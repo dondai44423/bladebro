@@ -1,0 +1,67 @@
+name: Bug Report
+description: Report a bug in Bladebro
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the unexpected behavior. Include the MCP request and response if possible.
+      placeholder: "I called `act click e5` and the server returned..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact sequence that triggers the bug.
+      placeholder: |
+        1. Navigate to https://...
+        2. Call `act click e3`
+        3. Observe...
+    validations:
+      required: true
+  - type: dropdown
+    id: action
+    attributes:
+      label: Which tool/action?
+      options:
+        - act (click)
+        - act (type)
+        - act (fill)
+        - act (select)
+        - act (navigate)
+        - act (scroll)
+        - act (hover)
+        - act (read)
+        - act (wait)
+        - act (back)
+        - act (upload)
+        - act (press)
+        - see
+        - state
+        - run
+        - vision
+        - other
+    validations:
+      required: true
+  - type: input
+    id: chrome-version
+    attributes:
+      label: Chrome/Chromium version
+      placeholder: "150.0.7871.186"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "Arch Linux, kernel 6.x"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: Stderr output or MCP error response. Paste raw — no screenshots.
+      render: shell

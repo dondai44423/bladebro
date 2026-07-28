@@ -1,0 +1,37 @@
+name: Feature Request
+description: Suggest a new capability for Bladebro
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What can't you do today that you need to do?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should it work? Which tool (act/see/state/run/vision) should this be a param/behavior of?
+      placeholder: "This should be a param on `act` — `act click e5 follow=true`..."
+    validations:
+      required: true
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which tool should this extend?
+      options:
+        - act
+        - see
+        - state
+        - run
+        - vision
+        - new tool (requires discussion)
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds exist today? Why aren't they sufficient?

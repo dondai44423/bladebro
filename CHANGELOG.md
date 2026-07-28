@@ -1,0 +1,63 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.9.0] - 2026-07-28
+
+Initial public release. Pre-v1 — hardening pass complete, CLI update pending.
+
+### Added
+- **5 MCP tools**: `act`, `see`, `state`, `run`, `vision` — full browser control from 5 tools
+- **12 actions**: click, type, clear, select, press, scroll, navigate, read, wait, back, hover, upload
+- **Live Page Model**: persistent, ref-stable, diff-first page model across tool calls
+- **Click escalation**: mouse → JS → Enter key, breaks on DOM mutation (MutationObserver)
+- **Text addressing**: `click text="Sign in"` — no ref needed
+- **Fill action**: auto-detects element type (textbox→type, combobox→select, checkbox→click)
+- **Conditional branching**: `run` with `if`/`then`/`else` steps
+- **Session persistence**: save/load localStorage + cookies with full fidelity
+- **Network-aware settle**: stable-count drain (handles long-poll/SSE), redirect dedup
+- **6-layer stealth system**:
+  - Protocol: no `Runtime.enable`, CDP over pipe (zero listening ports)
+  - Environment: UA override, WebGL, screen geometry, hardwareConcurrency, mediaDevices
+  - Behavior: bezier mouse paths, log-normal typing, idle hum, smooth scroll
+  - Coherence: per-domain stealth memory, geo-identity, WebRTC fail-closed
+  - Residue: cdc_ removal, native toString, MutationObserver
+  - Seasoning: persistent profile, storage quota, font audit
+- **18 stealth mechanisms** (S1-S18): pipe transport, idle hum, pacing governor, geo-identity, WebRTC fail-closed, per-domain memory, smooth scroll, adaptive GL, mediaDevices patch, coordinate click, remediation ladder, audit subcommand
+- **Auto-launch**: 5-tier Chrome path detection, Xvfb headful mode, lifecycle management
+- **Audit subcommand**: `bladebro audit` prints stealth vectors + self-check scorecard
+- **Panic isolation**: handler panics become JSON-RPC errors, server survives
+- **Chrome death fast-fail**: `Arc<AtomicBool>` on CdpClient, race-free closed detection
+- **Dialog handling**: auto-dismiss alert/confirm/prompt/beforeunload
+- **Profile lock recovery**: SIGTERM dying Chrome, clear recycled-PID locks
+
+### Fixed
+- Panic on every ref/text click (Action::Click grouped with ClickCoord in ref_id)
+- Click escalation double-fire (MutationObserver + content_changed flag)
+- `see find` couldn't find plain text (body.innerText fallback)
+- Redirect drift (HashSet<String> of requestIds instead of raw counter)
+- Long-poll/SSE settle block (stable-count settle at 500ms)
+- beforeunload auto-cancel (accept alert + beforeunload)
+- Session save data corruption (direct Runtime.evaluate instead of display text)
+- Session name path traversal (validate name)
+- Hum metronome evaluate tell (cache viewport, refresh every 12 cycles)
+- Hum clamp panic on tiny viewports
+- BLADE_LOCALE JS injection escape (BCP-47 validation)
+- S11 locale incoherence (apply_domain_profile swaps injection registration)
+- Stealth script stacking (register once at attach, swap only on locale change)
+- Chrome death hangs agent (closed: Arc<AtomicBool>)
+- Dialog double-fire (eager subscribe before dispatch + dialog_fired flag)
+- Profile lock contention (SIGTERM dying Chrome, clear recycled-PID locks)
+- `press` parameter on `type` silently ignored (fire Press after Type)
+- Select action param mismatch (accept both `option` and `text`)
+- Select JS matched by value only (match by visible text AND value)
+- Fill only handled text fields (auto-detect type)
+- Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
+
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/dondai44423/bladebro/releases/tag/v0.9.0
