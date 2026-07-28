@@ -1,0 +1,481 @@
+//! Runtime-structural perception: capture the live DOM as actionable elements.
+//!
+//! The thesis (decision D7): we read the live DOM and infer semantics from the
+//! markup itself — not from the browser's accessibility tree, which was built
+//! for screen readers and lies on poorly-annotated pages. A `<div role=button>`
+//! with no ARIA name still gets a name from its text; a hidden error `<div>`
+//! still appears because it exists in the DOM.
+//!
+//! We inject one script via `Runtime.evaluate` (with `returnByValue`) that
+//! walks the document, computes a *semantic* role + name for each interactive
+//! element, filters to visible+actionable ones, and returns a compact array.
+//! This is a single CDP round-trip and lets us compute the stability signature
+//! in-page (where the real DOM lives), not re-derive it in Rust from a raw tree.
+
+use serde::Deserialize;
+use serde_json::json;
+use std::time::Duration;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::cdp::CdpSession;
+use crate::error::{BladeError, Result};
+
+/// The compact descriptor of one actionable element as captured from the page.
+///
+/// `ref` is NOT assigned here — the stabilizer (`refs.rs`) assigns stable refs
+/// by matching across captures. Here we only carry the identity + signature +
+/// live state needed to (a) stabilize and (b) act later.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawElement {
+    pub tag: String,
+    /// Inferred semantic role: `button`/`link`/`textbox`/`checkbox`/`radio`/
+    /// `combobox`/`tab`/`menuitem`/`switch`/`slider`/`file`/`color`/`generic`.
+    pub role: String,
+    #[serde(default)]
+    pub name: String,
+    /// Input `type` for `<input>`, the `<select>` multiple flag, etc.
+    #[serde(default, rename = "type")]
+    pub element_type: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
+    /// Present only for checkbox/radio.
+    #[serde(default)]
+    pub checked: Option<bool>,
+    #[serde(default)]
+    pub href: Option<String>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    /// `required` attribute on form elements.
+    #[serde(default)]
+    pub required: bool,
+    /// `aria-haspopup` is set — this element opens a menu/dropdown.
+    #[serde(default, rename = "haspopup")]
+    pub has_popup: bool,
+    /// Nearest ancestor landmark role (nav/main/banner/footer/aside/search/dialog).
+    /// `None` = default content area.
+    #[serde(default)]
+    pub landmark: Option<String>,
+    /// `[x, y, w, h]` viewport-relative CSS pixels (already adjusted for
+    /// ancestor iframe offsets).
+    #[serde(rename = "box")]
+    pub box_: [f64; 4],
+    /// Stability signature: `role|name|ordinal` where ordinal is the index of
+    /// this element among same role+name elements in document order. Stable
+    /// across re-renders that preserve the element set, even if DOM order of
+    /// *other* elements shifts.
+    pub sig: String,
+    /// Frame path: list of iframe indices from the top document down.
+    /// Empty `[]` = top document. `[0]` = first iframe in top doc.
+    /// `[1, 0]` = first iframe inside the second iframe in top doc.
+    #[serde(default)]
+    pub frame: Vec<usize>,
+}
+
+/// The full capture: page identity + every actionable element.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PageCapture {
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    /// `document.readyState`: `loading` / `interactive` / `complete`.
+    #[serde(default, rename = "readyState")]
+    pub ready_state: String,
+    /// DOM mutations observed since the previous capture (0 unless the
+    /// mutation watcher was installed before an action). Lets verdicts
+    /// detect effects on non-actionable content (text swaps, counters).
+    #[serde(default)]
+    pub muts: i64,
+    #[serde(default)]
+    pub elements: Vec<RawElement>,
+}
+
+impl PageCapture {
+    /// A coarse page phase derived from `readyState` + element presence.
+    /// Refined later by scene detection (modal/error awareness).
+    pub fn phase(&self) -> &'static str {
+        match self.ready_state.as_str() {
+            "loading" => "loading",
+            // "interactive" means DOMContentLoaded has fired — the DOM is
+            // ready for interaction even if subresources (images, fonts)
+            // are still loading. Treating it as "ready" avoids false
+            // "loading" on SPAs that never reach "complete".
+            "interactive" => "ready",
+            _ => "ready",
+        }
+    }
+}
+
+// ---- shared JS fragments (used by both capture + find-by-sig scripts) ----
+
+/// CSS selector for all potentially-actionable elements.
+pub const JS_SELECTOR: &str = r#"a[href], button, input, select, textarea, summary, [contenteditable=""], [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [role="switch"], [role="textbox"], [role="combobox"], [onclick]"#;
+
+/// Visibility check: returns false for zero-size, display:none, visibility:hidden, opacity:0.
+pub const JS_VIS_FN: &str = r#"const vis=n=>{const r=n.getBoundingClientRect();if(r.width===0||r.height===0)return false;const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;return true;};"#;
+
+/// Escapes a string for safe interpolation into a CSS attribute selector.
+pub const JS_ESC_FN: &str = r#"const esc=s=>(s||'').replace(/["\\]/g,c=>'\\'+c);"#;
+
+/// Resolves the nearest ancestor landmark role for an element.
+/// Returns a short label (nav/main/banner/footer/aside/search/dialog) or
+/// an aria-label for labelled regions, or null for the default content area.
+pub const JS_LANDMARK_FN: &str = r#"const landmarkOf=n=>{let el=n;while(el&&el!==document.body&&el!==document.documentElement){const tag=el.tagName.toLowerCase();const role=el.getAttribute('role');if(tag==='nav'||role==='navigation')return'nav';if(tag==='main'||role==='main')return'main';if(tag==='header'||role==='banner')return'banner';if(tag==='footer'||role==='contentinfo')return'footer';if(tag==='aside'||role==='complementary')return'aside';if(role==='search')return'search';if(tag==='dialog'||role==='dialog'||role==='alertdialog')return'dialog';if(tag==='section'&&el.getAttribute('aria-label'))return el.getAttribute('aria-label').trim().slice(0,20);el=el.parentElement;}return null;};"#;
+
+/// Infers semantic role from markup (tag + role attribute + input type).
+pub const JS_ROLE_FN: &str = r#"const roleMap={button:'button',link:'link',checkbox:'checkbox',radio:'radio',tab:'tab',menuitem:'menuitem',switch:'switch',textbox:'textbox',combobox:'combobox',listbox:'listbox',option:'option'};function role(n){const a=n.getAttribute('role');if(a&&roleMap[a])return roleMap[a];const t=n.tagName.toLowerCase();if(t==='a')return'link';if(t==='button'||t==='summary')return'button';if(t==='select')return'combobox';if(t==='textarea'||n.isContentEditable)return'textbox';if(t==='input'){const ty=(n.type||'text').toLowerCase();if(ty==='checkbox')return'checkbox';if(ty==='radio')return'radio';if(ty==='submit'||ty==='button'||ty==='reset'||ty==='image')return'button';if(ty==='range')return'slider';if(ty==='file')return'file';if(ty==='color')return'color';if(ty==='hidden')return'hidden';return'textbox';}return'generic';}"#;
+
+/// Resolves an element's accessible name through the full fallback chain.
+/// `includeValue` controls whether the element's `value` is used as a last
+/// resort — it should be `true` for display (the agent sees the current value)
+/// but `false` for the stability signature (typing changes the value, which
+/// must NOT change the element's identity).
+pub const JS_NAME_FN: &str = r#"function name(n,includeValue){const al=n.getAttribute('aria-label');if(al&&al.trim())return al.trim().replace(/\s+/g,' ').slice(0,120);const doc=n.ownerDocument;const lb=n.getAttribute('aria-labelledby');if(lb&&doc){const e=doc.getElementById(lb);if(e&&(e.textContent||' ').trim())return e.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const id=n.id;if(id&&doc){const l=doc.querySelector('label[for="'+esc(id)+'"]');if(l&&(l.textContent||' ').trim())return l.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const cl=n.closest('label');if(cl&&(cl.textContent||' ').trim())return cl.textContent.trim().replace(/\s+/g,' ').slice(0,120);const ti=n.title;if(ti&&ti.trim())return ti.trim().slice(0,120);const ph=n.placeholder;if(ph&&ph.trim())return ph.trim().slice(0,120);const tc=n.textContent;if(tc&&tc.trim())return tc.trim().replace(/\s+/g,' ').slice(0,120);const alt=n.getAttribute('alt');if(alt&&alt.trim())return alt.trim().slice(0,120);if(includeValue){const val=n.value;if(val&&typeof val==='string'&&val.trim()&&n.tagName==='INPUT')return val.trim().slice(0,60);}return'';}"#;
+
+/// The shared preamble: just the selector + helper functions.
+/// Each script (capture, find-by-sig) sets up its own document context,
+/// node list, and counts — necessary because frame walking needs different
+/// setup per use case.
+pub static JS_PREAMBLE: LazyLock<String> = LazyLock::new(|| {
+    "const sel='".to_string()
+        + JS_SELECTOR
+        + "';"
+        + JS_VIS_FN
+        + JS_ESC_FN
+        + JS_ROLE_FN
+        + JS_NAME_FN
+        + JS_LANDMARK_FN
+});
+
+// ---- capture script ----
+
+/// The injected capture script. One expression returning an object via
+/// `returnByValue`. Walks same-origin iframes recursively, computing
+/// viewport-relative coordinates by accumulating ancestor iframe offsets.
+/// Cross-origin iframes are silently skipped (contentDocument throws).
+static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
+    "(()=>{"
+        .to_string()
+        + "const d=document;if(!d||!d.body)return null;"
+        + &JS_PREAMBLE
+        + "const out=[];const counts={};"
+        + "function cap(doc,fp,ox,oy){"
+        + "const all=[...doc.querySelectorAll(sel)];"
+        + "for(const n of all){"
+        + "if(!vis(n))continue;"
+        + "const r=role(n);if(r==='hidden')continue;"
+        + "const nm=name(n,true);const snm=name(n,false);"
+        + "const key=r+'\\u0000'+snm;counts[key]=(counts[key]||0)+1;"
+        + "const rect=n.getBoundingClientRect();"
+        + "out.push({tag:n.tagName.toLowerCase(),role:r,name:nm,type:n.type||null,"
+        + "value:n.value&&n.value.length<=200?n.value:null,"
+        + "disabled:!!n.disabled,"
+        + "checked:(r==='checkbox'||r==='radio')?!!n.checked:null,"
+        + "href:n.href||null,placeholder:n.placeholder||null,"
+        + "required:!!n.required||n.getAttribute('aria-required')==='true',"
+        + "haspopup:!!n.getAttribute('aria-haspopup'),"
+        + "landmark:landmarkOf(n),"
+        + "box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],"
+        + "sig:r+'|'+snm+'|'+counts[key],"
+        + "frame:fp});"
+        + "}"
+        + "const ifs=doc.querySelectorAll('iframe');"
+        + "for(let i=0;i<ifs.length;i++){"
+        + "try{const fdoc=ifs[i].contentDocument;if(fdoc&&fdoc.body){"
+        + "const ir=ifs[i].getBoundingClientRect();"
+        + "cap(fdoc,[...fp,i],ox+ir.x,oy+ir.y);"
+        + "}}catch(e){}}"
+        + "}"
+        + "cap(d,[],0,0);"
+        + "const __m=window.__blade_muts||0;window.__blade_muts=0;"
+        + "return{url:location.href,title:d.title||'',readyState:d.readyState,muts:__m,elements:out};"
+        + "})()"
+});
+
+// ---- capture function ----
+
+/// Wait for the page to reach at least `interactive` readyState (S18).
+/// ONE `Runtime.evaluate` with `awaitPromise` — the wait self-drives in-page
+/// via the DOMContentLoaded event instead of N CDP polling round-trips.
+/// On main-thread-saturated pages (fingerprint collectors) the old polling
+/// loop queued one evaluate per 200ms tick behind long tasks; this queues
+/// exactly one. Best-effort: any failure resolves as "proceed".
+pub async fn wait_for_load(cdp: &CdpSession, timeout: Duration) -> Result<()> {
+    let ms = timeout.as_millis() as u64;
+    let expr = format!(
+        "new Promise(function(res){{\
+            if(document.readyState!=='loading'){{res('ready');return;}}\
+            var done=false;function fin(v){{if(!done){{done=true;res(v);}}}}\
+            document.addEventListener('DOMContentLoaded',function(){{fin('ready');}},{{once:true}});\
+            setTimeout(function(){{fin('timeout');}},{ms});\
+        }})",
+    );
+    let _ = cdp
+        .send_with_timeout(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expr,
+                "returnByValue": true,
+                "awaitPromise": true,
+            })),
+            timeout + Duration::from_secs(3),
+        )
+        .await;
+    Ok(())
+}
+
+/// Wait for the DOM to settle after an action (S18). ONE `awaitPromise`
+/// evaluate installs a MutationObserver and resolves after 600ms of DOM
+/// quiet (or timeout). Replaces the Rust-side polling loop — on heavy-JS
+/// pages this cut per-action latency from ~2 minutes to seconds.
+///
+/// Note: observes childList + characterData only — NOT attributes, since
+/// CSS animations mutate style every frame and would perpetually reset the
+/// quiet timer, forcing full-timeout waits on every animated page.
+pub async fn wait_for_settle(cdp: &CdpSession, timeout: Duration) -> Result<()> {
+    wait_for_settle_with_network(cdp, timeout, None).await
+}
+
+/// Network-aware settle: in-page DOM quiet (one round-trip), then the
+/// in-flight request count drains on the LOCAL atomic (no CDP traffic).
+/// `in_flight` is maintained by a background task on [`Page`](crate::page::Page).
+/// When `None`, falls back to DOM-only settle.
+pub async fn wait_for_settle_with_network(
+    cdp: &CdpSession,
+    timeout: Duration,
+    in_flight: Option<&AtomicUsize>,
+) -> Result<()> {
+    let ms = timeout.as_millis() as u64;
+    let expr = format!(
+        "new Promise(function(res){{\
+            var t0=performance.now();var last=t0;var done=false;\
+            var mo=null;\
+            try{{mo=new MutationObserver(function(){{last=performance.now();}});\
+            mo.observe(document.documentElement||document,{{childList:true,subtree:true,characterData:true}});}}catch(e){{}}\
+            function fin(v){{if(done)return;done=true;try{{if(mo)mo.disconnect();}}catch(e){{}}res(v);}}\
+            (function tick(){{\
+                var now=performance.now();\
+                if(document.readyState!=='loading'&&(now-last)>=600){{fin('settled');return;}}\
+                if((now-t0)>={ms}){{fin('timeout');return;}}\
+                setTimeout(tick,150);\
+            }})();\
+        }})",
+    );
+    let _ = cdp
+        .send_with_timeout(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expr,
+                "returnByValue": true,
+                "awaitPromise": true,
+            })),
+            timeout + Duration::from_secs(3),
+        )
+        .await;
+
+    // DOM quiet (or we gave up waiting on a saturated page). Now drain the
+    // network counter locally — no CDP round-trips, just an atomic read.
+    if let Some(counter) = in_flight {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut last = counter.load(Ordering::Relaxed);
+        let mut last_change = tokio::time::Instant::now();
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let cur = counter.load(Ordering::Relaxed);
+            if cur == 0 {
+                break;
+            }
+            if cur != last {
+                last = cur;
+                last_change = now;
+            } else if now.duration_since(last_change) >= Duration::from_millis(500) {
+                // Stable count with open requests = long-poll/SSE stragglers.
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+    }
+    Ok(())
+}
+
+/// Run the capture script against `cdp` and parse the result.
+///
+/// Assumes `Runtime` is enabled (the [`Page`](super::Page) handle enables it on
+/// attach). Returns the raw capture; ref stabilization + diffing happen later.
+pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": &*CAPTURE_SCRIPT,
+                "returnByValue": true,
+                "awaitPromise": false,
+            })),
+        )
+        .await?;
+
+    // Runtime.evaluate → { result: { type, value }, exceptionDetails? }
+    if let Some(exc) = res.get("exceptionDetails") {
+        let msg = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("unknown page exception");
+        return Err(BladeError::Other(format!("page capture failed: {msg}")));
+    }
+
+    let value = res
+        .get("result")
+        .and_then(|r| r.get("value"));
+
+    // The capture script returns null when the page isn't ready yet (no
+    // document.body). Return an empty loading capture instead of erroring.
+    match value {
+        Some(serde_json::Value::Null) | None => Ok(PageCapture {
+            url: String::new(),
+            title: String::new(),
+            ready_state: "loading".into(),
+            muts: 0,
+            elements: Vec::new(),
+        }),
+        Some(v) => {
+            let parsed: PageCapture = serde_json::from_value(v.clone())?;
+            Ok(parsed)
+        }
+    }
+}
+
+/// M4: Detect and dismiss consent/cookie banners. Policy: reject (default),
+/// accept, or off (via BLADE_CONSENT env). Returns the framework name if dismissed.
+pub async fn dismiss_consent(cdp: &CdpSession) -> Result<Option<String>> {
+    let policy = std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
+    if policy == "off" {
+        return Ok(None);
+    }
+    let reject = policy != "accept";
+    let reject_js = if reject { "true" } else { "false" };
+
+    let expression = "(()=>{const reject=".to_string()
+        + reject_js
+        + ";const rs=['#onetrust-reject-all-handler','#CybotCookiebotDialogBodyButtonDecline','#didomi-notice-disagree-button','.qc-cmp2-summary-buttons button[mode=secondary]','#truste-consent-reject'];"
+        + "const as=['#onetrust-accept-btn-handler','#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll','#didomi-notice-agree-button','.qc-cmp2-summary-buttons button[mode=primary]','#truste-consent-button'];"
+        + "const sels=reject?rs:as;for(const sel of sels){const btn=document.querySelector(sel);if(btn){btn.click();return sel;}}"
+        + "const dialogs=document.querySelectorAll('[role=dialog],[role=banner],[class*=cookie],[class*=consent],[id*=cookie],[id*=consent]');"
+        + "for(const d of dialogs){const text=(d.textContent||'').toLowerCase();if(text.includes('cookie')||text.includes('consent')||text.includes('privacy')){const buttons=[...d.querySelectorAll('button,a')];const pattern=reject?/reject|decline|refuse|deny|necessary|essential/i:/accept|agree|allow|consent/i;const btn=buttons.find(b=>pattern.test(b.textContent||''));if(btn){btn.click();return 'generic';}}}"
+        + "return null;})()";
+
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expression,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+
+    if res.get("exceptionDetails").is_some() {
+        return Ok(None);
+    }
+    let framework = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    Ok(framework)
+}
+
+/// M6: Detect block/challenge pages (Cloudflare, DataDome, PerimeterX, reCAPTCHA, Akamai).
+/// Returns the block type if detected, or None.
+/// S12: remediation ladder — actionable steps for each block type.
+/// Appended to ambient events so the agent knows what to try next.
+pub fn remediation_ladder(block_type: &str) -> Vec<String> {
+    match block_type {
+        "cloudflare" => vec![
+            "wait 10s \u{2014} Turnstile often auto-passes non-interactively".into(),
+            "see \u{2014} check for a visible checkbox, use act click x=X y=Y if found".into(),
+            "if interactive challenge: solve manually or use coordinate click on checkbox".into(),
+        ],
+        "datadome" => vec![
+            "blocked by DataDome (ML-based per-site detection)".into(),
+            "try: navigate away, wait 30s, return (rate cooldown)".into(),
+            "if captcha wall: needs external solver".into(),
+        ],
+        "perimeterx" => vec![
+            "blocked by PerimeterX (behavioral analysis)".into(),
+            "try: slower pacing, longer idle hum, more natural session".into(),
+            "if captcha: needs external solver".into(),
+        ],
+        "recaptcha" => vec![
+            "reCAPTCHA challenge (v3 score-based or v2 checkbox)".into(),
+            "v3: improve score via longer session with human-like behavior".into(),
+            "v2: click checkbox via act click x=X y=Y".into(),
+        ],
+        "akamai" => vec![
+            "blocked by Akamai (IP reputation + TLS fingerprint)".into(),
+            "try: BLADE_PROXY for a different IP, BLADE_TZ for matching timezone".into(),
+        ],
+        "rate-limit" => vec![
+            "rate limited \u{2014} wait 30-60s before retrying".into(),
+            "consider: BLADE_PROXY for a different IP".into(),
+        ],
+        _ => vec!["unknown block \u{2014} try waiting and retrying".into()],
+    }
+}
+
+pub async fn detect_block(cdp: &CdpSession) -> Result<Option<String>> {
+    let expression = r#"(()=>{const d=document;if(!d)return null;const t=(d.title||'').toLowerCase();const body=(d.body?d.body.textContent||'':'').toLowerCase().slice(0,2000);const q=s=>!!d.querySelector(s);if(t.includes('just a moment')||q('#challenge-form')||q('cf-turnstile')||q('script[src*=challenge-platform]'))return 'cloudflare';if(q('iframe[src*=captcha-delivery]')||body.includes('datadome'))return 'datadome';if(q('#px-captcha')||q('script[src*=px-captcha]'))return 'perimeterx';if(q('.g-recaptcha')||q('iframe[src*=recaptcha]'))return 'recaptcha';if(body.includes('access denied')&&(body.includes('reference')||body.includes('akamai')))return 'akamai';if(body.includes('too many requests')||body.includes('rate limit'))return 'rate-limit';return null;})()"#;
+
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expression,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+
+    if res.get("exceptionDetails").is_some() {
+        return Ok(None);
+    }
+    let block = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    Ok(block)
+}
+
+/// Extract visible text content from the page body, excluding scripts,
+/// styles, and hidden elements. Returns at most `budget` characters.
+///
+/// Uses `innerText` which respects CSS visibility (unlike `textContent`).
+/// The text is collapsed to single spaces and truncated to the budget.
+pub async fn capture_content(cdp: &CdpSession, budget: usize) -> Result<String> {
+    let expr = format!(
+        "(()=>{{const d=document;if(!d||!d.body)return'';const c=d.body.cloneNode(true);c.querySelectorAll('script,style,noscript,svg,template,link,meta').forEach(e=>e.remove());const t=(c.innerText||c.textContent||'').replace(/\\s+/g,' ').trim();return t.slice(0,{budget});}})()"
+    );
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expr,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+
+    let text = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(text.to_string())
+}

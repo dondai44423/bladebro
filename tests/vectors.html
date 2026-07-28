@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Bladebro Stealth Vectors</title></head>
+<body>
+<h1>Bladebro Stealth Vector Suite</h1>
+<pre id="out">RUNNING</pre>
+<script>
+// Bladebro local stealth vector suite. Results rendered as plain text so
+// `see content=true` can read them. Format: "PASS name: detail" / "FAIL name: detail".
+// Summary line: "SCORE: X/Y pass".
+const lines = [];
+let pass = 0, total = 0;
+function check(name, ok, detail) {
+  total++;
+  if (ok) pass++;
+  lines.push((ok ? "PASS " : "FAIL ") + name + ": " + detail);
+}
+function info(name, detail) { lines.push("INFO " + name + ": " + detail); }
+function h(s) { let x = 5381; for (let i = 0; i < s.length; i++) x = ((x << 5) + x + s.charCodeAt(i)) >>> 0; return x.toString(16); }
+
+async function run() {
+  const ua = navigator.userAgent;
+  check("webdriver", navigator.webdriver !== true && navigator.webdriver !== "true", String(navigator.webdriver));
+  check("ua-no-headless", !/HeadlessChrome/i.test(ua), ua.slice(0, 90));
+  check("ua-platform-coherent", /Linux/.test(ua) === (navigator.platform.indexOf("Linux") === 0),
+        "ua=" + /Linux/.test(ua) + " platform=" + navigator.platform);
+  info("platform", navigator.platform);
+  check("plugins", navigator.plugins.length >= 4, String(navigator.plugins.length));
+  check("mimeTypes", navigator.mimeTypes.length >= 1, String(navigator.mimeTypes.length));
+  check("chrome-obj", typeof window.chrome === "object" && window.chrome !== null, typeof window.chrome);
+  let cdc = 0;
+  for (const k of Object.keys(window)) if (/cdc_|\$cdc/.test(k)) cdc++;
+  for (const k of Object.keys(document)) if (/cdc_|\$cdc/.test(k)) cdc++;
+  check("no-cdc", cdc === 0, cdc + " cdc props");
+  check("outer-inner-width", window.outerWidth !== window.innerWidth, "diff=" + (window.outerWidth - window.innerWidth));
+  check("outer-inner-height", window.outerHeight !== window.innerHeight, "diff=" + (window.outerHeight - window.innerHeight));
+  check("screen-size", screen.width >= 1024 && screen.height >= 700, screen.width + "x" + screen.height);
+  check("avail-less-than-screen", screen.availHeight <= screen.height && screen.availWidth <= screen.width,
+        "avail=" + screen.availWidth + "x" + screen.availHeight);
+  info("dpr", String(window.devicePixelRatio));
+  check("languages", Array.isArray(navigator.languages) && navigator.languages.length >= 1, (navigator.languages || []).join(","));
+  check("hardwareConcurrency", navigator.hardwareConcurrency >= 4, String(navigator.hardwareConcurrency));
+  check("deviceMemory", !("deviceMemory" in navigator) || navigator.deviceMemory >= 4, String(navigator.deviceMemory));
+
+  // WebGL 1 + 2
+  function glInfo(which) {
+    try {
+      const c = document.createElement("canvas");
+      const g = c.getContext(which);
+      if (!g) return null;
+      const ext = g.getExtension("WEBGL_debug_renderer_info");
+      if (!ext) return { vendor: "no-ext", renderer: "no-ext" };
+      return { vendor: g.getParameter(ext.UNMASKED_VENDOR_WEBGL), renderer: g.getParameter(ext.UNMASKED_RENDERER_WEBGL) };
+    } catch (e) { return null; }
+  }
+  const g1 = glInfo("webgl"), g2 = glInfo("webgl2");
+  check("webgl", !!g1, g1 ? g1.renderer : "null");
+  check("webgl2", !!g2, g2 ? g2.renderer : "null");
+  if (g1) check("webgl-not-swiftshader", !/SwiftShader/i.test(g1.renderer + " " + g1.vendor), g1.renderer);
+
+  // Permissions / Notification coherence
+  try {
+    const p = await navigator.permissions.query({ name: "notifications" });
+    check("perm-notifications", p.state === "prompt" || p.state === Notification.permission ||
+          (p.state === "denied" && Notification.permission === "denied"),
+          "query=" + p.state + " perm=" + Notification.permission);
+  } catch (e) { check("perm-notifications", false, "threw: " + e.message); }
+
+  // toString integrity of patched functions
+  check("tostring-permissions-query", /\[native code\]/.test(navigator.permissions.query.toString()), navigator.permissions.query.toString().slice(0, 60));
+  check("tostring-Worker", /\[native code\]/.test(Worker.toString()), Worker.toString().slice(0, 60));
+  check("tostring-toDataURL", /\[native code\]/.test(HTMLCanvasElement.prototype.toDataURL.toString()), HTMLCanvasElement.prototype.toDataURL.toString().slice(0, 60));
+  if (g2) check("tostring-gl2-getParameter", /\[native code\]/.test(WebGL2RenderingContext.prototype.getParameter.toString()), "checked");
+
+  // Console trap (Runtime.enable detector)
+  let trapped = false;
+  try {
+    const err = new Error("trap");
+    Object.defineProperty(err, "stack", { get() { trapped = true; return "x"; } });
+    console.debug(err);
+  } catch (e) {}
+  check("console-trap", !trapped, trapped ? "stack getter fired" : "clean");
+
+  // Media devices (pre-permission shape: devices exist, labels empty)
+  try {
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const kinds = devs.map(d => d.kind).sort().join(",");
+    check("mediadevices", devs.length >= 1, devs.length + " devices [" + kinds + "]");
+  } catch (e) { check("mediadevices", false, "threw: " + e.message); }
+
+  // Speech voices (Linux desktop may legitimately be empty — INFO only)
+  const voices = speechSynthesis.getVoices();
+  info("voices", voices.length + " voices");
+
+  // Storage quota (ephemeral-profile detector)
+  try {
+    const est = await navigator.storage.estimate();
+    const mb = Math.round((est.quota || 0) / 1048576);
+    check("storage-quota", mb >= 1000, mb + " MB quota");
+  } catch (e) { check("storage-quota", false, "threw: " + e.message); }
+
+  // Canvas fingerprint stability across two canvases (noise must be coherent)
+  function draw() {
+    const c = document.createElement("canvas"); c.width = 240; c.height = 60;
+    const x = c.getContext("2d");
+    x.textBaseline = "top"; x.font = "16px Arial"; x.fillStyle = "#f60";
+    x.fillRect(10, 10, 80, 20); x.fillStyle = "#069";
+    x.fillText("Bladebro,😀", 12, 24);
+    return c.toDataURL();
+  }
+  const fp1 = h(draw()), fp2 = h(draw());
+  check("canvas-stable", fp1 === fp2, fp1 + " vs " + fp2);
+
+  // Audio fingerprint stability
+  async function audioFp() {
+    const ac = new OfflineAudioContext(1, 5000, 44100);
+    const osc = ac.createOscillator(); osc.frequency.value = 1000;
+    const comp = ac.createDynamicsCompressor();
+    osc.connect(comp); comp.connect(ac.destination); osc.start(0);
+    const buf = await ac.startRendering();
+    const d = buf.getChannelData(0); let s = 0;
+    for (let i = 100; i < 1100; i++) s += Math.abs(d[i]);
+    return s.toFixed(6);
+  }
+  try {
+    const a1 = await audioFp(), a2 = await audioFp();
+    check("audio-stable", a1 === a2, a1 + " vs " + a2);
+  } catch (e) { check("audio-stable", false, "threw: " + e.message); }
+
+  // Connection API
+  const con = navigator.connection;
+  check("connection-api", !!con && typeof con.effectiveType === "string",
+        con ? con.effectiveType + " rtt=" + con.rtt + " downlink=" + con.downlink + " max=" + con.downlinkMax : "missing");
+
+  // Polyfilled APIs
+  check("webshare", "share" in navigator && "canShare" in navigator, String("share" in navigator));
+  check("contentindex", "ContentIndex" in window, String("ContentIndex" in window));
+  check("contactsmanager", "ContactsManager" in window, String("ContactsManager" in window));
+
+  // userAgentData coherence
+  if (navigator.userAgentData) {
+    const uad = navigator.userAgentData;
+    check("uad-platform", /Linux/.test(uad.platform || ""), uad.platform + " brands=" + uad.brands.map(b => b.brand + "/" + b.version).join(","));
+    check("uad-mobile-false", uad.mobile === false, String(uad.mobile));
+  } else { check("uad-platform", false, "userAgentData missing"); }
+
+  // Background color (headless-shell default-white tell)
+  const bg = getComputedStyle(document.body).backgroundColor;
+  info("bg-color", bg);
+
+  // Worker scope: UA + WebGL inside worker
+  try {
+    const wres = await new Promise((resolve) => {
+      const code = `onmessage = () => {
+        let gl = null;
+        try {
+          const oc = new OffscreenCanvas(8, 8);
+          const g = oc.getContext("webgl");
+          if (g) { const e = g.getExtension("WEBGL_debug_renderer_info"); gl = e ? g.getParameter(e.UNMASKED_RENDERER_WEBGL) : "no-ext"; }
+        } catch (e) { gl = "err:" + e.message; }
+        postMessage({ ua: navigator.userAgent, gl });
+      };`;
+      const w = new Worker(URL.createObjectURL(new Blob([code], { type: "application/javascript" })));
+      const to = setTimeout(() => resolve({ ua: "timeout", gl: null }), 4000);
+      w.onmessage = (ev) => { clearTimeout(to); w.terminate(); resolve(ev.data); };
+      w.postMessage(0);
+    });
+    check("worker-ua", !/HeadlessChrome/i.test(wres.ua) && wres.ua !== "timeout", String(wres.ua).slice(0, 80));
+    info("worker-gl", String(wres.gl));
+  } catch (e) { check("worker-ua", false, "threw: " + e.message); }
+
+  // WebRTC: exists + ICE candidate gathering (info — leak check needs proxy context)
+  check("webrtc-exists", typeof RTCPeerConnection === "function", typeof RTCPeerConnection);
+  try {
+    const ips = await new Promise((resolve) => {
+      const found = new Set();
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      pc.createDataChannel("x");
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate) { resolve([...found]); return; }
+        const m = /([0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9a-f:]+\.local)/i.exec(ev.candidate.candidate);
+        if (m) found.add(m[1]);
+      };
+      pc.createOffer().then(o => pc.setLocalDescription(o));
+      setTimeout(() => resolve([...found]), 2500);
+    });
+    info("webrtc-ice", ips.join(",") || "none");
+  } catch (e) { info("webrtc-ice", "threw: " + e.message); }
+
+  // Error stack residue
+  const stack = new Error("probe").stack || "";
+  check("error-stack-clean", !/cdc|devtools|__puppeteer|__playwright/i.test(stack), stack.split("\n").length + " frames clean");
+
+  document.getElementById("out").textContent =
+    "SCORE: " + pass + "/" + total + " pass\n" + lines.join("\n");
+  document.title = "DONE " + pass + "/" + total;
+}
+run();
+</script>
+</body>
+</html>

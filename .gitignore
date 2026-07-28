@@ -1,0 +1,12 @@
+# Private working docs — never tracked
+status.md
+project.md
+
+# Local build / dev artifacts
+target/
+dist/
+build/
+node_modules/
+*.log
+.env
+.env.*
