@@ -277,14 +277,13 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
             let session = json!({ "cookies": cookies, "localStorage": ls_entries, "origin": origin });
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let dir = format!("{home}/.blade/sessions");
+            let dir = crate::platform::blade_dir().join("sessions");
             std::fs::create_dir_all(&dir).map_err(|e| BladeError::Other(format!("cannot create sessions dir: {e}")))?;
-            let path = format!("{dir}/{name}.json");
+            let path = dir.join(format!("{name}.json"));
             std::fs::write(&path, serde_json::to_string_pretty(&session)?)
                 .map_err(|e| BladeError::Other(format!("cannot write session: {e}")))?;
             let cookie_count = cookies.as_array().map(|a| a.len()).unwrap_or(0);
-            Ok(format!("✓ saved session '{}': {} cookies, {} localStorage entries\n  → {}", name, cookie_count, ls_entries.len(), path))
+            Ok(format!("✓ saved session '{}': {} cookies, {} localStorage entries\n  → {}", name, cookie_count, ls_entries.len(), path.display()))
         }
 
         StateOp::LoadSession { name } => {
@@ -293,8 +292,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 }
             
             cdp.enable("Network").await?;
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let path = format!("{home}/.blade/sessions/{name}.json");
+            let path = crate::platform::blade_dir().join("sessions").join(format!("{name}.json"));
             let content = std::fs::read_to_string(&path)
                 .map_err(|e| BladeError::Other(format!("cannot read session '{name}': {e}")))?;
             let session: Value = serde_json::from_str(&content)?;

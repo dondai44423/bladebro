@@ -583,8 +583,7 @@ impl Page {
         if domain.is_empty() {
             return;
         }
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let path = std::path::PathBuf::from(home).join(".blade").join("profiles.json");
+        let path = crate::platform::blade_dir().join("profiles.json");
         let profiles: std::collections::HashMap<String, DomainProfile> =
             std::fs::read_to_string(&path)
                 .ok()

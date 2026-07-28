@@ -7,16 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Cross-platform native support**: macOS and Windows are first-class citizens, not afterthoughts
+- **`src/platform.rs`**: all OS-specific operations abstracted (process kill, PID check, home dir, Chrome detection)
+- **Process management**: SIGTERM/SIGKILL on Unix, `taskkill` on Windows
+- **PID checks**: `/proc` on Linux, `ps` on macOS, `tasklist` on Windows
+- **Headful mode**: Xvfb on Linux, native window server on macOS/Windows
+- **Home directory**: `HOME` on Unix, `USERPROFILE` on Windows
+- **CI matrix**: Ubuntu + macOS + Windows, Rust 1.80 + stable
+
+### Changed
+- **Pipe transport**: Unix-only (Windows uses WebSocket transport; pipe fds 3/4 don't exist on Windows)
+- **Font audit**: Linux-only (macOS/Windows have system fonts by default)
+
 ## [0.9.0] - 2026-07-28
 
-Initial public release. Pre-v1 — hardening pass complete, CLI update pending.
+Initial public release. Pre-v1, hardening pass complete, CLI update pending.
 
 ### Added
-- **5 MCP tools**: `act`, `see`, `state`, `run`, `vision` — full browser control from 5 tools
+- **5 MCP tools**: `act`, `see`, `state`, `run`, `vision`. Full browser control from 5 tools
 - **12 actions**: click, type, clear, select, press, scroll, navigate, read, wait, back, hover, upload
 - **Live Page Model**: persistent, ref-stable, diff-first page model across tool calls
 - **Click escalation**: mouse → JS → Enter key, breaks on DOM mutation (MutationObserver)
-- **Text addressing**: `click text="Sign in"` — no ref needed
+- **Text addressing**: `click text="Sign in"`. No ref needed
 - **Fill action**: auto-detects element type (textbox→type, combobox→select, checkbox→click)
 - **Conditional branching**: `run` with `if`/`then`/`else` steps
 - **Session persistence**: save/load localStorage + cookies with full fidelity

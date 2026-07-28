@@ -36,6 +36,8 @@ pub async fn run(host: &str, port: u16) -> Result<()> {
 
 /// Serve MCP over a zero-port CDP pipe connection (S1). `_browser` is held
 /// for the server's lifetime; dropping it kills Chrome + Xvfb.
+/// Unix-only: Windows uses WS transport.
+#[cfg(unix)]
 pub async fn run_pipe(client: CdpClient, _browser: crate::browser::Browser) -> Result<()> {
     let session = attach_pipe(&client).await?;
     let page = Page::attach(session, "pipe", Some(client)).await?;
@@ -45,6 +47,8 @@ pub async fn run_pipe(client: CdpClient, _browser: crate::browser::Browser) -> R
 
 /// Attach to the first page target over the browser-level pipe connection.
 /// Creates a fresh tab when none exists (restored-session edge cases).
+/// Unix-only: called by run_pipe which is also Unix-only.
+#[cfg(unix)]
 async fn attach_pipe(client: &CdpClient) -> Result<CdpSession> {
     let targets = client.send("Target.getTargets", None).await?;
     let empty = Vec::new();

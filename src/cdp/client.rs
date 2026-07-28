@@ -152,6 +152,8 @@ impl CdpClient {
     ///
     /// `reader` is our end of Chrome's fd 4 (CDP output); `writer` is our
     /// end of Chrome's fd 3 (CDP input).
+    /// Unix-only: Windows uses named pipes, which need a different API.
+    #[cfg(unix)]
     pub fn from_pipe(
         reader: tokio::net::unix::pipe::Receiver,
         writer: tokio::net::unix::pipe::Sender,

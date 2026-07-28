@@ -1,6 +1,6 @@
-<p align="center">
-  <img src="Assets/logobb.png" width="180" alt="Bladebro" />
-</p>
+<div align="center">
+
+<img src="Assets/logobb.png" width="180" alt="Bladebro" />
 
 # ⚡ Bladebro
 
@@ -19,17 +19,19 @@ One MCP server · one persistent page model · zero Node.js · runs on your mach
 cargo build --release && ./target/release/bladebro mcp
 ```
 
-[Install](#-install) · [The 5 tools](#-the-5-tools) · [Stealth](#-stealth-system) · [Comparison](#-comparison) · [Gotchas](#-gotchas) · [Honest limits](#-honest-limits)
+[Install](#-install) · [The 5 tools](#-the-5-tools) · [Stealth](#-stealth-system) · [Comparison](#-comparison) · [Gotchas](#-gotchas)
+
+</div>
 
 ---
 
-Bladebro is an agentic browser driver built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results — so the agent sees what *changed*, not the whole world, every single time.
+Bladebro is an agentic browser driver built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results: the agent sees what *changed*, not the whole world, every single time.
 
-Built in Rust. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent.
+Built in Rust. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent. Native on Linux, macOS, and Windows.
 
 ## 🔧 Install
 
-**Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.80+, Linux (Xvfb for headless servers).
+**Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.80+. Linux: Xvfb for headless servers (macOS/Windows run headful natively).
 
 ```bash
 git clone https://github.com/dondai44423/bladebro.git
@@ -59,15 +61,15 @@ That's it. Bladebro finds Chrome itself, launches it with stealth flags, and man
 
 ## 🎯 The 5 tools
 
-### `act` — act, then observe
+### `act` | act, then observe
 
 12 actions. Every `act` returns an **observation** (scene + delta + verdict), not `✓ Done`.
 
 | Action | Example | What it does |
 |---|---|---|
-| `click` | `act click e5` | Mouse → JS → Enter escalation, breaks on DOM change |
+| `click` | `act click e5` | Mouse, JS, Enter escalation; breaks on DOM change |
 | `type` | `act type e2 "hello" press=Enter` | Cadenced typing, optional key press after |
-| `fill` | `act fill fields=[...]` | Auto-detects type: textbox→type, dropdown→select, checkbox→click |
+| `fill` | `act fill fields=[...]` | Auto-detects type: textbox, dropdown, checkbox |
 | `select` | `act select e4 "Nepal"` | Matches visible text AND value, case-insensitive |
 | `navigate` | `act navigate "https://example.com"` | Idempotent (no-op if already there) |
 | `scroll` | `act scroll down 3` | Smooth eased multi-step wheel events |
@@ -78,11 +80,11 @@ That's it. Bladebro finds Chrome itself, launches it with stealth flags, and man
 | `upload` | `act upload e7 path="/tmp/file.txt"` | `DOM.setFileInputFiles` |
 | `press` | `act press Enter` | Real key event with keycode lookup |
 
-**Text addressing** — no ref needed: `act click text="Sign in"` finds the element by visible text.
+**Text addressing** | no ref needed: `act click text="Sign in"` finds the element by visible text.
 
-**Click escalation** — mouse → JS → Enter key. Breaks early on DOM mutation (MutationObserver), dialog, or navigation. No double-fire.
+**Click escalation** | mouse, JS, Enter key. Breaks early on DOM mutation (MutationObserver), dialog, or navigation. No double-fire.
 
-### `see` — perceive the page
+### `see` | perceive the page
 
 | Call | What you get |
 |---|---|
@@ -92,9 +94,9 @@ That's it. Bladebro finds Chrome itself, launches it with stealth flags, and man
 | `see find="Sign in"` | Find element/text, return ref + context snippet |
 | `see extract="table"` | Structured data extraction |
 
-8KB budget cap = ~2,100 tokens max, even on 2000-element pages. Auto-includes page text when ≤3 actionable elements (saves a round-trip on articles).
+8KB budget cap = ~2,100 tokens max, even on 2000-element pages. Auto-includes page text when 3 or fewer actionable elements (saves a round-trip on articles).
 
-### `state` — cookies, storage, tabs, sessions
+### `state` | cookies, storage, tabs, sessions
 
 | Call | What it does |
 |---|---|
@@ -105,7 +107,7 @@ That's it. Bladebro finds Chrome itself, launches it with stealth flags, and man
 | `state load_session name=login` | Restore session |
 | `state proxy "http://host:port"` | Set proxy |
 
-### `run` — batch + branch
+### `run` | batch + branch
 
 ```json
 {"action":"type","ref":"e1","text":"rust browser"}
@@ -122,7 +124,7 @@ Conditional branching in one call:
  "else":[{"action":"click","ref":"e2"}]}
 ```
 
-### `vision` — screenshot (rare fallback)
+### `vision` | screenshot (rare fallback)
 
 Returns base64 PNG. For canvas content, exotic layouts, or when the structural model fails.
 
@@ -132,7 +134,7 @@ Six layers. All on by default. No config needed.
 
 | Layer | What it does |
 |---|---|
-| **Protocol** | No `Runtime.enable` (defuses DataDome console trap), CDP over pipe (zero listening ports) |
+| **Protocol** | No `Runtime.enable` (defuses DataDome console trap), CDP over pipe (zero listening ports, Unix) |
 | **Environment** | UA override (no HeadlessChrome), WebGL renderer, outerWidth/innerWidth, screen geometry, hardwareConcurrency, deviceMemory, permissions, mediaDevices |
 | **Behavior** | Bezier mouse paths with overshoot+correction, log-normal typing cadence, idle hum (mouse movement during idle), smooth scroll |
 | **Coherence** | Per-domain stealth memory (timezone + locale), geo-consistent identity, WebRTC fail-closed, stable canvas/audio (no noise by default) |
@@ -161,29 +163,18 @@ Run `bladebro audit` to verify your own setup.
 | Process model | Long-lived daemon (stateful) | Stateless (reconnect per call) | Stateless |
 | Page model | Persistent, ref-stable, diff-first | None | None |
 | Binary size | 5.1MB | ~50MB (node + deps) | ~50MB (node + deps) |
+| Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
-**3-4x more token-efficient** than every competitor. The Live Page Model is the core innovation: it holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations — no more "stale element" failures.
+**3-4x more token-efficient** than every competitor. The Live Page Model is the core innovation: it holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations. No more "stale element" failures.
 
 ## ⚠️ Gotchas
 
 | Surprise | Why |
 |---|---|
-| Cloudflare Turnstile blocks Bladebro | Turnstile requires actual challenge solving, not just fingerprint spoofing. Detected honestly — you get a `blocked:` verdict, not a hang. |
+| Cloudflare Turnstile blocks Bladebro | Turnstile requires actual challenge solving, not just fingerprint spoofing. You get a `blocked:` verdict, not a hang. |
 | Datacenter IPs get flagged | Server/VPS IPs are flagged regardless of browser fingerprint. Use `BLADE_PROXY` with a residential proxy. |
-| Cross-origin iframes are invisible | SecurityError on `contentDocument`. Deliberate v1 limitation — would need `Runtime.enable` (breaks stealth). |
-| First navigation may take 2-3s | Chrome cold start + Xvfb display init. Subsequent navigations are fast. |
+| Cross-origin iframes are invisible | SecurityError on `contentDocument`. Deliberate limitation; would need `Runtime.enable` (breaks stealth). |
 | `BLADE_NOISE=1` can *hurt* stealth | FingerprintJS ML detects noise injection as "browser tampering." Off by default. Only use if you know why. |
-
-## 🧱 Honest limits
-
-| What it can NOT do | Why |
-|---|---|
-| Solve CAPTCHAs | Detect + honest `blocked:` verdict only. The agent is the intelligence, not the driver. |
-| Spoof Windows from Linux | Requires Windows fonts + font-metric surgery. Consistent Linux identity > inconsistent popular identity. |
-| Access cross-origin iframe DOM | Same-origin policy. Would need `Runtime.enable` (breaks DataDome stealth). |
-| Run without Chrome/Chromium | Uses the browser engine directly via CDP. No bundled browser. |
-| macOS/Windows support (yet) | Linux-only. Xvfb for headful mode. Cross-platform is on the roadmap. |
-| LLM inference inside the driver | Deterministic machinery only. No goal-mode, no extraction inference, no captcha solving. |
 
 ## 🤝 Contributing
 
@@ -191,4 +182,4 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Run `cargo clippy --release
 
 ## 📄 License
 
-MIT — see [LICENSE](LICENSE).
+MIT | see [LICENSE](LICENSE).

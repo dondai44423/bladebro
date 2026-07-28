@@ -15,6 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::error::{BladeError, Result};
+use crate::platform;
 
 /// Flags applied to every Chrome launch (both headless and headful).
 const STEALTH_FLAGS: &[&str] = &[
@@ -36,17 +37,21 @@ const HEADLESS_FLAGS: &[&str] = &["--headless=new", "--disable-gpu"];
 /// A launched Chrome process + optional virtual display. Both killed on Drop.
 pub struct Browser {
     child: Child,
+    #[cfg(target_os = "linux")]
     #[allow(dead_code)]
     xvfb: Option<VirtualDisplay>,
     port: u16,
 }
 
 /// A virtual X display managed by Xvfb. Killed + cleaned up on Drop.
+/// Linux-only: macOS and Windows have native window servers.
+#[cfg(target_os = "linux")]
 pub struct VirtualDisplay {
     child: Child,
     display_num: u16,
 }
 
+#[cfg(target_os = "linux")]
 impl VirtualDisplay {
     /// Start an Xvfb virtual display on a free display number.
     /// Returns the display number (e.g., 99 for `:99`).
@@ -78,6 +83,7 @@ impl VirtualDisplay {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for VirtualDisplay {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -92,9 +98,8 @@ impl Browser {
     /// Find Chrome, launch it with stealth flags on `port` (0 = auto-pick a
     /// free port), and wait for the CDP debug endpoint to respond.
     ///
-    /// If Xvfb is available, Chrome runs headful on a virtual display
-    /// (best stealth — eliminates headless signals at the root).
-    /// Otherwise, falls back to `--headless=new`.
+    /// Linux: Xvfb headful if available, headless fallback.
+    /// macOS/Windows: headful natively (native window server).
     pub async fn launch(port: u16) -> Result<Self> {
         let chrome_path = find_chrome()?;
         let port = if port == 0 { free_port() } else { port };
@@ -104,9 +109,13 @@ impl Browser {
         clear_stale_profile_lock(&user_data_dir)?;
         font_audit();
 
-        // Try Xvfb first (best stealth). Fall back to headless if unavailable.
+        #[cfg(target_os = "linux")]
         let xvfb = VirtualDisplay::start().ok();
+        #[cfg(target_os = "linux")]
         let headful = xvfb.is_some();
+
+        #[cfg(not(target_os = "linux"))]
+        let headful = true; // macOS/Windows have native window servers
 
         let mut args: Vec<String> = STEALTH_FLAGS.iter().map(|s| s.to_string()).collect();
         if !headful {
@@ -128,7 +137,10 @@ impl Browser {
             args.push("--window-size=1920,1080".into());
         }
 
+        #[cfg(target_os = "linux")]
         let mode_str = if headful { "headful (Xvfb)" } else { "headless" };
+        #[cfg(not(target_os = "linux"))]
+        let mode_str = "headful";
         eprintln!(
             "[bladebro] launching Chrome from {chrome_path} on port {port} ({mode_str})"
         );
@@ -138,7 +150,8 @@ impl Browser {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        // Set DISPLAY env var for headful mode.
+        // Set DISPLAY env var for headful mode (Linux only).
+        #[cfg(target_os = "linux")]
         if let Some(ref xvfb) = xvfb {
             cmd.env("DISPLAY", xvfb.display_env());
         }
@@ -158,7 +171,12 @@ impl Browser {
                         "[bladebro] Chrome ready: {} (protocol {})",
                         v.browser, v.protocol_version
                     );
-                    return Ok(Self { child, xvfb, port });
+                    return Ok(Self {
+                        child,
+                        #[cfg(target_os = "linux")]
+                        xvfb,
+                        port,
+                    });
                 }
                 Err(_) => {
                     match child.try_wait() {
@@ -199,20 +217,11 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        // SIGTERM first — lets Chrome flush localStorage/cookies to the
-        // persistent profile. SIGKILL after 3s if it hasn't exited.
-        unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGTERM);
-        }
-        for _ in 0..30 {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                Err(_) => break,
-            }
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Graceful shutdown: SIGTERM first (lets Chrome flush
+        // localStorage/cookies to the persistent profile), then
+        // SIGKILL after 3s if it hasn't exited. On Windows,
+        // TerminateProcess directly.
+        platform::shutdown_child(&mut self.child);
         // Xvfb is dropped here too (field order: child first, then xvfb).
     }
 }
@@ -231,8 +240,8 @@ fn profile_dir() -> std::path::PathBuf {
     if std::env::var("BLADE_FRESH").map(|v| v == "1").unwrap_or(false) {
         return std::env::temp_dir().join(format!("bladebro-chrome-{}", std::process::id()));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home).join(".blade").join("profile")
+    let home = platform::blade_dir();
+    home.join("profile")
 }
 
 /// Remove Chrome's SingletonLock/SingletonSocket/SingletonCookie when the
@@ -250,46 +259,35 @@ fn clear_stale_profile_lock(dir: &std::path::Path) -> Result<()> {
         .rsplit('-')
         .next()
         .and_then(|p| p.parse::<u32>().ok());
-    let pid_alive = pid
-        .map(|p| std::path::Path::new("/proc").join(p.to_string()).exists())
-        .unwrap_or(false);
+    let pid_alive = pid.map(platform::process_alive).unwrap_or(false);
 
     if pid_alive {
         let pid = pid.unwrap();
         // Check if the PID is actually a Chrome process (PID could have been recycled).
-        let is_chrome = std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
-            .unwrap_or_default()
-            .contains("chromium");
-        if is_chrome {
+        if platform::process_is_chrome(pid) {
             // Previous Chrome is still dying (orphaned by SIGKILL of the MCP server).
             // Send SIGTERM and wait up to 2s for it to exit.
-            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+            platform::kill_process_graceful(pid);
             for _ in 0..20 {
-                if !std::path::Path::new("/proc").join(pid.to_string()).exists() {
- break;
+                if !platform::process_alive(pid) {
+                    break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            if std::path::Path::new("/proc").join(pid.to_string()).exists() {
+            if platform::process_alive(pid) {
                 // Still alive after SIGTERM — escalate to SIGKILL.
-                unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+                platform::kill_process_force(pid);
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
         // If PID recycled (not Chrome) or Chrome is now dead, the lock is stale → clear it.
         // If Chrome is STILL alive (refused to die), only then error.
-        let still_alive = std::path::Path::new("/proc").join(pid.to_string()).exists();
-        if still_alive {
-            let is_chrome_still = std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
-                .unwrap_or_default()
-                .contains("chromium");
-            if is_chrome_still {
-                return Err(BladeError::Other(format!(
-                    "profile {} is locked by a live Chrome (another bladebro running?). \
-                     Use BLADE_PROFILE_DIR for a separate profile or BLADE_FRESH=1 for ephemeral.",
-                    dir.display()
-                )));
-            }
+        if platform::process_alive(pid) && platform::process_is_chrome(pid) {
+            return Err(BladeError::Other(format!(
+                "profile {} is locked by a live Chrome (another bladebro running?). \
+                 Use BLADE_PROFILE_DIR for a separate profile or BLADE_FRESH=1 for ephemeral.",
+                dir.display()
+            )));
         }
     }
     for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
@@ -301,34 +299,38 @@ fn clear_stale_profile_lock(dir: &std::path::Path) -> Result<()> {
 
 /// S15: warn when no emoji font is installed. Kasada/Akamai render emoji on
 /// hidden canvases and hash the pixels; a missing emoji font produces a hash
-/// no real browser generates. Best-effort, never fatal.
+/// no real browser generates. Linux-only (fc-list). Best-effort, never fatal.
 fn font_audit() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let found = std::process::Command::new("fc-list")
-            .args([":lang=und-zsye", "family"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| o.status.success() && !o.stdout.is_empty())
-            .unwrap_or_else(|_| {
-                [
-                    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
-                    "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
-                    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-                    "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
-                ]
-                .iter()
-                .any(|p| std::path::Path::new(p).exists())
-            });
-        if !found {
-            eprintln!(
-                "[bladebro] WARNING: no emoji font found — anti-bot canvas emoji hashes \
-                 will mismatch (Kasada/Akamai). Install: noto-fonts-emoji (Arch) / \
-                 fonts-noto-color-emoji (Debian)"
-            );
-        }
-    });
+    #[cfg(target_os = "linux")]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let found = std::process::Command::new("fc-list")
+                .args([":lang=und-zsye", "family"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .map(|o| o.status.success() && !o.stdout.is_empty())
+                .unwrap_or_else(|_| {
+                    [
+                        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+                        "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+                        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+                        "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
+                    ]
+                    .iter()
+                    .any(|p| std::path::Path::new(p).exists())
+                });
+            if !found {
+                eprintln!(
+                    "[bladebro] WARNING: no emoji font found — anti-bot canvas emoji hashes \
+                     will mismatch (Kasada/Akamai). Install: noto-fonts-emoji (Arch) / \
+                     fonts-noto-color-emoji (Debian)"
+                );
+            }
+        });
+    }
+    // macOS/Windows: system fonts are always present, no audit needed.
 }
 
 impl Browser {
@@ -352,8 +354,13 @@ impl Browser {
         clear_stale_profile_lock(&user_data_dir)?;
         font_audit();
 
+        #[cfg(target_os = "linux")]
         let xvfb = VirtualDisplay::start().ok();
+        #[cfg(target_os = "linux")]
         let headful = xvfb.is_some();
+
+        #[cfg(not(target_os = "linux"))]
+        let headful = true; // macOS/Windows have native window servers
 
         let mut args: Vec<String> = STEALTH_FLAGS.iter().map(|s| s.to_string()).collect();
         if !headful {
@@ -391,11 +398,15 @@ impl Browser {
             ));
         }
 
+        #[cfg(target_os = "linux")]
         let mode_str = if headful { "headful (Xvfb)" } else { "headless" };
+        #[cfg(not(target_os = "linux"))]
+        let mode_str = "headful";
         eprintln!("[bladebro] launching Chrome from {chrome_path} on CDP pipe ({mode_str})");
 
         let mut cmd = Command::new(&chrome_path);
         cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(target_os = "linux")]
         if let Some(ref xvfb) = xvfb {
             cmd.env("DISPLAY", xvfb.display_env());
         }
@@ -431,7 +442,12 @@ impl Browser {
                 Ok(v) => {
                     let product = v.get("product").and_then(|p| p.as_str()).unwrap_or("unknown");
                     eprintln!("[bladebro] Chrome ready: {product} (pipe transport)");
-                    return Ok((Self { child, xvfb, port: 0 }, client));
+                    return Ok((Self {
+                        child,
+                        #[cfg(target_os = "linux")]
+                        xvfb,
+                        port: 0,
+                    }, client));
                 }
                 Err(_) => {
                     match child.try_wait() {
@@ -454,7 +470,8 @@ impl Browser {
     }
 }
 
-/// Find the Xvfb binary on this system.
+/// Find the Xvfb binary on this system. Linux-only.
+#[cfg(target_os = "linux")]
 fn find_xvfb() -> Option<String> {
     // Common locations (NixOS system profile, standard paths).
     let candidates: &[&str] = &[
@@ -472,7 +489,8 @@ fn find_xvfb() -> Option<String> {
     find_in_path("Xvfb")
 }
 
-/// Find a free X display number. Checks for existing lock files.
+/// Find a free X display number. Checks for existing lock files. Linux-only.
+#[cfg(target_os = "linux")]
 fn free_display_num() -> u16 {
     for n in 99..200 {
         let lock = format!("/tmp/.X{n}-lock");

@@ -17,5 +17,6 @@ pub mod state;
 pub mod mcp;
 pub mod stealth;
 pub mod browser;
+pub mod platform;
 
 pub use error::{BladeError, Result};

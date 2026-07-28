@@ -68,12 +68,14 @@ fn run() -> Result<()> {
         .build()
         .map_err(bladebro::BladeError::other)?;
 
-    // S1: the mcp daemon defaults to the zero-port pipe transport.
+    // S1: the mcp daemon defaults to the zero-port pipe transport (Unix).
     // BLADE_TRANSPORT=ws forces the WebSocket transport; CLI one-shot
     // commands always use WS since they depend on HTTP target discovery.
+    // Windows uses WS (pipe fds 3/4 don't exist on Windows).
     let use_pipe = port == 0
         && cmd == "mcp"
-        && std::env::var("BLADE_TRANSPORT").map(|v| v != "ws").unwrap_or(true);
+        && std::env::var("BLADE_TRANSPORT").map(|v| v != "ws").unwrap_or(true)
+        && cfg!(unix);
 
     // Auto-launch Chrome if port is 0 (default). When --port is explicitly
     // given, connect to the existing Chrome instance on that port.
@@ -425,6 +427,8 @@ async fn cmd_mcp(base: &str, _browser: Option<bladebro::browser::Browser>) -> Re
 
 /// The default MCP path (S1): launch Chrome with CDP over pipe fds — no
 /// debugging port exists for page JavaScript to probe.
+/// Unix-only: Windows uses WS transport.
+#[cfg(unix)]
 async fn cmd_mcp_pipe() -> Result<()> {
     use bladebro::mcp;
     let (browser, client) = bladebro::browser::Browser::launch_pipe().await?;
