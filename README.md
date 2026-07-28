@@ -174,7 +174,19 @@ Run `bladebro audit` to verify your own setup.
 | Cloudflare Turnstile blocks Bladebro | Turnstile requires actual challenge solving, not just fingerprint spoofing. You get a `blocked:` verdict, not a hang. |
 | Datacenter IPs get flagged | Server/VPS IPs are flagged regardless of browser fingerprint. Use `BLADE_PROXY` with a residential proxy. |
 | Cross-origin iframes are invisible | SecurityError on `contentDocument`. Deliberate limitation; would need `Runtime.enable` (breaks stealth). |
+| macOS/Windows not yet live-tested | Should work (native code, CI matrix), but untested on real macOS/Windows machines. File an issue if something breaks. |
 | `BLADE_NOISE=1` can *hurt* stealth | FingerprintJS ML detects noise injection as "browser tampering." Off by default. Only use if you know why. |
+
+## 🔄 Update hub
+
+| Command | What it does |
+|---|---|
+| `bladebro -u` | Check for updates, download, install |
+| `bladebro -doc` | Diagnose system, suggest fixes |
+| `bladebro --rollback` | Restore previous version after broken update |
+| `bladebro -v` | Show version + update status |
+
+Set `GITHUB_TOKEN` for higher API rate limits. Set `BLADE_NO_UPDATE_CHECK=1` to skip update checks.
 
 ## 🤝 Contributing
 

@@ -249,20 +249,17 @@ fn profile_dir() -> std::path::PathBuf {
 /// live process holds the profile — corrupting a live profile is worse.
 fn clear_stale_profile_lock(dir: &std::path::Path) -> Result<()> {
     let lock = dir.join("SingletonLock");
-    let target = match std::fs::read_link(&lock) {
-        Ok(t) => t,
-        Err(_) => return Ok(()), // no lock, or not a symlink — nothing to do
+
+    // Linux/macOS: SingletonLock is a symlink to "hostname-pid".
+    // Windows: SingletonLock is a regular file containing the PID as text.
+    let pid = read_lock_pid(&lock);
+    let pid = match pid {
+        Some(p) => p,
+        None => return Ok(()), // no lock, or unreadable — nothing to do
     };
-    // Lock target looks like "hostname-12345".
-    let pid = target
-        .to_string_lossy()
-        .rsplit('-')
-        .next()
-        .and_then(|p| p.parse::<u32>().ok());
-    let pid_alive = pid.map(platform::process_alive).unwrap_or(false);
+    let pid_alive = platform::process_alive(pid);
 
     if pid_alive {
-        let pid = pid.unwrap();
         // Check if the PID is actually a Chrome process (PID could have been recycled).
         if platform::process_is_chrome(pid) {
             // Previous Chrome is still dying (orphaned by SIGKILL of the MCP server).
@@ -295,6 +292,25 @@ fn clear_stale_profile_lock(dir: &std::path::Path) -> Result<()> {
     }
     eprintln!("[bladebro] cleared stale profile lock in {}", dir.display());
     Ok(())
+}
+
+/// Read the PID from Chrome's SingletonLock. Platform-aware:
+/// Linux/macOS use a symlink, Windows uses a regular file.
+fn read_lock_pid(lock: &std::path::Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        let target = std::fs::read_link(lock).ok()?;
+        target
+            .to_string_lossy()
+            .rsplit('-')
+            .next()
+            .and_then(|p| p.parse::<u32>().ok())
+    }
+    #[cfg(windows)]
+    {
+        let content = std::fs::read_to_string(lock).ok()?;
+        content.trim().parse::<u32>().ok()
+    }
 }
 
 /// S15: warn when no emoji font is installed. Kasada/Akamai render emoji on

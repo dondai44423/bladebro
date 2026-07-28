@@ -55,6 +55,9 @@ fn run() -> Result<()> {
                 print_usage();
                 return Ok(());
             }
+            "-u" | "-doc" | "-v" | "--rollback" if cmd.is_none() => {
+                cmd = Some(args[i].clone());
+            }
             s if cmd.is_none() && !s.starts_with('-') => {
                 cmd = Some(s.to_string());
             }
@@ -68,6 +71,12 @@ fn run() -> Result<()> {
         .build()
         .map_err(bladebro::BladeError::other)?;
 
+    // Update hub commands don't need Chrome. Handle them before launch.
+    let is_update_cmd = matches!(
+        cmd.as_str(),
+        "update" | "-u" | "doctor" | "-doc" | "rollback" | "--rollback" | "-v" | "--version"
+    );
+
     // S1: the mcp daemon defaults to the zero-port pipe transport (Unix).
     // BLADE_TRANSPORT=ws forces the WebSocket transport; CLI one-shot
     // commands always use WS since they depend on HTTP target discovery.
@@ -80,12 +89,13 @@ fn run() -> Result<()> {
     // Auto-launch Chrome if port is 0 (default). When --port is explicitly
     // given, connect to the existing Chrome instance on that port.
     // Pipe mode launches its own Chrome inside cmd_mcp_pipe.
-    let browser = if port == 0 && !use_pipe {
+    // Update hub commands skip Chrome entirely.
+    let browser = if port == 0 && !use_pipe && !is_update_cmd {
         Some(rt.block_on(bladebro::browser::Browser::launch(0))?)
     } else {
         None
     };
-    let base = if port == 0 && !use_pipe {
+    let base = if port == 0 && !use_pipe && !is_update_cmd {
         browser.as_ref().unwrap().base()
     } else {
         format!("{host}:{port}")
@@ -122,6 +132,11 @@ fn run() -> Result<()> {
             let args = &positional[1..];
             rt.block_on(cmd_state(&base, &sub, args))
         }
+        // Update hub commands (no Chrome needed).
+        "update" | "-u" => rt.block_on(bladebro::updater::run("update", &positional)),
+        "doctor" | "-doc" => rt.block_on(bladebro::updater::run("doctor", &positional)),
+        "rollback" | "--rollback" => rt.block_on(bladebro::updater::run("rollback", &positional)),
+        "-v" | "--version" => rt.block_on(bladebro::updater::run("version", &positional)),
         "mcp" if use_pipe => rt.block_on(cmd_mcp_pipe()),
         "mcp" => rt.block_on(cmd_mcp(&base, browser)),
         "audit" => rt.block_on(cmd_audit(&base)),
@@ -528,8 +543,8 @@ fn print_usage() {
     eprintln!(
         "bladebro — agentic browser driver for AI\n\n\
          USAGE:\n    bladebro <COMMAND> [OPTIONS]\n\n\
-         COMMANDS:\n    probe      connect to a browser, enable core domains, round-trip a command\n    targets    list CDP targets\n    version    print /json/version\n    nav <url>  navigate the first page tab and wait for frameNavigated\n    see [url]  capture the page and print the agent view + a recapture delta\n    act <sub> <args...> [url]  perform an action and show the delta\n    state <sub> <args...>  inspect/modify cookies, storage, and tabs\n    mcp        run the MCP server (stdio JSON-RPC)
-    audit      run stealth vectors + boot self-check, print scorecard\n    help       show this message\n\n\
+         COMMANDS:\n    probe      connect to a browser, enable core domains, round-trip a command\n    targets    list CDP targets\n    version    print /json/version\n    nav <url>  navigate the first page tab and wait for frameNavigated\n    see [url]  capture the page and print the agent view + a recapture delta\n    act <sub> <args...> [url]  perform an action and show the delta\n    state <sub> <args...>  inspect/modify cookies, storage, and tabs\n    mcp        run the MCP server (stdio JSON-RPC)\n    audit      run stealth vectors + boot self-check, print scorecard\n    help       show this message\n\n\
+         UPDATE HUB:\n    update, -u         check for updates and install\n    doctor, -doc       diagnose system, suggest fixes\n    rollback           restore previous version\n    -v, --version      show version + update status\n\n\
          OPTIONS:\n    --host <h>   browser debug host (default 127.0.0.1)\n    --port <p>   browser debug port (default: auto-launch Chrome)\n\n\
          With no --port, Bladebro finds Chrome, launches it with stealth flags,\n         and manages its lifecycle. Set CHROME_PATH to override the binary location.\n         To connect to an already-running Chrome, pass --port 9222."
     );
