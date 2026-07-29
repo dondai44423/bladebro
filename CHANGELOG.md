@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-29
+
+First stable release. The agentic browser driver is production-ready.
+
 ### Added
+- **Update hub**: `bladebro -u` (self-update), `bladebro -doc` (9-point diagnostic), `bladebro --rollback`, `bladebro -v`. Atomic binary swap, magic-byte verification, backup + rollback. `GITHUB_TOKEN` for higher API limits. `BLADE_NO_UPDATE_CHECK=1` to skip checks
 - **MCP 2026-07-28 support**: dual-dialect protocol. Speaks 2024-11-05 through 2026-07-28, negotiated per request
 - **`server/discover`**: capability advertisement for stateless clients (SEP-2575, required by the new spec)
 - **Per-request version negotiation**: `_meta["io.modelcontextprotocol/protocolVersion"]` honored on every request; unknown versions fail closed with `UnsupportedProtocolVersionError` (-32022)
@@ -27,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.0] - 2026-07-28
 
-Initial public release. Pre-v1, hardening pass complete, CLI update pending.
+Pre-release. Hardening pass complete, CLI update pending.
 
 ### Added
 - **5 MCP tools**: `act`, `see`, `state`, `run`, `vision`. Full browser control from 5 tools
@@ -77,5 +82,6 @@ Initial public release. Pre-v1, hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/dondai44423/bladebro/releases/tag/v1.0.0
 [0.9.0]: https://github.com/dondai44423/bladebro/releases/tag/v0.9.0

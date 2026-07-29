@@ -12,7 +12,8 @@ One MCP server · one persistent page model · zero Node.js · runs on your mach
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org)
-[![Binary](https://img.shields.io/badge/binary-5.1MB-green.svg)](#-install)
+[![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?label=release)](https://github.com/dondai44423/bladebro/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
 [![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?style=social)](https://github.com/dondai44423/bladebro)
 
 ```bash
@@ -164,7 +165,7 @@ Run `bladebro audit` to verify your own setup.
 | Runtime | None (static binary) | Node.js | Node.js |
 | Process model | Long-lived daemon (stateful) | Stateless (reconnect per call) | Stateless |
 | Page model | Persistent, ref-stable, diff-first | None | None |
-| Binary size | 5.1MB | ~50MB (node + deps) | ~50MB (node + deps) |
+| Binary size | 5.2MB | ~50MB (node + deps) | ~50MB (node + deps) |
 | Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
 **3-4x more token-efficient** than every competitor. The Live Page Model is the core innovation: it holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations. No more "stale element" failures.
