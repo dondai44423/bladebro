@@ -88,14 +88,18 @@ fn run() -> Result<()> {
 
     // Auto-launch Chrome if port is 0 (default). When --port is explicitly
     // given, connect to the existing Chrome instance on that port.
+    // MCP mode uses lazy launch (Chrome starts on first tool call), so
+    // we skip the upfront launch for `mcp`. One-shot CLI commands
+    // (probe, see, act, etc.) still launch Chrome here as before.
     // Pipe mode launches its own Chrome inside cmd_mcp_pipe.
     // Update hub commands skip Chrome entirely.
-    let browser = if port == 0 && !use_pipe && !is_update_cmd {
+    let is_mcp = cmd == "mcp";
+    let browser = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp {
         Some(rt.block_on(bladebro::browser::Browser::launch(0))?)
     } else {
         None
     };
-    let base = if port == 0 && !use_pipe && !is_update_cmd {
+    let base = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp {
         browser.as_ref().unwrap().base()
     } else {
         format!("{host}:{port}")
@@ -138,7 +142,7 @@ fn run() -> Result<()> {
         "rollback" | "--rollback" => rt.block_on(bladebro::updater::run("rollback", &positional)),
         "-v" | "--version" => rt.block_on(bladebro::updater::run("version", &positional)),
         "mcp" if use_pipe => rt.block_on(cmd_mcp_pipe()),
-        "mcp" => rt.block_on(cmd_mcp(&base, browser)),
+        "mcp" => rt.block_on(cmd_mcp(&host, port)),
         "audit" => rt.block_on(cmd_audit(&base)),
         _ => {
             print_usage();
@@ -433,12 +437,9 @@ async fn cmd_state(base: &str, sub: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_mcp(base: &str, browser: Option<bladebro::browser::Browser>) -> Result<()> {
-    // browser keeps Chrome alive for the MCP server's lifetime and is
-    // passed to serve() for self-healing reconnection.
+async fn cmd_mcp(host: &str, port: u16) -> Result<()> {
     use bladebro::mcp;
-    let (host, port) = parse_host_port(base);
-    mcp::run(host, port, browser).await
+    mcp::run(host, port).await
 }
 
 /// The default MCP path (S1): launch Chrome with CDP over pipe fds — no
@@ -446,9 +447,7 @@ async fn cmd_mcp(base: &str, browser: Option<bladebro::browser::Browser>) -> Res
 /// Unix-only: Windows uses WS transport.
 #[cfg(unix)]
 async fn cmd_mcp_pipe() -> Result<()> {
-    use bladebro::mcp;
-    let (browser, client) = bladebro::browser::Browser::launch_pipe().await?;
-    mcp::run_pipe(client, browser).await
+    bladebro::mcp::run_pipe().await
 }
 
 /// Windows stub: pipe transport is Unix-only. This is never called
@@ -537,15 +536,6 @@ async fn cmd_audit(base: &str) -> Result<()> {
     }
     println!("{bar}");
     Ok(())
-}
-
-fn parse_host_port(base: &str) -> (&str, u16) {
-    if let Some((h, p)) = base.rsplit_once(':') {
-        if let Ok(port) = p.parse::<u16>() {
-            return (h, port);
-        }
-    }
-    ("127.0.0.1", 9222)
 }
 
 fn print_usage() {

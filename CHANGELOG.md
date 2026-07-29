@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Lazy Chrome launch**: Chrome no longer starts when the MCP server starts. It launches on the first `tools/call` and shuts down after 5 minutes of inactivity (configurable via `BLADE_IDLE_TIMEOUT` env var in seconds; `0` disables). `initialize`, `tools/list`, and other metadata calls never trigger a Chrome launch. Saves ~200MB+ of RAM when the agent isn't using browser tools.
 - **Self-healing browser connection**: when Chrome crashes or the CDP connection drops, the MCP server detects it and relaunches Chrome automatically. The agent never sees "browser connection closed". Tool calls are retried transparently after reconnection. Works for both pipe and WS transports.
 
 ### Fixed

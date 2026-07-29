@@ -13,7 +13,8 @@
 //! is negotiated per request. Mismatched versions get
 //! `UnsupportedProtocolVersionError` (-32022).
 
-use std::io::{self, BufRead, Write};
+use std::io::Write;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use serde_json::{json, Value};
 
@@ -82,23 +83,17 @@ fn shape_result(result: &mut Value, version: Option<&str>) {
 }
 
 /// Run the MCP server over stdio (WS transport). Blocks until stdin closes.
-pub async fn run(host: &str, port: u16, browser: Option<crate::browser::Browser>) -> Result<()> {
-    let target = cdp::first_page_target(&format!("{host}:{port}")).await?;
-    let client = CdpClient::connect(target.ws_url()?).await?;
-    let page = Page::attach(CdpSession::root(client), &format!("{host}:{port}"), None).await?;
-    eprintln!("[bladebro] MCP server ready on {host}:{port} (ws transport)");
-    serve(page, browser, false).await
+/// Chrome is NOT launched here — it starts lazily on the first tool call.
+pub async fn run(host: &str, port: u16) -> Result<()> {
+    serve(false, host, port).await
 }
 
-/// Serve MCP over a zero-port CDP pipe connection (S1). `_browser` is held
-/// for the server's lifetime; dropping it kills Chrome + Xvfb.
+/// Serve MCP over a zero-port CDP pipe connection (S1).
+/// Chrome is NOT launched here — it starts lazily on the first tool call.
 /// Unix-only: Windows uses WS transport.
 #[cfg(unix)]
-pub async fn run_pipe(client: CdpClient, browser: crate::browser::Browser) -> Result<()> {
-    let session = attach_pipe(&client).await?;
-    let page = Page::attach(session, "pipe", Some(client)).await?;
-    eprintln!("[bladebro] MCP server ready (pipe transport)");
-    serve(page, Some(browser), true).await
+pub async fn run_pipe() -> Result<()> {
+    serve(true, "", 0).await
 }
 
 /// Attach to the first page target over the browser-level pipe connection.
@@ -145,247 +140,313 @@ async fn attach_pipe(client: &CdpClient) -> Result<CdpSession> {
     Ok(CdpSession::child(client.clone(), session_id))
 }
 
-/// Relaunch Chrome and create a fresh `Page` after the browser connection
-/// dies. Drops the old `Browser` (kills Chrome + Xvfb), waits for cleanup,
-/// then launches a new one. Returns the new `Page` and `Browser`.
-///
-/// This is the self-healing core: the agent never sees "browser connection
-/// closed" because the server reconnects transparently before the tool
-/// call reaches the agent.
-async fn reconnect(
-    use_pipe: bool,
-) -> Result<(Page, Option<crate::browser::Browser>)> {
-    eprintln!("[bladebro] browser connection lost, relaunching...");
-    // Small delay to let the OS reclaim resources (port, display, etc.)
-    // before we launch a new Chrome instance.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+/// Idle timeout: Chrome is shut down after this many seconds of no tool
+/// calls, freeing RAM. 0 disables. Default: 300 (5 minutes).
+/// Configurable via `BLADE_IDLE_TIMEOUT` env var (seconds).
+fn idle_timeout_secs() -> u64 {
+    std::env::var("BLADE_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(300)
+}
 
+/// Launch Chrome and create a fresh `Page`. Used for three purposes:
+/// 1. Lazy init: first tool call in the MCP session.
+/// 2. Self-healing: Chrome crashed, relaunch before retrying.
+/// 3. Post-idle: Chrome was shut down after inactivity, relaunch on demand.
+///
+/// The caller is responsible for dropping the old `Browser` (if any)
+/// before calling this, to kill the old Chrome process.
+async fn launch_browser(
+    use_pipe: bool,
+    host: &str,
+    port: u16,
+) -> Result<(Page, Option<crate::browser::Browser>)> {
     if use_pipe {
         #[cfg(unix)]
         {
             let (browser, client) = crate::browser::Browser::launch_pipe().await?;
             let session = attach_pipe(&client).await?;
             let page = Page::attach(session, "pipe", Some(client)).await?;
-            eprintln!("[bladebro] reconnected (pipe transport)");
             return Ok((page, Some(browser)));
         }
         #[cfg(not(unix))]
         {
             return Err(BladeError::Other(
-                "pipe transport is Unix-only, cannot reconnect".into(),
+                "pipe transport is Unix-only".into(),
             ));
         }
     }
 
-    // WS transport: launch a new browser on a fresh port.
-    let browser = crate::browser::Browser::launch(0).await?;
-    let base = browser.base();
-    let target = cdp::first_page_target(&base).await?;
-    let client = CdpClient::connect(target.ws_url()?).await?;
-    let page = Page::attach(CdpSession::root(client), &base, None).await?;
-    eprintln!("[bladebro] reconnected (ws transport)");
-    Ok((page, Some(browser)))
+    // WS transport.
+    if port == 0 {
+        // Auto-launch: pick a free port.
+        let browser = crate::browser::Browser::launch(0).await?;
+        let base = browser.base();
+        let target = cdp::first_page_target(&base).await?;
+        let client = CdpClient::connect(target.ws_url()?).await?;
+        let page = Page::attach(CdpSession::root(client), &base, None).await?;
+        Ok((page, Some(browser)))
+    } else {
+        // Connect to an existing Chrome on the given port.
+        let base = format!("{host}:{port}");
+        let target = cdp::first_page_target(&base).await?;
+        let client = CdpClient::connect(target.ws_url()?).await?;
+        let page = Page::attach(CdpSession::root(client), &base, None).await?;
+        Ok((page, None))
+    }
 }
 
 /// The stdio JSON-RPC loop, shared by both transports.
 ///
-/// `browser` holds the Chrome child process (dropped on reconnect to kill
-/// the old Chrome). `use_pipe` selects the reconnection strategy.
+/// Chrome is NOT launched at startup. The server starts with no browser
+/// process, using minimal RAM. Chrome launches lazily on the first
+/// `tools/call` and shuts down after `idle_timeout_secs()` of inactivity.
+/// Only `tools/call` needs Chrome; `initialize`, `tools/list`, etc. are
+/// static metadata and never trigger a launch.
+///
+/// Self-healing: if Chrome crashes mid-session, the next `tools/call`
+/// detects the dead connection, relaunches Chrome, and retries the call.
+/// The agent never sees "browser connection closed".
 async fn serve(
-    mut page: Page,
-    mut browser: Option<crate::browser::Browser>,
     use_pipe: bool,
+    host: &str,
+    port: u16,
 ) -> Result<()> {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
+    let stdin = tokio::io::stdin();
+    let reader = BufReader::new(stdin);
+    let mut lines = reader.lines();
+    let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("[bladebro] stdin read error: {e}");
-                break;
-            }
-        };
+    let mut browser: Option<crate::browser::Browser> = None;
+    let mut page: Option<Page> = None;
+    let mut last_activity = std::time::Instant::now();
+    let idle_secs = idle_timeout_secs();
+    let mut idle_check = tokio::time::interval(std::time::Duration::from_secs(15));
+    idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        if line.trim().is_empty() {
-            continue;
+    eprintln!(
+        "[bladebro] MCP server ready (Chrome launches on first tool call{}",
+        if idle_secs > 0 {
+            format!(", idle timeout: {idle_secs}s)")
+        } else {
+            ")".to_string()
         }
+    );
 
-        let msg: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[bladebro] invalid JSON: {e}");
-                continue;
-            }
-        };
-
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = msg.get("params").cloned().unwrap_or(Value::Null);
-
-        // Dispatch. Per-request version negotiation first (SEP-2575):
-        // unknown versions fail closed with UnsupportedProtocolVersionError.
-        let version = match request_version(&params) {
-            Ok(v) => v,
-            Err(bad) => {
-                let resp = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": {
-                        "code": -32022,
-                        "message": format!("unsupported protocol version: {bad}"),
-                        "data": { "supportedVersions": SUPPORTED_VERSIONS },
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                let line = match line {
+                    Ok(Some(l)) => l,
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("[bladebro] stdin read error: {e}");
+                        break;
                     }
-                });
-                let resp_str = serde_json::to_string(&resp)?;
-                writeln!(out, "{resp_str}")?;
-                out.flush()?;
-                continue;
-            }
-        };
+                };
 
-        let response = match method {
-            "initialize" => Some(handle_initialize(id, &params)),
-            "initialized" | "notifications/initialized" => None, // notification, no response
-            "server/discover" => Some(handle_discover(id, version)),
-            "tools/list" => Some(handle_tools_list(id, version)),
-            "tools/call" => {
-                // Pre-call self-heal: if the browser connection is already
-                // dead (Chrome crashed between tool calls), reconnect now
-                // so the tool call succeeds on the first try.
-                if page.is_closed() {
-                    // Drop old browser (kills Chrome) before relaunching.
-                    drop(browser.take());
-                    match reconnect(use_pipe).await {
-                        Ok((new_page, new_browser)) => {
-                            page = new_page;
-                            browser = new_browser;
-                        }
-                        Err(e) => {
-                            eprintln!("[bladebro] pre-call reconnect failed: {e}");
-                            let resp = json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": {
-                                    "content": [{ "type": "text", "text": format!("\u{2717} browser connection lost. Bladebro tried to reconnect but failed: {e}. The server is still running, try again in a moment.") }],
-                                    "isError": true,
+                if line.trim().is_empty() { continue; }
+
+                let msg: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[bladebro] invalid JSON: {e}");
+                        continue;
+                    }
+                };
+
+                let id = msg.get("id").cloned();
+                let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let params = msg.get("params").cloned().unwrap_or(Value::Null);
+
+                // Per-request version negotiation (SEP-2575).
+                let version = match request_version(&params) {
+                    Ok(v) => v,
+                    Err(bad) => {
+                        let resp = json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32022,
+                                "message": format!("unsupported protocol version: {bad}"),
+                                "data": { "supportedVersions": SUPPORTED_VERSIONS },
+                            }
+                        });
+                        let resp_str = serde_json::to_string(&resp)?;
+                        writeln!(out, "{resp_str}")?;
+                        out.flush()?;
+                        continue;
+                    }
+                };
+
+                let response = match method {
+                    "initialize" => Some(handle_initialize(id, &params)),
+                    "initialized" | "notifications/initialized" => None,
+                    "server/discover" => Some(handle_discover(id, version)),
+                    "tools/list" => Some(handle_tools_list(id, version)),
+                    "tools/call" => {
+                        // === LAZY LAUNCH + SELF-HEAL ===
+                        // Ensure Chrome is running before any tool call.
+                        // Three cases: first call (page=None), idle shutdown
+                        // (page=None), or Chrome crashed (is_closed).
+                        let need_launch = page.is_none()
+                            || page.as_ref().map(|p| p.is_closed()).unwrap_or(true);
+                        if need_launch {
+                            if browser.is_some() {
+                                // Chrome crashed or is dead, kill it first.
+                                eprintln!("[bladebro] browser connection lost, relaunching...");
+                                drop(browser.take());
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            } else {
+                                eprintln!("[bladebro] launching Chrome (first tool call)...");
+                            }
+                            match launch_browser(use_pipe, host, port).await {
+                                Ok((new_page, new_browser)) => {
+                                    browser = new_browser;
+                                    page = Some(new_page);
                                 }
-                            });
-                            let resp_str = serde_json::to_string(&resp)?;
-                            writeln!(out, "{resp_str}")?;
-                            out.flush()?;
-                            continue;
+                                Err(e) => {
+                                    eprintln!("[bladebro] Chrome launch failed: {e}");
+                                    let resp = json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "content": [{ "type": "text", "text":
+                                                format!("\u{2717} Could not launch Chrome: {e}. Check that Chromium is installed and try again.") }],
+                                            "isError": true,
+                                        }
+                                    });
+                                    let resp_str = serde_json::to_string(&resp)?;
+                                    writeln!(out, "{resp_str}")?;
+                                    out.flush()?;
+                                    continue;
+                                }
+                            }
                         }
-                    }
-                }
 
-                // Clone id for retry paths — handle_tools_call consumes it.
-                let id_retry = id.clone();
+                        // === CALL THE TOOL ===
+                        // Clone id for retry paths — handle_tools_call consumes it.
+                        let id_retry = id.clone();
+                        let res = {
+                            let p = page.as_mut().unwrap();
+                            futures_util::FutureExt::catch_unwind(
+                                std::panic::AssertUnwindSafe(handle_tools_call(id, &params, p)),
+                            ).await
+                        };
 
-                // Panic isolation: a bug in any tool handler must NOT kill
-                // the server. Convert panics into JSON-RPC errors; the page
-                // model may be stale afterward but the next capture re-syncs.
-                let res = futures_util::FutureExt::catch_unwind(
-                    std::panic::AssertUnwindSafe(handle_tools_call(id, &params, &mut page)),
-                )
-                .await;
-
-                // handle_tools_call returns Result<Value, BladeError>:
-                // Ok(Value) = normal response (success or handled error).
-                // Err(Closed) = browser died during the call, need to reconnect.
-                let resp = match res {
-                    Ok(Ok(v)) => v,
-                    Ok(Err(BladeError::Closed)) => {
-                        // Self-heal: reconnect and retry the tool call once.
-                        eprintln!("[bladebro] browser closed during tool call, reconnecting...");
-                        // Drop old browser (kills Chrome) before relaunching.
-                        drop(browser.take());
-                        match reconnect(use_pipe).await {
-                            Ok((new_page, new_browser)) => {
-                                page = new_page;
-                                browser = new_browser;
-                                // Retry the tool call with the fresh page.
-                                // Clone id_retry for the retry call — handle_tools_call consumes it.
-                                let id_retry2 = id_retry.clone();
-                                match handle_tools_call(id_retry2, &params, &mut page).await {
-                                    Ok(v) => v,
+                        // handle_tools_call returns Result<Value, BladeError>:
+                        // Ok(Value) = normal response. Err(Closed) = browser
+                        // died during the call, need to relaunch + retry.
+                        let resp = match res {
+                            Ok(Ok(v)) => v,
+                            Ok(Err(BladeError::Closed)) => {
+                                // Self-heal: relaunch and retry once.
+                                eprintln!("[bladebro] browser closed during tool call, reconnecting...");
+                                drop(browser.take());
+                                page = None;
+                                match launch_browser(use_pipe, host, port).await {
+                                    Ok((new_page, new_browser)) => {
+                                        browser = new_browser;
+                                        page = Some(new_page);
+                                        let id_retry2 = id_retry.clone();
+                                        let p = page.as_mut().unwrap();
+                                        match handle_tools_call(id_retry2, &params, p).await {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                eprintln!("[bladebro] retry after reconnect failed: {e}");
+                                                json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": id_retry,
+                                                    "result": {
+                                                        "content": [{ "type": "text", "text":
+                                                            format!("\u{2717} Browser connection lost. Bladebro reconnected but the retry failed: {e}. Try the tool call again.") }],
+                                                        "isError": true,
+                                                    }
+                                                })
+                                            }
+                                        }
+                                    }
                                     Err(e) => {
-                                        eprintln!("[bladebro] retry after reconnect failed: {e}");
+                                        eprintln!("[bladebro] reconnect failed: {e}");
                                         json!({
                                             "jsonrpc": "2.0",
                                             "id": id_retry,
                                             "result": {
-                                                "content": [{ "type": "text", "text": format!("\u{2717} browser connection lost. Bladebro reconnected but the retry failed: {e}. Try the tool call again.") }],
+                                                "content": [{ "type": "text", "text":
+                                                    format!("\u{2717} Browser connection lost. Bladebro tried to reconnect but failed: {e}. The server is still running, try again in a moment.") }],
                                                 "isError": true,
                                             }
                                         })
                                     }
                                 }
                             }
-                            Err(e) => {
-                                eprintln!("[bladebro] reconnect failed: {e}");
-                                json!({
-                                    "jsonrpc": "2.0",
-                                    "id": id_retry,
-                                    "result": {
-                                        "content": [{ "type": "text", "text": format!("\u{2717} browser connection lost. Bladebro tried to reconnect but failed: {e}. The server is still running, try again in a moment.") }],
-                                        "isError": true,
-                                    }
-                                })
-                            }
+                            Ok(Err(e)) => json!({
+                                "jsonrpc": "2.0",
+                                "id": id_retry,
+                                "error": {
+                                    "code": -32603,
+                                    "message": e.to_string(),
+                                }
+                            }),
+                            Err(_) => json!({
+                                "jsonrpc": "2.0",
+                                "id": Value::Null,
+                                "error": {
+                                    "code": -32603,
+                                    "message": "internal panic in tool handler (see stderr) — session survived, retry or re-see",
+                                }
+                            }),
+                        };
+                        let mut resp = resp;
+                        if let Some(result) = resp.get_mut("result") {
+                            shape_result(result, version);
                         }
+                        last_activity = std::time::Instant::now();
+                        Some(resp)
                     }
-                    // Should never happen (handle_tools_call only returns Err(Closed)),
-                    // but handle gracefully to satisfy the type system.
-                    Ok(Err(e)) => json!({
+                    // Removed in 2026-07-28; kept for legacy keepalive clients.
+                    "ping" => {
+                        let mut result = json!({});
+                        shape_result(&mut result, version);
+                        Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+                    }
+                    _ => Some(json!({
                         "jsonrpc": "2.0",
-                        "id": id_retry,
+                        "id": id,
                         "error": {
-                            "code": -32603,
-                            "message": e.to_string(),
+                            "code": -32601,
+                            "message": format!("method not found: {method}"),
                         }
-                    }),
-                    Err(_) => json!({
-                        "jsonrpc": "2.0",
-                        "id": Value::Null,
-                        "error": {
-                            "code": -32603,
-                            "message": "internal panic in tool handler (see stderr) — session survived, retry or re-see",
-                        }
-                    }),
+                    })),
                 };
-                let mut resp = resp;
-                if let Some(result) = resp.get_mut("result") {
-                    shape_result(result, version);
-                }
-                Some(resp)
-            }
-            // Removed in 2026-07-28; kept for legacy keepalive clients.
-            "ping" => {
-                let mut result = json!({});
-                shape_result(&mut result, version);
-                Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
-            }
-            _ => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {
-                    "code": -32601,
-                    "message": format!("method not found: {method}"),
-                }
-            })),
-        };
 
-        if let Some(resp) = response {
-            // MCP spec: messages MUST NOT contain embedded newlines.
-            let resp_str = serde_json::to_string(&resp)?;
-            writeln!(out, "{resp_str}")?;
-            out.flush()?;
+                if let Some(resp) = response {
+                    let resp_str = serde_json::to_string(&resp)?;
+                    writeln!(out, "{resp_str}")?;
+                    out.flush()?;
+                }
+            }
+            _ = idle_check.tick() => {
+                if idle_secs > 0
+                    && browser.is_some()
+                    && last_activity.elapsed().as_secs() > idle_secs
+                {
+                    eprintln!(
+                        "[bladebro] idle timeout ({}s), shutting down Chrome to save memory",
+                        idle_secs
+                    );
+                    drop(browser.take());
+                    page = None;
+                }
+            }
         }
     }
 
+    // Clean up on exit.
+    drop(browser);
+    drop(page);
     Ok(())
 }
 
