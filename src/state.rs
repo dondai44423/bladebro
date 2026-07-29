@@ -90,6 +90,10 @@ pub struct Tab {
     pub url: String,
     #[serde(default)]
     pub title: String,
+    /// True if a CDP session is attached (i.e. this is the tab
+    /// bladebro is currently driving).
+    #[serde(default)]
+    pub attached: bool,
 }
 
 /// Perform a state operation and return a compact, agent-facing result string.
@@ -215,8 +219,10 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             }
             let mut out = String::new();
             for tab in &tabs {
+                let marker = if tab.attached { "*" } else { " " };
                 out.push_str(&format!(
-                    "{}  {}\n",
+                    "{} {}  {}\n",
+                    marker,
                     tab.target_id,
                     if tab.title.is_empty() {
                         truncate(&tab.url, 60)
@@ -225,6 +231,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                     }
                 ));
             }
+            out.push_str("(* = current tab; switch-tab <target_id> to change)");
             Ok(out)
         }
 

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 
 use crate::cdp::{CdpClient, CdpSession};
 use crate::cdp::list_page_targets;
-use crate::error::Result;
+use crate::error::{BladeError, Result};
 
 /// Information about a JavaScript dialog (alert/confirm/prompt/beforeunload)
 /// that was auto-dismissed by the dialog handler task.
@@ -37,6 +37,17 @@ pub struct DialogInfo {
 }
 
 /// A live page session: one CDP connection + its persistent Live Page Model.
+/// A completed/failed network request record (V8 introspection).
+#[derive(Debug, Clone)]
+pub struct NetEntry {
+    pub method: String,
+    pub url: String,
+    /// HTTP status (0 = failed/no response).
+    pub status: i64,
+    /// Failure reason if the request failed.
+    pub error: Option<String>,
+}
+
 ///
 /// Also owns a background dialog-handler task that auto-dismisses
 /// alert()/confirm()/prompt() dialogs so the page never deadlocks.
@@ -54,6 +65,8 @@ pub struct Page {
     dialog_task: Option<tokio::task::JoinHandle<()>>,
     /// Count of in-flight network requests (for settle + header display).
     in_flight: Arc<AtomicUsize>,
+    /// Ring buffer of the last 50 completed/failed requests (V8).
+    net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>>,
     /// Handle to the network-tracker background task. Aborted on Drop.
     network_task: Option<tokio::task::JoinHandle<()>>,
     /// Ambient events (consent dismissed, block detected) for the agent.
@@ -243,28 +256,63 @@ impl Page {
         // can wait for data to arrive, not just DOM stability.
         let ambient: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let in_flight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        let net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>> =
+            Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let cdp_for_net = cdp.clone();
         let net_counter = in_flight.clone();
+        let net_log_t = net_log.clone();
         let network_task = tokio::spawn(async move {
-            use std::collections::HashSet;
+            use std::collections::HashMap;
             let mut rx = cdp_for_net.subscribe();
             // Track request IDs, not a raw counter: requestWillBeSent fires
             // once per REDIRECT HOP for the same requestId while
             // loadingFinished fires once — a counter drifts +1 per hop and
             // eventually every settle waits the full timeout.
-            let mut open: HashSet<String> = HashSet::new();
+            let mut open: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Pending request metadata for the V8 net log.
+            let mut pending: HashMap<String, (String, String, i64)> = HashMap::new();
             loop {
                 match rx.recv().await {
                     Ok(ev) if ev.method == "Network.requestWillBeSent" => {
-                        if let Some(id) = ev.params.get("requestId").and_then(|v| v.as_str()) {
+                        let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+                        if !id.is_empty() {
                             open.insert(id.to_string());
+                            let req = ev.params.get("request");
+                            let method = req.and_then(|r| r.get("method")).and_then(|m| m.as_str()).unwrap_or("GET").to_string();
+                            let url = req.and_then(|r| r.get("url")).and_then(|u| u.as_str()).unwrap_or("").to_string();
+                            pending.insert(id.to_string(), (method, url, 0));
+                        }
+                    }
+                    Ok(ev) if ev.method == "Network.responseReceived" => {
+                        let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+                        let status = ev.params.get("response")
+                            .and_then(|r| r.get("status"))
+                            .and_then(|s| s.as_i64())
+                            .unwrap_or(0);
+                        if let Some(entry) = pending.get_mut(id) {
+                            entry.2 = status;
                         }
                     }
                     Ok(ev) if ev.method == "Network.loadingFinished"
                         || ev.method == "Network.loadingFailed" =>
                     {
-                        if let Some(id) = ev.params.get("requestId").and_then(|v| v.as_str()) {
+                        let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+                        if !id.is_empty() {
                             open.remove(id);
+                            if let Some((method, url, status)) = pending.remove(id) {
+                                let error = if ev.method == "Network.loadingFailed" {
+                                    Some(ev.params.get("errorText")
+                                        .and_then(|e| e.as_str())
+                                        .unwrap_or("failed")
+                                        .to_string())
+                                } else {
+                                    None
+                                };
+                                if let Ok(mut log) = net_log_t.lock() {
+                                    log.push_back(NetEntry { method, url, status, error });
+                                    if log.len() > 50 { log.pop_front(); }
+                                }
+                            }
                         }
                     }
                     Ok(_) => continue,
@@ -272,6 +320,7 @@ impl Page {
                         // Events were dropped — the set may now hold stale IDs.
                         // Clear rather than risk a permanently blocked settle.
                         open.clear();
+                        pending.clear();
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -316,6 +365,7 @@ impl Page {
             dialogs,
             dialog_task: Some(dialog_task),
             in_flight,
+            net_log,
             network_task: Some(network_task),
             ambient,
             base: base.to_string(),
@@ -360,6 +410,74 @@ impl Page {
         } else {
             list_page_targets(&self.base).await.unwrap_or_default()
         }
+    }
+
+    /// List all page targets (tabs). Public wrapper for the MCP
+    /// server's close-tab auto-switch.
+    pub async fn tab_targets(&self) -> Vec<crate::cdp::TargetInfo> {
+        self.list_page_targets().await
+    }
+
+    /// Switch the session to a different tab (target id from
+    /// `state tabs`). The whole page state is rebuilt against the
+    /// new tab: domains re-enabled, stealth re-injected, fresh
+    /// capture. The old tab stays OPEN — this is focus switching,
+    /// not closing. `*self = new_page` drops the old Page, whose
+    /// Drop aborts its background tasks (dialogs/network/hum).
+    pub async fn switch_tab(&mut self, target_id: &str) -> Result<()> {
+        // Detach the current session first (pipe mode) so only
+        // ONE session is attached at a time — the tabs list
+        // can then mark the current tab unambiguously.
+        if let Some(client) = &self.browser_client {
+            if let Some(sid) = self.cdp.session_id() {
+                let _ = client
+                    .send(
+                        "Target.detachFromTarget",
+                        Some(serde_json::json!({ "sessionId": sid })),
+                    )
+                    .await;
+            }
+        }
+        let session = if let Some(client) = &self.browser_client {
+            // Pipe mode: flat-session attach via the browser-level client.
+            let res = client
+                .send(
+                    "Target.attachToTarget",
+                    Some(serde_json::json!({ "targetId": target_id, "flatten": true })),
+                )
+                .await?;
+            let sid = res
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| BladeError::Other("Target.attachToTarget returned no sessionId".into()))?;
+            CdpSession::child(client.clone(), sid)
+        } else {
+            // WS mode: connect to the target's own WebSocket URL.
+            let targets = list_page_targets(&self.base).await?;
+            let t = targets
+                .iter()
+                .find(|t| t.id == target_id)
+                .ok_or_else(|| BladeError::Other(format!("tab not found: {target_id}")))?;
+            let client = CdpClient::connect(t.ws_url()?).await?;
+            CdpSession::root(client)
+        };
+        let new_page = Page::attach(session, &self.base, self.browser_client.clone()).await?;
+        *self = new_page;
+        Ok(())
+    }
+
+    /// Is the current tab still alive? A cheap probe used after
+    /// close-tab to detect that the agent closed the tab the
+    /// session was attached to.
+    pub async fn current_tab_alive(&self) -> bool {
+        self.cdp
+            .send_with_timeout(
+                "Runtime.evaluate",
+                Some(serde_json::json!({ "expression": "1", "returnByValue": true })),
+                Duration::from_secs(3),
+            )
+            .await
+            .is_ok()
     }
 
     /// Re-capture the page and return the delta since the last capture.
@@ -423,7 +541,21 @@ impl Page {
     }
 
     /// Perform an action and return the observation delta.
+    /// Perform an action, returning (delta, verdict).
+    ///
+    /// V1: self-healing refs. If the action targets a ref that is not in
+    /// the current model (page navigated, DOM re-rendered), the driver
+    /// looks up what the ref USED to be (graveyard), re-resolves that
+    /// identity against the live DOM, and acts on the healed element —
+    /// all invisibly. The agent only finds out via a `[ref healed]` note
+    /// in the verdict. If the element is truly gone, the error says what
+    /// the ref used to be.
     pub async fn act(&mut self, action: crate::action::Action) -> Result<(PageDelta, String)> {
+        let mut heal_note = if let Some(ref_id) = action.ref_id() {
+            self.ensure_ref(ref_id).await?
+        } else {
+            None
+        };
         // S5: pacing governor — realistic inter-action gaps.
         self.pace(&action).await;
         self.is_busy.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -435,9 +567,36 @@ impl Page {
         } else {
             Vec::new()
         };
-        let (delta, verdict) = crate::action::perform_with_network(
+        let result = crate::action::perform_with_network(
             &self.cdp, &mut self.lpm, &action, Some(&self.in_flight)
-        ).await?;
+        ).await;
+        // V1b: DOM-drift heal. The model had the ref, but the live
+        // DOM moved (SPA re-render between captures). Re-resolve the
+        // element's identity and retry ONCE before giving up.
+        let (delta, verdict) = match result {
+            Ok(v) => v,
+            Err(BladeError::ElementNotFound(_)) if action.ref_id().is_some() => {
+                let ref_id = action.ref_id().unwrap().to_string();
+                match self.heal_by_identity(&ref_id).await? {
+                    Some(note) => {
+                        heal_note = Some(note);
+                        crate::action::perform_with_network(
+                            &self.cdp, &mut self.lpm, &action, Some(&self.in_flight)
+                        ).await?
+                    }
+                    None => {
+                        return Err(BladeError::ElementNotFound(format!(
+                            "{ref_id} not in the live DOM and cannot be re-resolved"
+                        )));
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        let verdict = match heal_note {
+            Some(note) => format!("{verdict} [{note}]"),
+            None => verdict,
+        };
         if is_click {
             let after = self.list_page_targets().await;
             let new_tabs: Vec<_> = after.iter()
@@ -468,6 +627,69 @@ impl Page {
             .unwrap_or(0);
         self.last_action_epoch.store(now, std::sync::atomic::Ordering::Relaxed);
         Ok((delta, verdict))
+    }
+
+    /// Ensure a ref is live, healing it from the graveyard if dead.
+    /// Returns Some(heal note) if a heal happened, None if the ref was
+    /// already live. Errors when the ref is dead AND cannot be
+    /// re-resolved on the current page (with candidate list when
+    /// ambiguous — candidates are adopted so their refs are usable).
+    pub async fn ensure_ref(&mut self, ref_id: &str) -> Result<Option<String>> {
+        if self.lpm.element(ref_id).is_some() {
+            return Ok(None);
+        }
+        self.heal_by_identity(ref_id).await
+    }
+
+    /// Re-resolve a ref's identity (from the live model or the
+    /// graveyard) against the live DOM. On a single confident match,
+    /// the ref is re-adopted to the found element. On multiple, the
+    /// error lists candidates with usable refs.
+    async fn heal_by_identity(&mut self, ref_id: &str) -> Result<Option<String>> {
+        // Identity from live model first, then graveyard.
+        let (role, name) = if let Some(el) = self.lpm.element(ref_id) {
+            (el.raw.role.clone(), el.raw.name.clone())
+        } else if let Some((_sig, role, name)) = self.lpm.graveyard_lookup(ref_id) {
+            (role, name)
+        } else {
+            // Never-seen ref — let the normal StaleRef path handle it.
+            return Ok(None);
+        };
+        if name.is_empty() {
+            return Err(crate::error::BladeError::StaleRef(format!(
+                "{ref_id} was an unnamed {role} — cannot re-resolve. Use see to view the current page."
+            )));
+        }
+        let matches = crate::action::find_by_text(&self.cdp, &name, Some(&role)).await?;
+        match matches.len() {
+            0 => Err(crate::error::BladeError::StaleRef(format!(
+                "{ref_id} was '{role} \"{name}\"' — gone from the current page. Use see to view it."
+            ))),
+            1 => {
+                let m = &matches[0];
+                self.lpm.adopt_as(ref_id, &m.sig, &m.role, &m.name, &m.frame);
+                Ok(Some(format!(
+                    "ref {ref_id} healed → {role} \"{}\"",
+                    crate::page::model::truncate_pub(&name, 40)
+                )))
+            }
+            n => {
+                // Ambiguous heal: adopt every candidate so the agent gets
+                // usable refs in the error, and can retry in ONE call.
+                let mut lines = vec![format!(
+                    "{ref_id} was '{role} \"{name}\"' — {n} candidates on the current page:"
+                )];
+                for m in matches.iter().take(6) {
+                    let id = self.lpm.adopt(&m.sig, &m.role, &m.name, &m.frame);
+                    lines.push(format!("  {id} {} \"{}\"", m.role, m.name));
+                }
+                if n > 6 {
+                    lines.push(format!("  …and {} more", n - 6));
+                }
+                lines.push("retry with ref=<id> from the list above".to_string());
+                Err(crate::error::BladeError::StaleRef(lines.join("\n")))
+            }
+        }
     }
 
     /// Perform a state operation (cookies/storage/tabs) and return a text result.
@@ -520,6 +742,24 @@ impl Page {
             .lock()
             .map(|mut a| a.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    /// V8: snapshot of the network request log (last 50).
+    pub fn network_log(&self) -> Vec<NetEntry> {
+        self.net_log
+            .lock()
+            .map(|l| l.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// V8: read the console log captured by the injection hook.
+    /// Returns raw JSON (array of {l, m, t}).
+    pub async fn console_log(&self) -> Result<serde_json::Value> {
+        let res = self.cdp.send("Runtime.evaluate", Some(serde_json::json!({
+            "expression": "window.__uxa||[]",
+            "returnByValue": true,
+        }))).await?;
+        Ok(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(serde_json::json!([])))
     }
 
     /// Navigate to a URL. Re-registers the stealth script for the new

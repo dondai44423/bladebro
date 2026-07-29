@@ -66,70 +66,74 @@ That's it. Bladebro finds Chrome itself, launches it with stealth flags, and man
 
 ### `act` | act, then observe
 
-12 actions. Every `act` returns an **observation** (scene + delta + verdict), not `✓ Done`.
+Every `act` returns an **outcome verdict + page delta**. Click auto-escalates: mouse, JS, Enter. Click by text (no see needed): `act click text="Sign in"`. Ambiguous text? Error lists matches with refs and nth values: retry `nth=2`.
 
 | Action | Example | What it does |
 |---|---|---|
-| `click` | `act click e5` | Mouse, JS, Enter escalation; breaks on DOM change |
-| `type` | `act type e2 "hello" press=Enter` | Cadenced typing, optional key press after |
-| `fill` | `act fill fields=[...]` | Auto-detects type: textbox, dropdown, checkbox |
-| `select` | `act select e4 "Nepal"` | Matches visible text AND value, case-insensitive |
-| `navigate` | `act navigate "https://example.com"` | Idempotent (no-op if already there) |
-| `scroll` | `act scroll down 3` | Smooth eased multi-step wheel events |
-| `hover` | `act hover e3` | Bezier mouse path, triggers CSS `:hover` |
-| `read` | `act read e5` | Extract element text content (up to 5000 chars) |
-| `wait` | `act wait condition=element text="Submit" timeout=5` | Poll until condition met |
-| `back` | `act back` | History back, removed elements summarized |
-| `upload` | `act upload e7 path="/tmp/file.txt"` | `DOM.setFileInputFiles` |
-| `press` | `act press Enter` | Real key event with keycode lookup |
+| `click` | `act click e5` or `act click text="Sign in"` | Mouse, JS, Enter escalation |
+| `type` | `act type label="Search" text="hello"` | Cadenced typing into textboxes |
+| `fill` | `act fill fields=[...] submit="Go"` | Multi-field form fill, auto-detects type |
+| `navigate` | `act navigate url="https://example.com"` | Idempotent, returns full page model |
+| `scroll` | `act scroll dy=800` | Smooth eased wheel events |
+| `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
+| `back` / `forward` / `reload` | `act back` | History + reload |
+| `eval` | `act eval js="document.title"` | JS eval; `el` in scope when ref given |
+| `read` | `act read e5` | Element text content |
+| `wait` | `act wait condition=element text="Submit"` | Poll until condition met |
+| `press` | `act press key=Enter` | Real key event |
+| `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
+| `select` | `act select e4 option="Nepal"` | Dropdown by text or value |
 
-**Text addressing** | no ref needed: `act click text="Sign in"` finds the element by visible text.
+**Self-healing refs** | stale refs re-resolve automatically. If e5 was "Sign in" and the page navigated, `act click e5` finds the new "Sign in" and clicks it. You see `[ref e5 healed]` in the verdict.
 
-**Click escalation** | mouse, JS, Enter key. Breaks early on DOM mutation (MutationObserver), dialog, or navigation. No double-fire.
+**slim mode** | `act slim=true` returns verdict only, no delta. Use when you know what happens next.
 
-### `see` | perceive the page
+### `see` | observe (rarely needed)
+
+Navigate and act already return page state. Use see for:
 
 | Call | What you get |
 |---|---|
-| `see` | Full page view (token-budgeted, ~50 bytes/element) |
-| `see filter="button,link"` | Filtered view (comma-separated roles/names) |
-| `see content=true` | Page text content |
-| `see find="Sign in"` | Find element/text, return ref + context snippet |
-| `see extract="table"` | Structured data extraction |
+| `see` | Full view (semantic folding: nav/footer auto-fold) |
+| `see filter="button,link"` | Filtered by role/name/landmark |
+| `see find="price"` | Search elements by text, get refs + scores |
+| `see extract="json" template={...}` | Structured data from listing pages (one call) |
+| `see extract="links"` or `"forms"` | All links or all form fields |
+| `see logs="console"` | JS errors/warnings, errors first |
+| `see logs="network"` | Requests with status, failures first |
+| `see content=true` | Page text |
+| `see scope=e5` | One element's subtree text |
 
-8KB budget cap = ~2,100 tokens max, even on 2000-element pages. Auto-includes page text when 3 or fewer actionable elements (saves a round-trip on articles).
+**Big data goes to files.** Extracts over ~6KB are written to `~/.blade/artifacts/` and the response gives you the path + preview. Read the file.
 
 ### `state` | cookies, storage, tabs, sessions
 
 | Call | What it does |
 |---|---|
-| `state cookies` | List all cookies |
-| `state storage get key=mykey` | Get localStorage value |
-| `state tabs` | List open tabs |
-| `state save_session name=login` | Save localStorage + cookies (full fidelity) |
-| `state load_session name=login` | Restore session |
-| `state proxy "http://host:port"` | Set proxy |
+| `state op=tabs` | List tabs (* = current) |
+| `state op=open-tab url="..."` | Open + auto-focus new tab |
+| `state op=switch-tab target_id="..."` | Switch to a tab |
+| `state op=close-tab target_id="..."` | Close tab (auto-switches if current) |
+| `state op=cookies` | List cookies |
+| `state op=save name=login` | Save session (cookies + storage) |
+| `state op=load name=login` | Restore session |
 
-### `run` | batch + branch
+### `run` | batch + branch + JS
 
-```json
-{"action":"type","ref":"e1","text":"rust browser"}
-{"action":"press","key":"Enter"}
-{"action":"wait","condition":"element","text":"Results","timeout":5}
-{"action":"click","ref":"e2"}
-```
-
-Conditional branching in one call:
+All act fields work in steps (ref, text, label, nth, js, key, url, etc). Plus `if` and `while` control flow.
 
 ```json
-{"action":"if","condition":"element","text":"Submit","timeout":5,
- "then":[{"action":"click","ref":"e1"}],
- "else":[{"action":"click","ref":"e2"}]}
+{"steps":[
+  {"action":"type","label":"Email","text":"user@mail.com"},
+  {"action":"type","label":"Password","text":"secret"},
+  {"action":"click","text":"Sign in"},
+  {"action":"wait","condition":"element","text":"Dashboard","timeout":10}
+]}
 ```
 
-### `vision` | screenshot (rare fallback)
+### `vision` | screenshot (last resort)
 
-Returns base64 PNG. For canvas content, exotic layouts, or when the structural model fails.
+Returns base64 PNG. `vision marks=true` overlays numbered ref badges on elements so you can say "click e5" after seeing the screenshot. The structural model is almost always better: cheaper, more reliable, gives you refs to act on.
 
 ## 🛡️ Stealth system
 

@@ -105,6 +105,26 @@ if(navigator.connection){
 }
 }catch(e){}
 
+// V8: console capture for driver introspection (see logs=console).
+// Hooked methods are masked by the _lie registry (toString shows
+// native code). Stored on a non-enumerable window prop named like
+// a UX-analytics SDK artifact — invisible to for-in/Object.keys,
+// and nothing scans window own-props for this name. Ring buffer,
+// 200 entries, resets per document (correct: logs are per load).
+try{
+var _uxa=[];
+function _uxp(l,a){try{var p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.push(typeof v==='string'?v:JSON.stringify(v));}catch(e){p.push(String(v));}}_uxa.push({l:l,m:p.join(' ').slice(0,400),t:Date.now()});if(_uxa.length>200)_uxa.shift();}catch(e){}}
+['log','info','warn','error','debug'].forEach(function(m){
+  var _o=console[m];
+  var _h=function(){_uxp(m,arguments);return _o.apply(console,arguments);};
+  try{Object.defineProperty(console,m,{value:_h,writable:true,configurable:true,enumerable:true});}catch(e){console[m]=_h;}
+  _lie(_h,m);
+});
+window.addEventListener('error',function(e){_uxp('exception',[String(e.message||'')+' @'+String(e.filename||'')+':'+String(e.lineno||'')]);});
+window.addEventListener('unhandledrejection',function(e){_uxp('unhandledrejection',[String(e.reason)]);});
+try{Object.defineProperty(window,'__uxa',{get:function(){return _uxa;},configurable:false,enumerable:false});}catch(e){window.__uxa=_uxa;}
+}catch(e){}
+
 "#;
 
 /// Tail: cdc_ watcher + IIFE close. GL_SPOOF / NOISE assemble between HEAD and TAIL.

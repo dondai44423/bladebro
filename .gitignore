@@ -10,3 +10,4 @@ node_modules/
 *.log
 .env
 .env.*
+v2.md

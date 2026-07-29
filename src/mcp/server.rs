@@ -604,6 +604,7 @@ async fn resolve_text_target(
     page: &mut Page,
     query: &str,
     role_filter: Option<&str>,
+    nth: Option<usize>,
 ) -> Result<String> {
     let matches = crate::action::find_by_text(page.cdp_ref(), query, role_filter).await?;
     if matches.is_empty() {
@@ -613,15 +614,29 @@ async fn resolve_text_target(
             query, view
         )));
     }
+    // nth: 1-based pick from the scored match list. Lets the agent
+    // resolve ambiguity in ONE retry call without a full see.
+    if let Some(n) = nth {
+        if n >= 1 && n <= matches.len() {
+            let m = &matches[n - 1];
+            return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
+        }
+        // nth out of range — fall through to the list so the agent
+        // sees the valid range with refs.
+    }
     if matches.len() == 1 {
         let m = &matches[0];
         return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
     }
+    // Ambiguous: adopt every candidate so the error's refs are
+    // immediately usable. The agent retries with ref=<id> or nth=N
+    // — never needs a see call to disambiguate.
     let mut lines = vec![format!("ambiguous: {} matches for \"{}\":", matches.len(), query)];
-    for m in &matches {
-        lines.push(format!("  {} \"{}\"", m.role, m.name));
+    for (i, m) in matches.iter().enumerate() {
+        let id = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
+        lines.push(format!("  {id} {} \"{}\" (nth={})", m.role, m.name, i + 1));
     }
-    lines.push("Add role= or use see to get a specific ref.".to_string());
+    lines.push("retry with ref=<id> or nth=N".to_string());
     Err(BladeError::Other(lines.join("\n")))
 }
 
@@ -637,6 +652,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     let role_str = args.get("role").and_then(|r| r.as_str()).unwrap_or("");
     let expect = args.get("expect").and_then(|e| e.as_str()).unwrap_or("");
     let press = args.get("press").and_then(|p| p.as_str()).unwrap_or("");
+    let nth = args.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
 
     let action = match action_str {
         "click" => {
@@ -649,7 +665,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     ref_id.to_string()
                 } else if !text.is_empty() {
                     let rf = if !role_str.is_empty() { Some(role_str) } else { None };
-                    resolve_text_target(page, text, rf).await?
+                    resolve_text_target(page, text, rf, nth).await?
                 } else {
                     return Err(BladeError::Other("click requires 'ref', 'text', or 'x'+'y'".into()));
                 };
@@ -661,7 +677,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 ref_id.to_string()
             } else if !label.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { Some("textbox") };
-                resolve_text_target(page, label, rf).await?
+                resolve_text_target(page, label, rf, nth).await?
             } else {
                 return Err(BladeError::Other("type requires 'ref' or 'label' + 'text'".into()));
             };
@@ -676,19 +692,42 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
         }
         "press" => Action::Press { key: key.into() },
         "scroll" => Action::Scroll { dx, dy },
-        "hover" => Action::Hover { ref_id: ref_id.into() },
+        "reload" => Action::Reload,
+        "forward" => Action::Forward,
+        "eval" => {
+            // V7: JS eval. Handled inline (returns data, not delta).
+            let js = args.get("js").and_then(|j| j.as_str()).unwrap_or("");
+            if js.is_empty() {
+                return Err(BladeError::Other("eval requires 'js'".into()));
+            }
+            return handle_eval(page, js, ref_id).await;
+        }
+        "hover" => {
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !text.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                resolve_text_target(page, text, rf, nth).await?
+            } else {
+                return Err(BladeError::Other("hover requires 'ref' or 'text'".into()));
+            };
+            Action::Hover { ref_id: resolved }
+        }
         "upload" => Action::Upload { ref_id: ref_id.into(), path: text.into() },
         "read" => {
+            // Self-heal: the ref may have died since the agent saw it.
+            let heal = page.ensure_ref(ref_id).await?;
             let text_content = crate::action::read_text(page.cdp_ref(), page.model(), ref_id).await?;
             let el = page.model().element(ref_id);
             let role = el.map(|e| e.raw.role.clone()).unwrap_or_default();
             let name = el.map(|e| e.raw.name.clone()).unwrap_or_default();
+            let note = heal.map(|n| format!(" [{n}]")).unwrap_or_default();
             return Ok(format!(
-                "Page: {} | phase: {} | {} actionable\n{} {} \"{}\"\n  text: \"{}\"\n",
+                "Page: {} | phase: {} | {} actionable\n{} {} \"{}\"{}\n  text: \"{}\"\n",
                 page.model().url(),
                 page.model().phase(),
                 page.model().actionables(),
-                ref_id, role, name, text_content
+                ref_id, role, name, note, text_content
             ));
         }
         "fill" => {
@@ -711,7 +750,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 } else if !f_label.is_empty() {
                     // Don't restrict to textbox — the field could be a
                     // checkbox or select. Search all actionable elements.
-                    resolve_text_target(page, f_label, None).await?
+                    resolve_text_target(page, f_label, None, None).await?
                 } else {
                     continue;
                 };
@@ -757,7 +796,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 let resolved = if submit.starts_with('e') {
                     submit.to_string()
                 } else {
-                    resolve_text_target(page, submit, None).await?
+                    resolve_text_target(page, submit, None, None).await?
                 };
                 let (delta, verdict) = page.act(Action::Click { ref_id: resolved }).await?;
                 last_verdict = verdict;
@@ -841,6 +880,12 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     format!("\n\u{26a0} expected {expect}, got {observed} \u{2014} may have hit wrong target")
                 } else { String::new() }
             } else { String::new() };
+            // V13: slim mode — verdict only, no delta body. For
+            // agents mid-`run` or confident in the outcome.
+            let slim = args.get("slim").and_then(|s| s.as_bool()).unwrap_or(false);
+            if slim {
+                return Ok(format!("{verdict}{expect_note}"));
+            }
             if is_scroll {
                 Ok(format!("{verdict}{expect_note}\n{}", page.view(8000)))
             } else {
@@ -866,6 +911,22 @@ async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     let find = args.get("find").and_then(|f| f.as_str()).unwrap_or("");
     let extract = args.get("extract").and_then(|e| e.as_str()).unwrap_or("");
     let scope = args.get("scope").and_then(|s| s.as_str()).unwrap_or("");
+    let logs = args.get("logs").and_then(|l| l.as_str()).unwrap_or("");
+    let template = args.get("template").cloned();
+    let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
+
+    // V8: logs — console (injection hook) or network (tracker ring).
+    if !logs.is_empty() {
+        return handle_logs(page, logs).await;
+    }
+
+    // V9: template extraction — structured data in ONE call.
+    if extract == "json" {
+        let tpl = template.ok_or_else(|| BladeError::Other(
+            "extract=json requires 'template': {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css|css@attr\"}}}".into()
+        ))?;
+        return handle_template_extract(page, &tpl, limit).await;
+    }
 
     // M11: find — search all actionable elements by text, return matches with refs.
     if !find.is_empty() {
@@ -908,6 +969,16 @@ async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
             "returnByValue": true,
         }))).await?;
         let json_str = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("[]");
+        // V10: offload large extracts to a file.
+        if json_str.len() > 6000 {
+            let path = crate::artifacts::write_artifact(json_str, "json")?;
+            let count = json_str.matches("href").count();
+            return Ok(format!(
+                "extract {extract} (~{count} items, {} bytes) → {path}\npreview: {}…\nread the file for the full data",
+                json_str.len(),
+                json_str.chars().take(600).collect::<String>()
+            ));
+        }
         return Ok(format!("extract {extract}:\n{json_str}"));
     }
 
@@ -941,12 +1012,223 @@ async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     Ok(out)
 }
 
-async fn handle_state(args: &Value, page: &Page) -> Result<String> {
+/// V8: `see logs=console|network` — introspection for agent
+/// self-diagnosis. Errors/warnings first. Artifact-offloaded
+/// when the log is long.
+async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
+    match kind {
+        "console" => {
+            let entries = page.console_log().await?;
+            let arr = entries.as_array().cloned().unwrap_or_default();
+            if arr.is_empty() {
+                return Ok("console: (empty)".to_string());
+            }
+            // Errors first, then warnings, then the rest.
+            let mut errors = Vec::new();
+            let mut warnings = Vec::new();
+            let mut rest = Vec::new();
+            for e in &arr {
+                let level = e.get("l").and_then(|l| l.as_str()).unwrap_or("");
+                let msg = e.get("m").and_then(|m| m.as_str()).unwrap_or("");
+                let line = format!("{level}: {msg}");
+                match level {
+                    "error" | "exception" | "unhandledrejection" => errors.push(line),
+                    "warn" => warnings.push(line),
+                    _ => rest.push(line),
+                }
+            }
+            let mut out = format!("console ({} entries):\n", arr.len());
+            for l in errors.iter().chain(warnings.iter()).chain(rest.iter()).take(30) {
+                out.push_str(l);
+                out.push('\n');
+            }
+            if arr.len() > 30 {
+                let json_str = serde_json::to_string_pretty(&arr)?;
+                let path = crate::artifacts::write_artifact(&json_str, "json")?;
+                out.push_str(&format!("…and {} more → {path}\n", arr.len() - 30));
+            }
+            Ok(out)
+        }
+        "network" => {
+            let entries = page.network_log();
+            if entries.is_empty() {
+                return Ok("network: (no completed requests)".to_string());
+            }
+            // Failures and 4xx/5xx first — that's what the agent
+            // is debugging.
+            let mut bad = Vec::new();
+            let mut good = Vec::new();
+            for e in &entries {
+                let status_str = if e.status > 0 {
+                    e.status.to_string()
+                } else {
+                    e.error.clone().unwrap_or_else(|| "ERR".into())
+                };
+                let short_url = if e.url.len() > 90 {
+                    format!("{}…", &e.url[..87])
+                } else {
+                    e.url.clone()
+                };
+                let line = format!("{} {} {}", e.method, status_str, short_url);
+                if e.error.is_some() || e.status >= 400 {
+                    bad.push(line);
+                } else {
+                    good.push(line);
+                }
+            }
+            let mut out = format!("network ({} requests):\n", entries.len());
+            for l in bad.iter().chain(good.iter()).take(30) {
+                out.push_str(l);
+                out.push('\n');
+            }
+            if entries.len() > 30 {
+                out.push_str(&format!("…and {} more\n", entries.len() - 30));
+            }
+            Ok(out)
+        }
+        _ => Err(BladeError::Other(format!(
+            "unknown logs kind: {kind} (use 'console' or 'network')"
+        ))),
+    }
+}
+
+/// V9: template extraction. The agent provides a declarative
+/// template; the driver runs ONE query and returns structured
+/// JSON. Zero LLM in the loop — the fastest extraction of any
+/// agent browser.
+///
+/// Template shape:
+/// ```json
+/// {"items": {"container": "css", "fields": {"name": "css|css@attr"}}}
+/// ```
+/// Multiple top-level keys are allowed (multiple lists in one
+/// call). A field value of "" reads the container element
+/// itself. `@attr` reads an attribute; default is textContent.
+async fn handle_template_extract(
+    page: &mut Page,
+    template: &Value,
+    limit: usize,
+) -> Result<String> {
+    let obj = template.as_object().ok_or_else(|| {
+        BladeError::Other("template must be a JSON object".into())
+    })?;
+
+    // Build ONE JS expression covering all lists.
+    let mut list_builders = Vec::new();
+    for (list_name, spec) in obj {
+        let container = spec.get("container").and_then(|c| c.as_str()).unwrap_or("");
+        if container.is_empty() {
+            return Err(BladeError::Other(format!(
+                "template list '{list_name}' needs a 'container' selector"
+            )));
+        }
+        let fields = spec.get("fields").and_then(|f| f.as_object()).cloned().unwrap_or_default();
+        let mut field_parts = Vec::new();
+        for (fname, fsel) in &fields {
+            let sel = fsel.as_str().unwrap_or("");
+            field_parts.push(format!(
+                "{}:read(c,{})",
+                serde_json::to_string(fname)?,
+                serde_json::to_string(sel)?
+            ));
+        }
+        list_builders.push(format!(
+            "{}:(()=>{{const cs=[...document.querySelectorAll({})].slice(0,{});return cs.map(c=>({{{}}}));}})()",
+            serde_json::to_string(list_name)?,
+            serde_json::to_string(container)?,
+            limit,
+            field_parts.join(","),
+        ));
+    }
+
+    let expr = format!(
+        "(()=>{{const read=(c,sel)=>{{let s=sel,attr=null;const ai=sel.lastIndexOf('@');if(ai>0){{attr=sel.slice(ai+1);s=sel.slice(0,ai);}}const el=s?c.querySelector(s):c;if(!el)return null;if(attr)return el.getAttribute(attr);return(el.innerText||el.textContent||'').trim();}};return {{{}}};}})()",
+        list_builders.join(",")
+    );
+
+    let res = page.cdp_ref().send("Runtime.evaluate", Some(json!({
+        "expression": expr,
+        "returnByValue": true,
+    }))).await?;
+
+    if let Some(exc) = res.get("exceptionDetails") {
+        let msg = exc.get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("template extraction failed");
+        return Err(BladeError::Other(format!("extract failed: {}", &msg[..msg.len().min(200)])));
+    }
+
+    let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(json!({}));
+    let json_str = serde_json::to_string_pretty(&value)?;
+
+    // Count total items across lists.
+    let total: usize = value.as_object()
+        .map(|o| o.values().filter_map(|v| v.as_array().map(|a| a.len())).sum())
+        .unwrap_or(0);
+
+    if json_str.len() > 6000 {
+        let path = crate::artifacts::write_artifact(&json_str, "json")?;
+        let preview: String = json_str.chars().take(600).collect();
+        return Ok(format!(
+            "extract json ({total} items, {} bytes) → {path}\npreview: {preview}…\nread the file for the full data",
+            json_str.len()
+        ));
+    }
+    Ok(format!("extract json ({total} items):\n{json_str}"))
+}
+
+async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
     let op_str = args.get("op").and_then(|o| o.as_str()).unwrap_or("");
     let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
     let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
     let target_id = args.get("target_id").and_then(|t| t.as_str()).unwrap_or("");
+
+    // Tab lifecycle ops are handled HERE (not via state.rs) because
+    // they re-attach the session — they need &mut Page.
+    match op_str {
+        "open-tab" => {
+            // Create + auto-focus. Every agent that opens a tab
+            // wants to act in it — a separate switch-tab call
+            // would be pure waste.
+            let res = page.cdp_ref()
+                .send("Target.createTarget", Some(json!({ "url": url })))
+                .await?;
+            let new_id = res.get("targetId").and_then(|v| v.as_str())
+                .ok_or_else(|| crate::error::BladeError::Other("no targetId".into()))?;
+            page.switch_tab(new_id).await?;
+            let view = page.view(1500);
+            return Ok(format!("\u{2713} opened + switched to tab {new_id}\n{view}"));
+        }
+        "switch-tab" => {
+            page.switch_tab(target_id).await?;
+            let view = page.view(1500);
+            return Ok(format!("\u{2713} switched to tab {target_id}\n{view}"));
+        }
+        "close-tab" => {
+            page.cdp_ref()
+                .send("Target.closeTarget", Some(json!({ "targetId": target_id })))
+                .await?;
+            // If the agent closed the tab the session was attached
+            // to, the session is now dead — auto-switch to a
+            // remaining tab so the next command doesn't error.
+            if !page.current_tab_alive().await {
+                let tabs = page.tab_targets().await;
+                if let Some(first) = tabs.first() {
+                    page.switch_tab(&first.id).await?;
+                    let view = page.view(1500);
+                    return Ok(format!(
+                        "\u{2713} closed tab {target_id} (was current; switched to {})\n{view}",
+                        first.id
+                    ));
+                }
+                return Ok(format!("\u{2713} closed tab {target_id} (was the last tab)"));
+            }
+            return Ok(format!("\u{2713} closed tab {target_id}"));
+        }
+        _ => {}
+    }
 
     let op = match op_str {
         "cookies" => StateOp::GetCookies { urls: vec![] },
@@ -964,8 +1246,6 @@ async fn handle_state(args: &Value, page: &Page) -> Result<String> {
         "clear-ls" => StateOp::ClearLocalStorage,
         "clear-ss" => StateOp::ClearSessionStorage,
         "tabs" => StateOp::ListTabs,
-        "open-tab" => StateOp::OpenTab { url: url.into() },
-        "close-tab" => StateOp::CloseTab { target_id: target_id.into() },
         "save" => StateOp::SaveSession { name: name.into() },
         "load" => StateOp::LoadSession { name: name.into() },
         _ => return Err(crate::error::BladeError::Other(format!("unknown state op: {op_str}"))),
@@ -987,18 +1267,46 @@ async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
 }
 
 /// Build an Action from a step's JSON fields. Used by `execute_step` for
-/// regular (non-special) actions.
-fn build_action(step: &Value) -> Result<Action> {
+/// regular (non-special) actions. Supports the same addressing as `act`:
+/// ref, text (+role/nth) for click, label for type.
+async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
     let action_str = step.get("action").and_then(|a| a.as_str()).unwrap_or("");
     let ref_id = step.get("ref").and_then(|r| r.as_str()).unwrap_or("");
     let text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
     let key = step.get("key").and_then(|k| k.as_str()).unwrap_or("");
     let dx = step.get("dx").and_then(|d| d.as_i64()).unwrap_or(0);
     let dy = step.get("dy").and_then(|d| d.as_i64()).unwrap_or(0);
+    let role_str = step.get("role").and_then(|r| r.as_str()).unwrap_or("");
+    let label = step.get("label").and_then(|l| l.as_str()).unwrap_or("");
+    let nth = step.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
 
     match action_str {
-        "click" => Ok(Action::Click { ref_id: ref_id.into() }),
-        "type" => Ok(Action::Type { ref_id: ref_id.into(), text: text.into() }),
+        "click" => {
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !text.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                resolve_text_target(page, text, rf, nth).await?
+            } else {
+                return Err(crate::error::BladeError::Other(
+                    "click step requires 'ref' or 'text'".into(),
+                ));
+            };
+            Ok(Action::Click { ref_id: resolved })
+        }
+        "type" => {
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { Some("textbox") };
+                resolve_text_target(page, label, rf, nth).await?
+            } else {
+                return Err(crate::error::BladeError::Other(
+                    "type step requires 'ref' or 'label'".into(),
+                ));
+            };
+            Ok(Action::Type { ref_id: resolved, text: text.into() })
+        }
         "clear" => Ok(Action::Clear { ref_id: ref_id.into() }),
         "select" => {
             let opt = step.get("option").and_then(|o| o.as_str())
@@ -1008,7 +1316,21 @@ fn build_action(step: &Value) -> Result<Action> {
         }
         "press" => Ok(Action::Press { key: key.into() }),
         "scroll" => Ok(Action::Scroll { dx, dy }),
-        "hover" => Ok(Action::Hover { ref_id: ref_id.into() }),
+        "reload" => Ok(Action::Reload),
+        "forward" => Ok(Action::Forward),
+        "hover" => {
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !text.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                resolve_text_target(page, text, rf, nth).await?
+            } else {
+                return Err(crate::error::BladeError::Other(
+                    "hover step requires 'ref' or 'text'".into(),
+                ));
+            };
+            Ok(Action::Hover { ref_id: resolved })
+        }
         "upload" => Ok(Action::Upload { ref_id: ref_id.into(), path: text.into() }),
         "wait" => {
             let condition = step.get("condition").and_then(|c| c.as_str()).unwrap_or("settle");
@@ -1024,6 +1346,82 @@ fn build_action(step: &Value) -> Result<Action> {
         _ => Err(crate::error::BladeError::Other(format!(
             "unknown action: {action_str}"
         ))),
+    }
+}
+
+/// V7: evaluate JS in the page. If `ref_id` is non-empty, the
+/// element is resolved and exposed to the script as `el`.
+/// Result is JSON-stringified, capped at 4KB inline; bigger
+/// payloads go to an artifact file (V10).
+async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> {
+    let expression = if ref_id.is_empty() {
+        js.to_string()
+    } else {
+        page.ensure_ref(ref_id).await?;
+        let (sig, frame) = {
+            let el = page.model().element(ref_id).ok_or_else(|| {
+                BladeError::StaleRef(ref_id.to_string())
+            })?;
+            (el.raw.sig.clone(), el.raw.frame.clone())
+        };
+        let sig_js = serde_json::to_string(&sig)?;
+        let frame_js = serde_json::to_string(&frame)?;
+        // Frame-walk to the right document, find the element by
+        // role+name+ordinal, then invoke the user's JS with `el`
+        // in scope. Returns a {__blade_result} envelope.
+        format!(
+            "((sig,frame)=>{{let doc=document;for(const idx of frame){{const ifr=[...doc.querySelectorAll('iframe')][idx];if(!ifr)return{{__blade_not_found:true}};doc=ifr.contentDocument;}}const parts=sig.split('|');const role=parts[0],name=parts[1],ord=parseInt(parts[2]||'1');const all=[...doc.querySelectorAll('a,button,input,select,textarea,[role],[onclick],[tabindex],summary,label')];let count=0,el=null;for(const n of all){{const r=n.getAttribute('role')||n.tagName.toLowerCase();const nm=(n.getAttribute('aria-label')||n.innerText||n.value||n.placeholder||'').trim().slice(0,200);if(r===role&&nm===name){{count++;if(count===ord){{el=n;break}}}}}}if(!el)return{{__blade_not_found:true}};const result=((el)=>{{return({});}})(el);return{{__blade_result:result===undefined?null:result}}}})({},{})"
+        , js, sig_js, frame_js)
+    };
+
+    let res = page.cdp_ref().send("Runtime.evaluate", Some(json!({
+        "expression": expression,
+        "returnByValue": true,
+        "awaitPromise": true,
+    }))).await?;
+
+    if let Some(exc) = res.get("exceptionDetails") {
+        let msg = exc.get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("JS evaluation failed");
+        return Err(BladeError::Other(format!("eval failed: {}", &msg[..msg.len().min(200)])));
+    }
+
+    let value = res.get("result").and_then(|r| r.get("value")).cloned();
+
+    if let Some(ref v) = value {
+        if v.get("__blade_not_found").and_then(|b| b.as_bool()) == Some(true) {
+            return Err(BladeError::ElementNotFound(format!("{ref_id} not found in live DOM")));
+        }
+        if !ref_id.is_empty() {
+            if let Some(inner) = v.get("__blade_result") {
+                let json_str = serde_json::to_string_pretty(inner)?;
+                return format_eval_result(&json_str).await;
+            }
+        }
+    }
+
+    let json_str = match &value {
+        Some(v) => serde_json::to_string_pretty(v)?,
+        None => "undefined".to_string(),
+    };
+    format_eval_result(&json_str).await
+}
+
+/// Format an eval result: inline if small, artifact file if big.
+async fn format_eval_result(json_str: &str) -> Result<String> {
+    const INLINE_CAP: usize = 4000;
+    if json_str.len() <= INLINE_CAP {
+        Ok(format!("result: {json_str}"))
+    } else {
+        let path = crate::artifacts::write_artifact(json_str, "json")?;
+        let preview: String = json_str.chars().take(500).collect();
+        Ok(format!(
+            "result ({} bytes) → {path}\npreview: {preview}…\nread the file for the full result",
+            json_str.len()
+        ))
     }
 }
 
@@ -1135,8 +1533,34 @@ async fn execute_step(
                 "step {path}: read {ref_id} {role} \"{name}\"\n  text: \"{truncated}\""
             ));
         }
+        "js" | "eval" => {
+            // V7: JS eval step. Result is captured as an
+            // observation, capped inline.
+            let js_code = step.get("js").and_then(|j| j.as_str())
+                .or_else(|| step.get("text").and_then(|t| t.as_str()))
+                .unwrap_or("");
+            if js_code.is_empty() {
+                return Err(crate::error::BladeError::Other(
+                    "js step requires 'js' field".into(),
+                ));
+            }
+            let step_ref = step.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+            match handle_eval(page, js_code, step_ref).await {
+                Ok(result) => {
+                    let capped: String = result.chars().take(500).collect();
+                    observations.push(format!("step {path}: js → {capped}"));
+                }
+                Err(e) => {
+                    let _ = page.recapture().await;
+                    let view = page.view(2000);
+                    return Err(crate::error::BladeError::Other(format!(
+                        "step {path} js failed: {e}\n\n--- current page state ---\n{view}"
+                    )));
+                }
+            }
+        }
         _ => {
-            let action = build_action(step)?;
+            let action = build_action(step, page).await?;
             match page.act(action).await {
                 Ok((delta, verdict)) => {
                     observations.push(format!("step {path}: {verdict}\n{}", page.delta_view(&delta, 4000)));
@@ -1161,9 +1585,58 @@ async fn execute_step(
 /// content, exotic layouts, or when the structural model fails.
 async fn handle_vision(
     id: Option<Value>,
-    _args: &Value,
+    args: &Value,
     page: &mut Page,
 ) -> std::result::Result<Value, BladeError> {
+    let marks = args.get("marks").and_then(|m| m.as_bool()).unwrap_or(false);
+    let mut note = String::new();
+
+    if marks {
+        // V14: Set-of-Marks. Paint numbered ref badges on
+        // visible elements — the refs match the structural
+        // model exactly, so a vision-capable agent can say
+        // "click e5" and the act tool just works.
+        let items: Vec<(String, String)> = page.model().elements()
+            .iter()
+            .map(|e| (e.ref_id.clone(), e.raw.sig.clone()))
+            .collect();
+        let items_js = serde_json::to_string(&items)?;
+        let overlay = "((items)=>{".to_string()
+            + "const d=document;if(!d||!d.body)return 0;"
+            + &crate::page::perception::JS_PREAMBLE
+            + "const old=d.getElementById('blade-marks');if(old)old.remove();"
+            + "const ov=d.createElement('div');ov.id='blade-marks';"
+            + "ov.style.cssText='position:fixed;inset:0;pointer-events:none;z-index:2147483647;';"
+            + "const vw=innerWidth,vh=innerHeight;"
+            + "const all=[...d.querySelectorAll(sel)];const counts={};"
+            + "const sigs=new Map();"
+            + "for(const n of all){if(!vis(n))continue;const r=role(n);if(r==='hidden')continue;"
+            + "const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;"
+            + "sigs.set(r+'|'+nm+'|'+counts[key],n);}"
+            + "let marked=0;"
+            + "for(const[ref,sig]of items){const el=sigs.get(sig);if(!el)continue;"
+            + "const rect=el.getBoundingClientRect();"
+            + "if(rect.bottom<0||rect.top>vh||rect.right<0||rect.left>vw)continue;"
+            + "const b=d.createElement('div');b.textContent=ref;"
+            + "b.style.cssText='position:fixed;left:'+Math.max(0,rect.x+rect.width/2-12)+'px;top:'+Math.max(0,rect.y+rect.height/2-8)+'px;background:rgba(220,0,110,0.92);color:#fff;font:bold 11px/14px monospace;padding:0 4px;border-radius:3px;border:1px solid #fff;';"
+            + "ov.appendChild(b);marked++;}"
+            + "d.body.appendChild(ov);return marked;})(" + &items_js + ")";
+        let res = page.cdp_ref().send("Runtime.evaluate", Some(json!({
+            "expression": overlay,
+            "returnByValue": true,
+        }))).await?;
+        if let Some(exc) = res.get("exceptionDetails") {
+            let msg = exc.get("exception")
+                .and_then(|e| e.get("description"))
+                .and_then(|d| d.as_str())
+                .unwrap_or("overlay failed");
+            note = format!(" (marks overlay error: {})", &msg[..msg.len().min(120)]);
+        } else {
+            let marked = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_i64()).unwrap_or(0);
+            note = format!(" ({marked} elements marked; badge refs match the structural model)");
+        }
+    }
+
     let cdp = page.cdp_ref();
     let result = cdp
         .send(
@@ -1173,6 +1646,15 @@ async fn handle_vision(
             })),
         )
         .await;
+
+    // Remove the overlay BEFORE processing the result —
+    // the page must never keep our marks.
+    if marks {
+        let _ = page.cdp_ref().send("Runtime.evaluate", Some(json!({
+            "expression": "(()=>{const o=document.getElementById('blade-marks');if(o)o.remove();return true;})()",
+            "returnByValue": true,
+        }))).await;
+    }
 
     match result {
         Ok(res) => {
@@ -1191,11 +1673,14 @@ async fn handle_vision(
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "content": [{
-                        "type": "image",
-                        "data": data,
-                        "mimeType": "image/png"
-                    }]
+                    "content": [
+                        { "type": "text", "text": format!("screenshot{note}") },
+                        {
+                            "type": "image",
+                            "data": data,
+                            "mimeType": "image/png"
+                        }
+                    ]
                 }
             }))
         }

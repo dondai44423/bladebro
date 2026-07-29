@@ -52,6 +52,10 @@ pub enum Action {
     Wait { condition: String, text: String, timeout: Duration },
     /// Go back in browser history.
     Back,
+    /// Go forward in browser history.
+    Forward,
+    /// Reload the current page.
+    Reload,
     /// Hover over an element (move mouse to its center, no click).
     /// Triggers CSS :hover, hover-dropdowns, tooltips, hover-cards.
     Hover { ref_id: String },
@@ -71,7 +75,7 @@ impl Action {
             | Action::Read { ref_id }
             | Action::Hover { ref_id }
             | Action::Upload { ref_id, .. } => Some(ref_id),
-            Action::Press { .. } | Action::Scroll { .. } | Action::Wait { .. } | Action::Back => None,
+            Action::Press { .. } | Action::Scroll { .. } | Action::Wait { .. } | Action::Back | Action::Forward | Action::Reload => None,
         }
     }
 }
@@ -271,6 +275,16 @@ fn compute_verdict(
             } else {
                 "outcome: back (no navigation)".to_string()
             }
+        }
+        Action::Forward => {
+            if delta.navigated {
+                format!("outcome: navigated forward \u{2192} {}", shorten_url(&delta.url))
+            } else {
+                "outcome: forward (no navigation)".to_string()
+            }
+        }
+        Action::Reload => {
+            format!("outcome: reloaded {}", shorten_url(&delta.url))
         }
         Action::Hover { ref_id } => {
             if dom_changed && !delta.navigated {
@@ -970,10 +984,30 @@ pub async fn perform_with_network(
                 "returnByValue": true,
             }))).await?;
         }
+        Action::Forward => {
+            cdp.send("Runtime.evaluate", Some(json!({
+                "expression": "window.history.forward()",
+                "returnByValue": true,
+            }))).await?;
+        }
+        Action::Reload => {
+            // Page.reload (CDP) is a real reload: bypasses bfcache,
+            // re-fetches resources. ignoreCache=false keeps it a
+            // normal F5, not a hard reload.
+            cdp.send("Page.reload", Some(json!({
+                "ignoreCache": false,
+            }))).await?;
+        }
         Action::Hover { ref_id } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
-            // "hover" mode scrolls the element into view (block:center) and
-            // returns its post-scroll box + isTopmost.
+            // Install the mutation watcher FIRST — hover menus
+            // and tooltips mutate the DOM, and we want the delta
+            // to reflect what the hover actually revealed.
+            let _ = cdp.send("Runtime.evaluate", Some(json!({
+                "expression": MUT_WATCH,
+            }))).await;
+            // "hover" mode scrolls the element into view
+            // (block:center) and returns its post-scroll box.
             let found = find_by_sig(cdp, sig, frame, "hover", None).await?;
             if !found.ok {
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
@@ -984,8 +1018,21 @@ pub async fn perform_with_network(
             let cx = box_[0] + box_[2] / 2.0;
             let cy = box_[1] + box_[3] / 2.0;
             // Bezier mouse move to element center — no click.
-            // The human-like path triggers CSS :hover and JS mouseover/mouseenter.
-            dispatch_mouse_move(cdp, (cx, cy)).await?;
+            // The human-like path triggers CSS :hover and JS
+            // mouseover/mouseenter. On dispatch failure (page
+            // navigating mid-hover), re-resolve and retry once.
+            if dispatch_mouse_move(cdp, (cx, cy)).await.is_err() {
+                let retry = find_by_sig(cdp, sig, frame, "hover", None).await?;
+                if retry.ok {
+                    if let Some(b2) = retry.box_ {
+                        dispatch_mouse_move(cdp, (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0)).await?;
+                    }
+                }
+            }
+            // Hover-driven dropdowns appear within ~300ms — give
+            // the mutation watcher a beat to catch them before
+            // the settle wait decides nothing changed.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
         Action::Upload { ref_id, path } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();

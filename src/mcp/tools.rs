@@ -20,22 +20,26 @@ pub fn all_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "act",
-            description: "Perform one action on the page. Returns: outcome verdict (navigated/dom-changed/no-effect/typed), then the page delta (what changed). For pages with \u{2264}15 elements, full element list with change markers. Click auto-escalates: mouse \u{2192} JS \u{2192} Enter if no effect. Address elements by ref (e.g. 'e5') OR by text/label (e.g. text=\"Sign in\"). On error, current page state is included for recovery.",
+            description: "Perform one action on the page. This is your hands. Every action returns an outcome verdict + what changed (the delta), so you usually don't need `see` after.
+\n\
+ADDRESSING (pick one): text=\"Sign in\" (fastest, no see needed), ref=\"e5\" (from a previous response), label=\"Email\" for inputs, x+y for canvas. Ambiguous text? Add role=\"button\" or nth=2 (errors list matches with refs + nth values). Refs self-heal across navigations, so stale refs usually just work.\n\
+KEY ACTIONS: navigate(url), click, type(label+text), fill(fields+submit for multi-field forms), select, press(key), scroll(dx,dy), back/forward/reload, hover (reveals dropdowns in delta), wait(condition), eval(js for anything else; el in scope if ref given). slim=true returns verdict only.\n\
+On error, current page state is included — recover without an extra see.",
             input_schema: json!({
                 "type": "object",
                 "required": ["action"],
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "hover", "upload", "fill"]
+                        "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "fill", "eval"]
                     },
                     "ref": {
                         "type": "string",
-                        "description": "Element ref id (e.g. 'e5'). Required for click/type/clear/select/read/hover/upload (unless using text/label)."
+                        "description": "Element ref id (e.g. 'e5'). Refs self-heal across navigations — a stale ref usually still works."
                     },
                     "text": {
                         "type": "string",
-                        "description": "Click: element's visible text to find. Type: value to type. Select: option value (also accepts 'option' param). Wait: match text. Upload: file path."
+                        "description": "Click/hover: visible text of the element to find. Type: value to type. Select: option value. Wait: match text. Upload: file path."
                     },
                     "option": {
                         "type": "string",
@@ -48,6 +52,10 @@ pub fn all_tools() -> Vec<ToolDef> {
                     "role": {
                         "type": "string",
                         "description": "Filter for text/label resolution (e.g. 'button', 'textbox'). Disambiguates multiple matches."
+                    },
+                    "nth": {
+                        "type": "integer",
+                        "description": "1-based index for text/label matches when multiple exist. Ambiguity errors list matches with their nth values and refs."
                     },
                     "key": {
                         "type": "string",
@@ -78,6 +86,14 @@ pub fn all_tools() -> Vec<ToolDef> {
                         "type": "string",
                         "description": "Expected outcome: navigation|modal|new-tab|none|any. If mismatch, diagnostic appended."
                     },
+                    "js": {
+                        "type": "string",
+                        "description": "For eval: JavaScript to evaluate in the page. If ref is given, the element is available as 'el' in the script. Result is JSON."
+                    },
+                    "slim": {
+                        "type": "boolean",
+                        "description": "If true, return only the outcome verdict (no page delta). Saves tokens when you don't need to see the result."
+                    },
                     "fields": {
                         "type": "array",
                         "description": "For fill: array of {ref|label, text|option, check} objects. Auto-detects field type: textbox→type, combobox→select, checkbox/radio→click.",
@@ -101,7 +117,9 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "see",
-            description: "Observe the page. Default: full element view with refs, roles, names, hrefs, landmarks, and state hints. Filter by role/name for dense pages. Set content=true for page text. Use find=\"text\" to search for elements. Use extract=links|forms for structured JSON. Use scope=eN for one element's subtree text. Auto-includes text when \u{2264}3 actionable elements.",
+            description: "Observe the page. You rarely need this — navigate and act already return the page state. Use see to: zoom into dense pages (filter=\"button,link\"), search elements by text (find=\"price\"), extract structured data (extract=json + template for listings, extract=links|forms), read page text (content=true), debug (logs=console|network), or view one element's subtree (scope=eN).\n\
+Semantic folding: nav/footer/sidebar auto-fold on landmark pages; filter=nav expands them.\n\
+BIG DATA RULE: extract results over ~6KB go to a file path — read the file, don't re-extract.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -119,8 +137,21 @@ pub fn all_tools() -> Vec<ToolDef> {
                     },
                     "extract": {
                         "type": "string",
-                        "enum": ["links", "forms"],
-                        "description": "Extract structured data as JSON: all links (text+href) or all forms (fields)."
+                        "enum": ["links", "forms", "json"],
+                        "description": "Extract structured data as JSON: all links, all forms, or 'json' with a template."
+                    },
+                    "template": {
+                        "type": "object",
+                        "description": "For extract=json: {\"items\": {\"container\": \"css\", \"fields\": {\"name\": \"css or css@attr\"}}}. One call turns a listing page into structured JSON."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max items per list for extract=json. Default: 50."
+                    },
+                    "logs": {
+                        "type": "string",
+                        "enum": ["console", "network"],
+                        "description": "Read page logs: console (JS errors/warnings/logs) or network (requests with status). Errors first."
                     },
                     "scope": {
                         "type": "string",
@@ -135,14 +166,15 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "state",
-            description: "Read or modify browser state: cookies, localStorage, sessionStorage, tabs, and sessions. Use save/load to persist login state across sessions.",
+            description: "Browser state: cookies, localStorage/sessionStorage, tabs, and saved sessions.\n\
+WORKFLOWS: Login persistence: save <name> after login, load <name> in a later session (restores cookies+storage, then navigate to the site). Tabs: tabs (list, * = current), open-tab <url> (auto-focuses the new tab), switch-tab <target_id>, close-tab <target_id> (auto-switches if you close the current one).",
             input_schema: json!({
                 "type": "object",
                 "required": ["op"],
                 "properties": {
                     "op": {
                         "type": "string",
-                        "enum": ["cookies", "set-cookie", "del-cookie", "ls", "ss", "set-ls", "set-ss", "rm-ls", "rm-ss", "clear-ls", "clear-ss", "tabs", "open-tab", "close-tab", "save", "load"]
+                        "enum": ["cookies", "set-cookie", "del-cookie", "ls", "ss", "set-ls", "set-ss", "rm-ls", "rm-ss", "clear-ls", "clear-ss", "tabs", "open-tab", "close-tab", "switch-tab", "save", "load"]
                     },
                     "name": {
                         "type": "string",
@@ -158,14 +190,16 @@ pub fn all_tools() -> Vec<ToolDef> {
                     },
                     "target_id": {
                         "type": "string",
-                        "description": "Target id for close-tab."
+                        "description": "Target id for close-tab and switch-tab."
                     }
                 }
             }),
         },
         ToolDef {
             name: "run",
-            description: "Execute multiple actions in one call to save round-trips. Each step is an action object with the same fields as 'act'. Supports 'if' steps (condition/then/else) and 'while' steps (condition/steps/max for loops). Stops on first error with step number and page state.",
+            description: "Batch multiple actions in ONE call to save round-trips. Steps run sequentially; the run stops on the first error and returns the step number + current page state for recovery.\n\
+STEP GRAMMAR: same fields as act (action, ref, text, role, label, nth, key, url, dx, dy, condition, timeout, js). Special steps: {action:\"if\",condition,text,then:[...],else:[...]} for branching, {action:\"while\",condition,text,steps:[...],max:N} for loops.\n\
+RECIPES — form login: [type label=\"Email\" text=\"..\", type label=\"Password\" text=\"..\", click text=\"Sign in\"]. Infinite scroll: [while condition=\"element\" text=\"Load more\" max=5, steps:[click text=\"Load more\", wait]].",
             input_schema: json!({
                 "type": "object",
                 "required": ["steps"],
@@ -183,6 +217,11 @@ pub fn all_tools() -> Vec<ToolDef> {
                                 },
                                 "ref": { "type": "string" },
                                 "text": { "type": "string" },
+                                "role": { "type": "string" },
+                                "label": { "type": "string" },
+                                "option": { "type": "string" },
+                                "nth": { "type": "integer" },
+                                "js": { "type": "string" },
                                 "key": { "type": "string" },
                                 "url": { "type": "string" },
                                 "dx": { "type": "integer" },
@@ -213,10 +252,15 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "vision",
-            description: "Screenshot the page as a PNG image. Last resort for canvas content, image-based UIs, or visual verification when the structural model fails.",
+            description: "Screenshot the page as PNG. LAST RESORT — the structural model (see/act responses) is almost always better: it's cheaper and gives you refs to act on. Use vision only for canvas, image-based UIs, or visual verification. marks=true overlays numbered ref badges on elements so you can say 'click e5' after seeing the screenshot.",
             input_schema: json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "marks": {
+                        "type": "boolean",
+                        "description": "Overlay numbered ref badges on visible elements (Set-of-Marks)."
+                    }
+                }
             }),
         },
     ]

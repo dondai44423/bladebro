@@ -8,10 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Lazy Chrome launch**: Chrome no longer starts when the MCP server starts. It launches on the first `tools/call` and shuts down after 5 minutes of inactivity (configurable via `BLADE_IDLE_TIMEOUT` env var in seconds; `0` disables). `initialize`, `tools/list`, and other metadata calls never trigger a Chrome launch. Saves ~200MB+ of RAM when the agent isn't using browser tools.
-- **Self-healing browser connection**: when Chrome crashes or the CDP connection drops, the MCP server detects it and relaunches Chrome automatically. The agent never sees "browser connection closed". Tool calls are retried transparently after reconnection. Works for both pipe and WS transports.
+- **Self-healing refs**: stale refs re-resolve automatically. If `e5` was "Sign in" and the page navigated, `act click e5` finds the new "Sign in" and clicks it, noting `[ref e5 healed]` in the verdict. Dead refs that can't be re-resolved return the identity + candidates with usable refs.
+- **Ambiguity contracts**: ambiguous text clicks now list matches WITH refs + `nth` values (e.g. `e5 link "newest" (nth=1)`). New `nth` param picks from the list. One retry call, zero `see` calls.
+- **`nth` param** on `act` (1-based match index for text/label resolution).
+- **`reload` and `forward` actions** in act + run steps.
+- **Tab switching**: `state op=switch-tab target_id=...` switches the session to a tab. `open-tab` auto-focuses the new tab. `close-tab` auto-switches to a remaining tab if you close the current one. `tabs` list marks the current tab with `*`.
+- **JS eval** (`act action=eval js="..."`): evaluate JS in the page. `ref=e5` exposes the element as `el`. Big results (>4KB) go to an artifact file. Also available as `js` steps in `run`.
+- **Console + network introspection** (`see logs=console|network`): console entries (errors/warnings first) and network requests (failures first) with status codes. Console capture uses a `_lie`-masked injection hook, zero `Runtime.enable` cost.
+- **Template extraction** (`see extract=json template={...}`): declarative structured extraction in ONE call. `{"stories": {"container": "tr.story", "fields": {"title": ".title a", "link": ".title a@href"}}}` → array of objects. Multiple lists in one call. Attribute sugar `@href|@src|@value`. Artifact-offloaded when large.
+- **Artifact offloading**: eval results, extracts, and logs over ~6KB are written to `~/.blade/artifacts/` and the response gives a file path + preview. Context stays clean.
+- **Semantic folding**: nav/banner/footer/aside landmarks fold to one-liners on pages with a main landmark (e.g. `nav ▸ 24 items folded (filter=nav to expand)`). Filter expands them. Pages without landmarks render flat.
+- **`slim` mode** (`act slim=true`): verdict only, no delta. For agents mid-run that don't need the page state.
+- **Vision marks** (`vision marks=true`): Set-of-Marks overlay. Numbered ref badges painted on visible elements. Refs match the structural model exactly, so a vision-capable agent can say "click e5" and it works.
+- **Dialog auto-handling**: alert/confirm/prompt/beforeunload dialogs are auto-dismissed (alert=accept, confirm/prompt=cancel, beforeunload=accept) and surfaced to the agent. No more deadlocks on dialog-heavy pages.
+- **Lazy Chrome launch + idle shutdown**: Chrome launches on the first `tools/call` and shuts down after 5 minutes of inactivity (`BLADE_IDLE_TIMEOUT` env var, seconds, 0 disables). `initialize`, `tools/list`, and other metadata calls never trigger a launch.
+- **Self-healing browser connection**: when Chrome crashes, the MCP server detects it and relaunches Chrome automatically. Tool calls are retried transparently.
 
 ### Fixed
+- **Wayland display leak**: Chrome no longer opens on the user's real screen on Wayland sessions. Forced X11 ozone platform + stripped `WAYLAND_DISPLAY` when running under Xvfb.
+- **Hover flakiness**: hover now installs the mutation watcher first (dropdowns/menus appear in the delta), retries on dispatch failure, and waits 300ms for hover-driven reveals.
+- **Hover text resolution**: hover now accepts `text=` like click, not just `ref=`.
+- **Monotonic refs**: ref counter no longer resets on navigation. A stale `e5` from page A can no longer silently resolve to a different element on page B.
+- **`run` step text-addressing**: `click`/`type` steps in `run` now support text/label resolution with `nth`, same as `act`.
+- **`[search]` duplicate marker** on search-landmark textboxes.
 - **CI**: bumped min Rust to 1.86 (ICU crates need edition2024, stabilized in 1.85+). CI matrix now uses `stable` only.
 - **Windows compilation**: gated `run_pipe` re-export and `Duration` import behind `#[cfg(unix)]`. Added Windows stub for `cmd_mcp_pipe`.
 - **tokio-tungstenite**: bumped from 0.26.2 to 0.30.0.

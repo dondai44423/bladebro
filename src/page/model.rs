@@ -63,14 +63,26 @@ pub struct LivePageModel {
     /// Previous capture's state, keyed by ref id: `(sig, role, name, probe)`.
     /// Fed to the stabilizer next capture.
     prev_state: HashMap<String, (String, String, String, Option<StateProbe>)>,
-    /// Monotonic ref counter.
+    /// Monotonic ref counter. NEVER resets — not even on navigation.
+    /// A ref id, once minted, names at most one element for the life of
+    /// the session. Resetting on navigation (the old behavior) silently
+    /// rebound an agent's stale `e5` to a DIFFERENT element on the new
+    /// page — the worst failure mode a ref system can have.
     next_ref: u64,
+    /// Identities of refs that died in recent captures, most recent last.
+    /// Powers ref self-healing: when the agent uses a dead ref, we know
+    /// what it USED to point at and can re-resolve it on the live page.
+    /// Entries: (ref id, sig, role, name). Capped at GRAVEYARD_CAP.
+    graveyard: Vec<(String, String, String, String)>,
     /// False until the first capture completes; gates `navigated`.
     initialized: bool,
     url: String,
     title: String,
     phase: String,
 }
+
+/// Max remembered dead-ref identities.
+const GRAVEYARD_CAP: usize = 64;
 
 impl Default for LivePageModel {
     fn default() -> Self {
@@ -79,6 +91,7 @@ impl Default for LivePageModel {
             by_ref: HashMap::new(),
             prev_state: HashMap::new(),
             next_ref: 1,
+            graveyard: Vec::new(),
             initialized: false,
             url: String::new(),
             title: String::new(),
@@ -132,6 +145,14 @@ impl LivePageModel {
         }
         let id = format!("e{}", self.next_ref);
         self.next_ref += 1;
+        self.adopt_as(&id, sig, role, name, frame)
+    }
+
+    /// Adopt an element under a SPECIFIC ref id (self-healing: the dead
+    /// ref is reborn pointing at its re-resolved live element). If the
+    /// id is already live, the entry is REPLACED in place (force-heal:
+    /// the live DOM moved under a stale model entry).
+    pub fn adopt_as(&mut self, id: &str, sig: &str, role: &str, name: &str, frame: &[usize]) -> String {
         let raw = crate::page::perception::RawElement {
             tag: String::new(),
             role: role.to_string(),
@@ -149,13 +170,27 @@ impl LivePageModel {
             sig: sig.to_string(),
             frame: frame.to_vec(),
         };
-        self.elements.push(PageElement { ref_id: id.clone(), raw });
-        self.by_ref.insert(id.clone(), self.elements.len() - 1);
+        if let Some(&i) = self.by_ref.get(id) {
+            self.elements[i] = PageElement { ref_id: id.to_string(), raw };
+        } else {
+            self.elements.push(PageElement { ref_id: id.to_string(), raw });
+            self.by_ref.insert(id.to_string(), self.elements.len() - 1);
+        }
         self.prev_state.insert(
-            id.clone(),
+            id.to_string(),
             (sig.to_string(), role.to_string(), name.to_string(), None),
         );
-        id
+        id.to_string()
+    }
+
+    /// Look up a dead ref's last-known identity: (sig, role, name).
+    /// Returns None if the ref was never seen or already forgotten.
+    pub fn graveyard_lookup(&self, ref_id: &str) -> Option<(String, String, String)> {
+        self.graveyard
+            .iter()
+            .rev()
+            .find(|(id, _, _, _)| id == ref_id)
+            .map(|(_, sig, role, name)| (sig.clone(), role.clone(), name.clone()))
     }
 
     /// Ingest a fresh capture: stabilize refs, compute the delta, update state.
@@ -166,11 +201,11 @@ impl LivePageModel {
         let title_changed = self.initialized && self.title != cap.title;
         let phase = cap.phase().to_string();
 
-        // On navigation, reset the ref counter — the new page is a fresh
-        // context. Old refs don't carry over, so numbering should restart at e1.
-        if navigated {
-            self.next_ref = 1;
-        }
+        // Refs are monotonic for the session's lifetime — the counter
+        // never resets, even across navigations. If it reset, a stale
+        // `e5` from the previous page would silently resolve to a
+        // DIFFERENT element on the new page (silent misclick). With
+        // monotonic refs, a stale ref always errors or self-heals.
 
         let stab = stabilize(&self.prev_state, &cap.elements, &mut self.next_ref);
 
@@ -208,6 +243,25 @@ impl LivePageModel {
 
         let removed: Vec<String> = stab.removed.iter().map(|r| r.id.clone()).collect();
 
+        // Move dead refs' identities into the graveyard for self-healing.
+        // The agent may still hold e5; when it acts on e5 we re-resolve
+        // what e5 used to be (role+name) against the live page.
+        for r in &stab.removed {
+            // Skip if the same ref id is somehow already recorded.
+            if !self.graveyard.iter().any(|(id, _, _, _)| id == &r.id) {
+                self.graveyard.push((
+                    r.id.clone(),
+                    r.sig.clone(),
+                    r.role.clone(),
+                    r.name.clone(),
+                ));
+            }
+        }
+        if self.graveyard.len() > GRAVEYARD_CAP {
+            let excess = self.graveyard.len() - GRAVEYARD_CAP;
+            self.graveyard.drain(..excess);
+        }
+
         let delta = PageDelta {
             navigated,
             url: cap.url.clone(),
@@ -235,7 +289,19 @@ impl LivePageModel {
 
     /// Render the *full* current model as the agent-facing view, capped at
     /// `budget` characters. One scene line + one line per element.
+    ///
+    /// V11 semantic folding: when the page has a content landmark
+    /// (main/dialog/search), chrome landmarks (nav/banner/footer/
+    /// aside) fold to one-liners at their document position.
+    /// Pages without a content landmark render flat (can't tell
+    /// chrome from content). Groups smaller than 3 elements render
+    /// inline (folding two items saves nothing).
     pub fn compress(&self, budget: usize, in_flight: usize) -> String {
+        const FOLD_LANDMARKS: [&str; 4] = ["nav", "banner", "footer", "aside"];
+        let has_content_landmark = self.elements.iter().any(|e| {
+            matches!(e.raw.landmark.as_deref(), Some("main") | Some("dialog") | Some("search"))
+        });
+
         let mut out = String::new();
         out.push_str(&format!(
             "Page: {} | phase: {} | {} actionable{}\n",
@@ -247,7 +313,33 @@ impl LivePageModel {
         if !self.title.is_empty() {
             out.push_str(&format!("title: {}\n", truncate(&self.title, 80)));
         }
+
+        let mut folded_done: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (idx, el) in self.elements.iter().enumerate() {
+            if has_content_landmark {
+                if let Some(lm) = el.raw.landmark.as_deref() {
+                    if FOLD_LANDMARKS.contains(&lm) {
+                        if folded_done.contains(lm) {
+                            continue; // already folded into a one-liner
+                        }
+                        let count = self.elements.iter()
+                            .filter(|e| e.raw.landmark.as_deref() == Some(lm))
+                            .count();
+                        if count >= 3 {
+                            let fold_line = format!(
+                                "{lm} \u{25b8} {count} items folded (filter={lm} to expand)\n"
+                            );
+                            if out.len() + fold_line.len() > budget {
+                                break;
+                            }
+                            out.push_str(&fold_line);
+                            folded_done.insert(lm);
+                            continue;
+                        }
+                        // <3 items in this landmark: render inline.
+                    }
+                }
+            }
             let line = format_element(el);
             if out.len() + line.len() > budget {
                 let remaining = &self.elements[idx..];
@@ -275,6 +367,7 @@ impl LivePageModel {
             filters.iter().any(|fl| {
                 el.raw.role.to_lowercase().contains(fl)
                     || el.raw.name.to_lowercase().contains(fl)
+                    || el.raw.landmark.as_deref().unwrap_or("").to_lowercase().contains(fl)
             })
         };
         let mut out = String::new();
@@ -312,7 +405,16 @@ impl LivePageModel {
     /// For small pages (≤ 15 elements), shows the FULL element list with
     /// change markers — the agent always has full context without a `see` call.
     /// For larger pages, shows only the diff to save tokens.
+    /// V12: on navigation the delta IS the full model — delegate to
+    /// `compress` so the agent gets the folded, landmark-aware view.
     pub fn compress_delta(&self, d: &PageDelta, budget: usize, in_flight: usize) -> String {
+        if d.navigated {
+            return format!(
+                "navigated → {}\n{}",
+                short_url(&d.url),
+                self.compress(budget, in_flight)
+            );
+        }
         let mut out = String::new();
         out.push_str(&format!(
             "Page: {} | phase: {} | {} actionable{}\n",
@@ -321,9 +423,6 @@ impl LivePageModel {
             self.elements.len(),
             if in_flight > 0 { format!(" | {} requests in flight", in_flight) } else { String::new() }
         ));
-        if d.navigated {
-            out.push_str(&format!("navigated → {}\n", short_url(&d.url)));
-        }
         if d.title_changed && !d.navigated {
             out.push_str(&format!("title → \"{}\"\n", truncate(&d.title, 60)));
         }
@@ -481,7 +580,11 @@ fn format_element(el: &PageElement) -> String {
         }
     }
     if let Some(lm) = &el.raw.landmark {
-        if lm != "main" {
+        // Skip if the same marker was already shown as the
+        // element type (e.g. input type="search" in a search
+        // landmark would print "[search] [search]").
+        let already_shown = el.raw.element_type.as_deref() == Some(lm.as_str());
+        if lm != "main" && !already_shown {
             s.push_str(&format!(" [{lm}]"));
         }
     }
@@ -496,6 +599,11 @@ fn truncate(s: &str, n: usize) -> String {
         t.push('…');
         t
     }
+}
+
+/// Public truncate for cross-module verdict/note rendering.
+pub fn truncate_pub(s: &str, n: usize) -> String {
+    truncate(s, n)
 }
 
 fn short_url(u: &str) -> String {
