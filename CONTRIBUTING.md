@@ -1,6 +1,6 @@
 # Contributing to Bladebro
 
-Thanks for your interest in improving Bladebro. This is a small, focused project — keep PRs scoped.
+Thanks for your interest in improving Bladebro. This is a small, focused project, keep PRs scoped.
 
 ## Before you submit
 
@@ -23,11 +23,12 @@ If any of these fail, fix them before opening a PR.
 - Stealth improvements (verified against `bladebro audit` + real detection sites)
 - New actions on `act` (that fit the "few tools, full control" philosophy)
 - Performance improvements (with benchmarks)
-- Cross-platform support (macOS, Windows — currently Linux-only)
+- Cross-platform support (macOS, Windows — currently Only linux is live tested)
+- AI generated PR are fine but make sure to review it first.
 
 ## What we don't accept
 
-- More tools. The surface is 5 tools. New capabilities go as params/behaviors of existing tools.
+- More tools. The surface is 5 tools. New capabilities go as params/behaviors of existing tools, More tools only are added if the new tool helps massively instead of little.
 - An LLM inside the driver. Deterministic machinery only.
 - CAPTCHA solving. Detect + honest `blocked:` verdict only.
 - Chromium source forks. Stock Chrome stays the engine.
