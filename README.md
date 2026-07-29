@@ -11,7 +11,7 @@ Drive · click · type · scroll · stealth · settle · delta-first · one bina
 One MCP server · one persistent page model · zero Node.js · runs on your machine
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?label=release)](https://github.com/dondai44423/bladebro/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
 [![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?style=social)](https://github.com/dondai44423/bladebro)
@@ -34,7 +34,7 @@ Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and 
 
 ## 🔧 Install
 
-**Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.80+. Linux: Xvfb for headless servers (macOS/Windows run headful natively).
+**Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.85+. Linux: Xvfb for headless servers (macOS/Windows run headful natively).
 
 ```bash
 git clone https://github.com/dondai44423/bladebro.git
