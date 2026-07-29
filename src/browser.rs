@@ -34,13 +34,18 @@ const STEALTH_FLAGS: &[&str] = &[
 /// Additional flags for headless mode only.
 const HEADLESS_FLAGS: &[&str] = &["--headless=new", "--disable-gpu"];
 
-/// A launched Chrome process + optional virtual display. Both killed on Drop.
+/// A launched Chrome process + virtual display + session
+/// profile. Chrome killed on Drop; the session profile is
+/// synced back to the template and removed on explicit
+/// [`Browser::shutdown`] (graceful) or by the next launch's
+/// orphan reaper (ungraceful death).
 pub struct Browser {
     child: Child,
     #[cfg(target_os = "linux")]
     #[allow(dead_code)]
     xvfb: Option<VirtualDisplay>,
     port: u16,
+    profile: crate::session_profile::SessionProfile,
 }
 
 /// A virtual X display managed by Xvfb. Killed + cleaned up on Drop.
@@ -54,28 +59,66 @@ pub struct VirtualDisplay {
 #[cfg(target_os = "linux")]
 impl VirtualDisplay {
     /// Start an Xvfb virtual display on a free display number.
-    /// Returns the display number (e.g., 99 for `:99`).
+    ///
+    /// Race-free display selection: an atomic claim file
+    /// (`/tmp/.blade-x<n>-claim`, O_EXCL create) marks the
+    /// display as OURS before Xvfb even spawns. Timing-based
+    /// verification ("is Xvfb still alive after 200ms") was
+    /// not enough — a losing Xvfb can take >200ms to exit,
+    /// letting two bladebros share one display; when the
+    /// owner exits, the survivor's Chrome loses its display
+    /// and dies (observed live: SIGTERM on session A killed
+    /// session B's Chrome via a shared Xvfb).
     fn start() -> Result<Self> {
         let xvfb_path = find_xvfb().ok_or_else(|| {
             BladeError::Other("Xvfb not found".into())
         })?;
-        let display_num = free_display_num();
-
-        let child = Command::new(&xvfb_path)
-            .args([
-                &format!(":{display_num}"),
-                "-screen", "0", "1920x1080x24",
-                "-ac",           // disable access control (headless server)
-                "-nolisten", "tcp",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| BladeError::Other(format!("failed to launch Xvfb: {e}")))?;
-
-        eprintln!("[bladebro] Xvfb virtual display on :{display_num}");
-
-        Ok(Self { child, display_num })
+        let mut last_err = String::new();
+        for _attempt in 0..3 {
+            let Some(display_num) = claim_display_num() else {
+                last_err = "no free display claim".into();
+                break;
+            };
+            let child = Command::new(&xvfb_path)
+                .args([
+                    &format!(":{display_num}"),
+                    "-screen", "0", "1920x1080x24",
+                    "-ac",           // disable access control (headless server)
+                    "-nolisten", "tcp",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    release_display_claim(display_num);
+                    last_err = format!("spawn: {e}");
+                    continue;
+                }
+            };
+            // Verify survival: Xvfb exits when the display is
+            // held by a FOREIGN X server (the user's real one).
+            // Our claim prevents bladebro-vs-bladebro races;
+            // this check catches foreign owners.
+            std::thread::sleep(Duration::from_millis(300));
+            match child.try_wait() {
+                Ok(None) => {
+                    eprintln!("[bladebro] Xvfb virtual display on :{display_num}");
+                    return Ok(Self { child, display_num });
+                }
+                Ok(Some(status)) => {
+                    last_err = format!("Xvfb :{display_num} exited ({status})");
+                    eprintln!("[bladebro] Xvfb :{display_num} died ({status}), retrying");
+                    release_display_claim(display_num);
+                }
+                Err(e) => {
+                    release_display_claim(display_num);
+                    last_err = format!("poll: {e}");
+                }
+            }
+        }
+        Err(BladeError::Other(format!("Xvfb failed after 3 attempts: {last_err}")))
     }
 
     fn display_env(&self) -> String {
@@ -83,14 +126,46 @@ impl VirtualDisplay {
     }
 }
 
+/// Atomically claim a free display number via O_EXCL file
+/// creation. Returns None when 99..200 are all claimed.
+#[cfg(target_os = "linux")]
+fn claim_display_num() -> Option<u16> {
+    for n in 99..200 {
+        // Skip displays with a live foreign X server lock.
+        if std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists() {
+            continue;
+        }
+        let claim = format!("/tmp/.blade-x{n}-claim");
+        if std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&claim)
+            .and_then(|mut f| {
+                use std::io::Write;
+                write!(f, "{}", std::process::id())
+            })
+            .is_ok()
+        {
+            return Some(n);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn release_display_claim(display_num: u16) {
+    let _ = std::fs::remove_file(format!("/tmp/.blade-x{display_num}-claim"));
+}
+
 #[cfg(target_os = "linux")]
 impl Drop for VirtualDisplay {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // Clean up the lock file.
+        // Clean up the lock file + our claim.
         let lock = format!("/tmp/.X{}-lock", self.display_num);
         let _ = std::fs::remove_file(lock);
+        release_display_claim(self.display_num);
     }
 }
 
@@ -111,13 +186,36 @@ impl Browser {
     ///
     /// Linux: Xvfb headful if available, headless fallback.
     /// macOS/Windows: headful natively (native window server).
+    ///
+    /// Retries once with a fresh port if Chrome dies at startup
+    /// (port-steal race between the pick and Chrome's bind).
     pub async fn launch(port: u16) -> Result<Self> {
+        let auto = port == 0;
+        let mut last_err = None;
+        for attempt in 0..2 {
+            let p = if auto { free_port() } else { port };
+            match Self::launch_inner(p).await {
+                Ok(b) => return Ok(b),
+                Err(e) => {
+                    let msg = e.to_string();
+                    let retryable = auto
+                        && attempt == 0
+                        && msg.contains("exited during startup");
+                    last_err = Some(e);
+                    if !retryable {
+                        break;
+                    }
+                    eprintln!("[bladebro] Chrome died at startup (port race?), retrying on a fresh port");
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| BladeError::Other("launch failed".into())))
+    }
+
+    async fn launch_inner(port: u16) -> Result<Self> {
         let chrome_path = find_chrome()?;
-        let port = if port == 0 { free_port() } else { port };
-        let user_data_dir = profile_dir();
-        std::fs::create_dir_all(&user_data_dir)
-            .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
-        clear_stale_profile_lock(&user_data_dir)?;
+        let profile = crate::session_profile::SessionProfile::create()?;
+        let user_data_dir = profile.dir().to_path_buf();
         font_audit();
 
         #[cfg(target_os = "linux")]
@@ -200,6 +298,7 @@ impl Browser {
                         #[cfg(target_os = "linux")]
                         xvfb,
                         port,
+                        profile,
                     });
                 }
                 Err(_) => {
@@ -242,98 +341,25 @@ impl Browser {
 impl Drop for Browser {
     fn drop(&mut self) {
         // Graceful shutdown: SIGTERM first (lets Chrome flush
-        // localStorage/cookies to the persistent profile), then
-        // SIGKILL after 3s if it hasn't exited. On Windows,
+        // localStorage/cookies to the profile), then SIGKILL
+        // after 3s if it hasn't exited. On Windows,
         // TerminateProcess directly.
         platform::shutdown_child(&mut self.child);
         // Xvfb is dropped here too (field order: child first, then xvfb).
     }
 }
 
-/// S7: the seasoned persistent profile. Defaults to `~/.blade/profile` so
-/// cookies, history, cache, and service workers accumulate across runs —
-/// returning-visitor trust instead of a newborn profile every launch.
-/// `BLADE_FRESH=1` forces an ephemeral temp profile; `BLADE_PROFILE_DIR`
-/// overrides the location entirely.
-fn profile_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("BLADE_PROFILE_DIR") {
-        if !dir.is_empty() {
-            return std::path::PathBuf::from(dir);
-        }
-    }
-    if std::env::var("BLADE_FRESH").map(|v| v == "1").unwrap_or(false) {
-        return std::env::temp_dir().join(format!("bladebro-chrome-{}", std::process::id()));
-    }
-    let home = platform::blade_dir();
-    home.join("profile")
-}
-
-/// Remove Chrome's SingletonLock/SingletonSocket/SingletonCookie when the
-/// pid they point at is dead (stale after a crash). Errors out when another
-/// live process holds the profile — corrupting a live profile is worse.
-fn clear_stale_profile_lock(dir: &std::path::Path) -> Result<()> {
-    let lock = dir.join("SingletonLock");
-
-    // Linux/macOS: SingletonLock is a symlink to "hostname-pid".
-    // Windows: SingletonLock is a regular file containing the PID as text.
-    let pid = read_lock_pid(&lock);
-    let pid = match pid {
-        Some(p) => p,
-        None => return Ok(()), // no lock, or unreadable — nothing to do
-    };
-    let pid_alive = platform::process_alive(pid);
-
-    if pid_alive {
-        // Check if the PID is actually a Chrome process (PID could have been recycled).
-        if platform::process_is_chrome(pid) {
-            // Previous Chrome is still dying (orphaned by SIGKILL of the MCP server).
-            // Send SIGTERM and wait up to 2s for it to exit.
-            platform::kill_process_graceful(pid);
-            for _ in 0..20 {
-                if !platform::process_alive(pid) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            if platform::process_alive(pid) {
-                // Still alive after SIGTERM — escalate to SIGKILL.
-                platform::kill_process_force(pid);
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-        }
-        // If PID recycled (not Chrome) or Chrome is now dead, the lock is stale → clear it.
-        // If Chrome is STILL alive (refused to die), only then error.
-        if platform::process_alive(pid) && platform::process_is_chrome(pid) {
-            return Err(BladeError::Other(format!(
-                "profile {} is locked by a live Chrome (another bladebro running?). \
-                 Use BLADE_PROFILE_DIR for a separate profile or BLADE_FRESH=1 for ephemeral.",
-                dir.display()
-            )));
-        }
-    }
-    for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
-        let _ = std::fs::remove_file(dir.join(name));
-    }
-    eprintln!("[bladebro] cleared stale profile lock in {}", dir.display());
-    Ok(())
-}
-
-/// Read the PID from Chrome's SingletonLock. Platform-aware:
-/// Linux/macOS use a symlink, Windows uses a regular file.
-fn read_lock_pid(lock: &std::path::Path) -> Option<u32> {
-    #[cfg(unix)]
-    {
-        let target = std::fs::read_link(lock).ok()?;
-        target
-            .to_string_lossy()
-            .rsplit('-')
-            .next()
-            .and_then(|p| p.parse::<u32>().ok())
-    }
-    #[cfg(windows)]
-    {
-        let content = std::fs::read_to_string(lock).ok()?;
-        content.trim().parse::<u32>().ok()
+impl Browser {
+    /// Graceful shutdown: kill Chrome (Drop), then sync the
+    /// session profile back to the template and remove it.
+    /// Call this on every deliberate teardown path (stdin EOF,
+    /// signal, idle timeout). On SIGKILL nothing runs — the
+    /// next launch's orphan reaper cleans up instead.
+    pub fn shutdown(self) {
+        let profile_dir = self.profile.dir().to_path_buf();
+        drop(self); // kills Chrome + Xvfb
+        // Chrome is dead — the profile is flushed and safe to sync.
+        crate::session_profile::SessionProfile::cleanup_dir(&profile_dir);
     }
 }
 
@@ -388,10 +414,8 @@ impl Browser {
         use tokio::net::unix::pipe;
 
         let chrome_path = find_chrome()?;
-        let user_data_dir = profile_dir();
-        std::fs::create_dir_all(&user_data_dir)
-            .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
-        clear_stale_profile_lock(&user_data_dir)?;
+        let profile = crate::session_profile::SessionProfile::create()?;
+        let user_data_dir = profile.dir().to_path_buf();
         font_audit();
 
         #[cfg(target_os = "linux")]
@@ -494,6 +518,7 @@ impl Browser {
                         #[cfg(target_os = "linux")]
                         xvfb,
                         port: 0,
+                        profile,
                     }, client));
                 }
                 Err(_) => {
@@ -534,18 +559,6 @@ fn find_xvfb() -> Option<String> {
     }
     // Try PATH.
     find_in_path("Xvfb")
-}
-
-/// Find a free X display number. Checks for existing lock files. Linux-only.
-#[cfg(target_os = "linux")]
-fn free_display_num() -> u16 {
-    for n in 99..200 {
-        let lock = format!("/tmp/.X{n}-lock");
-        if !std::path::Path::new(&lock).exists() {
-            return n;
-        }
-    }
-    99 // Fallback; collision unlikely.
 }
 
 /// Find the Chrome/Chromium binary on this system.

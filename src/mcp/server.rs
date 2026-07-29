@@ -197,6 +197,38 @@ async fn launch_browser(
     }
 }
 
+/// Shut down Chrome without blocking the async executor:
+/// Browser::drop sends SIGTERM and waits up to 3s
+/// synchronously — on the executor thread that stalls every
+/// other task. Offload to a blocking thread.
+async fn shutdown_browser(b: crate::browser::Browser) {
+    let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+}
+
+/// Wait for a termination signal (SIGTERM/SIGINT/SIGHUP on
+/// Unix, Ctrl+C on Windows). Returns when the process should
+/// shut down gracefully. OpenCode and other harnesses kill
+/// MCP servers with SIGTERM — without this, Chrome + Xvfb
+/// are orphaned every time a session ends.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).ok();
+        let mut int = signal(SignalKind::interrupt()).ok();
+        let mut hup = signal(SignalKind::hangup()).ok();
+        tokio::select! {
+            _ = async { if let Some(s) = &mut term { s.recv().await } else { std::future::pending().await } } => {}
+            _ = async { if let Some(s) = &mut int { s.recv().await } else { std::future::pending().await } } => {}
+            _ = async { if let Some(s) = &mut hup { s.recv().await } else { std::future::pending().await } } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// The stdio JSON-RPC loop, shared by both transports.
 ///
 /// Chrome is NOT launched at startup. The server starts with no browser
@@ -208,6 +240,14 @@ async fn launch_browser(
 /// Self-healing: if Chrome crashes mid-session, the next `tools/call`
 /// detects the dead connection, relaunches Chrome, and retries the call.
 /// The agent never sees "browser connection closed".
+///
+/// Lifecycle guarantees (the reliability contract):
+/// - stdin EOF (client gone) → Chrome shut down, profile synced, exit.
+/// - SIGTERM/SIGINT/SIGHUP → same graceful teardown.
+/// - SIGKILL/panic → the next launch's orphan reaper kills
+///   the leaked Chrome/Xvfb and removes the session profile.
+/// - A second bladebro NEVER touches this session's Chrome:
+///   profiles are per-process (`~/.blade/profiles/sess-<pid>`).
 async fn serve(
     use_pipe: bool,
     host: &str,
@@ -225,6 +265,9 @@ async fn serve(
     let idle_secs = idle_timeout_secs();
     let mut idle_check = tokio::time::interval(std::time::Duration::from_secs(15));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Set when Chrome is relaunched after a crash/idle — the
+    // next response tells the agent its page state was reset.
+    let mut relaunch_note: Option<String> = None;
 
     eprintln!(
         "[bladebro] MCP server ready (Chrome launches on first tool call{}",
@@ -237,6 +280,10 @@ async fn serve(
 
     loop {
         tokio::select! {
+            _ = wait_for_shutdown_signal() => {
+                eprintln!("[bladebro] termination signal — shutting down Chrome gracefully");
+                break;
+            }
             line = lines.next_line() => {
                 let line = match line {
                     Ok(Some(l)) => l,
@@ -297,8 +344,19 @@ async fn serve(
                             if browser.is_some() {
                                 // Chrome crashed or is dead, kill it first.
                                 eprintln!("[bladebro] browser connection lost, relaunching...");
-                                drop(browser.take());
+                                if let Some(b) = browser.take() {
+                                    shutdown_browser(b).await;
+                                }
                                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                relaunch_note = Some(
+                                    "note: Chrome was restarted (connection lost) — page state reset to about:blank. Navigate to continue.".into()
+                                );
+                            } else if page.is_none() && relaunch_note.is_none() && last_activity.elapsed().as_secs() > idle_secs && idle_secs > 0 {
+                                // Post-idle relaunch: the agent's refs
+                                // are all gone. Say so explicitly.
+                                relaunch_note = Some(
+                                    "note: Chrome was restarted after idle shutdown — page state reset to about:blank. Navigate to continue.".into()
+                                );
                             } else {
                                 eprintln!("[bladebro] launching Chrome (first tool call)...");
                             }
@@ -344,12 +402,17 @@ async fn serve(
                             Ok(Err(BladeError::Closed)) => {
                                 // Self-heal: relaunch and retry once.
                                 eprintln!("[bladebro] browser closed during tool call, reconnecting...");
-                                drop(browser.take());
+                                if let Some(b) = browser.take() {
+                                    shutdown_browser(b).await;
+                                }
                                 page = None;
                                 match launch_browser(use_pipe, host, port).await {
                                     Ok((new_page, new_browser)) => {
                                         browser = new_browser;
                                         page = Some(new_page);
+                                        relaunch_note = Some(
+                                            "note: Chrome crashed and was restarted — page state reset to about:blank. Navigate to continue.".into()
+                                        );
                                         let id_retry2 = id_retry.clone();
                                         let p = page.as_mut().unwrap();
                                         match handle_tools_call(id_retry2, &params, p).await {
@@ -382,17 +445,52 @@ async fn serve(
                                     }
                                 }
                             }
-                            Ok(Err(e)) => json!({
-                                "jsonrpc": "2.0",
-                                "id": id_retry,
-                                "error": {
-                                    "code": -32603,
-                                    "message": e.to_string(),
+                            Ok(Err(e)) => {
+                                // Dead-tab recovery: the attached tab was
+                                // closed externally (window.close, site
+                                // nav). CDP reports it as a plain error,
+                                // not Closed — detect, open a fresh tab,
+                                // switch, and retry ONCE.
+                                let msg = e.to_string();
+                                let tab_died = msg.contains("Target closed")
+                                    || msg.contains("No target with given id")
+                                    || msg.contains("Session closed")
+                                    || msg.contains("Target.detachedFromTarget");
+                                if tab_died {
+                                    eprintln!("[bladebro] attached tab died, opening a fresh tab...");
+                                    let p = page.as_mut().unwrap();
+                                    match recover_dead_tab(p).await {
+                                        Ok(()) => {
+                                            let p = page.as_mut().unwrap();
+                                            match handle_tools_call(id_retry.clone(), &params, p).await {
+                                                Ok(v) => v,
+                                                Err(e2) => json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": id_retry,
+                                                    "error": { "code": -32603, "message": e2.to_string() }
+                                                }),
+                                            }
+                                        }
+                                        Err(re) => json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id_retry,
+                                            "error": { "code": -32603, "message": format!("{msg} (tab recovery failed: {re})") }
+                                        }),
+                                    }
+                                } else {
+                                    json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id_retry,
+                                        "error": {
+                                            "code": -32603,
+                                            "message": msg,
+                                        }
+                                    })
                                 }
-                            }),
+                            }
                             Err(_) => json!({
                                 "jsonrpc": "2.0",
-                                "id": Value::Null,
+                                "id": id_retry,
                                 "error": {
                                     "code": -32603,
                                     "message": "internal panic in tool handler (see stderr) — session survived, retry or re-see",
@@ -401,6 +499,14 @@ async fn serve(
                         };
                         let mut resp = resp;
                         if let Some(result) = resp.get_mut("result") {
+                            // Prepend the relaunch note to the first
+                            // text content block so the agent knows
+                            // its page state was reset.
+                            if let Some(note) = relaunch_note.take() {
+                                if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                    content.insert(0, json!({ "type": "text", "text": note }));
+                                }
+                            }
                             shape_result(result, version);
                         }
                         last_activity = std::time::Instant::now();
@@ -437,17 +543,35 @@ async fn serve(
                         "[bladebro] idle timeout ({}s), shutting down Chrome to save memory",
                         idle_secs
                     );
-                    drop(browser.take());
+                    if let Some(b) = browser.take() {
+                        shutdown_browser(b).await;
+                    }
                     page = None;
                 }
             }
         }
     }
 
-    // Clean up on exit.
-    drop(browser);
+    // Clean up on exit: kill Chrome gracefully (flushes the
+    // session profile back to the template), abort page tasks.
+    if let Some(b) = browser.take() {
+        shutdown_browser(b).await;
+    }
     drop(page);
     Ok(())
+}
+
+/// Recover when the attached tab was closed externally:
+/// create a fresh tab and switch the session to it. The
+/// retry then acts on a live page instead of erroring
+/// "Target closed" forever.
+async fn recover_dead_tab(page: &mut Page) -> Result<()> {
+    let res = page.cdp_ref()
+        .send("Target.createTarget", Some(json!({ "url": "about:blank" })))
+        .await?;
+    let new_id = res.get("targetId").and_then(|v| v.as_str())
+        .ok_or_else(|| BladeError::Other("no targetId on tab recovery".into()))?;
+    page.switch_tab(new_id).await
 }
 
 fn handle_initialize(id: Option<Value>, params: &Value) -> Value {
@@ -715,6 +839,11 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
         }
         "upload" => Action::Upload { ref_id: ref_id.into(), path: text.into() },
         "read" => {
+            if ref_id.is_empty() {
+                return Err(BladeError::Other(
+                    "read requires 'ref' (an element id like e5 from see)".into(),
+                ));
+            }
             // Self-heal: the ref may have died since the agent saw it.
             let heal = page.ensure_ref(ref_id).await?;
             let text_content = crate::action::read_text(page.cdp_ref(), page.model(), ref_id).await?;
@@ -894,6 +1023,10 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
         }
         // Error context: recapture and include available elements so the
         // agent doesn't need a separate `see` call to understand the failure.
+        // CRITICAL: BladeError::Closed propagates UNWRAPPED — serve()
+        // detects it and self-heals (relaunch + retry). Wrapping it in
+        // Other would kill transparent crash recovery.
+        Err(BladeError::Closed) => Err(BladeError::Closed),
         Err(e) => {
             let _ = page.recapture().await;
             let view = page.view(3000);
@@ -1550,6 +1683,8 @@ async fn execute_step(
                     let capped: String = result.chars().take(500).collect();
                     observations.push(format!("step {path}: js → {capped}"));
                 }
+                // Closed propagates unwrapped so serve() self-heals.
+                Err(BladeError::Closed) => return Err(BladeError::Closed),
                 Err(e) => {
                     let _ = page.recapture().await;
                     let view = page.view(2000);
@@ -1565,6 +1700,8 @@ async fn execute_step(
                 Ok((delta, verdict)) => {
                     observations.push(format!("step {path}: {verdict}\n{}", page.delta_view(&delta, 4000)));
                 }
+                // Closed propagates unwrapped so serve() self-heals.
+                Err(BladeError::Closed) => return Err(BladeError::Closed),
                 Err(e) => {
                     let _ = page.recapture().await;
                     let view = page.view(3000);

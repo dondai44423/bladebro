@@ -13,6 +13,7 @@ pub mod cdp;
 pub mod error;
 pub mod page;
 pub mod action;
+pub mod session_profile;
 pub mod state;
 pub mod mcp;
 pub mod stealth;

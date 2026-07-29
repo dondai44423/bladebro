@@ -425,19 +425,9 @@ impl Page {
     /// not closing. `*self = new_page` drops the old Page, whose
     /// Drop aborts its background tasks (dialogs/network/hum).
     pub async fn switch_tab(&mut self, target_id: &str) -> Result<()> {
-        // Detach the current session first (pipe mode) so only
-        // ONE session is attached at a time — the tabs list
-        // can then mark the current tab unambiguously.
-        if let Some(client) = &self.browser_client {
-            if let Some(sid) = self.cdp.session_id() {
-                let _ = client
-                    .send(
-                        "Target.detachFromTarget",
-                        Some(serde_json::json!({ "sessionId": sid })),
-                    )
-                    .await;
-            }
-        }
+        // Attach to the NEW target FIRST. The old code detached
+        // the current session first — if the attach then failed,
+        // the session was detached from everything (bricked).
         let session = if let Some(client) = &self.browser_client {
             // Pipe mode: flat-session attach via the browser-level client.
             let res = client
@@ -461,6 +451,19 @@ impl Page {
             let client = CdpClient::connect(t.ws_url()?).await?;
             CdpSession::root(client)
         };
+        // New session attached — now detach the OLD one (pipe
+        // mode) so only one session stays attached. Failure
+        // here is harmless (two sessions attached briefly).
+        if let Some(client) = &self.browser_client {
+            if let Some(sid) = self.cdp.session_id() {
+                let _ = client
+                    .send(
+                        "Target.detachFromTarget",
+                        Some(serde_json::json!({ "sessionId": sid })),
+                    )
+                    .await;
+            }
+        }
         let new_page = Page::attach(session, &self.base, self.browser_client.clone()).await?;
         *self = new_page;
         Ok(())

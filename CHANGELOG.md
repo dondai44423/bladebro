@@ -7,7 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.0.1] - 2026-07-29
+## [2.1.0] - 2026-07-30
+
+### Fixed — Reliability overhaul (14 bugs)
+
+- **Cross-session Chrome murder**: every bladebro shared one Chrome profile. A second session's launch SIGKILLed the first session's live Chrome; if both were alive, they murdered each other's browsers in a loop. Fixed with session-scoped profiles (`~/.blade/profiles/sess-<pid>`) — two sessions never touch the same Chrome.
+- **Orphaned Chrome + Xvfb on kill**: no signal handlers. SIGTERM/SIGKILL from the harness orphaned Chrome + Xvfb forever (11 leaked Xvfb processes observed on one machine after a day). Fixed with SIGTERM/SIGINT/SIGHUP handlers that gracefully shut down Chrome, sync the profile back to the template, and clean up.
+- **Xvfb display leak**: orphaned Xvfb held `/tmp/.X<n>-lock`; each launch picked a higher number. Fixed with an orphan reaper that kills parentless Xvfb processes and removes stale locks + display-claim files on every launch.
+- **Xvfb launch race**: two bladebros launching simultaneously both claimed the same display. One Xvfb died, but its Chrome rendered on the survivor's Xvfb — when the survivor exited, the other's Chrome lost its display and crashed. Fixed with atomic O_EXCL display-claim files.
+- **SIGTERM hang**: `tokio::io::stdin()` reads on a blocking-pool thread. After signal-driven shutdown, the parked read blocked `Runtime::drop` forever — the process stayed alive with Chrome long dead. Fixed with explicit `process::exit` before the runtime drops.
+- **Self-heal broken for act/run**: `handle_act` and `execute_step` wrapped `BladeError::Closed` into a generic error, so the transparent relaunch+retry never fired on mid-action crashes. Fixed: `Closed` propagates unwrapped.
+- **Panic response used `id: null`**: broke JSON-RPC correlation; the client's request hung until timeout. Fixed to use the request id.
+- **Idle-relaunch state loss invisible**: after idle shutdown, the agent's refs failed with "never seen" and no hint. Fixed: the first post-relaunch response prepends a note explaining the browser restarted.
+- **Dead-tab recovery**: closing the attached tab externally bricked the session ("Target closed" forever). Fixed: auto-opens a fresh tab and retries.
+- **switch_tab detach-before-attach**: if the attach failed after detaching, the session was detached from everything. Fixed: attach new first, then detach old.
+- **free_port TOCTOU**: port picked, listener dropped, Chrome binds later — another process could steal it. Fixed: retry with a fresh port on startup-exit failure.
+- **Artifact filename collisions**: per-process counter started at 1 in every process, so session B overwrote session A's `blade-0001.json`. Fixed: pid-namespaced filenames + rotation (newest 300).
+- **read without ref**: cryptic heal error. Fixed: clear "read requires 'ref'" message.
+- **Browser drop blocked the async loop**: `shutdown_child` slept synchronously inside Drop on the executor thread (up to 3s). Fixed: offloaded to `spawn_blocking`.
+
+### Added
+
+- **Session-scoped Chrome profiles** (`src/session_profile.rs`): per-process profile dirs with template copy-on-launch (preserves returning-visitor seasoning) and copy-back-on-exit (sole survivor syncs). Orphan reaper cleans dead sessions + Xvfb on every launch.
+- **Signal handlers** (SIGTERM/SIGINT/SIGHUP on Unix, Ctrl+C on Windows): graceful Chrome shutdown + profile sync + cleanup before exit.
+- **Display-claim files** (`/tmp/.blade-x<n>-claim`): race-free Xvfb display selection via atomic O_EXCL creation.
+- **`build.rs`**: embeds git SHA + dirty flag into the binary; `bladebro -v` shows it.
+- **`release.sh`**: one-command release script — bump, changelog, build/test/clippy, tag, push, GitHub release with binary. Version skew becomes structurally impossible.
 
 ### Fixed
 - **Updater download reliability**: downloads now retry up to 3 times with resume (`Range` header). Slow/flaky connections no longer kill updates mid-download.

@@ -18,13 +18,38 @@ fn main() -> ExitCode {
         )
         .init();
 
-    match run() {
+    let code = match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("bladebro: {e}");
             ExitCode::FAILURE
         }
-    }
+    };
+    // See exit_immediately: a parked stdin read hangs
+    // Runtime::drop after signal-driven shutdown.
+    exit_immediately(code);
+}
+
+/// Exit immediately without dropping the tokio runtime.
+///
+/// Why: `tokio::io::stdin()` reads on a blocking-pool thread.
+/// When the MCP server exits via a SIGNAL (SIGTERM from the
+/// harness), the pending stdin read is still parked — and
+/// `Runtime::drop` waits for all blocking tasks to finish.
+/// The parked read never finishes (the harness holds the
+/// pipe open) → the process hangs forever AFTER all cleanup
+/// already ran. Observed live: bladebro survived SIGTERM by
+/// minutes with Chrome long dead.
+///
+/// At this point every teardown step is complete (Chrome
+/// killed, profile synced, session dir removed) — the only
+/// remaining state is in-memory. Skipping the runtime drop
+/// is safe.
+fn exit_immediately(code: ExitCode) -> ! {
+    std::process::exit(match code {
+        ExitCode::SUCCESS => 0,
+        _ => 1,
+    });
 }
 
 fn run() -> Result<()> {
@@ -105,7 +130,7 @@ fn run() -> Result<()> {
         format!("{host}:{port}")
     };
 
-    match cmd.as_str() {
+    let result = match cmd.as_str() {
         "probe" => rt.block_on(cmd_probe(&base)),
         "targets" => rt.block_on(cmd_targets(&base)),
         "version" => rt.block_on(cmd_version(&base)),
@@ -147,6 +172,18 @@ fn run() -> Result<()> {
         _ => {
             print_usage();
             Ok(())
+        }
+    };
+    // Exit HERE, before `rt` drops: the MCP server reads
+    // stdin on a blocking-pool thread, and after a
+    // signal-driven shutdown that read stays parked —
+    // Runtime::drop waits for it forever. All teardown is
+    // complete at this point; skip the runtime drop.
+    match result {
+        Ok(()) => exit_immediately(ExitCode::SUCCESS),
+        Err(e) => {
+            eprintln!("bladebro: {e}");
+            exit_immediately(ExitCode::FAILURE);
         }
     }
 }
