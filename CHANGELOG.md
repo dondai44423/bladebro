@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.0] - 2026-07-30
 
+## [2.1.0] - 2026-07-30
+
 ### Fixed — Reliability overhaul (14 bugs)
 
 - **Cross-session Chrome murder**: every bladebro shared one Chrome profile. A second session's launch SIGKILLed the first session's live Chrome; if both were alive, they murdered each other's browsers in a loop. Fixed with session-scoped profiles (`~/.blade/profiles/sess-<pid>`) — two sessions never touch the same Chrome.
