@@ -450,6 +450,14 @@ async fn cmd_mcp_pipe() -> Result<()> {
     mcp::run_pipe(client, browser).await
 }
 
+/// Windows stub: pipe transport is Unix-only. This is never called
+/// (use_pipe is always false on Windows) but the compiler needs the
+/// symbol to resolve.
+#[cfg(not(unix))]
+async fn cmd_mcp_pipe() -> Result<()> {
+    Err(BladeError::Other("pipe transport is Unix-only".into()))
+}
+
 /// S13: `bladebro audit` — run the stealth vectors + boot self-check (S2)
 /// and print a scorecard. One-shot CLI command (WS transport).
 async fn cmd_audit(base: &str) -> Result<()> {
