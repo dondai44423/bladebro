@@ -19,7 +19,7 @@ path = "src/main.rs"
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util", "signal"] }
 # CDP transport — plain ws:// to localhost; no TLS feature needed (avoids any OpenSSL)
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
