@@ -29,6 +29,8 @@ Bladebro is an agentic browser driver built from the agent's perspective. Instea
 
 Built in Rust. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent. Native on Linux, macOS, and Windows.
 
+Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and the new stateless per-request negotiation with `server/discover`, dual-dialect. Works with every MCP client, old and new.
+
 ## 🔧 Install
 
 **Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.80+. Linux: Xvfb for headless servers (macOS/Windows run headful natively).

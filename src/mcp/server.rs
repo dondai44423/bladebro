@@ -5,11 +5,13 @@
 //! from stdin, dispatches to the appropriate tool, and writes responses to
 //! stdout. stderr is for logging only — nothing else goes to stdout.
 //!
-//! Protocol flow:
-//! 1. Client sends `initialize` → server responds with capabilities + version.
-//! 2. Client sends `initialized` notification.
-//! 3. Client sends `tools/list` → server responds with tool definitions.
-//! 4. Client sends `tools/call` → server dispatches, responds with text content.
+//! Protocol: dual-dialect. Legacy clients (≤2025-11-25) use the
+//! `initialize` handshake; the 2026-07-28 stateless revision (SEP-2575)
+//! carries the protocol version per-request in
+//! `_meta["io.modelcontextprotocol/protocolVersion"]` and discovers
+//! capabilities via `server/discover`. Both are supported; the dialect
+//! is negotiated per request. Mismatched versions get
+//! `UnsupportedProtocolVersionError` (-32022).
 
 use std::io::{self, BufRead, Write};
 
@@ -22,8 +24,62 @@ use crate::mcp::tools::tools_to_json;
 use crate::page::Page;
 use crate::state::StateOp;
 
-/// Protocol version we support.
+/// Default protocol version for legacy clients that don't negotiate.
 const PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// The 2026-07-28 stateless revision (SEP-2575). Requests carrying this
+/// version in `_meta` get new-dialect results: `resultType` (SEP-2322),
+/// server identity in `_meta`, and cache hints on list endpoints.
+const STATELESS_VERSION: &str = "2026-07-28";
+
+/// All protocol versions this server speaks. Legacy versions behave
+/// identically for the methods we implement; the stateless revision
+/// changes result shaping only.
+const SUPPORTED_VERSIONS: &[&str] = &[
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+    STATELESS_VERSION,
+];
+
+/// Server instructions shared by `initialize` and `server/discover`.
+const INSTRUCTIONS: &str = "Stealth browser driver. `see` reads the page (diff-first), `act` interacts (click/type/navigate), `state` manages cookies/tabs/sessions, `run` executes batch JS, `vision` screenshots.";
+
+/// Extract the per-request protocol version (SEP-2575). New-spec clients
+/// send `_meta["io.modelcontextprotocol/protocolVersion"]` on every
+/// request; legacy clients omit it and get the legacy dialect.
+/// Err carries the unsupported version string.
+fn request_version(params: &Value) -> std::result::Result<Option<&'static str>, String> {
+    let v = params
+        .get("_meta")
+        .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(|v| v.as_str());
+    match v {
+        None => Ok(None),
+        Some(v) => match SUPPORTED_VERSIONS.iter().copied().find(|s| *s == v) {
+            Some(s) => Ok(Some(s)),
+            None => Err(v.to_string()),
+        },
+    }
+}
+
+/// Add 2026-07-28 dialect fields to a result payload: `resultType`
+/// (required by SEP-2322) and server identity in `_meta` (SEP-2575).
+fn shape_result(result: &mut Value, version: Option<&str>) {
+    if version != Some(STATELESS_VERSION) {
+        return;
+    }
+    if let Some(obj) = result.as_object_mut() {
+        obj.entry("resultType").or_insert(json!("complete"));
+        obj.entry("_meta").or_insert(json!({
+            "io.modelcontextprotocol/serverInfo": {
+                "name": "bladebro",
+                "version": env!("CARGO_PKG_VERSION"),
+            }
+        }));
+    }
+}
 
 /// Run the MCP server over stdio (WS transport). Blocks until stdin closes.
 pub async fn run(host: &str, port: u16) -> Result<()> {
@@ -120,11 +176,32 @@ async fn serve(mut page: Page) -> Result<()> {
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
-        // Dispatch.
+        // Dispatch. Per-request version negotiation first (SEP-2575):
+        // unknown versions fail closed with UnsupportedProtocolVersionError.
+        let version = match request_version(&params) {
+            Ok(v) => v,
+            Err(bad) => {
+                let resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32022,
+                        "message": format!("unsupported protocol version: {bad}"),
+                        "data": { "supportedVersions": SUPPORTED_VERSIONS },
+                    }
+                });
+                let resp_str = serde_json::to_string(&resp)?;
+                writeln!(out, "{resp_str}")?;
+                out.flush()?;
+                continue;
+            }
+        };
+
         let response = match method {
-            "initialize" => Some(handle_initialize(id)),
-            "initialized" => None, // notification, no response
-            "tools/list" => Some(handle_tools_list(id)),
+            "initialize" => Some(handle_initialize(id, &params)),
+            "initialized" | "notifications/initialized" => None, // notification, no response
+            "server/discover" => Some(handle_discover(id, version)),
+            "tools/list" => Some(handle_tools_list(id, version)),
             "tools/call" => {
                 // Panic isolation: a bug in any tool handler must NOT kill
                 // the server (a panic once took down whole sessions — dead
@@ -135,7 +212,7 @@ async fn serve(mut page: Page) -> Result<()> {
                     std::panic::AssertUnwindSafe(handle_tools_call(id, &params, &mut page)),
                 )
                 .await;
-                Some(match res {
+                let mut resp = match res {
                     Ok(v) => v,
                     Err(_) => json!({
                         "jsonrpc": "2.0",
@@ -145,9 +222,18 @@ async fn serve(mut page: Page) -> Result<()> {
                             "message": "internal panic in tool handler (see stderr) — session survived, retry or re-see",
                         }
                     }),
-                })
+                };
+                if let Some(result) = resp.get_mut("result") {
+                    shape_result(result, version);
+                }
+                Some(resp)
             }
-            "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
+            // Removed in 2026-07-28; kept for legacy keepalive clients.
+            "ping" => {
+                let mut result = json!({});
+                shape_result(&mut result, version);
+                Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+            }
             _ => Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -169,30 +255,71 @@ async fn serve(mut page: Page) -> Result<()> {
     Ok(())
 }
 
-fn handle_initialize(id: Option<Value>) -> Value {
+fn handle_initialize(id: Option<Value>, params: &Value) -> Value {
+    // Legacy handshake (removed in 2026-07-28 but old clients require
+    // it). Negotiate: echo the client's version when we support it,
+    // fall back to our default otherwise — the client decides whether
+    // to continue with the offered version.
+    let requested = params.get("protocolVersion").and_then(|v| v.as_str());
+    let negotiated = requested
+        .filter(|v| SUPPORTED_VERSIONS.contains(v))
+        .unwrap_or(PROTOCOL_VERSION);
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": negotiated,
             "capabilities": {
                 "tools": { "listChanged": false }
             },
             "serverInfo": {
                 "name": "bladebro",
                 "version": env!("CARGO_PKG_VERSION"),
-            }
+            },
+            "instructions": INSTRUCTIONS,
         }
     })
 }
 
-fn handle_tools_list(id: Option<Value>) -> Value {
+/// `server/discover` — capability advertisement for the 2026-07-28
+/// stateless revision (SEP-2575). Servers MUST implement this; new
+/// clients may call it instead of the removed `initialize` handshake.
+fn handle_discover(id: Option<Value>, version: Option<&str>) -> Value {
+    let mut result = json!({
+        "supportedVersions": SUPPORTED_VERSIONS,
+        "capabilities": {
+            "tools": { "listChanged": false }
+        },
+        "instructions": INSTRUCTIONS,
+        "ttlMs": 3_600_000,
+        "cacheScope": "public",
+    });
+    shape_result(&mut result, version);
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": {
-            "tools": tools_to_json(),
+        "result": result,
+    })
+}
+
+fn handle_tools_list(id: Option<Value>, version: Option<&str>) -> Value {
+    let mut result = json!({
+        "tools": tools_to_json(),
+    });
+    // CacheableResult (SEP-2549): the tool list is static per binary,
+    // so cache aggressively. Tools are returned in a deterministic
+    // order for client-side caching and prompt cache hits.
+    if version == Some(STATELESS_VERSION) {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("ttlMs".into(), json!(3_600_000));
+            obj.insert("cacheScope".into(), json!("public"));
         }
+    }
+    shape_result(&mut result, version);
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
     })
 }
 
