@@ -94,6 +94,17 @@ impl Drop for VirtualDisplay {
     }
 }
 
+/// Point a Chrome child command at the Xvfb display and pin it
+/// to X11. On Wayland sessions, Chrome would otherwise inherit
+/// WAYLAND_DISPLAY and open on the user's real screen.
+#[cfg(target_os = "linux")]
+fn apply_xvfb_env(cmd: &mut Command, xvfb: &VirtualDisplay) {
+    cmd.env("DISPLAY", xvfb.display_env());
+    cmd.env_remove("WAYLAND_DISPLAY");
+    cmd.env_remove("XDG_SESSION_TYPE");
+    cmd.arg("--ozone-platform=x11");
+}
+
 impl Browser {
     /// Find Chrome, launch it with stealth flags on `port` (0 = auto-pick a
     /// free port), and wait for the CDP debug endpoint to respond.
@@ -120,6 +131,14 @@ impl Browser {
         let mut args: Vec<String> = STEALTH_FLAGS.iter().map(|s| s.to_string()).collect();
         if !headful {
             args.extend(HEADLESS_FLAGS.iter().map(|s| s.to_string()));
+        }
+        // On Xvfb there is no GPU: Chrome 139+ refuses software
+        // WebGL unless this flag is set (contexts return null).
+        // The stealth GL spoof masks the SwiftShader strings, so
+        // pages see a coherent hardware identity either way.
+        #[cfg(target_os = "linux")]
+        if headful {
+            args.push("--enable-unsafe-swiftshader".into());
         }
         args.push(format!("--remote-debugging-port={port}"));
         args.push(format!("--user-data-dir={}", user_data_dir.display()));
@@ -151,9 +170,14 @@ impl Browser {
             .stderr(Stdio::null());
 
         // Set DISPLAY env var for headful mode (Linux only).
+        // CRITICAL on Wayland sessions: Chrome 110+ defaults to the
+        // Wayland ozone platform when WAYLAND_DISPLAY is inherited
+        // from the user's session — it opens on the USER'S real
+        // screen, ignoring the Xvfb DISPLAY. Strip Wayland env and
+        // force X11 so Chrome stays invisible on the virtual display.
         #[cfg(target_os = "linux")]
         if let Some(ref xvfb) = xvfb {
-            cmd.env("DISPLAY", xvfb.display_env());
+            apply_xvfb_env(&mut cmd, xvfb);
         }
 
         let mut child = cmd
@@ -382,6 +406,13 @@ impl Browser {
         if !headful {
             args.extend(HEADLESS_FLAGS.iter().map(|s| s.to_string()));
         }
+        // On Xvfb there is no GPU: Chrome 139+ refuses software
+        // WebGL unless this flag is set (contexts return null).
+        // The stealth GL spoof masks the SwiftShader strings.
+        #[cfg(target_os = "linux")]
+        if headful {
+            args.push("--enable-unsafe-swiftshader".into());
+        }
         args.push("--remote-debugging-pipe".into());
         args.push(format!("--user-data-dir={}", user_data_dir.display()));
 
@@ -424,7 +455,7 @@ impl Browser {
         cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
         #[cfg(target_os = "linux")]
         if let Some(ref xvfb) = xvfb {
-            cmd.env("DISPLAY", xvfb.display_env());
+            apply_xvfb_env(&mut cmd, xvfb);
         }
         // In the child (post-fork, pre-exec): our pipe ends become fds 3/4.
         // The OwnedFds are moved into the closure — the parent's copies close
