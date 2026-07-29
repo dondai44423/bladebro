@@ -433,11 +433,12 @@ async fn cmd_state(base: &str, sub: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_mcp(base: &str, _browser: Option<bladebro::browser::Browser>) -> Result<()> {
-    // _browser keeps Chrome alive for the MCP server's lifetime.
+async fn cmd_mcp(base: &str, browser: Option<bladebro::browser::Browser>) -> Result<()> {
+    // browser keeps Chrome alive for the MCP server's lifetime and is
+    // passed to serve() for self-healing reconnection.
     use bladebro::mcp;
     let (host, port) = parse_host_port(base);
-    mcp::run(host, port).await
+    mcp::run(host, port, browser).await
 }
 
 /// The default MCP path (S1): launch Chrome with CDP over pipe fds — no

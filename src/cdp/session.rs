@@ -45,6 +45,11 @@ impl CdpSession {
         &self.client
     }
 
+    /// Has the transport been closed?
+    pub fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
+
     /// This session's id, if it is a child session.
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()

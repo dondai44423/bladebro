@@ -297,6 +297,12 @@ impl CdpClient {
         self.events_tx.subscribe()
     }
 
+    /// Has the transport been closed (Chrome died or pipe broke)?
+    /// Used by the MCP server to decide whether to self-heal.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
     /// Wait for the next event whose method equals `method`, up to `deadline`.
     ///
     /// Other events are skipped. A lagged bus is recovered transparently.

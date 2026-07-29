@@ -82,23 +82,23 @@ fn shape_result(result: &mut Value, version: Option<&str>) {
 }
 
 /// Run the MCP server over stdio (WS transport). Blocks until stdin closes.
-pub async fn run(host: &str, port: u16) -> Result<()> {
+pub async fn run(host: &str, port: u16, browser: Option<crate::browser::Browser>) -> Result<()> {
     let target = cdp::first_page_target(&format!("{host}:{port}")).await?;
     let client = CdpClient::connect(target.ws_url()?).await?;
     let page = Page::attach(CdpSession::root(client), &format!("{host}:{port}"), None).await?;
     eprintln!("[bladebro] MCP server ready on {host}:{port} (ws transport)");
-    serve(page).await
+    serve(page, browser, false).await
 }
 
 /// Serve MCP over a zero-port CDP pipe connection (S1). `_browser` is held
 /// for the server's lifetime; dropping it kills Chrome + Xvfb.
 /// Unix-only: Windows uses WS transport.
 #[cfg(unix)]
-pub async fn run_pipe(client: CdpClient, _browser: crate::browser::Browser) -> Result<()> {
+pub async fn run_pipe(client: CdpClient, browser: crate::browser::Browser) -> Result<()> {
     let session = attach_pipe(&client).await?;
     let page = Page::attach(session, "pipe", Some(client)).await?;
     eprintln!("[bladebro] MCP server ready (pipe transport)");
-    serve(page).await
+    serve(page, Some(browser), true).await
 }
 
 /// Attach to the first page target over the browser-level pipe connection.
@@ -145,8 +145,57 @@ async fn attach_pipe(client: &CdpClient) -> Result<CdpSession> {
     Ok(CdpSession::child(client.clone(), session_id))
 }
 
+/// Relaunch Chrome and create a fresh `Page` after the browser connection
+/// dies. Drops the old `Browser` (kills Chrome + Xvfb), waits for cleanup,
+/// then launches a new one. Returns the new `Page` and `Browser`.
+///
+/// This is the self-healing core: the agent never sees "browser connection
+/// closed" because the server reconnects transparently before the tool
+/// call reaches the agent.
+async fn reconnect(
+    use_pipe: bool,
+) -> Result<(Page, Option<crate::browser::Browser>)> {
+    eprintln!("[bladebro] browser connection lost, relaunching...");
+    // Small delay to let the OS reclaim resources (port, display, etc.)
+    // before we launch a new Chrome instance.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    if use_pipe {
+        #[cfg(unix)]
+        {
+            let (browser, client) = crate::browser::Browser::launch_pipe().await?;
+            let session = attach_pipe(&client).await?;
+            let page = Page::attach(session, "pipe", Some(client)).await?;
+            eprintln!("[bladebro] reconnected (pipe transport)");
+            return Ok((page, Some(browser)));
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(BladeError::Other(
+                "pipe transport is Unix-only, cannot reconnect".into(),
+            ));
+        }
+    }
+
+    // WS transport: launch a new browser on a fresh port.
+    let browser = crate::browser::Browser::launch(0).await?;
+    let base = browser.base();
+    let target = cdp::first_page_target(&base).await?;
+    let client = CdpClient::connect(target.ws_url()?).await?;
+    let page = Page::attach(CdpSession::root(client), &base, None).await?;
+    eprintln!("[bladebro] reconnected (ws transport)");
+    Ok((page, Some(browser)))
+}
+
 /// The stdio JSON-RPC loop, shared by both transports.
-async fn serve(mut page: Page) -> Result<()> {
+///
+/// `browser` holds the Chrome child process (dropped on reconnect to kill
+/// the old Chrome). `use_pipe` selects the reconnection strategy.
+async fn serve(
+    mut page: Page,
+    mut browser: Option<crate::browser::Browser>,
+    use_pipe: bool,
+) -> Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -203,17 +252,101 @@ async fn serve(mut page: Page) -> Result<()> {
             "server/discover" => Some(handle_discover(id, version)),
             "tools/list" => Some(handle_tools_list(id, version)),
             "tools/call" => {
+                // Pre-call self-heal: if the browser connection is already
+                // dead (Chrome crashed between tool calls), reconnect now
+                // so the tool call succeeds on the first try.
+                if page.is_closed() {
+                    // Drop old browser (kills Chrome) before relaunching.
+                    drop(browser.take());
+                    match reconnect(use_pipe).await {
+                        Ok((new_page, new_browser)) => {
+                            page = new_page;
+                            browser = new_browser;
+                        }
+                        Err(e) => {
+                            eprintln!("[bladebro] pre-call reconnect failed: {e}");
+                            let resp = json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [{ "type": "text", "text": format!("\u{2717} browser connection lost. Bladebro tried to reconnect but failed: {e}. The server is still running, try again in a moment.") }],
+                                    "isError": true,
+                                }
+                            });
+                            let resp_str = serde_json::to_string(&resp)?;
+                            writeln!(out, "{resp_str}")?;
+                            out.flush()?;
+                            continue;
+                        }
+                    }
+                }
+
+                // Clone id for retry paths — handle_tools_call consumes it.
+                let id_retry = id.clone();
+
                 // Panic isolation: a bug in any tool handler must NOT kill
-                // the server (a panic once took down whole sessions — dead
-                // agent, no error). Convert panics into JSON-RPC errors;
-                // the page model may be stale afterward but the next
-                // capture re-syncs it.
+                // the server. Convert panics into JSON-RPC errors; the page
+                // model may be stale afterward but the next capture re-syncs.
                 let res = futures_util::FutureExt::catch_unwind(
                     std::panic::AssertUnwindSafe(handle_tools_call(id, &params, &mut page)),
                 )
                 .await;
-                let mut resp = match res {
-                    Ok(v) => v,
+
+                // handle_tools_call returns Result<Value, BladeError>:
+                // Ok(Value) = normal response (success or handled error).
+                // Err(Closed) = browser died during the call, need to reconnect.
+                let resp = match res {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(BladeError::Closed)) => {
+                        // Self-heal: reconnect and retry the tool call once.
+                        eprintln!("[bladebro] browser closed during tool call, reconnecting...");
+                        // Drop old browser (kills Chrome) before relaunching.
+                        drop(browser.take());
+                        match reconnect(use_pipe).await {
+                            Ok((new_page, new_browser)) => {
+                                page = new_page;
+                                browser = new_browser;
+                                // Retry the tool call with the fresh page.
+                                // Clone id_retry for the retry call — handle_tools_call consumes it.
+                                let id_retry2 = id_retry.clone();
+                                match handle_tools_call(id_retry2, &params, &mut page).await {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        eprintln!("[bladebro] retry after reconnect failed: {e}");
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id_retry,
+                                            "result": {
+                                                "content": [{ "type": "text", "text": format!("\u{2717} browser connection lost. Bladebro reconnected but the retry failed: {e}. Try the tool call again.") }],
+                                                "isError": true,
+                                            }
+                                        })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[bladebro] reconnect failed: {e}");
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id_retry,
+                                    "result": {
+                                        "content": [{ "type": "text", "text": format!("\u{2717} browser connection lost. Bladebro tried to reconnect but failed: {e}. The server is still running, try again in a moment.") }],
+                                        "isError": true,
+                                    }
+                                })
+                            }
+                        }
+                    }
+                    // Should never happen (handle_tools_call only returns Err(Closed)),
+                    // but handle gracefully to satisfy the type system.
+                    Ok(Err(e)) => json!({
+                        "jsonrpc": "2.0",
+                        "id": id_retry,
+                        "error": {
+                            "code": -32603,
+                            "message": e.to_string(),
+                        }
+                    }),
                     Err(_) => json!({
                         "jsonrpc": "2.0",
                         "id": Value::Null,
@@ -223,6 +356,7 @@ async fn serve(mut page: Page) -> Result<()> {
                         }
                     }),
                 };
+                let mut resp = resp;
                 if let Some(result) = resp.get_mut("result") {
                     shape_result(result, version);
                 }
@@ -323,7 +457,11 @@ fn handle_tools_list(id: Option<Value>, version: Option<&str>) -> Value {
     })
 }
 
-async fn handle_tools_call(id: Option<Value>, params: &Value, page: &mut Page) -> Value {
+async fn handle_tools_call(
+    id: Option<Value>,
+    params: &Value,
+    page: &mut Page,
+) -> std::result::Result<Value, BladeError> {
     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -361,14 +499,17 @@ async fn handle_tools_call(id: Option<Value>, params: &Value, page: &mut Page) -
             for a in &ambient {
                 text.push_str(&format!("\u{26a0} {}\n", a));
             }
-            json!({
+            Ok(json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
                     "content": [{ "type": "text", "text": text }]
                 }
-            })
+            }))
         }
+        // Propagate Closed so serve() can self-heal (relaunch Chrome
+        // and retry the tool call). The agent never sees this error.
+        Err(BladeError::Closed) => Err(BladeError::Closed),
         Err(e) => {
             // Also drain dialogs on error.
             let mut text = format!("\u{2717} error: {e}");
@@ -384,14 +525,14 @@ async fn handle_tools_call(id: Option<Value>, params: &Value, page: &mut Page) -
             for a in &ambient {
                 text.push_str(&format!("\n\u{26a0} {}\n", a));
             }
-            json!({
+            Ok(json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
                     "content": [{ "type": "text", "text": text }],
                     "isError": true,
                 }
-            })
+            }))
         }
     }
 }
@@ -957,7 +1098,11 @@ async fn execute_step(
 ///
 /// This is the `vision` tool (decision D5) — a rare fallback for canvas
 /// content, exotic layouts, or when the structural model fails.
-async fn handle_vision(id: Option<Value>, _args: &Value, page: &mut Page) -> Value {
+async fn handle_vision(
+    id: Option<Value>,
+    _args: &Value,
+    page: &mut Page,
+) -> std::result::Result<Value, BladeError> {
     let cdp = page.cdp_ref();
     let result = cdp
         .send(
@@ -972,16 +1117,16 @@ async fn handle_vision(id: Option<Value>, _args: &Value, page: &mut Page) -> Val
         Ok(res) => {
             let data = res.get("data").and_then(|d| d.as_str()).unwrap_or("");
             if data.is_empty() {
-                return json!({
+                return Ok(json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
                         "content": [{ "type": "text", "text": "Screenshot returned no data." }],
                         "isError": true,
                     }
-                });
+                }));
             }
-            json!({
+            Ok(json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
@@ -991,17 +1136,17 @@ async fn handle_vision(id: Option<Value>, _args: &Value, page: &mut Page) -> Val
                         "mimeType": "image/png"
                     }]
                 }
-            })
+            }))
         }
-        Err(e) => {
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{ "type": "text", "text": format!("\u{2717} error: {e}") }],
-                    "isError": true,
-                }
-            })
-        }
+        // Propagate Closed so serve() can self-heal.
+        Err(BladeError::Closed) => Err(BladeError::Closed),
+        Err(e) => Ok(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "content": [{ "type": "text", "text": format!("\u{2717} error: {e}") }],
+                "isError": true,
+            }
+        })),
     }
 }

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Self-healing browser connection**: when Chrome crashes or the CDP connection drops, the MCP server detects it and relaunches Chrome automatically. The agent never sees "browser connection closed". Tool calls are retried transparently after reconnection. Works for both pipe and WS transports.
+
+### Fixed
+- **CI**: bumped min Rust to 1.86 (ICU crates need edition2024, stabilized in 1.85+). CI matrix now uses `stable` only.
+- **Windows compilation**: gated `run_pipe` re-export and `Duration` import behind `#[cfg(unix)]`. Added Windows stub for `cmd_mcp_pipe`.
+- **tokio-tungstenite**: bumped from 0.26.2 to 0.30.0.
+
 ## [1.0.0] - 2026-07-29
 
 First stable release. The agentic browser driver is production-ready.

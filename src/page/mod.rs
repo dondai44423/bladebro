@@ -499,6 +499,12 @@ impl Page {
         &self.cdp
     }
 
+    /// Has the browser connection been closed (Chrome died)?
+    /// The MCP server checks this before tool calls to self-heal.
+    pub fn is_closed(&self) -> bool {
+        self.cdp.is_closed()
+    }
+
     /// Drain the queue of auto-dismissed dialogs. Called by the MCP server
     /// after each tool call to surface dialog notifications to the agent.
     pub fn drain_dialogs(&self) -> Vec<DialogInfo> {
