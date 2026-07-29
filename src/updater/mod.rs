@@ -17,6 +17,10 @@ use crate::error::{BladeError, Result};
 /// The current version, baked in at compile time.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Git commit + dirty flag, baked in by build.rs.
+/// Lets `-v` identify exactly what code a binary runs.
+pub const BUILD_ID: &str = env!("BLADE_BUILD_ID");
+
 /// The GitHub repo for release checks.
 const GITHUB_REPO: &str = "dondai44423/bladebro";
 
@@ -47,14 +51,30 @@ async fn update(args: &[String]) -> Result<()> {
     let current = CURRENT_VERSION;
 
     if !force && !version::is_newer(latest.tag(), current) {
-        ui::info(&format!("Already up to date (v{current})"));
+        if version::compare_versions(latest.tag(), current) == std::cmp::Ordering::Less {
+            ui::info(&format!(
+                "Local build (v{current}) is ahead of the latest release ({})",
+                latest.tag()
+            ));
+        } else {
+            ui::info(&format!("Already on the latest release (v{current})"));
+        }
         return Ok(());
     }
 
     if version::is_newer(latest.tag(), current) {
         ui::info(&format!("Update available: v{current} -> {}", latest.tag()));
+    } else if version::compare_versions(latest.tag(), current) == std::cmp::Ordering::Less {
+        ui::warn(&format!(
+            "Local build (v{current}) is AHEAD of the latest release ({}).",
+            latest.tag()
+        ));
+        ui::warn("Downgrading is only possible with --force.");
+        if !force {
+            return Ok(());
+        }
     } else {
-        ui::warn("Force update requested (same or older version)");
+        ui::warn("Force update requested (same version)");
     }
 
     // Step 2: download the binary.
@@ -79,15 +99,28 @@ async fn update(args: &[String]) -> Result<()> {
 }
 
 /// `bladebro -v` / `bladebro --version` — show version + update status.
+///
+/// Three honest states, never a misleading "up to date":
+/// - behind:  update available → tells you to run -u
+/// - equal:   on the latest release
+/// - ahead:   local build is NEWER than the latest release
+///   (dev build or pending release) — says so.
 async fn show_version() -> Result<()> {
-    println!("bladebro v{CURRENT_VERSION}");
+    println!("bladebro v{CURRENT_VERSION} ({BUILD_ID})");
     match version::fetch_latest().await {
         Ok(latest) => {
-            if version::is_newer(latest.tag(), CURRENT_VERSION) {
-                println!("  update available: {}", latest.tag());
-                println!("  run: bladebro -u");
-            } else {
-                println!("  up to date");
+            match version::compare_versions(latest.tag(), CURRENT_VERSION) {
+                std::cmp::Ordering::Greater => {
+                    println!("  update available: {}", latest.tag());
+                    println!("  run: bladebro -u");
+                }
+                std::cmp::Ordering::Equal => {
+                    println!("  on the latest release");
+                }
+                std::cmp::Ordering::Less => {
+                    println!("  ahead of the latest release ({})", latest.tag());
+                    println!("  (local build is newer — dev build or pending release)");
+                }
             }
         }
         Err(_) => {

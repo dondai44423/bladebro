@@ -11,6 +11,10 @@ pub struct Release {
     pub assets: Vec<Asset>,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub prerelease: bool,
 }
 
 impl Release {
@@ -29,7 +33,13 @@ pub struct Asset {
     pub size: u64,
 }
 
-/// Fetch the latest release from GitHub.
+/// Fetch the latest stable release from GitHub.
+///
+/// Fetches the 10 most recent releases and picks the highest
+/// version by SEMVER ORDER — not GitHub's created_at ordering,
+/// which breaks when an old release is edited or re-tagged.
+/// Drafts are skipped. Prereleases are only returned when no
+/// stable release exists (early-project phase).
 /// Uses GITHUB_TOKEN env var if set (higher rate limit).
 pub async fn fetch_latest() -> Result<Release> {
     // Allow skipping update checks entirely (CI, air-gapped).
@@ -38,7 +48,7 @@ pub async fn fetch_latest() -> Result<Release> {
     }
 
     let url = format!(
-        "https://api.github.com/repos/{}/releases?per_page=1",
+        "https://api.github.com/repos/{}/releases?per_page=10",
         super::GITHUB_REPO
     );
     let mut client_builder = reqwest::Client::builder()
@@ -89,25 +99,61 @@ pub async fn fetch_latest() -> Result<Release> {
         .await
         .map_err(|e| BladeError::Other(format!("cannot parse release: {e}")))?;
 
-    releases
-        .into_iter()
-        .next()
-        .ok_or_else(|| BladeError::Other("no releases found".into()))
+    // Pick the highest semver among non-draft releases.
+    // Stable releases win over prereleases at equal/lower versions.
+    let mut best: Option<Release> = None;
+    for r in releases.into_iter().filter(|r| !r.draft) {
+        let replace = match &best {
+            None => true,
+            Some(b) => {
+                let cmp = compare_versions(r.tag(), b.tag());
+                cmp == std::cmp::Ordering::Greater
+                    || (cmp == std::cmp::Ordering::Equal && b.prerelease && !r.prerelease)
+            }
+        };
+        if replace {
+            best = Some(r);
+        }
+    }
+    best.ok_or_else(|| BladeError::Other("no releases found".into()))
 }
 
-/// Is `latest` newer than `current`? Simple semver comparison.
-/// Strips a leading "v" prefix if present.
-pub fn is_newer(latest: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> {
-        v.strip_prefix('v')
-            .unwrap_or(v)
-            .split('.')
-            .filter_map(|s| s.parse::<u64>().ok())
-            .collect()
+/// Parse a version string into comparable numeric components.
+/// Strips a leading "v" and any pre-release suffix ("-dev",
+/// "-beta.1" — the numeric parts still compare correctly for
+/// our purposes: 2.0.0-dev < 2.0.0 is handled by the caller).
+fn parse_version(v: &str) -> (Vec<u64>, bool) {
+    let core = v.strip_prefix('v').unwrap_or(v);
+    let (nums_str, is_prerelease) = match core.split_once('-') {
+        Some((n, _)) => (n, true),
+        None => (core, false),
     };
-    let l = parse(latest);
-    let c = parse(current);
-    l > c
+    let nums: Vec<u64> = nums_str
+        .split('.')
+        .filter_map(|s| s.parse::<u64>().ok())
+        .collect();
+    (nums, is_prerelease)
+}
+
+/// Three-way version comparison: how does `a` relate to `b`?
+/// Pre-release versions sort BELOW their release
+/// (2.0.0-dev < 2.0.0).
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let (an, a_pre) = parse_version(a);
+    let (bn, b_pre) = parse_version(b);
+    match an.cmp(&bn) {
+        std::cmp::Ordering::Equal => match (a_pre, b_pre) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
+        },
+        ord => ord,
+    }
+}
+
+/// Is `latest` newer than `current`? Semver comparison.
+pub fn is_newer(latest: &str, current: &str) -> bool {
+    compare_versions(latest, current) == std::cmp::Ordering::Greater
 }
 
 /// The expected asset name for this platform.
@@ -155,6 +201,20 @@ mod tests {
     #[test]
     fn is_newer_strips_v_prefix() {
         assert!(is_newer("v1.0.0", "0.9.0"));
+    }
+
+    #[test]
+    fn compare_three_way() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_versions("2.0.0", "1.0.0"), Greater);
+        assert_eq!(compare_versions("1.0.0", "2.0.0"), Less);
+        assert_eq!(compare_versions("2.0.0", "2.0.0"), Equal);
+        assert_eq!(compare_versions("v2.0.0", "1.9.9"), Greater);
+        // Pre-release sorts below its release.
+        assert_eq!(compare_versions("2.0.0-dev", "2.0.0"), Less);
+        assert_eq!(compare_versions("2.0.0", "2.0.0-dev"), Greater);
+        // Dev build ahead of last release.
+        assert_eq!(compare_versions("2.0.0", "1.0.0"), Greater);
     }
 
     #[test]
