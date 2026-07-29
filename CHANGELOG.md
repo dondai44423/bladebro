@@ -24,7 +24,7 @@ First stable release. The agentic browser driver is production-ready.
 - **PID checks**: `/proc` on Linux, `ps` on macOS, `tasklist` on Windows
 - **Headful mode**: Xvfb on Linux, native window server on macOS/Windows
 - **Home directory**: `HOME` on Unix, `USERPROFILE` on Windows
-- **CI matrix**: Ubuntu + macOS + Windows, Rust 1.85 + stable
+- **CI matrix**: Ubuntu + macOS + Windows, Rust stable
 
 ### Changed
 - **Pipe transport**: Unix-only (Windows uses WebSocket transport; pipe fds 3/4 don't exist on Windows)

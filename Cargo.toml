@@ -2,7 +2,7 @@
 name = "bladebro"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 license = "MIT"
 description = "An agentic browser driver for AI — few tools, full control, real stealth, god-tier token efficiency."
 repository = "https://github.com/dondai44423/bladebro"
