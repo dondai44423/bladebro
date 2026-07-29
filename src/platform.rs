@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::process::Child;
+#[cfg(unix)]
 use std::time::Duration;
 
 /// The user's home directory.

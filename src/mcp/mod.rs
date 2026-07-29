@@ -3,4 +3,6 @@
 pub mod server;
 pub mod tools;
 
-pub use server::{run, run_pipe};
+pub use server::run;
+#[cfg(unix)]
+pub use server::run_pipe;
