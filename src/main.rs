@@ -455,7 +455,7 @@ async fn cmd_mcp_pipe() -> Result<()> {
 /// symbol to resolve.
 #[cfg(not(unix))]
 async fn cmd_mcp_pipe() -> Result<()> {
-    Err(BladeError::Other("pipe transport is Unix-only".into()))
+    Err(bladebro::error::BladeError::Other("pipe transport is Unix-only".into()))
 }
 
 /// S13: `bladebro audit` — run the stealth vectors + boot self-check (S2)
