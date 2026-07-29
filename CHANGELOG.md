@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-29
+
 ### Added
 - **Self-healing refs**: stale refs re-resolve automatically. If `e5` was "Sign in" and the page navigated, `act click e5` finds the new "Sign in" and clicks it, noting `[ref e5 healed]` in the verdict. Dead refs that can't be re-resolved return the identity + candidates with usable refs.
 - **Ambiguity contracts**: ambiguous text clicks now list matches WITH refs + `nth` values (e.g. `e5 link "newest" (nth=1)`). New `nth` param picks from the list. One retry call, zero `see` calls.
