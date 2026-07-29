@@ -11,6 +11,8 @@ pub struct DownloadedBinary {
 }
 
 /// Download the platform binary from a release.
+/// Retries up to 3 times with resume — slow/flaky
+/// connections are the norm, not the exception.
 pub async fn download_binary(release: &version::Release) -> Result<DownloadedBinary> {
     let asset = version::find_asset(release).ok_or_else(|| {
         BladeError::Other(format!(
@@ -25,14 +27,47 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
         ))
     })?;
 
+    let current = std::env::current_exe()
+        .map_err(|e| BladeError::Other(format!("cannot find current exe: {e}")))?;
+    let dir = current.parent().unwrap_or(std::path::Path::new("."));
+    let tmp = dir.join(".bladebro-update-tmp");
+
+    let mut last_err = String::new();
+    for attempt in 1..=3 {
+        if attempt > 1 {
+            eprintln!("  retry {attempt}/3...");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        match download_once(&asset.browser_download_url, &tmp).await {
+            Ok(size) => {
+                return Ok(DownloadedBinary { path: tmp, size });
+            }
+            Err(e) => {
+                last_err = e.to_string();
+            }
+        }
+    }
+    Err(BladeError::Other(format!(
+        "download failed after 3 attempts: {last_err}"
+    )))
+}
+
+async fn download_once(url: &str, tmp: &std::path::Path) -> Result<u64> {
+    // Resume from wherever the last attempt left off.
+    let existing = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
+
     let client = reqwest::Client::builder()
         .user_agent("bladebro-updater")
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
 
-    let resp = client
-        .get(&asset.browser_download_url)
+    let mut req = client.get(url);
+    if existing > 0 {
+        req = req.header("Range", format!("bytes={existing}-"));
+    }
+
+    let resp = req
         .send()
         .await
         .map_err(|e| BladeError::Other(format!("download failed: {e}")))?;
@@ -49,24 +84,25 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
         .await
         .map_err(|e| BladeError::Other(format!("download interrupted: {e}")))?;
 
-    if bytes.is_empty() {
+    if bytes.is_empty() && existing == 0 {
         return Err(BladeError::Other("downloaded file is empty".into()));
     }
 
-    // Write to a temp file in the same directory as the target binary.
-    // This ensures the rename is atomic (same filesystem).
-    let current = std::env::current_exe()
-        .map_err(|e| BladeError::Other(format!("cannot find current exe: {e}")))?;
-    let dir = current.parent().unwrap_or(std::path::Path::new("."));
-    let tmp = dir.join(".bladebro-update-tmp");
-
-    std::fs::write(&tmp, &bytes)
-        .map_err(|e| BladeError::Other(format!("cannot write temp file: {e}")))?;
-
-    Ok(DownloadedBinary {
-        path: tmp,
-        size: bytes.len() as u64,
-    })
+    // Append for resumes, truncate for fresh downloads.
+    if existing > 0 {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(tmp)
+            .map_err(|e| BladeError::Other(format!("cannot open temp file: {e}")))?;
+        f.write_all(&bytes)
+            .map_err(|e| BladeError::Other(format!("cannot write temp file: {e}")))?;
+        Ok(existing + bytes.len() as u64)
+    } else {
+        std::fs::write(tmp, &bytes)
+            .map_err(|e| BladeError::Other(format!("cannot write temp file: {e}")))?;
+        Ok(bytes.len() as u64)
+    }
 }
 
 /// Verify a downloaded binary is valid (correct magic bytes, reasonable size).

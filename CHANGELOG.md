@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Updater download reliability**: downloads now retry up to 3 times with resume (`Range` header). Slow/flaky connections no longer kill updates mid-download.
+
 ## [2.0.0] - 2026-07-29
 
 ### Added
