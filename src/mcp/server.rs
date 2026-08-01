@@ -778,6 +778,14 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     let press = args.get("press").and_then(|p| p.as_str()).unwrap_or("");
     let nth = args.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
 
+    // Resource blocking (W1): `act navigate block=images,fonts,...`.
+    // Applied before the navigation so the rules are live for the load.
+    if action_str == "navigate" {
+        if let Some(block) = args.get("block").and_then(|b| b.as_str()) {
+            page.set_block_classes(block).await?;
+        }
+    }
+
     let action = match action_str {
         "click" => {
             let cx = args.get("x").and_then(|v| v.as_f64());
@@ -1359,6 +1367,18 @@ async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
                 return Ok(format!("\u{2713} closed tab {target_id} (was the last tab)"));
             }
             return Ok(format!("\u{2713} closed tab {target_id}"));
+        }
+        "block" => {
+            let classes = args.get("classes").and_then(|c| c.as_str()).unwrap_or("");
+            if !classes.is_empty() {
+                let mask = page.set_block_classes(classes).await?;
+                return Ok(format!("blocking: {}", crate::page::intercept::InterceptState::describe(mask)));
+            }
+            if args.get("clear").and_then(|c| c.as_bool()).unwrap_or(false) {
+                page.set_block_classes("none").await?;
+                return Ok("blocking: none".to_string());
+            }
+            return Ok(format!("blocking: {}", crate::page::intercept::InterceptState::describe(page.block_rules())));
         }
         _ => {}
     }

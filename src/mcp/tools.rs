@@ -166,15 +166,15 @@ BIG DATA RULE: extract results over ~6KB go to a file path — read the file, do
         },
         ToolDef {
             name: "state",
-            description: "Browser state: cookies, localStorage/sessionStorage, tabs, and saved sessions.\n\
-WORKFLOWS: Login persistence: save <name> after login, load <name> in a later session (restores cookies+storage, then navigate to the site). Tabs: tabs (list, * = current), open-tab <url> (auto-focuses the new tab), switch-tab <target_id>, close-tab <target_id> (auto-switches if you close the current one).",
+            description: "Browser state: cookies, localStorage/sessionStorage, tabs, saved sessions, and resource blocking.\n\
+WORKFLOWS: Login persistence: save <name> after login, load <name> in a later session (restores cookies+storage, then navigate to the site). Tabs: tabs (list, * = current), open-tab <url> (auto-focuses the new tab), switch-tab <target_id>, close-tab <target_id> (auto-switches if you close the current one). Resource blocking (speed): op=block classes=\"images,fonts,media,trackers\" to set (persists), op=block clear=true to stop, op=block alone to read. Blocks inert assets and third-party trackers only, never first-party scripts or bot-detection.",
             input_schema: json!({
                 "type": "object",
                 "required": ["op"],
                 "properties": {
                     "op": {
                         "type": "string",
-                        "enum": ["cookies", "set-cookie", "del-cookie", "ls", "ss", "set-ls", "set-ss", "rm-ls", "rm-ss", "clear-ls", "clear-ss", "tabs", "open-tab", "close-tab", "switch-tab", "save", "load"]
+                        "enum": ["cookies", "set-cookie", "del-cookie", "ls", "ss", "set-ls", "set-ss", "rm-ls", "rm-ss", "clear-ls", "clear-ss", "tabs", "open-tab", "close-tab", "switch-tab", "save", "load", "block"]
                     },
                     "name": {
                         "type": "string",
@@ -191,6 +191,14 @@ WORKFLOWS: Login persistence: save <name> after login, load <name> in a later se
                     "target_id": {
                         "type": "string",
                         "description": "Target id for close-tab and switch-tab."
+                    },
+                    "classes": {
+                        "type": "string",
+                        "description": "For op=block: comma-separated classes to block (images, fonts, media, trackers)."
+                    },
+                    "clear": {
+                        "type": "boolean",
+                        "description": "For op=block: true to stop all blocking."
                     }
                 }
             }),

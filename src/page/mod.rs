@@ -4,6 +4,7 @@
 //! `Page` is what the future `act` / `see` / `run` MCP tools will operate on.
 //! It owns the LPM across captures so refs stay stable and diffs accumulate.
 
+pub mod intercept;
 pub mod model;
 pub mod perception;
 pub mod refs;
@@ -84,6 +85,11 @@ pub struct Page {
     stealth_script_id: Option<crate::stealth::ScriptId>,
     /// Locale the current injection bakes in (None = no override).
     active_locale: Option<String>,
+    /// Request-interception state shared with the Fetch task
+    /// (block-class bitmask + page domain for third-party checks).
+    intercept: intercept::InterceptState,
+    /// Request-interception task handle.
+    intercept_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for Page {
@@ -358,6 +364,16 @@ impl Page {
             is_busy.clone(),
         );
 
+        // Request-interception task: answers Fetch.requestPaused events
+        // with block/continue verdicts. Only receives events while
+        // Fetch is enabled (blocking active); idle otherwise.
+        let intercept = intercept::InterceptState::default();
+        let intercept_task = tokio::spawn(intercept::run_interception(
+            cdp.clone(),
+            intercept.clone(),
+            cdp.subscribe(),
+        ));
+
         Ok(Self {
             cdp,
             browser_client,
@@ -374,6 +390,8 @@ impl Page {
             hum_task: Some(hum_task),
             stealth_script_id,
             active_locale,
+            intercept,
+            intercept_task: Some(intercept_task),
         })
     }
 
@@ -486,7 +504,42 @@ impl Page {
     /// Re-capture the page and return the delta since the last capture.
     pub async fn recapture(&mut self) -> Result<PageDelta> {
         let cap = capture(&self.cdp).await?;
+        // Keep the interception third-party baseline in sync with the
+        // current page (covers SPA navigations that bypass navigate()).
+        self.intercept.set_page_url(&cap.url);
         Ok(self.lpm.ingest(cap))
+    }
+
+    /// Set active resource-block classes ("images,fonts,media,trackers").
+    /// Empty / "none" clears blocking. Toggles the CDP Fetch domain so
+    /// interception adds zero overhead while blocking is off.
+    pub async fn set_block_classes(&mut self, spec: &str) -> Result<u32> {
+        let mask = if spec.trim().eq_ignore_ascii_case("none") || spec.trim().eq_ignore_ascii_case("clear") {
+            0
+        } else {
+            intercept::InterceptState::parse_classes(spec)
+        };
+        let was = self.intercept.rules();
+        self.intercept.set_rules(mask);
+        if mask != 0 && was == 0 {
+            // Enable interception: pause every request so we can decide.
+            self.cdp
+                .send(
+                    "Fetch.enable",
+                    Some(serde_json::json!({ "patterns": [{ "urlPattern": "*" }] })),
+                )
+                .await?;
+        } else if mask == 0 && was != 0 {
+            // Drain anything still paused, then stop intercepting.
+            self.intercept.drain_pending_requests(&self.cdp).await;
+            self.cdp.send("Fetch.disable", None).await?;
+        }
+        Ok(mask)
+    }
+
+    /// Current block-class bitmask (for `state op=block get`).
+    pub fn block_rules(&self) -> u32 {
+        self.intercept.rules()
     }
 
     /// A full agent-facing view of the current model (the `see` output).
@@ -921,6 +974,9 @@ impl Drop for Page {
             handle.abort();
         }
         if let Some(handle) = self.hum_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.intercept_task.take() {
             handle.abort();
         }
     }
