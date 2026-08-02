@@ -1774,7 +1774,7 @@ async fn handle_vision(
             + "const ov=d.createElement('div');ov.id='blade-marks';"
             + "ov.style.cssText='position:fixed;inset:0;pointer-events:none;z-index:2147483647;';"
             + "const vw=innerWidth,vh=innerHeight;"
-            + "const all=[...d.querySelectorAll(sel)];"
+            + "const all=deepAll(d,sel);"
             + "const sigs=new Map();const counts={};"
             // Sig = '' frame prefix (main doc) | role | shortName | rank,
             // rank counted over ALL matches (vis-failing included) — matches

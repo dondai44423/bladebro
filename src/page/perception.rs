@@ -72,6 +72,11 @@ pub struct RawElement {
     /// `[1, 0]` = first iframe inside the second iframe in top doc.
     #[serde(default)]
     pub frame: Vec<usize>,
+    /// True if this element lives inside an open shadow root (W2). Debug aid;
+    /// coordinate and sig handling are identical to light-DOM elements since
+    /// shadow DOM does not create a new coordinate space (unlike iframes).
+    #[serde(default)]
+    pub shadow: bool,
 }
 
 /// The full capture: page identity + every actionable element.
@@ -155,7 +160,20 @@ pub static JS_PREAMBLE: LazyLock<String> = LazyLock::new(|| {
         + JS_LABEL_CACHE
         + JS_NAME_FN
         + JS_LANDMARK_FN
+        + JS_DEEP_ALL
 });
+
+// Shadow-piercing collector (W2). `document.querySelectorAll(sel)` cannot see
+// inside shadow roots, so actionable elements in open shadow trees (YouTube,
+// Salesforce, most Web Component apps) were invisible. deepAll walks the light
+// DOM and recurses into every open `shadowRoot`, returning a flat element list.
+// Closed shadow roots are unreachable by JS (a hard platform restriction), but
+// their host is still visible so coordinate clicks keep working. The ORDER is
+// deterministic (light matches, then each shadow tree in host order), and every
+// consumer (capture, find_by_sig, find_by_text, marks) uses deepAll, so per-name
+// rank sigs stay consistent. Shadow elements share the top document's
+// coordinate space, so no iframe-style offset is needed.
+pub const JS_DEEP_ALL: &str = r#"function deepAll(root,sel){const out=[];const visit=(c)=>{const m=c.querySelectorAll(sel);for(let i=0;i<m.length;i++)out.push(m[i]);const all=c.querySelectorAll('*');for(let i=0;i<all.length;i++){const s=all[i].shadowRoot;if(s)visit(s);}};visit(root);return out;}"#;
 
 // ---- capture script ----
 
@@ -191,7 +209,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         // are culled to in-viewport elements. The frame prefix keeps sigs
         // unique across frames and matches find_by_sig.
         + "const fps=fp.join(',');"
-        + "const all=[...doc.querySelectorAll(sel)];"
+        + "const all=deepAll(doc,sel);"
         + "const counts={};"
         + "for(let i=0;i<all.length;i++){"
         + "const n=all[i];"
@@ -216,6 +234,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "landmark:landmarkOf(n),"
         + "box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],"
         + "sig:fps+'|'+r+'|'+snm+'|'+rank,"
+        + "shadow:n.getRootNode()!==doc,"
         + "frame:fp});"
         + "}"
         + "const ifs=doc.querySelectorAll('iframe');"
@@ -394,10 +413,28 @@ pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
             elements: Vec::new(),
         }),
         Some(v) => {
-            let parsed: PageCapture = serde_json::from_value(v.clone())?;
+            let mut parsed: PageCapture = serde_json::from_value(v.clone())?;
+            // Chrome internal pages (chrome://, chrome-extension://, about:*
+            // except about:blank) expose their own shadow-DOM UI, which the
+            // W2 shadow piercing would otherwise turn into phantom actionable
+            // elements (e.g. chrome://new-tab-page yields ~15). Automating a
+            // browser-internal page is never the intent, so surface none.
+            if is_internal_page(&parsed.url) {
+                parsed.elements.clear();
+            }
             Ok(parsed)
         }
     }
+}
+
+/// True for browser-internal pages whose own UI must not be captured as
+/// actionable elements. `about:blank` is allowed (it is empty anyway).
+fn is_internal_page(url: &str) -> bool {
+    url.starts_with("chrome://")
+        || url.starts_with("chrome-extension://")
+        || url.starts_with("devtools://")
+        || url.starts_with("edge://")
+        || url.starts_with("about:") && url != "about:blank"
 }
 
 /// M4: Detect and dismiss consent/cookie banners. Policy: reject (default),

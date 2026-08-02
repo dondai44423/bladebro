@@ -155,7 +155,7 @@ pub async fn find_by_text(
         .to_string()
         + "const d=document;if(!d||!d.body)return[];"
         + &JS_PREAMBLE
-        + "const all=[...d.querySelectorAll(sel)];const results=[];const counts={};"
+        + "const all=deepAll(d,sel);const results=[];const counts={};"
         + "const q=query.toLowerCase();"
         // Rank counted over ALL matches (vis-failing included, role-hidden
         // excluded) — identical to the capture script (V25c). Only vis-passing
@@ -436,7 +436,7 @@ async fn find_by_sig(
         + "if(!f)return{ok:false,reason:'frame gone'};"
         + "try{doc=f.contentDocument;if(!doc)return{ok:false,reason:'frame inaccessible'};}catch(e){return{ok:false,reason:'cross-origin'};}"
         + "const ir=f.getBoundingClientRect();ox+=ir.x;oy+=ir.y;}"
-        + "const all=[...doc.querySelectorAll(sel)];"
+        + "const all=deepAll(doc,sel);"
         // Sig = framePath | role | shortName | rank, rank counted over ALL
         // matches (vis-failing included, role-hidden excluded) — identical to
         // the capture script (V25c). vis() is checked only on the matched
@@ -1079,7 +1079,7 @@ pub async fn perform_with_network(
                 + "const d=document;if(!d||!d.body)return null;"
                 + &JS_PREAMBLE
                 + "let doc=d;for(let i=0;i<frame.length;i++){const ifs=doc.querySelectorAll('iframe');const f=ifs[frame[i]];if(!f)return null;try{doc=f.contentDocument;if(!doc)return null;}catch(e){return null;}}"
-                + "const all=[...doc.querySelectorAll(sel)];const fps=frame.join(',');const counts={};"
+                + "const all=deepAll(doc,sel);const fps=frame.join(',');const counts={};"
                 + "for(let i=0;i<all.length;i++){const n=all[i];const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;const s=fps+'|'+r+'|'+nm+'|'+counts[key];if(s===sig)return vis(n)?n:null;}return null;})("
                 + &sig_js
                 + ","

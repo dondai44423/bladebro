@@ -169,6 +169,7 @@ impl LivePageModel {
             box_: [0.0; 4],
             sig: sig.to_string(),
             frame: frame.to_vec(),
+            shadow: false,
         };
         if let Some(&i) = self.by_ref.get(id) {
             self.elements[i] = PageElement { ref_id: id.to_string(), raw };

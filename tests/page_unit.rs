@@ -22,6 +22,7 @@ fn el(role: &str, name: &str, sig: &str, value: Option<&str>, disabled: bool) ->
         box_: [0.0; 4],
         sig: sig.into(),
         frame: Vec::new(),
+        shadow: false,
     }
 }
 
