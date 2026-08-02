@@ -37,6 +37,21 @@ pub fn write_artifact(data: &str, ext: &str) -> Result<String> {
     Ok(path.display().to_string())
 }
 
+/// Write binary `data` to an artifact file and return its absolute path.
+/// Used for PDF output (Page.printToPDF bytes) and completed downloads.
+pub fn write_artifact_bytes(data: &[u8], ext: &str) -> Result<String> {
+    let dir = artifact_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| crate::error::BladeError::Other(format!("artifact dir: {e}")))?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let path = dir.join(format!("blade-{pid}-{seq:04}.{ext}"));
+    std::fs::write(&path, data)
+        .map_err(|e| crate::error::BladeError::Other(format!("artifact write: {e}")))?;
+    rotate_artifacts(&dir);
+    Ok(path.display().to_string())
+}
+
 /// Delete the oldest artifacts beyond MAX_ARTIFACTS.
 /// Best-effort: any error is ignored (rotation is hygiene,
 /// not correctness).

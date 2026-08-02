@@ -40,6 +40,7 @@ name = "bladebro"
 version = "2.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "futures-util",
  "libc",
  "reqwest",

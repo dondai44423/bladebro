@@ -23,7 +23,7 @@ pub fn all_tools() -> Vec<ToolDef> {
             description: "Perform one action on the page. This is your hands. Every action returns an outcome verdict + what changed (the delta), so you usually don't need `see` after.
 \n\
 ADDRESSING (pick one): text=\"Sign in\" (fastest, no see needed), ref=\"e5\" (from a previous response), label=\"Email\" for inputs, x+y for canvas. Ambiguous text? Add role=\"button\" or nth=2 (errors list matches with refs + nth values). Refs self-heal across navigations, so stale refs usually just work.\n\
-KEY ACTIONS: navigate(url), click, type(label+text), fill(fields+submit for multi-field forms), select, press(key), scroll(dx,dy), back/forward/reload, hover (reveals dropdowns in delta), wait(condition), eval(js for anything else; el in scope if ref given). slim=true returns verdict only.\n\
+KEY ACTIONS: navigate(url), click, type(label+text), fill(fields+submit for multi-field forms), select, press(key), scroll(dx,dy), back/forward/reload, hover (reveals dropdowns in delta), wait(condition), eval(js for anything else; el in scope if ref given), pdf (export page as PDF artifact), download (wait for a triggered download to finish, returns path). slim=true returns verdict only.\n\
 On error, current page state is included — recover without an extra see.",
             input_schema: json!({
                 "type": "object",
@@ -31,7 +31,7 @@ On error, current page state is included — recover without an extra see.",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "fill", "eval"]
+                        "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "fill", "eval", "pdf", "download"]
                     },
                     "ref": {
                         "type": "string",
@@ -89,6 +89,22 @@ On error, current page state is included — recover without an extra see.",
                     "js": {
                         "type": "string",
                         "description": "For eval: JavaScript to evaluate in the page. If ref is given, the element is available as 'el' in the script. Result is JSON."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "For pdf: explicit output file path (default: an artifact in ~/.blade/artifacts/)."
+                    },
+                    "landscape": {
+                        "type": "boolean",
+                        "description": "For pdf: landscape orientation. Default false."
+                    },
+                    "printBackground": {
+                        "type": "boolean",
+                        "description": "For pdf: include background colors/images. Default true."
+                    },
+                    "scale": {
+                        "type": "number",
+                        "description": "For pdf: render scale 0.1-2.0. Default 1.0."
                     },
                     "slim": {
                         "type": "boolean",

@@ -37,6 +37,26 @@ pub struct DialogInfo {
     pub accepted: bool,
 }
 
+/// A tracked download (V19). Updated by the download-watch task as
+/// Page.downloadProgress events arrive.
+#[derive(Debug, Clone)]
+pub struct DownloadInfo {
+    /// CDP download guid.
+    pub guid: String,
+    /// The URL being downloaded.
+    pub url: String,
+    /// Suggested filename.
+    pub filename: String,
+    /// "inProgress" | "completed" | "canceled".
+    pub state: String,
+    /// Bytes received so far.
+    pub received_bytes: u64,
+    /// Total bytes (0 if unknown).
+    pub total_bytes: u64,
+    /// Final path on disk (downloadPath/filename).
+    pub path: String,
+}
+
 /// A live page session: one CDP connection + its persistent Live Page Model.
 /// A completed/failed network request record (V8 introspection).
 #[derive(Debug, Clone)]
@@ -90,6 +110,11 @@ pub struct Page {
     intercept: intercept::InterceptState,
     /// Request-interception task handle.
     intercept_task: Option<tokio::task::JoinHandle<()>>,
+    /// Tracked downloads (V19), updated by the download-watch task. Newest
+    /// last. `act action=download` waits on the newest entry.
+    downloads: std::sync::Arc<Mutex<Vec<DownloadInfo>>>,
+    /// Download-watch task handle, aborted on shutdown.
+    download_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for Page {
@@ -261,6 +286,58 @@ impl Page {
         // Spawn the network-tracker task: counts in-flight requests so settle
         // can wait for data to arrive, not just DOM stability.
         let ambient: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // V19: download-watch task. Page.setDownloadBehavior (M17, above) already
+        // routes downloads to download_dir and enables Page.downloadWillBegin /
+        // Page.downloadProgress events. Track each download's state and surface
+        // a `download started` ambient note so a click that triggers a download
+        // is never silent.
+        let downloads: Arc<Mutex<Vec<DownloadInfo>>> = Arc::new(Mutex::new(Vec::new()));
+        let cdp_for_dl = cdp.clone();
+        let dlq = downloads.clone();
+        let dl_ambient = ambient.clone();
+        let dl_dir = download_dir.clone();
+        let download_task = tokio::spawn(async move {
+            let mut rx = cdp_for_dl.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(ev) if ev.method == "Page.downloadWillBegin" => {
+                        let guid = ev.params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let url = ev.params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let filename = ev.params.get("suggestedFilename").and_then(|v| v.as_str()).unwrap_or("download").to_string();
+                        let path = dl_dir.join(&filename).display().to_string();
+                        if let Ok(mut q) = dlq.lock() {
+                            q.push(DownloadInfo {
+                                guid, url, filename: filename.clone(),
+                                state: "inProgress".into(),
+                                received_bytes: 0, total_bytes: 0, path,
+                            });
+                            if q.len() > 50 { let n = q.len() - 50; q.drain(0..n); }
+                        }
+                        if let Ok(mut a) = dl_ambient.lock() {
+                            a.push(format!("download started: {filename}"));
+                        }
+                    }
+                    Ok(ev) if ev.method == "Page.downloadProgress" => {
+                        let guid = ev.params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let state = ev.params.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let received = ev.params.get("receivedBytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let total = ev.params.get("totalBytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if let Ok(mut q) = dlq.lock() {
+                            if let Some(d) = q.iter_mut().find(|d| d.guid == guid) {
+                                d.state = state;
+                                d.received_bytes = received;
+                                d.total_bytes = total;
+                            }
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         let in_flight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -392,7 +469,14 @@ impl Page {
             active_locale,
             intercept,
             intercept_task: Some(intercept_task),
+            downloads,
+            download_task: Some(download_task),
         })
+    }
+
+    /// The download tracker (V19). Newest download last.
+    pub fn downloads(&self) -> std::sync::Arc<Mutex<Vec<DownloadInfo>>> {
+        self.downloads.clone()
     }
 
     /// List the browser's page targets — over the pipe's browser-level
@@ -1009,6 +1093,9 @@ impl Drop for Page {
             handle.abort();
         }
         if let Some(handle) = self.intercept_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.download_task.take() {
             handle.abort();
         }
     }

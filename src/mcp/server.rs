@@ -838,6 +838,14 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             }
             return handle_eval(page, js, ref_id).await;
         }
+        "pdf" => {
+            // V20: export the current page as a PDF artifact.
+            return handle_pdf(page, args).await;
+        }
+        "download" => {
+            // V19: wait for the most recent download to complete.
+            return handle_download(page, args).await;
+        }
         "hover" => {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
@@ -1528,12 +1536,24 @@ async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> 
         };
         let sig_js = serde_json::to_string(&sig)?;
         let frame_js = serde_json::to_string(&frame)?;
-        // Frame-walk to the right document, find the element by
-        // role+name+ordinal, then invoke the user's JS with `el`
-        // in scope. Returns a {__blade_result} envelope.
-        format!(
-            "((sig,frame)=>{{let doc=document;for(const idx of frame){{const ifr=[...doc.querySelectorAll('iframe')][idx];if(!ifr)return{{__blade_not_found:true}};doc=ifr.contentDocument;}}const parts=sig.split('|');const role=parts[0],name=parts[1],ord=parseInt(parts[2]||'1');const all=[...doc.querySelectorAll('a,button,input,select,textarea,[role],[onclick],[tabindex],summary,label')];let count=0,el=null;for(const n of all){{const r=n.getAttribute('role')||n.tagName.toLowerCase();const nm=(n.getAttribute('aria-label')||n.innerText||n.value||n.placeholder||'').trim().slice(0,200);if(r===role&&nm===name){{count++;if(count===ord){{el=n;break}}}}}}if(!el)return{{__blade_not_found:true}};const result=((el)=>{{return({});}})(el);return{{__blade_result:result===undefined?null:result}}}})({},{})"
-        , js, sig_js, frame_js)
+        // Find the element by its CANONICAL sig — the same role()/name()/deepAll
+        // scheme the capture script and find_by_sig use (V25c/W2). The prior
+        // inline version matched tagName ('a') against the semantic role
+        // ('link'), so eval-with-ref was broken for links and most inputs.
+        // Then invoke the user's JS with `el` in scope.
+        "((sig,frame)=>{".to_string()
+            + &crate::page::perception::JS_PREAMBLE
+            + "let doc=document;for(const idx of frame){const ifr=[...doc.querySelectorAll('iframe')][idx];if(!ifr)return{__blade_not_found:true};try{doc=ifr.contentDocument;if(!doc)return{__blade_not_found:true};}catch(e){return{__blade_not_found:true};}}"
+            + "const all=deepAll(doc,sel);const fps=frame.join(',');const counts={};let el=null;"
+            + "for(const n of all){const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;const s=fps+'|'+r+'|'+nm+'|'+counts[key];if(s===sig){el=n;break}}"
+            + "if(!el)return{__blade_not_found:true};"
+            + "const result=((el)=>{return("
+            + js
+            + ");})(el);return{__blade_result:result===undefined?null:result}})("
+            + &sig_js
+            + ","
+            + &frame_js
+            + ")"
     };
 
     let res = page.cdp_ref().send("Runtime.evaluate", Some(json!({
@@ -1584,6 +1604,88 @@ async fn format_eval_result(json_str: &str) -> Result<String> {
             "result ({} bytes) → {path}\npreview: {preview}…\nread the file for the full result",
             json_str.len()
         ))
+    }
+}
+
+/// V20: export the current page as a PDF. Page.printToPDF → base64 → decode
+/// → artifact file. Optional `path` writes to an explicit location instead.
+/// Options: landscape (default false), printBackground (default true),
+/// scale (default 1.0, clamped 0.1-2.0).
+async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
+    let landscape = args.get("landscape").and_then(|v| v.as_bool()).unwrap_or(false);
+    let print_bg = args.get("printBackground").and_then(|v| v.as_bool()).unwrap_or(true);
+    let scale = args.get("scale").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.1, 2.0);
+
+    let res = page.cdp_ref().send("Page.printToPDF", Some(json!({
+        "landscape": landscape,
+        "printBackground": print_bg,
+        "scale": scale,
+    }))).await?;
+
+    if let Some(exc) = res.get("exceptionDetails") {
+        let msg = exc.get("exception").and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str()).unwrap_or("printToPDF failed");
+        return Err(BladeError::Other(format!("pdf failed: {msg}")));
+    }
+    let data = res.get("data").and_then(|d| d.as_str()).unwrap_or("");
+    if data.is_empty() {
+        return Err(BladeError::Other("printToPDF returned no data".into()));
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data)
+        .map_err(|e| BladeError::Other(format!("pdf base64 decode: {e}")))?;
+
+    let path = match args.get("path").and_then(|p| p.as_str()) {
+        Some(p) if !p.is_empty() => {
+            let pb = std::path::PathBuf::from(p);
+            if let Some(parent) = pb.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| BladeError::Other(format!("pdf dir: {e}")))?;
+            }
+            std::fs::write(&pb, &bytes)
+                .map_err(|e| BladeError::Other(format!("pdf write: {e}")))?;
+            pb.display().to_string()
+        }
+        _ => crate::artifacts::write_artifact_bytes(&bytes, "pdf")?,
+    };
+    Ok(format!("pdf saved: {} ({} bytes)", path, bytes.len()))
+}
+
+/// V19: wait for the most recent download to finish and return its path+size.
+/// Downloads are routed to a temp dir (M17) and tracked by the download-watch
+/// task. `act action=download` after a click that triggers a download blocks
+/// until it completes (or `timeout` secs, default 60).
+async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
+    let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(60);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let downloads = page.downloads();
+    loop {
+        let latest = {
+            let q = downloads.lock().unwrap_or_else(|e| e.into_inner());
+            q.last().cloned()
+        };
+        match latest {
+            Some(d) if d.state == "completed" => {
+                let size = std::fs::metadata(&d.path).map(|m| m.len()).unwrap_or(d.received_bytes);
+                return Ok(format!(
+                    "download complete: {} ({} bytes)\nfrom: {}",
+                    d.path, size, d.url
+                ));
+            }
+            Some(d) if d.state == "canceled" => {
+                return Err(BladeError::Other(format!(
+                    "download canceled: {} ({})", d.filename, d.url
+                )));
+            }
+            Some(_) => { /* in progress — keep waiting */ }
+            None => { /* no download started yet — keep waiting */ }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(BladeError::Other(format!(
+                "no completed download within {timeout_secs}s. If a download is in progress, retry with a longer timeout."
+            )));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
 }
 
