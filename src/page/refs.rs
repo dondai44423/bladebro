@@ -62,14 +62,18 @@ pub fn stabilize(
     next: &[RawElement],
     next_ref: &mut u64,
 ) -> StabilizeResult {
-    // Index previous elements by signature for exact matching, and by
-    // role+name (stripping ordinal) for fuzzy rebind when only the ordinal shifts.
+    // Index previous elements by signature for exact matching. With the V25c
+    // global per-frame rank sig scheme, an exact sig match now survives BOTH
+    // scrolls (document order never changes) and insertions of
+    // differently-named elements (a per-name rank is unaffected). No fuzzy
+    // role+name rebind is done: it cannot distinguish "same element
+    // re-rendered" from "a different same-named element scrolled into view"
+    // under viewport culling, and guessing wrong is a silent misclick (D25).
+    // The rare same-named reorder orphans the ref to the graveyard, and a
+    // later click sig-precise-heals to the exact original element.
     let mut prev_by_sig: HashMap<&str, &str> = HashMap::new(); // sig -> ref id
-    let mut prev_by_rn: HashMap<String, Vec<String>> = HashMap::new(); // "role\x00name" -> ref ids
-    for (ref_id, (sig, role, name, _)) in prev {
+    for (ref_id, (sig, _, _, _)) in prev {
         prev_by_sig.insert(sig.as_str(), ref_id.as_str());
-        let rn = format!("{role}\u{0}{name}");
-        prev_by_rn.entry(rn).or_default().push(ref_id.clone());
     }
 
     let mut result = StabilizeResult::default();
@@ -95,30 +99,14 @@ pub fn stabilize(
                 }
                 continue;
             }
-            // The ref this sig maps to was already consumed by an
-            // earlier element this round (duplicate sigs) — fall through
-            // to fuzzy/mint.
+            // The ref this sig maps to was already consumed by an earlier
+            // element this round (cannot happen with rank-unique sigs, but
+            // keep the guard) — treat as fresh.
         }
-
-        // 2. Fuzzy rebind: same role+name, different ordinal — the set reordered,
-        //    not replaced. Take the first unused prev ref for this role+name.
-        let rn = format!("{}\u{0}{}", el.role, el.name);
-        let mut rebound = false;
-        if let Some(cands) = prev_by_rn.get(rn.as_str()) {
-            if let Some(unused) = cands.iter().find(|r| !used_prev.contains(r.as_str())) {
-                result.live.insert(el.sig.clone(), unused.clone());
-                used_prev.insert(unused.clone());
-                if let Some((_, _, _, Some(prev_probe))) = prev.get(unused.as_str()) {
-                    if let Some(change) = diff_state(prev_probe, el) {
-                        result.changed.push((unused.clone(), change));
-                    }
-                }
-                rebound = true;
-            }
-        }
-        if !rebound {
-            fresh.push(i);
-        }
+        // No exact sig match: this is a genuinely new element (or a survivor
+        // whose rank shifted on a same-named reorder). Mint a fresh ref; the
+        // old ref orphans to the graveyard and sig-precise-heals on use.
+        fresh.push(i);
     }
 
     // Pass 2: mint fresh refs for new elements, skipping any id a

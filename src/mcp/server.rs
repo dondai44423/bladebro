@@ -387,12 +387,16 @@ async fn serve(
                         // === CALL THE TOOL ===
                         // Clone id for retry paths — handle_tools_call consumes it.
                         let id_retry = id.clone();
+                        let _hc_t = std::time::Instant::now();
                         let res = {
                             let p = page.as_mut().unwrap();
                             futures_util::FutureExt::catch_unwind(
                                 std::panic::AssertUnwindSafe(handle_tools_call(id, &params, p)),
                             ).await
                         };
+                        if std::env::var("NAV_TIMING").is_ok() {
+                            eprintln!("[nav-timing] handle_tools_call total: {:?}", _hc_t.elapsed());
+                        }
 
                         // handle_tools_call returns Result<Value, BladeError>:
                         // Ok(Value) = normal response. Err(Closed) = browser
@@ -957,12 +961,17 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
         "back" => Action::Back,
         "navigate" => {
             let delta = page.navigate(url).await?;
+            let _rt = std::time::Instant::now();
             let verdict = if delta.navigated {
                 format!("outcome: navigated \u{2192} {}", page.model().url())
             } else {
                 "outcome: already here".to_string()
             };
-            return Ok(format!("{verdict}\n{}", page.delta_view(&delta, 8000)));
+            let view = page.delta_view(&delta, 8000);
+            if std::env::var("NAV_TIMING").is_ok() {
+                eprintln!("[nav-timing] delta_view: {:?} ({} bytes)", _rt.elapsed(), view.len());
+            }
+            return Ok(format!("{verdict}\n{}", view));
         }
         _ => {
             return Err(crate::error::BladeError::Other(format!(
@@ -1765,11 +1774,16 @@ async fn handle_vision(
             + "const ov=d.createElement('div');ov.id='blade-marks';"
             + "ov.style.cssText='position:fixed;inset:0;pointer-events:none;z-index:2147483647;';"
             + "const vw=innerWidth,vh=innerHeight;"
-            + "const all=[...d.querySelectorAll(sel)];const counts={};"
-            + "const sigs=new Map();"
-            + "for(const n of all){if(!vis(n))continue;const r=role(n);if(r==='hidden')continue;"
+            + "const all=[...d.querySelectorAll(sel)];"
+            + "const sigs=new Map();const counts={};"
+            // Sig = '' frame prefix (main doc) | role | shortName | rank,
+            // rank counted over ALL matches (vis-failing included) — matches
+            // the capture script (V25c). Only vis-passing elements are mapped
+            // for marking, but the rank counts everything so sigs agree.
+            + "for(let i=0;i<all.length;i++){const n=all[i];const r=role(n);if(r==='hidden')continue;"
             + "const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;"
-            + "sigs.set(r+'|'+nm+'|'+counts[key],n);}"
+            + "if(!vis(n))continue;"
+            + "sigs.set('|'+r+'|'+nm+'|'+counts[key],n);}"
             + "let marked=0;"
             + "for(const[ref,sig]of items){const el=sigs.get(sig);if(!el)continue;"
             + "const rect=el.getBoundingClientRect();"

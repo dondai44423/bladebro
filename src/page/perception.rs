@@ -132,7 +132,14 @@ pub const JS_ROLE_FN: &str = r#"const roleMap={button:'button',link:'link',check
 /// resort — it should be `true` for display (the agent sees the current value)
 /// but `false` for the stability signature (typing changes the value, which
 /// must NOT change the element's identity).
-pub const JS_NAME_FN: &str = r#"function name(n,includeValue){const al=n.getAttribute('aria-label');if(al&&al.trim())return al.trim().replace(/\s+/g,' ').slice(0,120);const doc=n.ownerDocument;const lb=n.getAttribute('aria-labelledby');if(lb&&doc){const e=doc.getElementById(lb);if(e&&(e.textContent||' ').trim())return e.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const id=n.id;if(id&&doc){const l=doc.querySelector('label[for="'+esc(id)+'"]');if(l&&(l.textContent||' ').trim())return l.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const cl=n.closest('label');if(cl&&(cl.textContent||' ').trim())return cl.textContent.trim().replace(/\s+/g,' ').slice(0,120);const ti=n.title;if(ti&&ti.trim())return ti.trim().slice(0,120);const ph=n.placeholder;if(ph&&ph.trim())return ph.trim().slice(0,120);const tc=n.textContent;if(tc&&tc.trim())return tc.trim().replace(/\s+/g,' ').slice(0,120);const alt=n.getAttribute('alt');if(alt&&alt.trim())return alt.trim().slice(0,120);if(includeValue){const val=n.value;if(val&&typeof val==='string'&&val.trim()&&n.tagName==='INPUT')return val.trim().slice(0,60);}return'';}"#;
+// Label map cache, one per document, held in a WeakMap so nothing is added
+// to the DOM (an expando would be a stealth tell). Built lazily on first use
+// and reused — this removes the per-element `querySelector('label[for=…]')`
+// that made name resolution O(n²) on id-heavy pages, which is what lets the
+// capture compute names for ALL elements (needed for stable sigs) cheaply.
+pub const JS_LABEL_CACHE: &str = r#"const __BLC=new WeakMap();function getLabels(doc){let m=__BLC.get(doc);if(!m){m={};try{for(const l of doc.querySelectorAll('label[for]')){const f=l.getAttribute('for');if(f&&!(f in m)){const t=(l.textContent||'').trim();if(t)m[f]=t.replace(/\s+/g,' ').slice(0,120);}}}catch(e){}__BLC.set(doc,m);}return m;}"#;
+
+pub const JS_NAME_FN: &str = r#"function name(n,includeValue){const al=n.getAttribute('aria-label');if(al&&al.trim())return al.trim().replace(/\s+/g,' ').slice(0,120);const doc=n.ownerDocument;const lb=n.getAttribute('aria-labelledby');if(lb&&doc){const e=doc.getElementById(lb);if(e&&(e.textContent||' ').trim())return e.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const id=n.id;if(id&&doc){const lt=getLabels(doc)[id];if(lt)return lt;}const cl=n.closest('label');if(cl&&(cl.textContent||' ').trim())return cl.textContent.trim().replace(/\s+/g,' ').slice(0,120);const ti=n.title;if(ti&&ti.trim())return ti.trim().slice(0,120);const ph=n.placeholder;if(ph&&ph.trim())return ph.trim().slice(0,120);const tc=n.textContent;if(tc&&tc.trim())return tc.trim().replace(/\s+/g,' ').slice(0,120);const alt=n.getAttribute('alt');if(alt&&alt.trim())return alt.trim().slice(0,120);if(includeValue){const val=n.value;if(val&&typeof val==='string'&&val.trim()&&n.tagName==='INPUT')return val.trim().slice(0,60);}return'';}"#;
 
 /// The shared preamble: just the selector + helper functions.
 /// Each script (capture, find-by-sig) sets up its own document context,
@@ -145,6 +152,7 @@ pub static JS_PREAMBLE: LazyLock<String> = LazyLock::new(|| {
         + JS_VIS_FN
         + JS_ESC_FN
         + JS_ROLE_FN
+        + JS_LABEL_CACHE
         + JS_NAME_FN
         + JS_LANDMARK_FN
 });
@@ -160,15 +168,44 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         .to_string()
         + "const d=document;if(!d||!d.body)return null;"
         + &JS_PREAMBLE
-        + "const out=[];const counts={};"
+        + "const out=[];"
+        // Viewport culling (V25c): only capture elements in or near the
+        // viewport. An agent can only click what it can see; off-screen
+        // elements are reachable via see find= or self-healing refs (click
+        // scrolls into view). On link-dense pages (Wikipedia: thousands of
+        // <a>) this cuts capture from ~3000 nodes to ~100 — the difference
+        // between a 5.6s and a ~0.25s capture — AND shrinks the default
+        // model (fewer tokens). Margin is generous to reduce scroll flap.
+        + "const VH=window.innerHeight||800;const VM=Math.round(VH*1.5);"
         + "function cap(doc,fp,ox,oy){"
+        // Sig scheme (V25c): sig = framePath | role | shortName | rank, where
+        // rank is the element's ordinal among SAME-role+name elements in its
+        // OWN frame, counted over ALL selector matches (visible or not,
+        // on-screen or not). Because the rank is GLOBAL per frame and derived
+        // from document order, it is stable across SCROLLS (document order
+        // never changes) AND across insertions of differently-named elements
+        // — the two properties viewport culling needs to never silently
+        // rebind a ref to a different element (D25). We must compute
+        // role+name for every element to get the rank; the label cache makes
+        // that cheap. Only the EXPENSIVE parts (vis check, box serialization)
+        // are culled to in-viewport elements. The frame prefix keeps sigs
+        // unique across frames and matches find_by_sig.
+        + "const fps=fp.join(',');"
         + "const all=[...doc.querySelectorAll(sel)];"
-        + "for(const n of all){"
-        + "if(!vis(n))continue;"
+        + "const counts={};"
+        + "for(let i=0;i<all.length;i++){"
+        + "const n=all[i];"
         + "const r=role(n);if(r==='hidden')continue;"
-        + "const nm=name(n,true);const snm=name(n,false);"
-        + "const key=r+'\\u0000'+snm;counts[key]=(counts[key]||0)+1;"
+        + "const snm=name(n,false);"
+        + "const key=r+'\\u0000'+snm;counts[key]=(counts[key]||0)+1;const rank=counts[key];"
+        // Cull: only serialize elements in or near the viewport. Off-screen
+        // elements were still COUNTED above (stable rank) but skip the box +
+        // vis work. Reachable via see find= or self-heal (click scrolls).
         + "const rect=n.getBoundingClientRect();"
+        + "const ay=rect.y+oy;"
+        + "if(ay+rect.height<-VM||ay>VH+VM)continue;"
+        + "if(!vis(n))continue;"
+        + "const nm=name(n,true);"
         + "out.push({tag:n.tagName.toLowerCase(),role:r,name:nm,type:n.type||null,"
         + "value:n.value&&n.value.length<=200?n.value:null,"
         + "disabled:!!n.disabled,"
@@ -178,7 +215,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "haspopup:!!n.getAttribute('aria-haspopup'),"
         + "landmark:landmarkOf(n),"
         + "box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],"
-        + "sig:r+'|'+snm+'|'+counts[key],"
+        + "sig:fps+'|'+r+'|'+snm+'|'+rank,"
         + "frame:fp});"
         + "}"
         + "const ifs=doc.querySelectorAll('iframe');"
@@ -278,23 +315,35 @@ pub async fn wait_for_settle_with_network(
     // DOM quiet (or we gave up waiting on a saturated page). Now drain the
     // network counter locally — no CDP round-trips, just an atomic read.
     if let Some(counter) = in_flight {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut last = counter.load(Ordering::Relaxed);
-        let mut last_change = tokio::time::Instant::now();
+        // Network drain: wait for the post-load burst to finish. We do
+        // NOT wait for a fully-quiet network — modern pages never go
+        // quiet (analytics beacons, websockets, long-poll) and the count
+        // keeps fluctuating, which used to burn the whole 5s deadline
+        // (measured: Wikipedia/BBC navigated in 8.5s, floor is 2.5s).
+        // Instead: keep waiting only while the count makes progress
+        // toward zero (each new low resets the grace timer); break once
+        // it has plateaued for GRACE, when it hits zero, or at the hard
+        // deadline. Fast by default; agents needing full network quiet
+        // can `act wait condition=network` explicitly.
+        const GRACE: Duration = Duration::from_millis(1200);
+        let hard_deadline = tokio::time::Instant::now() + timeout;
+        let mut lowest = counter.load(Ordering::Relaxed);
+        let mut last_new_low = tokio::time::Instant::now();
         loop {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                break;
-            }
             let cur = counter.load(Ordering::Relaxed);
             if cur == 0 {
                 break;
             }
-            if cur != last {
-                last = cur;
-                last_change = now;
-            } else if now.duration_since(last_change) >= Duration::from_millis(500) {
-                // Stable count with open requests = long-poll/SSE stragglers.
+            let now = tokio::time::Instant::now();
+            if now >= hard_deadline {
+                break;
+            }
+            if cur < lowest {
+                lowest = cur;
+                last_new_low = now;
+            } else if now.duration_since(last_new_low) > GRACE {
+                // Plateaued: no new low in GRACE. Either stragglers
+                // finished or only persistent connections remain.
                 break;
             }
             tokio::time::sleep(Duration::from_millis(80)).await;

@@ -155,14 +155,19 @@ pub async fn find_by_text(
         .to_string()
         + "const d=document;if(!d||!d.body)return[];"
         + &JS_PREAMBLE
-        + "const all=[...d.querySelectorAll(sel)];const counts={};const results=[];"
+        + "const all=[...d.querySelectorAll(sel)];const results=[];const counts={};"
         + "const q=query.toLowerCase();"
-        + "for(const n of all){"
-        + "if(!vis(n))continue;"
+        // Rank counted over ALL matches (vis-failing included, role-hidden
+        // excluded) — identical to the capture script (V25c). Only vis-passing
+        // matches are RETURNED, but the rank counts everything so sigs agree.
+        // Frame prefix '' (main doc) + '|' matches capture's fps format.
+        + "for(let i=0;i<all.length;i++){const n=all[i];"
         + "const r=role(n);if(r==='hidden')continue;"
+        + "const snm=name(n,false);"
+        + "const key=r+'\\u0000'+snm;counts[key]=(counts[key]||0)+1;"
         + "if(rf&&r!==rf)continue;"
-        + "const snm=name(n,false);const key=r+'\\u0000'+snm;counts[key]=(counts[key]||0)+1;"
-        + "const sig=r+'|'+snm+'|'+counts[key];"
+        + "if(!vis(n))continue;"
+        + "const sig='|'+r+'|'+snm+'|'+counts[key];"
         + "const nm=name(n,true);let score=0;"
         + "if(nm===query)score=100;else if(nm.toLowerCase()===q)score=80;"
         + "else if(nm.includes(query))score=70;else if(nm.toLowerCase().includes(q))score=60;"
@@ -431,16 +436,20 @@ async fn find_by_sig(
         + "if(!f)return{ok:false,reason:'frame gone'};"
         + "try{doc=f.contentDocument;if(!doc)return{ok:false,reason:'frame inaccessible'};}catch(e){return{ok:false,reason:'cross-origin'};}"
         + "const ir=f.getBoundingClientRect();ox+=ir.x;oy+=ir.y;}"
-        + "const all=[...doc.querySelectorAll(sel)];const counts={};"
-        + "for(const n of all){"
-        + "if(!vis(n))continue;"
+        + "const all=[...doc.querySelectorAll(sel)];"
+        // Sig = framePath | role | shortName | rank, rank counted over ALL
+        // matches (vis-failing included, role-hidden excluded) — identical to
+        // the capture script (V25c). vis() is checked only on the matched
+        // element, never for ranking, so ranks stay aligned with capture.
+        + "const fps=frame.join(',');const counts={};"
+        + "for(let i=0;i<all.length;i++){const n=all[i];"
         + "const r=role(n);if(r==='hidden')continue;"
         + "const nm=name(n,false);"
         + "const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;"
-        + "const s=r+'|'+nm+'|'+counts[key];"
+        + "const s=fps+'|'+r+'|'+nm+'|'+counts[key];"
         + "if(s==="
         + &sig_js
-        + "){const rect=n.getBoundingClientRect();"
+        + "){if(!vis(n))return{ok:false,reason:'element hidden'};const rect=n.getBoundingClientRect();"
         + "const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;"
         + "const top=doc.elementFromPoint(cx,cy);"
         + "const isTopmost=top===n||n.contains(top);"
@@ -1070,8 +1079,8 @@ pub async fn perform_with_network(
                 + "const d=document;if(!d||!d.body)return null;"
                 + &JS_PREAMBLE
                 + "let doc=d;for(let i=0;i<frame.length;i++){const ifs=doc.querySelectorAll('iframe');const f=ifs[frame[i]];if(!f)return null;try{doc=f.contentDocument;if(!doc)return null;}catch(e){return null;}}"
-                + "const all=[...doc.querySelectorAll(sel)];const counts={};"
-                + "for(const n of all){if(!vis(n))continue;const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;const s=r+'|'+nm+'|'+counts[key];if(s===sig)return n;}return null;})("
+                + "const all=[...doc.querySelectorAll(sel)];const fps=frame.join(',');const counts={};"
+                + "for(let i=0;i<all.length;i++){const n=all[i];const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;const s=fps+'|'+r+'|'+nm+'|'+counts[key];if(s===sig)return vis(n)?n:null;}return null;})("
                 + &sig_js
                 + ","
                 + &frame_js
