@@ -179,8 +179,7 @@ result.live.insert(el.sig.clone(), ref_id.to_string());
 /// re-renders that preserve structure even when text or classes change
 /// (React/Vue/Angular re-renders, live region updates, counter changes).
 /// Different sigs but same structural fingerprint = same element.
-
-
+/// 
 /// The live state of an element at capture time, stored on the LPM so the next
 /// capture can detect changes without a separate query.
 #[derive(Debug, Clone)]

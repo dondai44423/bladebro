@@ -31,7 +31,30 @@ On error, current page state is included — recover without an extra see.",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "fill", "eval", "pdf", "download", "collect"]
+                        "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "fill", "batch", "eval", "pdf", "download", "collect"]
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Batch: array of action objects to run sequentially in ONE call. Each step has {action, ref/text, ...all normal params}. Stops early if a step navigates (page changed) or fails.",
+                        "items": {
+                            "type": "object",
+                            "required": ["action"],
+                            "properties": {
+                                "action": {"type": "string", "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload"]},
+                                "ref": {"type": "string"},
+                                "text": {"type": "string"},
+                                "label": {"type": "string"},
+                                "key": {"type": "string"},
+                                "url": {"type": "string"},
+                                "dx": {"type": "integer"},
+                                "dy": {"type": "integer"},
+                                "role": {"type": "string"},
+                                "nth": {"type": "integer"},
+                                "option": {"type": "string"},
+                                "x": {"type": "number"},
+                                "y": {"type": "number"}
+                            }
+                        }
                     },
                     "ref": {
                         "type": "string",

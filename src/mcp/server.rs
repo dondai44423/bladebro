@@ -971,6 +971,57 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             }
         }
         "back" => Action::Back,
+        "batch" => {
+            // D49: run each step sequentially in this one MCP call. The key
+            // token-efficiency win: the agent does see → batch([click e2,
+            // type e3 "user", click e4, type e5 "pass", click e6]) → see
+            // instead of 11 calls for a 5-field form. Each nested step
+            // recaptures internally (no stale refs), ONE final recapture
+            // renders the cumulative delta.
+            let steps = args.get("steps").and_then(|s| s.as_array())
+                .ok_or_else(|| BladeError::Other("batch requires 'steps' array".into()))?;
+            if steps.is_empty() {
+                return Err(BladeError::Other("batch requires at least one step".into()));
+            }
+            let mut verdicts: Vec<String> = Vec::new();
+            let mut ok_count = 0usize;
+            let mut halted: Option<usize> = None;
+            let start_url = page.model().url().to_string();
+            for (i, step) in steps.iter().enumerate() {
+                let step_action = step.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
+                match Box::pin(handle_act(step, page)).await {
+                    Ok(verdict) => {
+                        ok_count += 1;
+                        let vline = verdict.lines().next().unwrap_or("ok").trim().to_string();
+                        verdicts.push(format!("step{}[{}]: {}", i+1, step_action, vline));
+                        // Halt if this step navigated (post-fill submit, link click).
+                        // Wrong-page clicks are the worst failure mode in batches.
+                        if page.model().url() != start_url {
+                            halted = Some(i+1);
+                            verdicts.push(format!("step{}[{}]: HALT (navigated → {})", i+1, step_action, page.model().url()));
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        halted = Some(i+1);
+                        verdicts.push(format!("step{}[{}]: HALT: {}", i+1, step_action, e));
+                        break;
+                    }
+                }
+            }
+            // Cumulative final delta — one render, all the changes.
+            let final_delta = page.recapture().await?;
+            let view = page.delta_view(&final_delta, 8000);
+            let summary = if let Some(halt) = halted {
+                format!("batch halt at step {halt} ({ok_count} ok)")
+            } else {
+                format!("batch ({} steps, {} ok)", steps.len(), ok_count)
+            };
+            return Ok(format!("{summary}\n{verdicts}\n{view}",
+                summary=summary,
+                verdicts=if verdicts.is_empty() { String::new() } else { format!("(steps: {})\n", verdicts.join(" | ")) },
+                view=view));
+        }
         "navigate" => {
             let delta = page.navigate(url).await?;
             let _rt = std::time::Instant::now();
