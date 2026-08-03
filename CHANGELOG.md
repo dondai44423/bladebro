@@ -5,19 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.1] - 2026-08-03
 
-## [2.1.0] - 2026-07-30
+### Added — v3 "I don't believe this works"
 
-## [2.1.0] - 2026-07-30
+- **npm distribution**: `npm install -g bladebro` ships a prebuilt binary. No Rust, no compilation. Per-platform packages via `optionalDependencies` with `os`/`cpu` fields (npm handles resolution natively). `scripts/publish-npm.sh` automates the full publish pipeline (version sync, build, publish, propagation wait).
+- **Re-render immunity (D48)**: structural fingerprint identity for every captured element. FNV-1a hash over ancestor chain + tag + children + identity attributes. When React/Vue/Angular re-renders (DOM nodes replaced, text changes), refs survive via fingerprint match instead of being invalidated. The agent sees `↺ e2 (re-render survived)` in the delta. No other agent browser does this.
+- **Batch actions (D49)**: `act batch steps=[...]` runs multi-step workflows in ONE MCP call. Each step dispatches through the same handler, recapturing internally (no stale refs). Safety halt on page navigation or first failure with step-level context. 5-step form fill+submit in one call instead of 11.
+- **Auto-extract (`see extract=auto`)**: template-free list extraction via structural detection and content-value scoring (count × text × external links × headings × images). Verified on HN (30 articles), Lobste.rs (25 stories), Wikipedia (50 references), DuckDuckGo, StackOverflow, Reddit, GitHub, MDN.
+- **Collect (`act collect`)**: native scroll+dedupe loop for infinite feeds. Auto-extract, dedupe by URL/title/text, scroll, repeat until max or no new items. ONE call, ONE artifact. Verified: 80 items from infinite-scroll page, 0 duplicates.
+- **Downloads**: `act download timeout=N` waits for triggered downloads, returns path + byte size + source URL. Auto-notes "download started" in click delta.
+- **PDF export**: `act pdf` exports page as PDF artifact via Page.printToPDF.
+- **Shadow DOM piercing**: `deepAll` shadow-piercing collector in capture. Open shadow roots (YouTube, Salesforce, Web Components) are visible.
+- **Wait intelligence**: 6 conditions (element, title, settle, url, text, js). Timeout errors with page state for agent recovery.
+- **Resource blocking**: fetch interception with block classes (images, fonts, css, js, media, trackers). NEVER_BLOCK bot-detection domains. 3-4x faster page loads.
+- **Human input physics**: Bezier mouse trajectories with overshoot+correction, log-normal per-key typing cadence, eased multi-step scroll.
 
-### Fixed — Reliability overhaul (14 bugs)
+### Performance
 
-- **Cross-session Chrome murder**: every bladebro shared one Chrome profile. A second session's launch SIGKILLed the first session's live Chrome; if both were alive, they murdered each other's browsers in a loop. Fixed with session-scoped profiles (`~/.blade/profiles/sess-<pid>`) — two sessions never touch the same Chrome.
-- **Orphaned Chrome + Xvfb on kill**: no signal handlers. SIGTERM/SIGKILL from the harness orphaned Chrome + Xvfb forever (11 leaked Xvfb processes observed on one machine after a day). Fixed with SIGTERM/SIGINT/SIGHUP handlers that gracefully shut down Chrome, sync the profile back to the template, and clean up.
-- **Xvfb display leak**: orphaned Xvfb held `/tmp/.X<n>-lock`; each launch picked a higher number. Fixed with an orphan reaper that kills parentless Xvfb processes and removes stale locks + display-claim files on every launch.
-- **Xvfb launch race**: two bladebros launching simultaneously both claimed the same display. One Xvfb died, but its Chrome rendered on the survivor's Xvfb — when the survivor exited, the other's Chrome lost its display and crashed. Fixed with atomic O_EXCL display-claim files.
-- **SIGTERM hang**: `tokio::io::stdin()` reads on a blocking-pool thread. After signal-driven shutdown, the parked read blocked `Runtime::drop` forever — the process stayed alive with Chrome long dead. Fixed with explicit `process::exit` before the runtime drops.
+- Viewport-scoped capture: 19ms recapture (was 5.6s, 295x improvement). Only captures in-viewport elements; off-screen elements still counted for stable rank sigs.
+- Warm Wikipedia navigate: 1.4s (was 9.5s).
+- Settle wait: ~1.3s (was 5s).
+
+### Stealth
+
+- incolumitas.com: 8/8 automated detection tests ALL PASS (webdriver=false, no HeadlessChrome UA leak, platform=Linux x86_64, plugins=5, no override/overflow/worker leaks).
+- bot.sannysoft.com: 0 fails.
+- Core indicators clean: UA has no "HeadlessChrome", webdriver=false, screen=1920x1080x24, hardwareConcurrency=16, deviceMemory=8.
+
+### Fixed
+
+- `handle_eval` ref-targeting matched tagName against semantic role (broken for links/inputs). Rewrote to canonical sig matching.
+- Wait action discarded `check_condition` result (always returned "waited" even on timeout). Now errors with page state.
+- Removed unsafe fuzzy role+name rebind (couldn't distinguish re-render from scroll-swap under viewport culling).
+
+### Tests
+
+- 41 unit tests (including 3 re-render immunity tests). 26/26 real-site battery. 0 clippy warnings.
+
 - **Self-heal broken for act/run**: `handle_act` and `execute_step` wrapped `BladeError::Closed` into a generic error, so the transparent relaunch+retry never fired on mid-action crashes. Fixed: `Closed` propagates unwrapped.
 - **Panic response used `id: null`**: broke JSON-RPC correlation; the client's request hung until timeout. Fixed to use the request id.
 - **Idle-relaunch state loss invisible**: after idle shutdown, the agent's refs failed with "never seen" and no hint. Fixed: the first post-relaunch response prepends a note explaining the browser restarted.

@@ -6,21 +6,22 @@
 
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
-Drive · click · type · scroll · stealth · settle · delta-first · one binary
+Re-render-immune refs · batch actions · auto-extract · stealth · delta-first · one binary
 
 One MCP server · one persistent page model · zero Node.js · runs on your machine
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/bladebro.svg)](https://www.npmjs.com/package/bladebro)
 [![Rust](https://img.shields.io/badge/Rust-1.86+-orange.svg)](https://www.rust-lang.org)
 [![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?label=release)](https://github.com/dondai44423/bladebro/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
 [![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?style=social)](https://github.com/dondai44423/bladebro)
 
 ```bash
-cargo build --release && ./target/release/bladebro mcp
+npm install -g bladebro && bladebro mcp
 ```
 
-[Install](#-install) · [The 5 tools](#-the-5-tools) · [Stealth](#-stealth-system) · [Comparison](#-comparison) · [Gotchas](#-gotchas)
+[Install](#-install) · [The 5 tools](#-the-5-tools) · [Re-render immunity](#-re-render-immunity) · [Stealth](#-stealth-system) · [Comparison](#-comparison)
 
 </div>
 
@@ -34,20 +35,40 @@ Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and 
 
 ## 🔧 Install
 
+### npm (recommended)
+
+```bash
+npm install -g bladebro
+bladebro mcp
+```
+
+That's it. No Rust, no compilation, no dependencies. The npm package ships a prebuilt binary for your platform. Currently available for **Linux x86_64**. macOS and Windows binaries coming soon.
+
+### From source
+
 **Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.86+. Linux: Xvfb for headless servers (macOS/Windows run headful natively).
 
 ```bash
 git clone https://github.com/dondai44423/bladebro.git
 cd bladebro
 cargo build --release
+./target/release/bladebro mcp
 ```
 
-That's it. Bladebro finds Chrome itself, launches it with stealth flags, and manages its lifecycle.
+### Connect your AI agent
 
-**Connect your AI agent** via MCP over stdio:
+MCP over stdio — point your agent at the binary:
 
 ```json
-{ "mcpServers": { "bladebro": { "command": "/path/to/bladebro", "args": ["mcp"] } } }
+{ "mcpServers": { "bladebro": { "command": "bladebro", "args": ["mcp"] } } }
+```
+
+### Diagnostics
+
+```bash
+bladebro -doc    # system check (Chrome, Xvfb, profile, network, version)
+bladebro -v      # version + update status
+bladebro audit   # stealth verification
 ```
 
 | Env Var | Default | What it does |
@@ -73,18 +94,24 @@ Every `act` returns an **outcome verdict + page delta**. Click auto-escalates: m
 | `click` | `act click e5` or `act click text="Sign in"` | Mouse, JS, Enter escalation |
 | `type` | `act type label="Search" text="hello"` | Cadenced typing into textboxes |
 | `fill` | `act fill fields=[...] submit="Go"` | Multi-field form fill, auto-detects type |
+| `batch` | `act batch steps=[{click},{type},{click}]` | **Multi-step workflows in ONE call** (D49) |
 | `navigate` | `act navigate url="https://example.com"` | Idempotent, returns full page model |
 | `scroll` | `act scroll dy=800` | Smooth eased wheel events |
 | `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
-| `back` / `forward` / `reload` | `act back` | History + reload |
+| `collect` | `act collect max=50 timeout=30` | **Auto-extract + scroll + dedupe loop** for infinite feeds |
+| `wait` | `act wait condition=url text="dashboard"` | 6 conditions: element, title, settle, url, text, js |
 | `eval` | `act eval js="document.title"` | JS eval; `el` in scope when ref given |
 | `read` | `act read e5` | Element text content |
-| `wait` | `act wait condition=element text="Submit"` | Poll until condition met |
 | `press` | `act press key=Enter` | Real key event |
 | `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
 | `select` | `act select e4 option="Nepal"` | Dropdown by text or value |
+| `pdf` | `act pdf` | Export page as PDF artifact |
+| `download` | `act download timeout=10` | Wait for triggered download, returns path |
+| `back` / `forward` / `reload` | `act back` | History + reload |
 
 **Self-healing refs** | stale refs re-resolve automatically. If e5 was "Sign in" and the page navigated, `act click e5` finds the new "Sign in" and clicks it. You see `[ref e5 healed]` in the verdict.
+
+**Batch actions (D49)** | run multi-step workflows in ONE MCP call. Fills, submits, multi-click sequences — one call, one final delta. Halts on navigation or first error with step-level context. 5-step form fill+submit in one call instead of 11.
 
 **slim mode** | `act slim=true` returns verdict only, no delta. Use when you know what happens next.
 
@@ -97,12 +124,17 @@ Navigate and act already return page state. Use see for:
 | `see` | Full view (semantic folding: nav/footer auto-fold) |
 | `see filter="button,link"` | Filtered by role/name/landmark |
 | `see find="price"` | Search elements by text, get refs + scores |
+| `see extract="auto"` | **Template-free list extraction** (D48): structural detection, content-value scoring |
 | `see extract="json" template={...}` | Structured data from listing pages (one call) |
 | `see extract="links"` or `"forms"` | All links or all form fields |
 | `see logs="console"` | JS errors/warnings, errors first |
 | `see logs="network"` | Requests with status, failures first |
 | `see content=true` | Page text |
 | `see scope=e5` | One element's subtree text |
+
+**Auto-extract (`extract=auto`)** | deterministic structural list extraction. For every element with 3+ children, groups by structural signature, scores by content value (count × text × external links × headings × images). Extracts title, URL, image, price, date, text. Verified on HN (30 articles), Lobste.rs (25 stories), Wikipedia (50 references), DuckDuckGo, StackOverflow, Reddit, GitHub, MDN.
+
+**Collect (`act collect`)** | native scroll+dedupe loop for infinite feeds. Auto-extract, dedupe by URL/title/text, scroll, repeat until max or no new items. ONE call, ONE artifact. Verified: 80 items from infinite-scroll test page, 0 duplicates.
 
 **Big data goes to files.** Extracts over ~6KB are written to `~/.blade/artifacts/` and the response gives you the path + preview. Read the file.
 
@@ -115,6 +147,7 @@ Navigate and act already return page state. Use see for:
 | `state op=switch-tab target_id="..."` | Switch to a tab |
 | `state op=close-tab target_id="..."` | Close tab (auto-switches if current) |
 | `state op=cookies` | List cookies |
+| `state op=set-cookie name=token value=abc` | Set a cookie |
 | `state op=save name=login` | Save session (cookies + storage) |
 | `state op=load name=login` | Restore session |
 
@@ -135,6 +168,26 @@ All act fields work in steps (ref, text, label, nth, js, key, url, etc). Plus `i
 
 Returns base64 PNG. `vision marks=true` overlays numbered ref badges on elements so you can say "click e5" after seeing the screenshot. The structural model is almost always better: cheaper, more reliable, gives you refs to act on.
 
+## 🧬 Re-render immunity
+
+**The #1 reliability gap in every other agent browser, solved.**
+
+When React, Vue, or Angular re-renders a component, the DOM nodes are destroyed and recreated. Every other agent browser loses all refs — the agent must recapture, re-identify elements, and re-learn the page. Bladebro doesn't.
+
+Every captured element gets a **structural fingerprint** — an FNV-1a hash of its ancestor chain, tag, children, and identity attributes. When a re-render changes text (the sig changes) but preserves structure (the fingerprint is identical), the stabilizer rebinds the ref via fingerprint match instead of invalidating it.
+
+```
+Before re-render:  e2 button "Buy Now"     sig=button|Buy Now|1  fp=0xdeadbeef
+After re-render:   e2 button "Buy Now v1"  sig=button|Buy Now v1|1  fp=0xdeadbeef  ← SAME fp
+                   ↺ e2 (re-render survived)
+```
+
+The agent sees `↺ e2 (re-render survived)` in the delta. The ref never died. The click works. No recapture needed.
+
+**Verified live:** SPA-style `innerHTML` replacement (React-equivalent DOM destruction) — ref `e2` tracked from "Buy Now" to "Buy Now v1" via fingerprint, click on surviving ref incremented the counter. Zero refs lost.
+
+**No other agent browser does this.** Playwright, Puppeteer, CDP wrappers, SerpAPI — all lose refs on re-render. Bladebro's structural fingerprint is built on the global per-frame-rank signature scheme, which is the prerequisite none of them have.
+
 ## 🛡️ Stealth system
 
 Six layers. All on by default. No config needed.
@@ -154,7 +207,8 @@ Six layers. All on by default. No config needed.
 |---|---|
 | 36-vector local suite | 36/36 pass |
 | bot.sannysoft.com | ALL PASS |
-| incolumitas.com | No bot detection |
+| incolumitas.com | 8/8 automated tests PASS (webdriver=false, no UA leak, no override/overflow) |
+| CreepJS | headless: 33% (one sub-test; core indicators clean) |
 | Boot self-check | 4/4 OK |
 
 Run `bladebro audit` to verify your own setup.
@@ -166,13 +220,21 @@ Run `bladebro audit` to verify your own setup.
 | Tool defs | ~940 tokens | ~13,700 tokens | ~8,000 tokens |
 | Per-click result | 60-570 tokens (delta) | 2,000+ tokens (full page) | 2,000+ tokens |
 | Stealth | 6-layer, built-in | None | None |
+| Re-render immunity | Yes (structural fingerprints) | No | No |
+| Auto-extraction | Template-free (extract=auto) | No | No |
+| Infinite scroll collect | Yes (act collect) | No | No |
+| Batch actions | Yes (act batch, D49) | No | No |
+| Shadow DOM | Pierced (deepAll) | Partial | Partial |
+| PDF export | Yes (act pdf) | No | No |
+| Download handling | Yes (act download) | No | No |
 | Runtime | None (static binary) | Node.js | Node.js |
 | Process model | Long-lived daemon (stateful) | Stateless (reconnect per call) | Stateless |
 | Page model | Persistent, ref-stable, diff-first | None | None |
-| Binary size | 5.2MB | ~50MB (node + deps) | ~50MB (node + deps) |
+| Binary size | 5.6MB | ~50MB (node + deps) | ~50MB (node + deps) |
+| Install | `npm install -g bladebro` | npm + playwright install | npm |
 | Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
-**3-4x more token-efficient** than every competitor. The Live Page Model is the core innovation: it holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations. No more "stale element" failures.
+**3-4x more token-efficient** than every competitor. The Live Page Model is the core innovation: it holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations AND re-renders. No more "stale element" failures.
 
 ## ⚠️ Gotchas
 
@@ -188,7 +250,8 @@ Run `bladebro audit` to verify your own setup.
 
 | Command | What it does |
 |---|---|
-| `bladebro -u` | Check for updates, download, install |
+| `npm update -g bladebro` | Update to latest (npm install) |
+| `bladebro -u` | Check for updates, download, install (from-source install) |
 | `bladebro -doc` | Diagnose system, suggest fixes |
 | `bladebro --rollback` | Restore previous version after broken update |
 | `bladebro -v` | Show version + update status |
