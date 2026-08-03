@@ -40,15 +40,12 @@ cargo build --release
 cp target/release/bladebro npm/bladebro-linux-x64/bladebro
 chmod +x npm/bladebro-linux-x64/bladebro
 
-# Windows x86_64 (via cross/Docker)
-if command -v cross &>/dev/null; then
-  cross build --release --target x86_64-pc-windows-gnu
-  cp target/x86_64-pc-windows-gnu/release/bladebro.exe npm/bladebro-windows-x64/bladebro.exe
-elif command -v cargo-zigbuild &>/dev/null; then
+# Windows x86_64 (via cargo-zigbuild + zig linker)
+if command -v cargo-zigbuild &>/dev/null; then
   cargo zigbuild --release --target x86_64-pc-windows-gnu
   cp target/x86_64-pc-windows-gnu/release/bladebro.exe npm/bladebro-windows-x64/bladebro.exe
 else
-  echo "WARNING: No cross-compilation tool for Windows. Skipping."
+  echo "WARNING: cargo-zigbuild not found. Skipping Windows build."
 fi
 
 # macOS x86_64 + arm64 (via cargo-zigbuild + zig)
