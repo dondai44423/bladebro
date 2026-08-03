@@ -1,0 +1,16 @@
+{
+  "name": "bladebro-windows-x64",
+  "version": "3.0.2",
+  "description": "Bladebro binary for Windows x86_64",
+  "license": "MIT",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "bladebro.exe",
+  "files": [
+    "bladebro.exe"
+  ]
+}

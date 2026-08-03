@@ -1,0 +1,10 @@
+{
+  "name": "bladebro-darwin-arm64",
+  "version": "3.0.2",
+  "description": "Bladebro binary for macOS Apple Silicon",
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "main": "bladebro",
+  "files": ["bladebro"]
+}

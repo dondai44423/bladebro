@@ -13,3 +13,6 @@ node_modules/
 v2.md
 v3.md
 npm/bladebro-linux-x64/bladebro
+npm/bladebro-windows-x64/bladebro.exe
+npm/bladebro-darwin-x64/bladebro
+npm/bladebro-darwin-arm64/bladebro
