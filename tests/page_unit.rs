@@ -23,6 +23,7 @@ fn el(role: &str, name: &str, sig: &str, value: Option<&str>, disabled: bool) ->
         sig: sig.into(),
         frame: Vec::new(),
         shadow: false,
+        fingerprint: 0,
     }
 }
 
@@ -34,6 +35,14 @@ fn cap(url: &str, els: Vec<RawElement>) -> bladebro::page::PageCapture {
         muts: 0,
         elements: els,
     }
+}
+
+/// Helper: construct an element with a specific structural fingerprint.
+/// Simulates a re-rendered element: same fingerprint, different sig/text.
+fn el_fp(role: &str, name: &str, sig: &str, fingerprint: u64) -> RawElement {
+    let mut e = el(role, name, sig, None, false);
+    e.fingerprint = fingerprint;
+    e
 }
 
 #[test]
@@ -201,4 +210,140 @@ fn navigation_mint_never_collides_with_rebound_refs() {
     assert_eq!(refs.len(), uniq.len(),
         "ref collision after navigation mint: {refs:?}");
     assert_eq!(lpm.elements().len(), 3);
+}
+
+// ===== D48: Structural fingerprint re-render immunity =====
+
+#[test]
+fn re_render_immunity_refs_survive_when_text_changes_but_structure_is_identical() {
+    let mut lpm = LivePageModel::new();
+
+    // First capture: a SPA button "Submit" and a counter "0 items".
+    // Both have distinct structural fingerprints (they sit in different DOM
+    // locations).
+    let fp_submit: u64 = 0xdeadbeef;
+    let fp_counter: u64 = 0xfeedface;
+    let fp_link: u64 = 0xcafebabe;
+
+    let d = lpm.ingest(cap("https://app.test/", vec![
+        el_fp("button", "Submit", "button|Submit|1", fp_submit),
+        el_fp("text", "0 items", "text|0 items|1", fp_counter),
+        el_fp("link", "Help", "link|Help|1", fp_link),
+    ]));
+    assert_eq!(d.added.len(), 3);
+    let submit_ref = d.added[0].ref_id.clone(); // e1
+    let counter_ref = d.added[1].ref_id.clone(); // e2
+    let help_ref = d.added[2].ref_id.clone();    // e3
+    assert_eq!(d.rebound.len(), 0, "no rebound expected on first capture");
+
+    // Re-render: React/Vue rebuilds the component tree.
+    // Text changes: "Submit" -> "Submit (2)", "0 items" -> "1 item".
+    // Structure is IDENTICAL -> same fingerprints.
+    // The link's text/structure is unchanged -> exact sig match.
+    let d = lpm.ingest(cap("https://app.test/", vec![
+        el_fp("button", "Submit (2)", "button|Submit (2)|1", fp_submit), // text changed, fp same
+        el_fp("text", "1 item", "text|1 item|1", fp_counter),           // text changed, fp same
+        el_fp("link", "Help", "link|Help|1", fp_link),                 // unchanged
+    ]));
+
+    // THE CORE ASSERTION: refs SURVIVED the re-render.
+    // Without fingerprint matching, all three would have been removed+re-added.
+    // With fingerprint matching, the first two rebound (refs kept) and the third
+    // is unchanged (exact sig match).
+    assert!(d.rebound.len() >= 1,
+        "expected at least one fingerprint rebind, got: {:?}", d.rebound);
+    assert!(d.removed.len() == 0,
+        "no refs should have been removed during re-render: {:?}", d.removed);
+
+    // Verify the refs are still the SAME identity (e1, e2, e3 preserved).
+    let live_refs: Vec<&str> = lpm.elements().iter().map(|e| e.ref_id.as_str()).collect();
+    assert!(live_refs.contains(&submit_ref.as_str()),
+        "submit ref {submit_ref} should survive re-render");
+    assert!(live_refs.contains(&counter_ref.as_str()),
+        "counter ref {counter_ref} should survive re-render");
+    assert!(live_refs.contains(&help_ref.as_str()),
+        "help ref {help_ref} should survive");
+}
+
+#[test]
+fn re_render_immunity_does_not_cross_match_different_elements() {
+    // Two identical "Delete" buttons at DIFFERENT structural positions
+    // (different fingerprints) must not cross-match during a re-render.
+    // Each ref must track back to its OWN DOM position, not the other's.
+    let mut lpm = LivePageModel::new();
+    let fp_a: u64 = 0x1111;
+    let fp_b: u64 = 0x2222;
+
+    let d = lpm.ingest(cap("https://app.test/", vec![
+        el_fp("button", "Delete", "button|Delete|1", fp_a),
+        el_fp("button", "Delete", "button|Delete|2", fp_b),
+    ]));
+    assert_eq!(d.added.len(), 2);
+    // Record ref_id -> fingerprint mapping for later identity checking.
+    let first_world: Vec<(String, u64)> = lpm.elements().iter()
+        .map(|e| (e.ref_id.clone(), e.raw.fingerprint))
+        .collect();
+
+    // Re-render: text changes, structure IDENTICAL (fingerprint preserved).
+    let d = lpm.ingest(cap("https://app.test/", vec![
+        el_fp("button", "Delete (renamed)", "button|Delete (renamed)|1", fp_a),
+        el_fp("button", "Delete (renamed)", "button|Delete (renamed)|2", fp_b),
+    ]));
+
+    // Re-render immunity: no refs die, both rebind via fingerprint.
+    assert!(d.removed.is_empty(), "no refs should die: {:?}", d.removed);
+    assert_eq!(d.rebound.len(), 2, "both should rebind: {:?}", d.rebound);
+
+    // CRITICAL: no cross-matching. The fingerprint is the identity anchor.
+    // Verify each rebound ref tracked back to an element with the SAME
+    // fingerprint it had originally (this is what prevents silent confusion).
+    for (ref_id, _new_sig) in &d.rebound {
+        let original_fp = first_world.iter()
+            .find(|(rid, _)| rid == ref_id)
+            .map(|(_, fp)| *fp)
+            .unwrap_or(0);
+        let current = lpm.elements().iter()
+            .find(|e| e.ref_id == *ref_id)
+            .map(|e| e.raw.fingerprint)
+            .unwrap_or(0);
+        assert_eq!(original_fp, current,
+            "ref {ref_id}: original fingerprint {original_fp:#x} != current {current:#x} (cross-match!)");
+    }
+}
+
+#[test]
+fn re_render_no_fingerprint_falls_back_to_normal_flow() {
+    let mut lpm = LivePageModel::new();
+
+    // Pre-D48 elements: fingerprint = 0 (no structural identity).
+    // Behavior should be identical to pre-D48: sig exact match only.
+    let d = lpm.ingest(cap("https://app.test/", vec![
+        el_fp("button", "Save", "button|Save|1", 0),
+    ]));
+    let ref_save = d.added[0].ref_id.clone();
+
+    // Same sig: exact match -> ref survives (existing behavior).
+    let d = lpm.ingest(cap("https://app.test/", vec![
+        el_fp("button", "Save", "button|Save|1", 0),
+    ]));
+    assert!(d.rebound.is_empty(), "zero-fp: no rebound expected");
+    assert!(d.removed.is_empty(), "exact sig match should keep ref");
+
+    // Re-render with ZERO fingerprint but same sig: exact match still works.
+    let d = lpm.ingest(cap("https://app.test/", vec![
+        el_fp("button", "Save", "button|Save|1", 0),
+    ]));
+    assert!(d.rebound.is_empty(), "zero-fp: no rebound expected");
+    assert!(d.removed.is_empty(), "exact sig match should keep ref");
+    assert!(lpm.elements().iter().any(|e| e.ref_id == ref_save),
+        "ref should still exist via exact sig match");
+
+    // Re-render with ZERO fingerprint but DIFFERENT sig (text changed):
+    // NO fingerprint to match on -> ref is lost (pre-D48 behavior, correct).
+    let d = lpm.ingest(cap("https://app.test/", vec![
+        el_fp("button", "Save (2)", "button|Save (2)|1", 0),
+    ]));
+    assert_eq!(d.rebound.len(), 0, "zero-fp elements never rebound");
+    assert_eq!(d.removed.len(), 1, "old ref should be removed");
+    assert_eq!(d.removed[0], ref_save, "correct ref removed");
 }

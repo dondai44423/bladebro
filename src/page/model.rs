@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 use crate::page::perception::{PageCapture, RawElement};
 use crate::page::refs::{stabilize, StateChange, StateProbe};
+use crate::page::refs::PrevState;
 
 /// One actionable element with its stable ref attached.
 #[derive(Debug, Clone)]
@@ -35,6 +36,11 @@ pub struct PageDelta {
     pub removed: Vec<String>,
     /// `(ref id, change)` for surviving elements whose state changed.
     pub changed: Vec<(String, StateChange)>,
+    /// Refs kept via structural fingerprint rebind (D48 re-render immunity).
+    /// Each `(ref_id, new_sig)` means the ref survived a re-render that
+    /// changed its sig but preserved the structural fingerprint. The agent
+    /// sees "re-render survived" instead of "ref died" — the key UX win.
+    pub rebound: Vec<(String, String)>,
     /// Previous title — set when the title changed between captures.
     pub title_changed: bool,
     /// DOM mutations were observed since the previous capture (via the
@@ -48,6 +54,7 @@ impl PageDelta {
         self.added.is_empty()
             && self.removed.is_empty()
             && self.changed.is_empty()
+            && self.rebound.is_empty()
             && !self.navigated
             && !self.title_changed
     }
@@ -60,9 +67,12 @@ pub struct LivePageModel {
     elements: Vec<PageElement>,
     /// `ref id -> index in elements` for O(1) lookup by ref.
     by_ref: HashMap<String, usize>,
-    /// Previous capture's state, keyed by ref id: `(sig, role, name, probe)`.
+    /// Previous capture's state, keyed by ref id.
     /// Fed to the stabilizer next capture.
-    prev_state: HashMap<String, (String, String, String, Option<StateProbe>)>,
+    ///
+    /// `fingerprint == 0` means pre-D48, no fingerprint available.
+    /// `probe == None` means pre-state-probe, no state tracking.
+    prev_state: HashMap<String, PrevState>,
     /// Monotonic ref counter. NEVER resets — not even on navigation.
     /// A ref id, once minted, names at most one element for the life of
     /// the session. Resetting on navigation (the old behavior) silently
@@ -170,6 +180,7 @@ impl LivePageModel {
             sig: sig.to_string(),
             frame: frame.to_vec(),
             shadow: false,
+            fingerprint: 0,
         };
         if let Some(&i) = self.by_ref.get(id) {
             self.elements[i] = PageElement { ref_id: id.to_string(), raw };
@@ -179,7 +190,13 @@ impl LivePageModel {
         }
         self.prev_state.insert(
             id.to_string(),
-            (sig.to_string(), role.to_string(), name.to_string(), None),
+            PrevState {
+                sig: sig.to_string(),
+                role: role.to_string(),
+                name: name.to_string(),
+                probe: None,
+                fingerprint: 0,
+            },
         );
         id.to_string()
     }
@@ -224,7 +241,13 @@ impl LivePageModel {
                 by_ref.insert(ref_id.clone(), elements.len() - 1);
                 prev_state.insert(
                     ref_id.clone(),
-                    (el.sig.clone(), el.role.clone(), el.name.clone(), Some(StateProbe::from(el))),
+                    PrevState {
+                        sig: el.sig.clone(),
+                        role: el.role.clone(),
+                        name: el.name.clone(),
+                        probe: Some(StateProbe::from(el)),
+                        fingerprint: el.fingerprint,
+                    },
                 );
             }
             // Any element not in `live` is a bug (stabilize inserts all), but
@@ -271,6 +294,7 @@ impl LivePageModel {
             added,
             removed,
             changed: stab.changed,
+            rebound: stab.rebound,
             title_changed,
             content_changed: cap.muts > 0,
         };
@@ -531,6 +555,17 @@ impl LivePageModel {
                 parts.push(format!("checked={checked}"));
             }
             let line = format!("~ {ref_id} {}\n", parts.join(" "));
+            if out.len() + line.len() > budget {
+                break;
+            }
+            out.push_str(&line);
+        }
+        // Re-render immunity (D48): refs that survived via structural
+        // fingerprint even though their sigs changed. The agent sees this
+        // as "the page re-rendered but my refs are still valid" instead of
+        // a silent invalidation or surprise recapture.
+        for (ref_id, _) in &d.rebound {
+            let line = format!("↺ {ref_id} (re-render survived)\n");
             if out.len() + line.len() > budget {
                 break;
             }

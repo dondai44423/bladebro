@@ -77,6 +77,13 @@ pub struct RawElement {
     /// shadow DOM does not create a new coordinate space (unlike iframes).
     #[serde(default)]
     pub shadow: bool,
+    /// Structural identity fingerprint: FNV-1a hash over (ancestor chain +
+    /// tag + first-3-child tags + type/name/testid attrs). Survives DOM
+    /// re-renders that preserve structure even when text content changes
+    /// (React/Vue/Angular re-renders, counter updates, live region swaps).
+    /// Zero for scars from pre-fingerprint builds (backwards compat).
+    #[serde(default)]
+    pub fingerprint: u64,
 }
 
 /// The full capture: page identity + every actionable element.
@@ -161,6 +168,8 @@ pub static JS_PREAMBLE: LazyLock<String> = LazyLock::new(|| {
         + JS_NAME_FN
         + JS_LANDMARK_FN
         + JS_DEEP_ALL
+        + JS_FNV_FN
+        + JS_NC_FN
 });
 
 // Shadow-piercing collector (W2). `document.querySelectorAll(sel)` cannot see
@@ -174,6 +183,18 @@ pub static JS_PREAMBLE: LazyLock<String> = LazyLock::new(|| {
 // rank sigs stay consistent. Shadow elements share the top document's
 // coordinate space, so no iframe-style offset is needed.
 pub const JS_DEEP_ALL: &str = r#"function deepAll(root,sel){const out=[];const visit=(c)=>{const m=c.querySelectorAll(sel);for(let i=0;i<m.length;i++)out.push(m[i]);const all=c.querySelectorAll('*');for(let i=0;i<all.length;i++){const s=all[i].shadowRoot;if(s)visit(s);}};visit(root);return out;}"#;
+
+/// FNV-1a 32-bit hash — fast, deterministic, good enough for identity.
+/// Chosen over SHA/MD5 because it is pure arithmetic (no string lookup
+/// tables), inlined into the capture loop (one pass over the input), and
+/// 32 bits is sufficient since the sig ranks are the primary identity.
+pub const JS_FNV_FN: &str = r#"function fnv(s){let h=0x811c9dc5;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0}return h}"#;
+
+/// Ancestor chain string: `tag[index]>tag[index]>...` up to 10 levels.
+/// Captures the element's structural position in the DOM so that a re-render
+/// preserving structure (React/Vue) leaves the fingerprint unchanged even
+/// when the element's text, class, or id mutates.
+pub const JS_NC_FN: &str = r#"function nc(n){const c=[];let cur=n;for(let d=0;d<10&&cur;d++){c.push(cur.tagName?cur.tagName.toLowerCase():'unk');const p=cur.parentElement;if(p){c.push(''+Array.prototype.indexOf.call(p.children,cur));cur=p}else break}return c.join('>')}"#;
 
 // ---- capture script ----
 
@@ -224,6 +245,13 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "if(ay+rect.height<-VM||ay>VH+VM)continue;"
         + "if(!vis(n))continue;"
         + "const nm=name(n,true);"
+        // Structural identity fingerprint (D48): hash of ancestor chain +
+        // tag + first children + identity attrs. Survives re-renders that
+        // keep structure but change text/class values (React, Vue, Angular).
+        // Computed here (in JS) so we don't serialize ancestor chains.
+        + "const _kids=n.children&&n.children.length?Array.from(n.children).slice(0,3).map(c=>c.tagName.toLowerCase()).join(','):'';"
+        + "const _cust=(n.type||'')+','+(n.name||'')+','+(n.getAttribute('data-testid')||'');"
+        + "const _fp=fnv(nc(n)+','+n.tagName.toLowerCase()+','+_kids+'|'+_cust);"
         + "out.push({tag:n.tagName.toLowerCase(),role:r,name:nm,type:n.type||null,"
         + "value:n.value&&n.value.length<=200?n.value:null,"
         + "disabled:!!n.disabled,"
@@ -234,6 +262,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "landmark:landmarkOf(n),"
         + "box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],"
         + "sig:fps+'|'+r+'|'+snm+'|'+rank,"
+        + "fingerprint:_fp,"
         + "shadow:n.getRootNode()!==doc,"
         + "frame:fp});"
         + "}"
