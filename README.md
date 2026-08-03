@@ -42,7 +42,7 @@ Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and 
 | **Auto-extract** | Template-free list extraction. No CSS selectors, no setup. Detects structure, scores content, extracts rows. | 10+ sites verified |
 | **Infinite-scroll collect** | Scroll + dedupe loop for feeds. ONE call, ONE artifact, zero duplicates. | 80 items verified |
 | **6-layer stealth** | Protocol, environment, behavior, coherence, residue, seasoning. All on by default. | incolumitas 8/8 |
-| **Delta-first tokens** | Every action returns what changed, not the whole page. 3-4x cheaper than competitors. | 940-token tool defs |
+| **Delta-first tokens** | Every action returns what changed, not the whole page. 5x cheaper than competitors. | ~2,600-token tool defs |
 | **Self-healing refs** | Stale refs re-resolve automatically. Agent never sees "element not found" after navigation. | 26/26 sites |
 
 ## 🔧 Install
@@ -238,7 +238,7 @@ Run `bladebro audit` to verify your own setup.
 
 | | Bladebro | Playwright MCP | Chrome DevTools MCP |
 |---|---|---|---|
-| Tool defs | ~940 tokens | ~13,700 tokens | ~8,000 tokens |
+| Tool defs | ~2,600 tokens | ~13,700 tokens | ~8,000 tokens |
 | Per-click result | 60-570 tokens (delta) | 2,000+ tokens (full page) | 2,000+ tokens |
 | Stealth | 6-layer, built-in | None | None |
 | Re-render immunity | Yes (structural fingerprints) | No | No |
@@ -255,7 +255,7 @@ Run `bladebro audit` to verify your own setup.
 | Install | `npm install -g bladebro` | npm + playwright install | npm |
 | Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
-**3-4x more token-efficient** than every competitor. The Live Page Model is the core innovation: it holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations AND re-renders. No more "stale element" failures.
+**5x more token-efficient** than every competitor. The Live Page Model is the core innovation: it holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations AND re-renders. No more "stale element" failures.
 
 ## ⚠️ Gotchas
 

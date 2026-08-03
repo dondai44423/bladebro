@@ -959,16 +959,16 @@ impl Page {
         };
         let wait = self
             .cdp
-            .wait_for("Page.frameNavigated", Duration::from_secs(15));
+            .wait_for("Page.frameNavigated", Duration::from_secs(10));
         self.cdp
             .send("Page.navigate", Some(serde_json::json!({ "url": url })))
             .await?;
         _t("sent");
-        let _ = tokio::time::timeout(Duration::from_secs(15), wait).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), wait).await;
         _t("frameNavigated");
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
         _t("load");
-        wait_for_settle_with_network(&self.cdp, Duration::from_secs(5), Some(&self.in_flight)).await?;
+        wait_for_settle_with_network(&self.cdp, Duration::from_secs(3), Some(&self.in_flight)).await?;
         _t("settle");
         // M4+M6: Check for consent banners and block pages after navigation.
         let consent = dismiss_consent(&self.cdp).await.unwrap_or(None);

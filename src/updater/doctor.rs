@@ -418,10 +418,12 @@ fn check_disk_space() -> Check {
             fix: None,
         },
     };
-    let dir = exe.parent().unwrap_or(std::path::Path::new("."));
+    // Suppress unused warning on non-Unix (exe only used in cfg(unix) block).
+    let _ = &exe;
 
     #[cfg(unix)]
     {
+        let dir = exe.parent().unwrap_or(std::path::Path::new("."));
         let output = std::process::Command::new("df")
             .arg("-k")
             .arg(dir)

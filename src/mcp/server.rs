@@ -1514,8 +1514,8 @@ async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String> {
 /// V22: collect — auto-extract + scroll + dedupe loop. ONE call collects
 /// an entire infinite-scroll feed into a single artifact.
 async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
+    let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(100) as usize;
-    let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(60);
     let mut all_items: Vec<serde_json::Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut no_new_streak = 0u32;
@@ -1877,7 +1877,7 @@ async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
 /// task. `act action=download` after a click that triggers a download blocks
 /// until it completes (or `timeout` secs, default 60).
 async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
-    let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(60);
+    let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
 
     // If a URL is provided, navigate to it first. The navigation will

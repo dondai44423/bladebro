@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Release pipeline**: `release.sh` builds all 4 platforms and uploads all binaries to GitHub release. `publish-npm.sh` uses cargo-zigbuild for all cross-platform builds.
+- **Tool definitions rewritten for agent mastery**: all 5 tool descriptions rewritten with workflow guidance, addressing hierarchy (text > ref > label > coords), common recipes, batch/run distinction, state ops in steps, and error recovery rules. ~2,600 tokens total (was ~940, but now includes complete parameter-level guidance that prevents wasted tool calls).
+- **Timeout defaults reduced**: download 60s→30s, collect 60s→30s, navigate frameNavigated 15s→10s. Settle stays 5s. Calls that haven't succeeded in 30s are likely stuck.
 
 ## [3.0.1] - 2026-08-03
 
