@@ -1,6 +1,6 @@
 {
   "name": "bladebro",
-  "version": "3.0.4",
+  "version": "3.0.5",
   "description": "God-tier agentic browser driver for AI agents. Few tools, full control, real stealth, max token efficiency.",
   "license": "MIT",
   "repository": {
@@ -33,10 +33,10 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "bladebro-linux-x64": "3.0.4",
-    "bladebro-darwin-x64": "3.0.4",
-    "bladebro-darwin-arm64": "3.0.4",
-    "bladebro-windows-x64": "3.0.4"
+    "bladebro-linux-x64": "3.0.5",
+    "bladebro-darwin-x64": "3.0.5",
+    "bladebro-darwin-arm64": "3.0.5",
+    "bladebro-windows-x64": "3.0.5"
   },
   "engines": {
     "node": ">=14"
