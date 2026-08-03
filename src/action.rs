@@ -400,8 +400,108 @@ pub async fn check_condition(
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
         }
+        "url" => {
+            let needle = text.to_lowercase();
+            loop {
+                let res = cdp
+                    .send(
+                        "Runtime.evaluate",
+                        Some(json!({
+                            "expression": "location.href",
+                            "returnByValue": true,
+                        })),
+                    )
+                    .await;
+                let url = res
+                    .ok()
+                    .and_then(|r| {
+                        r.get("result")
+                            .and_then(|r| r.get("value"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .unwrap_or_default();
+                if url.to_lowercase().contains(&needle) {
+                    return true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+        "text" => {
+            let needle_js = serde_json::to_string(&text.to_lowercase())
+                .unwrap_or_else(|_| "\"\"".to_string());
+            let expr = format!(
+                "(document.body&&document.body.innerText||'').toLowerCase().includes({needle_js})"
+            );
+            loop {
+                let res = cdp
+                    .send(
+                        "Runtime.evaluate",
+                        Some(json!({
+                            "expression": &expr,
+                            "returnByValue": true,
+                        })),
+                    )
+                    .await;
+                let found = res
+                    .ok()
+                    .and_then(|r| {
+                        r.get("result")
+                            .and_then(|r| r.get("value"))
+                            .and_then(|v| v.as_bool())
+                    })
+                    .unwrap_or(false);
+                if found {
+                    return true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+        "js" => {
+            // Evaluate the user's JS expression and check truthiness.
+            loop {
+                let res = cdp
+                    .send(
+                        "Runtime.evaluate",
+                        Some(json!({
+                            "expression": text,
+                            "returnByValue": true,
+                        })),
+                    )
+                    .await;
+                let truthy = res
+                    .ok()
+                    .and_then(|r| {
+                        r.get("result")
+                            .and_then(|r| r.get("value"))
+                            .map(|v| match v {
+                                serde_json::Value::Bool(b) => *b,
+                                serde_json::Value::Null => false,
+                                serde_json::Value::Number(n) => {
+                                    n.as_f64().map(|f| f != 0.0).unwrap_or(false)
+                                }
+                                serde_json::Value::String(s) => !s.is_empty(),
+                                _ => true,
+                            })
+                    })
+                    .unwrap_or(false);
+                if truthy {
+                    return true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
         _ => {
-            // "settle" or unknown — wait for DOM to settle, always true.
+            // "settle", "network", or unknown — wait for DOM to settle.
             let _ = wait_for_settle(cdp, timeout).await;
             true
         }
@@ -984,8 +1084,15 @@ pub async fn perform_with_network(
         }
         Action::Wait { condition, text, timeout } => {
             // check_condition polls until the condition is met or timeout.
-            // The return value is ignored here — Wait just blocks until done.
-            let _ = check_condition(cdp, condition, text, *timeout).await;
+            // On timeout, error so the agent gets the current page state to
+            // recover (a silent "waited" would be a lie — the condition failed).
+            let met = check_condition(cdp, condition, text, *timeout).await;
+            if !met {
+                return Err(BladeError::Other(format!(
+                    "wait timeout: condition '{condition}' not met within {}s",
+                    timeout.as_secs()
+                )));
+            }
         }
         Action::Back => {
             cdp.send("Runtime.evaluate", Some(json!({

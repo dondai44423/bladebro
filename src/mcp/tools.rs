@@ -75,8 +75,8 @@ On error, current page state is included — recover without an extra see.",
                     },
                     "condition": {
                         "type": "string",
-                        "enum": ["element", "title", "settle"],
-                        "description": "Wait condition. Default: settle."
+                        "enum": ["element", "title", "settle", "url", "text", "js"],
+                        "description": "Wait condition. settle (default, DOM+network idle), element (visible element with text), title (title contains text), url (URL contains text), text (page text contains text), js (JS expression in text is truthy). Use text= param for the condition value."
                     },
                     "timeout": {
                         "type": "integer",
