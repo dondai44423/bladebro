@@ -1,0 +1,41 @@
+{
+  "name": "bladebro",
+  "version": "3.0.0",
+  "description": "God-tier agentic browser driver for AI agents. Few tools, full control, real stealth, max token efficiency.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dondai44423/bladebro"
+  },
+  "homepage": "https://github.com/dondai44423/bladebro#readme",
+  "bugs": {
+    "url": "https://github.com/dondai44423/bladebro/issues"
+  },
+  "keywords": [
+    "browser",
+    "automation",
+    "agent",
+    "ai",
+    "mcp",
+    "cdp",
+    "chrome",
+    "stealth",
+    "scraper",
+    "puppeteer",
+    "playwright"
+  ],
+  "bin": {
+    "bladebro": "bin.js"
+  },
+  "files": [
+    "bin.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "optionalDependencies": {
+    "bladebro-linux-x64": "3.0.0"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}
