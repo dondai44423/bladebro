@@ -29,8 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Release pipeline**: `release.sh` builds all 4 platforms and uploads all binaries to GitHub release. `publish-npm.sh` uses cargo-zigbuild for all cross-platform builds.
-- **Tool definitions rewritten for agent mastery**: all 5 tool descriptions rewritten with workflow guidance, addressing hierarchy (text > ref > label > coords), common recipes, batch/run distinction, state ops in steps, and error recovery rules. ~2,600 tokens total (was ~940, but now includes complete parameter-level guidance that prevents wasted tool calls).
-- **Timeout defaults reduced**: download 60s→30s, collect 60s→30s, navigate frameNavigated 15s→10s. Settle stays 5s. Calls that haven't succeeded in 30s are likely stuck.
+- **Tool definitions rewritten**: all 5 tool descriptions rewritten with mechanics-focused guidance (addressing hierarchy, return value semantics, when to use fill/batch/run, error recovery). Schema descriptions trimmed to one-liners. ~1,900 tokens total.
+- **Timeout defaults reduced**: download 60s→30s, collect 60s→30s, navigate frameNavigated 15s→10s.
+
+### Fixed
+
+- **Combobox typing**: `find_by_sig` now drills to inner `<textarea>`/`<input>` when the target element has `role="combobox"`. Previously, key events were dispatched to the container `<div>`, leaving the input value empty. This was the root cause of typing failures on Google Search and other combobox-based inputs.
+- **Label addressing for type**: `act type label=...` no longer filters to `role=textbox` only. Combobox elements (Google Search, React-based inputs) are now found via label addressing. Previously, the textbox-only filter caused "no element matching" errors on any combobox input.
+- **Smart disambiguation**: `resolve_text_target` now auto-picks the top-scored match instead of erroring on ambiguity. When scores differ, the exact match wins over substring matches. When scores are tied, the first match is picked. All matches are adopted into the page model so refs are available for recovery. Eliminates wasted round trips on pages with duplicate button text.
+- **Step indexing in `run`**: `handle_run` now uses 1-based step numbering, matching `act batch`. Previously, run used 0-based indexing, causing confusing error messages like "step 2 failed" when the agent expected step 3.
+- **Settle speed**: DOM-quiet threshold reduced from 600ms to 300ms. Action-dependent settle timeouts: type/clear 1s, press/select 2s, scroll/hover/click 3s, navigate 5s (was 5s for all). Navigation check timeout reduced from 500ms to 150ms for type/clear/scroll. Reduces per-action latency by ~50% for type-heavy workflows.
+- **CI fix**: Fixed Windows unused variable warning in `doctor.rs` `check_disk_space`.
 
 ## [3.0.1] - 2026-08-03
 

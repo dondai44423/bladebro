@@ -3,6 +3,8 @@
 //! Core thesis: the agent driving the browser should perceive the page as a
 //! side-effect of acting, not by pulling snapshots every turn. The driver
 //! maintains a Live Page Model and returns the delta on every action.
+
+#![recursion_limit = "256"]
 //!
 //! This crate is organised as:
 //! - [`cdp`]: a thin, own Chrome DevTools Protocol client (no Playwright shim).

@@ -342,7 +342,7 @@ pub async fn wait_for_settle_with_network(
             function fin(v){{if(done)return;done=true;try{{if(mo)mo.disconnect();}}catch(e){{}}res(v);}}\
             (function tick(){{\
                 var now=performance.now();\
-                if(document.readyState!=='loading'&&(now-last)>=600){{fin('settled');return;}}\
+                if(document.readyState!=='loading'&&(now-last)>=300){{fin('settled');return;}}\
                 if((now-t0)>={ms}){{fin('timeout');return;}}\
                 setTimeout(tick,150);\
             }})();\

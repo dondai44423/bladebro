@@ -752,20 +752,21 @@ async fn resolve_text_target(
         // nth out of range — fall through to the list so the agent
         // sees the valid range with refs.
     }
+    // Smart disambiguation: matches are sorted by score (desc).
+    // Auto-pick the top match — if scores differ, it's the clear winner.
+    // If tied, pick the first; agent can override with nth=N or ref=.
+    // Adopt ALL matches so their refs are available in the page model.
     if matches.len() == 1 {
         let m = &matches[0];
         return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
     }
-    // Ambiguous: adopt every candidate so the error's refs are
-    // immediately usable. The agent retries with ref=<id> or nth=N
-    // — never needs a see call to disambiguate.
-    let mut lines = vec![format!("ambiguous: {} matches for \"{}\":", matches.len(), query)];
-    for (i, m) in matches.iter().enumerate() {
-        let id = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
-        lines.push(format!("  {id} {} \"{}\" (nth={})", m.role, m.name, i + 1));
+    let top = &matches[0];
+    let id = page.model_mut().adopt(&top.sig, &top.role, &top.name, &top.frame);
+    // Adopt remaining matches so refs are in the model for recovery.
+    for m in &matches[1..] {
+        let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
     }
-    lines.push("retry with ref=<id> or nth=N".to_string());
-    Err(BladeError::Other(lines.join("\n")))
+    Ok(id)
 }
 
 async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
@@ -812,7 +813,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { Some("textbox") };
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
             } else {
                 return Err(BladeError::Other("type requires 'ref' or 'label' + 'text'".into()));
@@ -1652,7 +1653,8 @@ async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
 
     let mut observations = Vec::new();
     for (i, step) in steps.iter().enumerate() {
-        execute_step(page, step, &i.to_string(), &mut observations).await?;
+        let step_num = i + 1; // 1-based for human-readable error messages
+        execute_step(page, step, &step_num.to_string(), &mut observations).await?;
     }
     Ok(observations.join("\n"))
 }
@@ -1689,7 +1691,7 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { Some("textbox") };
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
             } else {
                 return Err(crate::error::BladeError::Other(
@@ -1982,7 +1984,7 @@ async fn execute_step(
                 if met {
                     crate::page::wait_for_settle_with_network(
                         page.cdp_ref(),
-                        std::time::Duration::from_secs(3),
+                        std::time::Duration::from_secs(1),
                         Some(page.in_flight_ref()),
                     )
                     .await?;

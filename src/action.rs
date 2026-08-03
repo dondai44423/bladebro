@@ -553,17 +553,18 @@ async fn find_by_sig(
         + "const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;"
         + "const top=doc.elementFromPoint(cx,cy);"
         + "const isTopmost=top===n||n.contains(top);"
+        + "var tgt=n;if(n.getAttribute&&n.getAttribute('role')==='combobox'&&n.tagName!=='SELECT'){var ii=n.querySelector('textarea,input:not([type=hidden])');if(ii)tgt=ii;}"
         + "if(mode==='box'){if(!isTopmost){n.scrollIntoView({block:'center'});const r2=n.getBoundingClientRect();const cx2=r2.x+r2.width/2;const cy2=r2.y+r2.height/2;const top2=doc.elementFromPoint(cx2,cy2);return{ok:true,box:[Math.round(r2.x+ox)||0,Math.round(r2.y+oy)||0,Math.round(r2.width)||0,Math.round(r2.height)||0],tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:top2===n||n.contains(top2)};}return{ok:true,box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:isTopmost};}"
-        + "if(mode==='prepare'){n.scrollIntoView({block:'center'});n.focus();if('value' in n){n.value='';n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));}const r3=n.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!n.disabled};}"
-        + "if(mode==='focus'){n.focus();return{ok:true};}"
-        + "if(mode==='clear'){if('value' in n){n.value='';n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));}return{ok:true};}"
+        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled};}"
+        + "if(mode==='focus'){tgt.focus();return{ok:true};}"
+        + "if(mode==='clear'){if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}return{ok:true};}"
         + "if(mode==='click'){n.click();return{ok:true};}"
-        + "if(mode==='check'){return{ok:true,text:n.value||''};}"
-        + "if(mode==='type'){n.focus();var proto=n.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var setter=Object.getOwnPropertyDescriptor(proto,'value').set;if(setter){setter.call(n,"
+        + "if(mode==='check'){return{ok:true,text:tgt.value||''};}"
+        + "if(mode==='type'){tgt.focus();var proto=tgt.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var setter=Object.getOwnPropertyDescriptor(proto,'value').set;if(setter){setter.call(tgt,"
         + &text_js
-        + ");}else{n.value="
+        + ");}else{tgt.value="
         + &text_js
-        + ";}n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true};}"
+        + ";}tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true};}"
         + "if(mode==='select'){"
         + "if(n.tagName==='SELECT'){"
         + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
@@ -933,7 +934,7 @@ pub async fn perform_with_network(
                     }
                     _ => {}
                 }
-                wait_for_settle_with_network(cdp, Duration::from_secs(5), in_flight).await?;
+                wait_for_settle_with_network(cdp, Duration::from_secs(3), in_flight).await?;
                 let cap = capture(cdp).await?;
                 delta = lpm.ingest(cap);
 
@@ -1229,15 +1230,28 @@ pub async fn perform_with_network(
         }
     }
 
+    // Action-dependent timeouts: type/clear/scroll don't trigger navigation,
+    // and their DOM settles fast. Shorter nav check + shorter settle = faster.
+    let nav_check_ms = match action {
+        Action::Type { .. } | Action::Clear { .. } | Action::Scroll { .. } => 150,
+        _ => 500,
+    };
+    let settle_secs = match action {
+        Action::Type { .. } | Action::Clear { .. } => 1,
+        Action::Press { .. } | Action::Select { .. } => 2,
+        Action::Scroll { .. } | Action::Hover { .. } => 3,
+        _ => 5,
+    };
+
     // Check if navigation was triggered (with a short timeout).
     let nav_result = tokio::time::timeout(
-        Duration::from_millis(500),
+        Duration::from_millis(nav_check_ms),
         sub_fires(&mut nav_sub, "Page.frameNavigated"),
     ).await;
     if let Ok(true) = nav_result {
         crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
     }
-    wait_for_settle_with_network(cdp, Duration::from_secs(5), in_flight).await?;
+    wait_for_settle_with_network(cdp, Duration::from_secs(settle_secs), in_flight).await?;
 
     // Recapture → delta.
     let cap = capture(cdp).await?;
