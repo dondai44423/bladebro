@@ -846,6 +846,10 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             // V19: wait for the most recent download to complete.
             return handle_download(page, args).await;
         }
+        "collect" => {
+            // V22: auto-extract + scroll + dedupe loop. Infinite-scroll collection.
+            return handle_collect(page, args).await;
+        }
         "hover" => {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
@@ -1081,9 +1085,18 @@ async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // V9: template extraction — structured data in ONE call.
     if extract == "json" {
         let tpl = template.ok_or_else(|| BladeError::Other(
-            "extract=json requires 'template': {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css|css@attr\"}}}".into()
+            "extract=json requires 'template': {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css|css@attr\"}}}. For template-free structured extraction use extract=auto.".into()
         ))?;
         return handle_template_extract(page, &tpl, limit).await;
+    }
+
+    // V21: auto-extract — deterministic structural analysis. Finds the DOM
+    // container with the most repeated structurally-similar children (the
+    // "main list": products, articles, results), extracts per-item fields,
+    // and INFERS field names by content type (title/link/image/price/date).
+    // No template, no LLM.
+    if extract == "auto" {
+        return handle_auto_extract(page, limit).await;
     }
 
     // M11: find — search all actionable elements by text, return matches with refs.
@@ -1334,6 +1347,151 @@ async fn handle_template_extract(
         ));
     }
     Ok(format!("extract json ({total} items):\n{json_str}"))
+}
+
+/// V21: Auto-extract — deterministic structural list extraction.
+/// Finds the DOM container whose direct children are the most
+/// structurally-repeated (the "main list"), extracts per-item fields by
+/// content type, returns a JSON array. No template, no LLM.
+fn auto_extract_expr(limit: usize) -> String {
+    let lim = limit.min(500);
+    r#"(()=>{
+const PRICE=/([$€£¥₹]\s?\d[\d,]*(?:\.\d{1,2})?|\b\d+[\.,]\d{2}\b)/;
+const DATE=/(\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[\/]\d{1,2}[\/]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s*\d{2,4}\b|\b\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago\b)/i;
+const HOST=location.hostname;
+function sig(el){const k=[...el.children].map(c=>c.tagName).join(',');return el.tagName+'['+k+']';}
+function txt(el){return(el.innerText||el.textContent||'').replace(/\s+/g,' ').trim();}
+function links(el){return[...el.querySelectorAll('a[href]')];}
+function extLink(el){return links(el).find(a=>a.hostname&&a.hostname!==HOST);}
+let best=null,bestScore=0,bestSig='';
+for(const c of document.querySelectorAll('*')){
+const kids=[...c.children].filter(k=>k.nodeType===1);
+if(kids.length<3)continue;
+const groups={};
+for(const k of kids){const s=sig(k);if(!groups[s])groups[s]=[];groups[s].push(k);}
+for(const s in groups){
+const items=groups[s];
+if(items.length<3)continue;
+let totalText=0,extCount=0,hCount=0,imgCount=0;
+for(const it of items){
+totalText+=txt(it).length;
+if(extLink(it))extCount++;
+if(it.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'))hCount++;
+if(it.querySelector('img[src]'))imgCount++;
+}
+const count=items.length;
+const avgText=totalText/count;
+if(avgText<5)continue;
+const tf=Math.min(Math.max(avgText/50,0.5),4);
+const ef=extCount/count,hf=hCount/count,imf=imgCount/count;
+const score=count*tf*(1+ef*2+hf+imf*0.5);
+if(score>bestScore){bestScore=score;best=c;bestSig=s;}
+}
+}
+if(!best)return JSON.stringify({error:'no repeated list found',items:[]});
+const tagName=best.tagName.toLowerCase();
+const cls=(best.className&&best.className.baseVal!==undefined?best.className.baseVal:best.className)||'';
+const container=tagName+(cls?('.'+cls.split(/\s+/)[0]):'');
+const items=[...best.children].filter(k=>k.nodeType===1&&sig(k)===bestSig).map(item=>{
+const t=txt(item);const o={};
+const h=item.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]');
+let title=h?txt(h):'';
+if(!title){title=t.split(' ').slice(0,12).join(' ').slice(0,140);}
+const allLinks=links(item);
+const ext=extLink(item);
+const link=ext||allLinks[0];
+if(link){const lt=txt(link);if(lt&&!title)title=lt.slice(0,140);}
+if(title)o.title=title.slice(0,140);
+if(link){o.url=link.href;}
+const img=item.querySelector('img[src]');
+if(img){o.image=img.src;if(img.alt)o.image_alt=img.alt.slice(0,100);}
+const pr=t.match(PRICE);if(pr)o.price=pr[0];
+const dt=t.match(DATE);if(dt)o.date=dt[0];
+if(t&&t!==(o.title||''))o.text=t.slice(0,200);
+return o;
+}).filter(o=>Object.keys(o).length>0).slice(0,"#.to_string()
+    + &lim.to_string()
+    + r#");
+return JSON.stringify({container,count:items.length,items});
+})()"#
+}
+
+/// Run auto-extract and return the parsed JSON value.
+async fn run_auto_extract(page: &Page, limit: usize) -> Result<serde_json::Value> {
+    let expr = auto_extract_expr(limit);
+    let res = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
+        "expression": expr,
+        "returnByValue": true,
+    }))).await?;
+    if let Some(exc) = res.get("exceptionDetails") {
+        let msg = exc.get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("auto-extract eval failed");
+        return Err(BladeError::Other(format!("auto-extract: {}", &msg[..msg.len().min(200)])));
+    }
+    let json_str = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("{}");
+    Ok(serde_json::from_str(json_str).unwrap_or_else(|_| serde_json::json!({"error": "parse failed", "items": []})))
+}
+
+async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String> {
+    let val = run_auto_extract(page, limit).await?;
+    let json_str = serde_json::to_string(&val)?;
+    if json_str.len() > 6000 {
+        let path = crate::artifacts::write_artifact(&json_str, "json")?;
+        let preview: String = json_str.chars().take(600).collect();
+        return Ok(format!(
+            "extract auto ({} bytes) → {path}\npreview: {preview}…\nread the file for the full data",
+            json_str.len(),
+        ));
+    }
+    Ok(format!("extract auto:\n{json_str}"))
+}
+
+/// V22: collect — auto-extract + scroll + dedupe loop. ONE call collects
+/// an entire infinite-scroll feed into a single artifact.
+async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
+    let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(100) as usize;
+    let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(60);
+    let mut all_items: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut no_new_streak = 0u32;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    loop {
+        let val = run_auto_extract(page, 500).await?;
+        let items = val.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default();
+        let mut new_count = 0usize;
+        for item in items {
+            let key = item.get("url").or_else(|| item.get("title"))
+                .or_else(|| item.get("text"))
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if key.is_empty() || seen.insert(key) {
+                all_items.push(item);
+                new_count += 1;
+            }
+        }
+
+        if all_items.len() >= max { break; }
+        if new_count == 0 {
+            no_new_streak += 1;
+            if no_new_streak >= 2 { break; }
+        } else {
+            no_new_streak = 0;
+        }
+        if std::time::Instant::now() > deadline { break; }
+
+        let _ = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
+            "expression": "window.scrollBy(0, Math.floor(window.innerHeight*0.9))",
+            "returnByValue": true,
+        }))).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+
+    let json = serde_json::to_string_pretty(&all_items)?;
+    let path = crate::artifacts::write_artifact(&json, "json")?;
+    Ok(format!("collected {} items ({} bytes) → {path}", all_items.len(), json.len()))
 }
 
 async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {

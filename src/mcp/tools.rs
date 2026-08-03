@@ -23,7 +23,7 @@ pub fn all_tools() -> Vec<ToolDef> {
             description: "Perform one action on the page. This is your hands. Every action returns an outcome verdict + what changed (the delta), so you usually don't need `see` after.
 \n\
 ADDRESSING (pick one): text=\"Sign in\" (fastest, no see needed), ref=\"e5\" (from a previous response), label=\"Email\" for inputs, x+y for canvas. Ambiguous text? Add role=\"button\" or nth=2 (errors list matches with refs + nth values). Refs self-heal across navigations, so stale refs usually just work.\n\
-KEY ACTIONS: navigate(url), click, type(label+text), fill(fields+submit for multi-field forms), select, press(key), scroll(dx,dy), back/forward/reload, hover (reveals dropdowns in delta), wait(condition), eval(js for anything else; el in scope if ref given), pdf (export page as PDF artifact), download (wait for a triggered download to finish, returns path). slim=true returns verdict only.\n\
+KEY ACTIONS: navigate(url), click, type(label+text), fill(fields+submit for multi-field forms), select, press(key), scroll(dx,dy), back/forward/reload, hover (reveals dropdowns in delta), wait(condition), eval(js for anything else; el in scope if ref given), pdf (export page as PDF artifact), download (wait for a triggered download to finish, returns path), collect (auto-extract + scroll + dedupe loop, infinite-scroll collection into one artifact). slim=true returns verdict only.\n\
 On error, current page state is included — recover without an extra see.",
             input_schema: json!({
                 "type": "object",
@@ -31,7 +31,7 @@ On error, current page state is included — recover without an extra see.",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "fill", "eval", "pdf", "download"]
+                        "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "fill", "eval", "pdf", "download", "collect"]
                     },
                     "ref": {
                         "type": "string",
@@ -127,13 +127,17 @@ On error, current page state is included — recover without an extra see.",
                     "submit": {
                         "type": "string",
                         "description": "For fill: ref or text of the submit button to click after filling."
+                    },
+                    "max": {
+                        "type": "integer",
+                        "description": "For collect: max items to collect. Default: 100."
                     }
                 }
             }),
         },
         ToolDef {
             name: "see",
-            description: "Observe the page. You rarely need this — navigate and act already return the page state. Use see to: zoom into dense pages (filter=\"button,link\"), search elements by text (find=\"price\"), extract structured data (extract=json + template for listings, extract=links|forms), read page text (content=true), debug (logs=console|network), or view one element's subtree (scope=eN).\n\
+            description: "Observe the page. You rarely need this — navigate and act already return the page state. Use see to: zoom into dense pages (filter=\"button,link\"), search elements by text (find=\"price\"), extract structured data (extract=auto for template-free list extraction, extract=json+template for custom, extract=links|forms), read page text (content=true), debug (logs=console|network), or view one element's subtree (scope=eN).\n\
 Semantic folding: nav/footer/sidebar auto-fold on landmark pages; filter=nav expands them.\n\
 BIG DATA RULE: extract results over ~6KB go to a file path — read the file, don't re-extract.",
             input_schema: json!({
@@ -153,8 +157,8 @@ BIG DATA RULE: extract results over ~6KB go to a file path — read the file, do
                     },
                     "extract": {
                         "type": "string",
-                        "enum": ["links", "forms", "json"],
-                        "description": "Extract structured data as JSON: all links, all forms, or 'json' with a template."
+                        "enum": ["links", "forms", "json", "auto"],
+                        "description": "Extract structured data as JSON: 'links', 'forms', 'json' (needs template), or 'auto' (template-free: finds the main repeated list and infers fields: title/url/image/price/date/text)."
                     },
                     "template": {
                         "type": "object",
