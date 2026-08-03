@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Bladebro release script — the ONLY way to cut a release.
-# One command does everything, in the right order, with
-# verification at every step. Version skew becomes impossible:
-# the script refuses to release if anything is out of sync.
+# One command does everything: version bump, build all platforms,
+# test, clippy, tag, push, GitHub release with ALL 4 binaries,
+# and publish to npm.
 #
-# Usage: ./release.sh <version>     e.g. ./release.sh 2.0.0
+# Usage: ./release.sh <version>     e.g. ./release.sh 3.0.4
 #
-# Requires: cargo, git, gh (GitHub CLI), a clean-ish tree
-# (uncommitted changes OK only in gitignored files).
+# Requires: cargo, cargo-zigbuild (for macOS/Windows cross-compile),
+#           git, gh (GitHub CLI), npm (for npm publish)
+#           A clean-ish tree (uncommitted changes OK only in gitignored files).
 
 set -euo pipefail
 
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
-    echo "usage: ./release.sh <version>  (e.g. 2.0.0)" >&2
+    echo "usage: ./release.sh <version>  (e.g. 3.0.4)" >&2
     exit 1
 fi
 
@@ -31,7 +32,7 @@ fi
 sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
 grep -q "^version = \"$VERSION\"" Cargo.toml || {
     echo "ERROR: Cargo.toml bump failed" >&2; exit 1; }
-echo "[1/7] Cargo.toml -> $VERSION"
+echo "[1/9] Cargo.toml -> $VERSION"
 
 # 3. CHANGELOG must have an [Unreleased] section with content;
 #    promote it to the release version with today's date.
@@ -45,7 +46,6 @@ import re, sys
 version, today = sys.argv[1], sys.argv[2]
 with open("CHANGELOG.md") as f:
     text = f.read()
-# Promote Unreleased -> [version] - date, add fresh Unreleased.
 new = text.replace(
     "## [Unreleased]",
     f"## [Unreleased]\n\n## [{version}] - {today}",
@@ -54,24 +54,49 @@ new = text.replace(
 with open("CHANGELOG.md", "w") as f:
     f.write(new)
 PYEOF
-echo "[2/7] CHANGELOG promoted to [$VERSION] - $TODAY"
+echo "[2/9] CHANGELOG promoted to [$VERSION] - $TODAY"
 
 # 4. Full verification: build, test, clippy.
-echo "[3/7] cargo build --release..."
+echo "[3/9] cargo build --release (Linux)..."
 cargo build --release 2>&1 | tail -1
-echo "[4/7] cargo test..."
+
+echo "[4/9] cargo test..."
 cargo test --release 2>&1 | grep -c "test result: ok" >/dev/null
-echo "[5/7] clippy..."
+
+echo "[5/9] clippy..."
 cargo clippy --release -- -D warnings 2>&1 | tail -1
 
-# 5. Commit + tag.
+# 5. Build all cross-platform binaries.
+echo "[6/9] Building cross-platform binaries..."
+
+# Windows x86_64 (via cargo-zigbuild)
+if command -v cargo-zigbuild &>/dev/null; then
+    cargo zigbuild --release --target x86_64-pc-windows-gnu 2>&1 | tail -1
+else
+    echo "  WARNING: cargo-zigbuild not found, skipping Windows build"
+fi
+
+# macOS x86_64 (via cargo-zigbuild)
+if command -v cargo-zigbuild &>/dev/null; then
+    cargo zigbuild --release --target x86_64-apple-darwin 2>&1 | tail -1
+else
+    echo "  WARNING: cargo-zigbuild not found, skipping macOS x64 build"
+fi
+
+# macOS arm64 (via cargo-zigbuild)
+if command -v cargo-zigbuild &>/dev/null; then
+    cargo zigbuild --release --target aarch64-apple-darwin 2>&1 | tail -1
+else
+    echo "  WARNING: cargo-zigbuild not found, skipping macOS arm64 build"
+fi
+
+# 6. Commit + tag.
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "release: v$VERSION"
 git tag -a "v$VERSION" -m "v$VERSION"
-echo "[6/7] committed + tagged v$VERSION"
+echo "[7/9] committed + tagged v$VERSION"
 
-# 6. Push. Use gh's stored token for the remote if the
-#    remote URL has no credentials.
+# 7. Push.
 REMOTE_URL=$(git remote get-url origin)
 if [[ "$REMOTE_URL" != *"@github.com"* ]]; then
     TOKEN=$(gh auth token 2>/dev/null || true)
@@ -81,20 +106,61 @@ if [[ "$REMOTE_URL" != *"@github.com"* ]]; then
     fi
 fi
 git push origin master:main --tags
-# Scrub the token from the remote URL.
 git remote set-url origin "https://github.com/dondai44423/bladebro.git" 2>/dev/null || true
 trap - EXIT
-echo "[7/7] pushed"
+echo "[8/9] pushed"
 
-# 7. GitHub release with the binary.
-ASSET="bladebro-linux-x86_64"
-cp target/release/bladebro "/tmp/$ASSET"
-gh release create "v$VERSION" "/tmp/$ASSET" \
+# 8. GitHub release with ALL 4 platform binaries.
+echo "[9/9] Creating GitHub release with binaries..."
+
+# Prepare asset files with the correct names (matching what the updater expects).
+TMPDIR_RELEASE=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_RELEASE"' EXIT
+
+cp target/release/bladebro "$TMPDIR_RELEASE/bladebro-linux-x64"
+
+if [[ -f target/x86_64-pc-windows-gnu/release/bladebro.exe ]]; then
+    cp target/x86_64-pc-windows-gnu/release/bladebro.exe "$TMPDIR_RELEASE/bladebro-windows-x64.exe"
+fi
+
+if [[ -f target/x86_64-apple-darwin/release/bladebro ]]; then
+    cp target/x86_64-apple-darwin/release/bladebro "$TMPDIR_RELEASE/bladebro-darwin-x64"
+fi
+
+if [[ -f target/aarch64-apple-darwin/release/bladebro ]]; then
+    cp target/aarch64-apple-darwin/release/bladebro "$TMPDIR_RELEASE/bladebro-darwin-arm64"
+fi
+
+# Create release with all available binaries.
+ASSETS=()
+for f in "$TMPDIR_RELEASE"/bladebro-*; do
+    [[ -f "$f" ]] && ASSETS+=("$f")
+done
+
+if [[ ${#ASSETS[@]} -eq 0 ]]; then
+    echo "ERROR: no binaries found to upload" >&2
+    exit 1
+fi
+
+gh release create "v$VERSION" "${ASSETS[@]}" \
     --title "v$VERSION" \
     --notes-from-tag 2>/dev/null \
-|| gh release create "v$VERSION" "/tmp/$ASSET" --title "v$VERSION" --generate-notes
+|| gh release create "v$VERSION" "${ASSETS[@]}" --title "v$VERSION" --generate-notes
+
+# 9. Publish to npm (if publish-npm.sh exists).
+if [[ -f scripts/publish-npm.sh ]]; then
+    echo ""
+    echo "=== Publishing to npm ==="
+    bash scripts/publish-npm.sh
+fi
 
 echo ""
 echo "=== RELEASED v$VERSION ==="
-echo "Binary attached: $ASSET"
+echo "Binaries uploaded: ${#ASSETS[@]}"
+echo "  - bladebro-linux-x64"
+[[ -f "$TMPDIR_RELEASE/bladebro-windows-x64.exe" ]] && echo "  - bladebro-windows-x64.exe"
+[[ -f "$TMPDIR_RELEASE/bladebro-darwin-x64" ]] && echo "  - bladebro-darwin-x64"
+[[ -f "$TMPDIR_RELEASE/bladebro-darwin-arm64" ]] && echo "  - bladebro-darwin-arm64"
+echo ""
 echo "Verify: bladebro -v  (should show update available for older installs)"
+echo "Verify: bladebro -u  (should download and install the new version)"

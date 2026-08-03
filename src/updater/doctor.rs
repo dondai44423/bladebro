@@ -59,10 +59,13 @@ pub async fn run() -> Result<()> {
     // 7. Network connectivity
     checks.push(check_network().await);
 
-    // 8. Binary integrity
+    // 8. Binary integrity + install method
     checks.push(check_binary());
 
-    // 9. Version vs latest
+    // 9. Disk space
+    checks.push(check_disk_space());
+
+    // 10. Version vs latest
     checks.push(check_version().await);
 
     // Print results.
@@ -375,21 +378,94 @@ fn check_binary() -> Check {
 
     let size = std::fs::metadata(&exe).map(|m| m.len()).unwrap_or(0);
     let size_mb = size as f64 / 1_048_576.0;
+    let method = super::version::install_method();
 
-    if size > 1_000_000 && size < 500_000_000 {
+    let size_ok = size > 1_000_000 && size < 500_000_000;
+    let detail = format!(
+        "v{} ({size_mb:.1}MB) [{}]",
+        super::CURRENT_VERSION,
+        match method {
+            "npm" => "npm",
+            "source" => "source build",
+            _ => "binary",
+        }
+    );
+
+    if size_ok {
         Check {
             name: "Binary integrity",
             status: Status::Pass,
-            detail: format!("v{} ({size_mb:.1}MB)", super::CURRENT_VERSION),
+            detail,
             fix: None,
         }
     } else {
         Check {
             name: "Binary integrity",
             status: Status::Warn,
-            detail: format!("unusual size: {size_mb:.1}MB"),
-            fix: Some("Re-download from GitHub releases".into()),
+            detail: format!("{detail} unusual size"),
+            fix: Some("Reinstall: npm install -g bladebro".into()),
         }
+    }
+}
+
+fn check_disk_space() -> Check {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return Check {
+            name: "Disk space",
+            status: Status::Warn,
+            detail: "cannot check".into(),
+            fix: None,
+        },
+    };
+    let dir = exe.parent().unwrap_or(std::path::Path::new("."));
+
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("df")
+            .arg("-k")
+            .arg(dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if let Some(line) = stdout.lines().last() {
+                    let fields: Vec<&str> = line.split_whitespace().collect();
+                    let use_idx = fields.iter().position(|f| f.ends_with('%'));
+                    let avail_idx = use_idx.and_then(|i| if i > 0 { Some(i - 1) } else { None });
+                    if let Some(idx) = avail_idx {
+                        if let Ok(avail_kb) = fields[idx].parse::<u64>() {
+                            let avail_mb = avail_kb as f64 / 1024.0;
+                            if avail_mb < 50.0 {
+                                return Check {
+                                    name: "Disk space",
+                                    status: Status::Warn,
+                                    detail: format!("{avail_mb:.0} MB free (updates need ~20MB)"),
+                                    fix: Some("Free up disk space before updating".into()),
+                                };
+                            }
+                            return Check {
+                                name: "Disk space",
+                                status: Status::Pass,
+                                detail: format!("{avail_mb:.0} MB free"),
+                                fix: None,
+                            };
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Check {
+        name: "Disk space",
+        status: Status::Pass,
+        detail: "sufficient".into(),
+        fix: None,
     }
 }
 

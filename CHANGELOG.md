@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — Update Hub overhaul
+
+- **Asset naming mismatch**: updater looked for `bladebro-linux-x86_64` but npm packages and releases use `bladebro-linux-x64`. Now uses npm-consistent naming (`bladebro-{os}-{arch}`) with legacy name fallback and fuzzy keyword matching for any naming variation.
+- **No binaries on GitHub releases**: releases v3.0.2 and v3.0.3 were created without binary assets, so `bladebro -u` failed with "no binary for this platform." Release script now builds and uploads all 4 platform binaries to every GitHub release.
+- **Download resume corruption**: `download_once` didn't check for HTTP 206 (Partial Content). On a 200 response with an existing partial file, it appended full content, corrupting the binary. Now correctly distinguishes 206 (append) from 200 (truncate and restart).
+- **npm install detection**: self-updating an npm-installed binary breaks the npm installation (replaced file doesn't match npm's hash). Updater now detects `node_modules` in the exe path, warns the user, and suggests `npm update -g bladebro` instead. Force override with `--force`.
+
+### Added — Update Hub
+
+- **`--check` dry run**: `bladebro -u --check` checks for updates without downloading or installing.
+- **Binary execution verification**: after download, the updater runs `binary --version` to confirm the binary starts and identifies as bladebro. Catches wrong-architecture binaries, missing shared libraries, and corrupted files that pass magic-byte checks.
+- **Disk space pre-flight**: checks available disk space via `df` before downloading. Warns if less than the binary size + 10MB is available.
+- **Install method detection**: `bladebro -v` and `bladebro -doc` now show whether the binary was installed via npm, source build, or direct binary.
+- **Writable check before swap**: verifies the binary location is writable before attempting the swap. Returns a clear error with the correct fix for npm installs, permission issues, and read-only filesystems.
+- **Backup pruning**: keeps the last 5 backups, automatically prunes older ones.
+- **Backup verification on rollback**: verifies backup integrity (magic bytes + size) before restoring. If the most recent backup is corrupted, automatically tries the next one.
+- **Doctor disk space check**: new check (#10) showing available disk space.
+- **Fuzzy asset matching**: if exact asset name doesn't match, falls back to keyword matching (os + arch keywords, excluding checksums/text archives).
+- **Better error messages**: no-asset error now lists available assets and suggests npm/source install alternatives.
+
+### Changed — Release pipeline
+
+- **`release.sh`**: now builds all 4 platforms (Linux native, Windows/macOS via cargo-zigbuild), uploads all binaries to GitHub release with correct names, and triggers npm publish automatically.
+- **`publish-npm.sh`**: uses cargo-zigbuild for all cross-platform builds (removed `cross` Docker dependency — Docker glibc was too old for build scripts).
+
 ## [3.0.1] - 2026-08-03
 
 ### Added — v3 "I don't believe this works"

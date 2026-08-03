@@ -2,6 +2,8 @@
 //!
 //! Commands:
 //! - `bladebro -u` / `bladebro update` — check for updates, download, swap
+//! - `bladebro -u --check` — dry run: check for updates, don't install
+//! - `bladebro -u --force` — force update even if same version
 //! - `bladebro -doc` / `bladebro doctor` — diagnose system, suggest fixes
 //! - `bladebro --rollback` — restore previous binary after broken update
 //! - `bladebro -v` / `bladebro --version` — show version + update status
@@ -18,7 +20,6 @@ use crate::error::{BladeError, Result};
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Git commit + dirty flag, baked in by build.rs.
-/// Lets `-v` identify exactly what code a binary runs.
 pub const BUILD_ID: &str = env!("BLADE_BUILD_ID");
 
 /// The GitHub repo for release checks.
@@ -40,8 +41,13 @@ pub async fn run(cmd: &str, args: &[String]) -> Result<()> {
 }
 
 /// `bladebro update` / `bladebro -u` — check for updates, download, swap.
+///
+/// Flags:
+///   --check / -c  — dry run: check but don't install
+///   --force / -f  — force update even if same version (reinstall)
 async fn update(args: &[String]) -> Result<()> {
     let force = args.iter().any(|a| a == "--force" || a == "-f");
+    let dry_run = args.iter().any(|a| a == "--check" || a == "-c");
 
     ui::header("Bladebro Update");
 
@@ -77,20 +83,66 @@ async fn update(args: &[String]) -> Result<()> {
         ui::warn("Force update requested (same version)");
     }
 
+    // Dry run: stop here.
+    if dry_run {
+        ui::info("Dry run (--check): skipping download and install");
+        ui::hint("To update: bladebro -u");
+        return Ok(());
+    }
+
+    // npm detection: warn if installed via npm.
+    if version::is_npm_install() && !force {
+        ui::warn("This binary was installed via npm (detected node_modules in path)");
+        ui::warn("Self-updating would break the npm installation.");
+        println!();
+        ui::info("To update via npm:");
+        ui::hint("npm update -g bladebro");
+        println!();
+        ui::hint("Or force self-update: bladebro -u --force");
+        return Ok(());
+    }
+
     // Step 2: download the binary.
-    ui::step(2, 4, "Downloading...");
+    let asset_name = version::platform_asset_name();
+    let asset_size = version::find_asset(&latest).map(|a| a.size).unwrap_or(0);
+    let download_label = if asset_size > 0 {
+        format!("{asset_name} (~{:.1} MB)", asset_size as f64 / 1_000_000.0)
+    } else {
+        asset_name
+    };
+    ui::step(2, 4, &format!("Downloading {download_label}..."));
+
     let binary_path = download::download_binary(&latest).await?;
-    ui::info(&format!("Downloaded {} bytes", binary_path.size));
+    ui::info(&format!(
+        "Downloaded {:.1} MB",
+        binary_path.size as f64 / 1_000_000.0
+    ));
 
     // Step 3: verify the download.
     ui::step(3, 4, "Verifying...");
     download::verify_binary(&binary_path)?;
-    ui::info("Binary verified");
+    ui::info("Binary verified (magic + size)");
+
+    // Try executing the binary to confirm it runs.
+    match download::verify_binary_runs(&binary_path) {
+        Ok(()) => ui::info("Binary starts: confirmed"),
+        Err(e) => {
+            download::cleanup_tmp(&binary_path.path);
+            return Err(BladeError::Other(format!(
+                "downloaded binary failed verification: {e}\n\
+                 The binary may be for the wrong architecture or corrupted.\n\
+                 Try: npm install -g bladebro"
+            )));
+        }
+    }
 
     // Step 4: swap.
     ui::step(4, 4, "Installing...");
     let backup = swap::swap_binary(&binary_path.path)?;
     ui::info(&format!("Backed up previous version to {}", backup.display()));
+
+    // Clean up temp file.
+    download::cleanup_tmp(&binary_path.path);
 
     ui::success(&format!("Updated to {}", latest.tag()));
     ui::hint("Restart your MCP client to use the new version.");
@@ -101,12 +153,20 @@ async fn update(args: &[String]) -> Result<()> {
 /// `bladebro -v` / `bladebro --version` — show version + update status.
 ///
 /// Three honest states, never a misleading "up to date":
-/// - behind:  update available → tells you to run -u
+/// - behind:  update available
 /// - equal:   on the latest release
-/// - ahead:   local build is NEWER than the latest release
-///   (dev build or pending release) — says so.
+/// - ahead:   local build is newer than the latest release
 async fn show_version() -> Result<()> {
     println!("bladebro v{CURRENT_VERSION} ({BUILD_ID})");
+
+    // Show install method.
+    let method = version::install_method();
+    if method == "npm" {
+        println!("  install: npm");
+    } else if method == "source" {
+        println!("  install: source build");
+    }
+
     match version::fetch_latest().await {
         Ok(latest) => {
             match version::compare_versions(latest.tag(), CURRENT_VERSION) {
