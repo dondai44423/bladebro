@@ -1036,6 +1036,18 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             }
             return Ok(format!("{verdict}\n{}", view));
         }
+        "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies" | "set-cookie" => {
+            // Allow state ops as action shortcuts in batch/run steps.
+            let mut state_args = args.clone();
+            if action_str != "state" {
+                if let Some(obj) = state_args.as_object_mut() {
+                    if !obj.contains_key("op") {
+                        obj.insert("op".to_string(), serde_json::Value::String(action_str.to_string()));
+                    }
+                }
+            }
+            return handle_state(&state_args, page).await;
+        }
         _ => {
             return Err(crate::error::BladeError::Other(format!(
                 "unknown action: {action_str}"
@@ -1866,6 +1878,27 @@ async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
 /// until it completes (or `timeout` secs, default 60).
 async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(60);
+    let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
+
+    // If a URL is provided, navigate to it first. The navigation will
+    // trigger the download (if the URL is a download endpoint).
+    if !url.is_empty() {
+        let delta = page.navigate(url).await?;
+        // Brief settle in case the server redirects to a download.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // If the navigation resulted in a page load (not a download),
+        // the download may be triggered by JS on the page. Wait for settle.
+        if !delta.navigated && page.downloads().lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty() {
+            crate::page::wait_for_settle_with_network(
+                page.cdp_ref(),
+                std::time::Duration::from_secs(3),
+                Some(page.in_flight_ref()),
+            ).await?;
+        }
+    }
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let downloads = page.downloads();
     loop {
@@ -2030,6 +2063,30 @@ async fn execute_step(
                     let view = page.view(2000);
                     return Err(crate::error::BladeError::Other(format!(
                         "step {path} js failed: {e}\n\n--- current page state ---\n{view}"
+                    )));
+                }
+            }
+        }
+        "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies" | "set-cookie" => {
+            let mut state_args = step.clone();
+            if action_str != "state" {
+                if let Some(obj) = state_args.as_object_mut() {
+                    if !obj.contains_key("op") {
+                        obj.insert("op".to_string(), serde_json::Value::String(action_str.to_string()));
+                    }
+                }
+            }
+            match handle_state(&state_args, page).await {
+                Ok(result) => {
+                    let capped: String = result.chars().take(2000).collect();
+                    observations.push(format!("step {path}: {capped}"));
+                }
+                Err(BladeError::Closed) => return Err(BladeError::Closed),
+                Err(e) => {
+                    let _ = page.recapture().await;
+                    let view = page.view(3000);
+                    return Err(crate::error::BladeError::Other(format!(
+                        "step {path} state failed: {e}\n\n--- current page state ---\n{view}"
                     )));
                 }
             }

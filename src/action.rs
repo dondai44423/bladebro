@@ -558,9 +558,12 @@ async fn find_by_sig(
         + "if(mode==='focus'){n.focus();return{ok:true};}"
         + "if(mode==='clear'){if('value' in n){n.value='';n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));}return{ok:true};}"
         + "if(mode==='click'){n.click();return{ok:true};}"
-        + "if(mode==='type'){n.focus();n.value="
+        + "if(mode==='check'){return{ok:true,text:n.value||''};}"
+        + "if(mode==='type'){n.focus();var proto=n.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var setter=Object.getOwnPropertyDescriptor(proto,'value').set;if(setter){setter.call(n,"
         + &text_js
-        + ";n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true};}"
+        + ");}else{n.value="
+        + &text_js
+        + ";}n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true};}"
         + "if(mode==='select'){"
         + "if(n.tagName==='SELECT'){"
         + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
@@ -994,6 +997,21 @@ pub async fn perform_with_network(
                 .await?;
                 if i < cadence.len() {
                     tokio::time::sleep(cadence[i]).await;
+                }
+            }
+            // Verify the value was actually set. Some inputs reject CDP
+            // key events (framework-controlled, certain focus states).
+            // If the value is empty or wrong, fall back to JS value
+            // setting with native setter + event dispatch.
+            let check = find_by_sig(cdp, sig, frame, "check", None).await?;
+            if check.ok && check.text.as_deref() != Some(text.as_str()) {
+                // Key events didn't insert text. Use JS fallback with
+                // native value setter (React/Vue/Angular compatible).
+                let fallback = find_by_sig(cdp, sig, frame, "type", Some(text)).await?;
+                if !fallback.ok {
+                    return Err(BladeError::Other(format!(
+                        "typing failed: key events did not insert text and JS fallback failed for {ref_id}"
+                    )));
                 }
             }
         }
