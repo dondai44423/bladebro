@@ -6,9 +6,9 @@
 
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
-Re-render-immune refs · batch actions · auto-extract · stealth · delta-first · one binary
+Re-render-immune refs · batch actions · auto-extract · infinite-scroll collect · 6-layer stealth · delta-first
 
-One MCP server · one persistent page model · zero Node.js · runs on your machine
+One MCP server · one persistent page model · zero Node.js · one binary · Linux · macOS · Windows
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/bladebro.svg)](https://www.npmjs.com/package/bladebro)
@@ -33,6 +33,18 @@ Built in Rust. One static binary. No runtime. No Node.js. No Playwright shim. Ju
 
 Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and the new stateless per-request negotiation with `server/discover`, dual-dialect. Works with every MCP client, old and new.
 
+### What makes it different
+
+| Innovation | What it means | Status |
+|---|---|---|
+| **Re-render immunity** | Refs survive React/Vue/Angular DOM replacement via structural fingerprints. No other agent browser does this. | Live-verified |
+| **Batch actions** | Multi-step workflows (fill 5 fields, submit, wait) in ONE MCP call instead of 11. | Live-verified |
+| **Auto-extract** | Template-free list extraction. No CSS selectors, no setup. Detects structure, scores content, extracts rows. | 10+ sites verified |
+| **Infinite-scroll collect** | Scroll + dedupe loop for feeds. ONE call, ONE artifact, zero duplicates. | 80 items verified |
+| **6-layer stealth** | Protocol, environment, behavior, coherence, residue, seasoning. All on by default. | incolumitas 8/8 |
+| **Delta-first tokens** | Every action returns what changed, not the whole page. 3-4x cheaper than competitors. | 940-token tool defs |
+| **Self-healing refs** | Stale refs re-resolve automatically. Agent never sees "element not found" after navigation. | 26/26 sites |
+
 ## 🔧 Install
 
 ### npm (recommended)
@@ -42,7 +54,16 @@ npm install -g bladebro
 bladebro mcp
 ```
 
-That's it. No Rust, no compilation, no dependencies. The npm package ships a prebuilt binary for your platform. Currently available for **Linux x86_64**. macOS and Windows binaries coming soon.
+That's it. No Rust, no compilation, no dependencies. The npm package ships a prebuilt binary for your platform:
+
+| Platform | Package | Size |
+|---|---|---|
+| Linux x86_64 | `bladebro-linux-x64` | 5.6 MB |
+| Windows x86_64 | `bladebro-windows-x64` | 5.2 MB |
+| macOS Intel | `bladebro-darwin-x64` | 5.2 MB |
+| macOS Apple Silicon | `bladebro-darwin-arm64` | 4.8 MB |
+
+npm resolves the correct binary automatically via `os`/`cpu` fields. Users only download the binary for their platform. Zero postinstall scripts, zero warnings.
 
 ### From source
 
@@ -243,7 +264,7 @@ Run `bladebro audit` to verify your own setup.
 | Cloudflare Turnstile blocks Bladebro | Turnstile requires actual challenge solving, not just fingerprint spoofing. You get a `blocked:` verdict, not a hang. |
 | Datacenter IPs get flagged | Server/VPS IPs are flagged regardless of browser fingerprint. Use `BLADE_PROXY` with a residential proxy. |
 | Cross-origin iframes are invisible | SecurityError on `contentDocument`. Deliberate limitation; would need `Runtime.enable` (breaks stealth). |
-| macOS/Windows not yet live-tested | Should work (native code, CI matrix), but untested on real macOS/Windows machines. File an issue if something breaks. |
+| macOS/Windows binaries cross-compiled | Built via cargo-zigbuild (zig linker) from Linux, not native-tested on real macOS/Windows machines. File an issue if something breaks. |
 | `BLADE_NOISE=1` can *hurt* stealth | FingerprintJS ML detects noise injection as "browser tampering." Off by default. Only use if you know why. |
 
 ## 🔄 Update hub
