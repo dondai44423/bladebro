@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="280" viewBox="0 0 800 280" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0a0f"/>
+      <stop offset="1" stop-color="#12121a"/>
+    </linearGradient>
+    <linearGradient id="agent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7c5cfc"/>
+      <stop offset="1" stop-color="#5a3fd0"/>
+    </linearGradient>
+    <linearGradient id="mcp" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00d4aa"/>
+      <stop offset="1" stop-color="#00b894"/>
+    </linearGradient>
+    <linearGradient id="chrome" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a90d9"/>
+      <stop offset="1" stop-color="#357abd"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="800" height="280" rx="12" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" font-family="'SF Pro Display', system-ui, sans-serif"
+        font-size="16" font-weight="700" fill="#8888a0" letter-spacing="2">ARCHITECTURE</text>
+
+  <!-- Layer 1: AI Agent -->
+  <g transform="translate(50, 50)">
+    <rect x="0" y="0" width="120" height="60" rx="10" fill="url(#agent)" filter="url(#glow)"/>
+    <text x="60" y="28" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#fff">AI Agent</text>
+    <text x="60" y="44" text-anchor="middle" font-family="monospace" font-size="9" fill="#c8b8ff">Claude · GPT · etc</text>
+  </g>
+
+  <!-- Arrow: Agent → MCP -->
+  <g stroke="#00d4aa" stroke-width="2" fill="none" opacity="0.5">
+    <line x1="170" y1="80" x2="310" y2="80" stroke-dasharray="5,4"/>
+    <polygon points="310,80 302,75 302,85" fill="#00d4aa" opacity="0.8"/>
+  </g>
+  <text x="240" y="72" text-anchor="middle" font-family="monospace" font-size="9" fill="#00d4aa" opacity="0.7">MCP stdio</text>
+
+  <!-- Layer 2: Bladebro MCP Server -->
+  <g transform="translate(310, 40)">
+    <rect x="0" y="0" width="180" height="80" rx="10" fill="url(#mcp)" filter="url(#glow)"/>
+    <text x="90" y="28" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="800" fill="#fff">Bladebro</text>
+    <text x="90" y="44" text-anchor="middle" font-family="monospace" font-size="9" fill="#c8fff0">5 tools · MCP server</text>
+    <text x="90" y="58" text-anchor="middle" font-family="monospace" font-size="9" fill="#c8fff0">Rust · zero runtime</text>
+    <text x="90" y="72" text-anchor="middle" font-family="monospace" font-size="8" fill="#9eebd0">~1,900 token tool defs</text>
+  </g>
+
+  <!-- Arrow: MCP → CDP -->
+  <g stroke="#00d4aa" stroke-width="2" fill="none" opacity="0.5">
+    <line x1="490" y1="80" x2="630" y2="80" stroke-dasharray="5,4"/>
+    <polygon points="630,80 622,75 622,85" fill="#00d4aa" opacity="0.8"/>
+  </g>
+  <text x="560" y="72" text-anchor="middle" font-family="monospace" font-size="9" fill="#00d4aa" opacity="0.7">CDP pipe</text>
+
+  <!-- Layer 3: Chromium -->
+  <g transform="translate(630, 50)">
+    <rect x="0" y="0" width="120" height="60" rx="10" fill="url(#chrome)" filter="url(#glow)"/>
+    <text x="60" y="28" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#fff">Chromium</text>
+    <text x="60" y="44" text-anchor="middle" font-family="monospace" font-size="9" fill="#b8d8ff">CDP protocol</text>
+  </g>
+
+  <!-- Below: Live Page Model -->
+  <g transform="translate(120, 150)">
+    <rect x="0" y="0" width="560" height="100" rx="10" fill="#1a1a25" stroke="#2a2a3a" stroke-width="1"/>
+    <text x="280" y="22" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="#00d4aa">Live Page Model</text>
+    <text x="280" y="36" text-anchor="middle" font-family="monospace" font-size="9" fill="#8888a0">persistent · ref-stable · diff-first</text>
+
+    <!-- Three pillars -->
+    <g transform="translate(30, 48)">
+      <rect x="0" y="0" width="150" height="40" rx="8" fill="#0d0d14" stroke="#00d4aa" stroke-width="1" opacity="0.5"/>
+      <text x="75" y="18" text-anchor="middle" font-family="monospace" font-size="9" font-weight="700" fill="#00d4aa">e1 e2 e3 ...</text>
+      <text x="75" y="32" text-anchor="middle" font-family="monospace" font-size="8" fill="#8888a0">stable refs</text>
+    </g>
+
+    <g transform="translate(205, 48)">
+      <rect x="0" y="0" width="150" height="40" rx="8" fill="#0d0d14" stroke="#7c5cfc" stroke-width="1" opacity="0.5"/>
+      <text x="75" y="18" text-anchor="middle" font-family="monospace" font-size="9" font-weight="700" fill="#7c5cfc">fp=0xdead...</text>
+      <text x="75" y="32" text-anchor="middle" font-family="monospace" font-size="8" fill="#8888a0">fingerprints</text>
+    </g>
+
+    <g transform="translate(380, 48)">
+      <rect x="0" y="0" width="150" height="40" rx="8" fill="#0d0d14" stroke="#4a90d9" stroke-width="1" opacity="0.5"/>
+      <text x="75" y="18" text-anchor="middle" font-family="monospace" font-size="9" font-weight="700" fill="#4a90d9">{ -x, +y }</text>
+      <text x="75" y="32" text-anchor="middle" font-family="monospace" font-size="8" fill="#8888a0">deltas only</text>
+    </g>
+  </g>
+
+  <!-- Vertical connector from Bladebro to LPM -->
+  <line x1="400" y1="120" x2="400" y2="150" stroke="#00d4aa" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.4"/>
+
+  <!-- Vertical connector from Chromium to LPM -->
+  <line x1="690" y1="110" x2="690" y2="145" stroke="#4a90d9" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.3"/>
+  <line x1="690" y1="145" x2="680" y2="150" stroke="#4a90d9" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.3"/>
+
+  <!-- Vertical connector from Agent to LPM -->
+  <line x1="110" y1="110" x2="110" y2="145" stroke="#7c5cfc" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.3"/>
+  <line x1="110" y1="145" x2="120" y2="150" stroke="#7c5cfc" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.3"/>
+</svg>

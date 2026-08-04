@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="340" viewBox="0 0 800 340" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0a0f"/>
+      <stop offset="1" stop-color="#12121a"/>
+    </linearGradient>
+    <radialGradient id="center" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#00d4aa" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#00d4aa" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="800" height="340" rx="12" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="32" text-anchor="middle" font-family="'SF Pro Display', system-ui, sans-serif"
+        font-size="16" font-weight="700" fill="#8888a0" letter-spacing="2">6-LAYER STEALTH SYSTEM</text>
+
+  <!-- Concentric layers (hexagonal shield motif) -->
+  <g transform="translate(160, 170)">
+    <!-- Layer 6: Seasoning -->
+    <polygon points="0,-110 95,-55 95,55 0,110 -95,55 -95,-55" fill="none" stroke="#ff9f43" stroke-width="1.5" opacity="0.4"/>
+    <text x="0" y="-95" text-anchor="middle" font-family="monospace" font-size="9" font-weight="700" fill="#ff9f43" opacity="0.8">6 Seasoning</text>
+
+    <!-- Layer 5: Residue -->
+    <polygon points="0,-92 80,-46 80,46 0,92 -80,46 -80,-46" fill="none" stroke="#ee5a5a" stroke-width="1.5" opacity="0.4"/>
+    <text x="0" y="-77" text-anchor="middle" font-family="monospace" font-size="9" font-weight="700" fill="#ee5a5a" opacity="0.8">5 Residue</text>
+
+    <!-- Layer 4: Coherence -->
+    <polygon points="0,-74 64,-37 64,37 0,74 -64,37 -64,-37" fill="none" stroke="#7c5cfc" stroke-width="1.5" opacity="0.4"/>
+    <text x="0" y="-59" text-anchor="middle" font-family="monospace" font-size="9" font-weight="700" fill="#7c5cfc" opacity="0.8">4 Coherence</text>
+
+    <!-- Layer 3: Behavior -->
+    <polygon points="0,-56 48,-28 48,28 0,56 -48,28 -48,-28" fill="none" stroke="#4a90d9" stroke-width="1.5" opacity="0.4"/>
+    <text x="0" y="-41" text-anchor="middle" font-family="monospace" font-size="9" font-weight="700" fill="#4a90d9" opacity="0.8">3 Behavior</text>
+
+    <!-- Layer 2: Environment -->
+    <polygon points="0,-40 35,-20 35,20 0,40 -35,20 -35,-20" fill="none" stroke="#00d4aa" stroke-width="1.5" opacity="0.5"/>
+    <text x="0" y="-25" text-anchor="middle" font-family="monospace" font-size="8" font-weight="700" fill="#00d4aa" opacity="0.9">2 Env</text>
+
+    <!-- Layer 1: Protocol (core) -->
+    <polygon points="0,-24 21,-12 21,12 0,24 -21,12 -21,-12" fill="#00d4aa" opacity="0.15" stroke="#00d4aa" stroke-width="1.5"/>
+    <text x="0" y="4" text-anchor="middle" font-family="monospace" font-size="8" font-weight="700" fill="#00d4aa">1 CDP</text>
+  </g>
+
+  <!-- Right side: descriptions -->
+  <g transform="translate(340, 55)" font-family="system-ui, sans-serif">
+    <g transform="translate(0, 0)">
+      <rect x="0" y="0" width="8" height="8" rx="2" fill="#00d4aa"/>
+      <text x="18" y="8" font-size="12" font-weight="700" fill="#00d4aa">Protocol</text>
+      <text x="18" y="22" font-family="monospace" font-size="10" fill="#8888a0">No Runtime.enable · CDP over pipe · zero ports</text>
+    </g>
+    <g transform="translate(0, 35)">
+      <rect x="0" y="0" width="8" height="8" rx="2" fill="#00d4aa"/>
+      <text x="18" y="8" font-size="12" font-weight="700" fill="#00d4aa">Environment</text>
+      <text x="18" y="22" font-family="monospace" font-size="10" fill="#8888a0">UA · WebGL · screen · hardware · permissions</text>
+    </g>
+    <g transform="translate(0, 70)">
+      <rect x="0" y="0" width="8" height="8" rx="2" fill="#4a90d9"/>
+      <text x="18" y="8" font-size="12" font-weight="700" fill="#4a90d9">Behavior</text>
+      <text x="18" y="22" font-family="monospace" font-size="10" fill="#8888a0">Bezier mouse · log-normal typing · idle hum</text>
+    </g>
+    <g transform="translate(0, 105)">
+      <rect x="0" y="0" width="8" height="8" rx="2" fill="#7c5cfc"/>
+      <text x="18" y="8" font-size="12" font-weight="700" fill="#7c5cfc">Coherence</text>
+      <text x="18" y="22" font-family="monospace" font-size="10" fill="#8888a0">Per-domain memory · geo-consistent · WebRTC fail-closed</text>
+    </g>
+    <g transform="translate(0, 140)">
+      <rect x="0" y="0" width="8" height="8" rx="2" fill="#ee5a5a"/>
+      <text x="18" y="8" font-size="12" font-weight="700" fill="#ee5a5a">Residue</text>
+      <text x="18" y="22" font-family="monospace" font-size="10" fill="#8888a0">cdc_ removal · toString integrity · MutationObserver</text>
+    </g>
+    <g transform="translate(0, 175)">
+      <rect x="0" y="0" width="8" height="8" rx="2" fill="#ff9f43"/>
+      <text x="18" y="8" font-size="12" font-weight="700" fill="#ff9f43">Seasoning</text>
+      <text x="18" y="22" font-family="monospace" font-size="10" fill="#8888a0">Persistent profile · storage · fonts · chrome object</text>
+    </g>
+  </g>
+
+  <!-- Bottom: test scores -->
+  <g transform="translate(50, 285)">
+    <rect x="0" y="0" width="700" height="40" rx="8" fill="#0d0d14" stroke="#2a2a3a" stroke-width="1"/>
+    <text x="20" y="25" font-family="monospace" font-size="11" fill="#00d4aa" font-weight="700">VERIFIED:</text>
+    <text x="100" y="25" font-family="monospace" font-size="11" fill="#8888a0">36/36 local suite</text>
+    <text x="250" y="25" font-family="monospace" font-size="11" fill="#8888a0">sannysoft ALL PASS</text>
+    <text x="400" y="25" font-family="monospace" font-size="11" fill="#8888a0">incolumitas 8/8 PASS</text>
+    <text x="560" y="25" font-family="monospace" font-size="11" fill="#8888a0">boot 4/4 OK</text>
+  </g>
+</svg>

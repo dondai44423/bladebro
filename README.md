@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="Assets/logobb.png" width="180" alt="Bladebro" />
-
-# ⚡ Bladebro
+<img src="Assets/svg/hero.svg" width="800" alt="Bladebro" />
 
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
@@ -10,26 +8,27 @@ Re-render-immune refs · batch actions · auto-extract · infinite-scroll collec
 
 One MCP server · one persistent page model · zero Node.js · one binary · Linux · macOS · Windows
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![npm version](https://img.shields.io/npm/v/bladebro.svg)](https://www.npmjs.com/package/bladebro)
-[![Rust](https://img.shields.io/badge/Rust-1.86+-orange.svg)](https://www.rust-lang.org)
-[![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?label=release)](https://github.com/dondai44423/bladebro/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
-[![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?style=social)](https://github.com/dondai44423/bladebro)
+[![npm version](https://img.shields.io/npm/v/bladebro?color=00d4aa&label=npm&style=flat-square)](https://www.npmjs.com/package/bladebro)
+[![Rust](https://img.shields.io/badge/Rust-1.86+-ce422b?style=flat-square)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-00d4aa?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?color=00d4aa&label=release&style=flat-square)](https://github.com/dondai44423/bladebro/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI&style=flat-square)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/npm/dw/bladebro?color=7c5cfc&label=downloads&style=flat-square)](https://www.npmjs.com/package/bladebro)
+[![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?color=ff9f43&style=flat-square)](https://github.com/dondai44423/bladebro)
 
 ```bash
 npm install -g bladebro && bladebro mcp
 ```
 
-[Install](#-install) · [The 5 tools](#-the-5-tools) · [Re-render immunity](#-re-render-immunity) · [Stealth](#-stealth-system) · [Comparison](#-comparison)
+[Install](#-install) · [The 5 tools](#-the-5-tools) · [Architecture](#-architecture) · [Re-render immunity](#-re-render-immunity) · [Stealth](#-stealth-system) · [Comparison](#-comparison) · [Gotchas](#-gotchas) · [Limits](#-honest-limits)
 
 </div>
 
 ---
 
-Bladebro is an agentic browser driver built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results: the agent sees what *changed*, not the whole world, every single time.
+Bladebro is an **agentic browser driver** built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results: the agent sees what *changed*, not the whole world, every single time.
 
-Built in Rust. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent. Native on Linux, macOS, and Windows.
+Built in **Rust**. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent. Native on Linux, macOS, and Windows.
 
 Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and the new stateless per-request negotiation with `server/discover`, dual-dialect. Works with every MCP client, old and new.
 
@@ -45,7 +44,7 @@ Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and 
 | **Delta-first tokens** | Every action returns what changed, not the whole page. 5x cheaper than competitors. | ~1,900-token tool defs |
 | **Self-healing refs** | Stale refs re-resolve automatically. Agent never sees "element not found" after navigation. | 26/26 sites |
 
-## 🔧 Install
+## 🚀 Install
 
 ### npm (recommended)
 
@@ -58,7 +57,7 @@ That's it. No Rust, no compilation, no dependencies. The npm package ships a pre
 
 | Platform | Package | Size |
 |---|---|---|
-| Linux x86_64 | `bladebro-linux-x64` | 5.6 MB |
+| Linux x86_64 | `bladebro-linux-x64` | 5.7 MB |
 | Windows x86_64 | `bladebro-windows-x64` | 5.2 MB |
 | macOS Intel | `bladebro-darwin-x64` | 5.2 MB |
 | macOS Apple Silicon | `bladebro-darwin-arm64` | 4.8 MB |
@@ -106,7 +105,11 @@ bladebro audit   # stealth verification
 
 ## 🎯 The 5 tools
 
-### `act` | act, then observe
+<div align="center">
+<img src="Assets/svg/tools-comparison.svg" width="800" alt="Tool comparison: 5 tools vs 20+" />
+</div>
+
+### `act` — act, then observe
 
 Every `act` returns an **outcome verdict + page delta**. Click auto-escalates: mouse, JS, Enter. Click by text (no see needed): `act click text="Sign in"`. Ambiguous text? Error lists matches with refs and nth values: retry `nth=2`.
 
@@ -115,7 +118,7 @@ Every `act` returns an **outcome verdict + page delta**. Click auto-escalates: m
 | `click` | `act click e5` or `act click text="Sign in"` | Mouse, JS, Enter escalation |
 | `type` | `act type label="Search" text="hello"` | Cadenced typing into textboxes |
 | `fill` | `act fill fields=[...] submit="Go"` | Multi-field form fill, auto-detects type |
-| `batch` | `act batch steps=[{click},{type},{click}]` | **Multi-step workflows in ONE call** (D49) |
+| `batch` | `act batch steps=[{click},{type},{click}]` | **Multi-step workflows in ONE call** |
 | `navigate` | `act navigate url="https://example.com"` | Idempotent, returns full page model |
 | `scroll` | `act scroll dy=800` | Smooth eased wheel events |
 | `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
@@ -127,25 +130,27 @@ Every `act` returns an **outcome verdict + page delta**. Click auto-escalates: m
 | `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
 | `select` | `act select e4 option="Nepal"` | Dropdown by text or value |
 | `pdf` | `act pdf` | Export page as PDF artifact |
-| `download` | `act download timeout=10` | Wait for triggered download, returns path |
+| `download` | `act download url=... timeout=10` | Fetch+Blob download, returns path |
 | `back` / `forward` / `reload` | `act back` | History + reload |
 
-**Self-healing refs** | stale refs re-resolve automatically. If e5 was "Sign in" and the page navigated, `act click e5` finds the new "Sign in" and clicks it. You see `[ref e5 healed]` in the verdict.
+**Self-healing refs** — stale refs re-resolve automatically. If e5 was "Sign in" and the page navigated, `act click e5` finds the new "Sign in" and clicks it. You see `[ref e5 healed]` in the verdict.
 
-**Batch actions (D49)** | run multi-step workflows in ONE MCP call. Fills, submits, multi-click sequences — one call, one final delta. Halts on navigation or first error with step-level context. 5-step form fill+submit in one call instead of 11.
+**Batch actions** — run multi-step workflows in ONE MCP call. Fills, submits, multi-click sequences: one call, one final delta. Halts on navigation or first error with step-level context. 5-step form fill+submit in one call instead of 11.
 
-**slim mode** | `act slim=true` returns verdict only, no delta. Use when you know what happens next.
+**`url=` on any action** — `act fill url="https://..." fields=[...]` navigates first, then fills. One call to go to a page AND act on it. Exception: `download` fetches via JS (no navigation), `set-cookie` uses url for cookie scope.
 
-### `see` | observe (rarely needed)
+**`slim=true`** — returns verdict only, no delta. Use when you know what happens next.
 
-Navigate and act already return page state. Use see for:
+### `see` — observe (rarely needed)
+
+Navigate and act already return page state. Use `see` for:
 
 | Call | What you get |
 |---|---|
 | `see` | Full view (semantic folding: nav/footer auto-fold) |
 | `see filter="button,link"` | Filtered by role/name/landmark |
 | `see find="price"` | Search elements by text, get refs + scores |
-| `see extract="auto"` | **Template-free list extraction** (D48): structural detection, content-value scoring |
+| `see extract="auto"` | **Template-free list extraction**: structural detection, content-value scoring |
 | `see extract="json" template={...}` | Structured data from listing pages (one call) |
 | `see extract="links"` or `"forms"` | All links or all form fields |
 | `see logs="console"` | JS errors/warnings, errors first |
@@ -153,13 +158,13 @@ Navigate and act already return page state. Use see for:
 | `see content=true` | Page text |
 | `see scope=e5` | One element's subtree text |
 
-**Auto-extract (`extract=auto`)** | deterministic structural list extraction. For every element with 3+ children, groups by structural signature, scores by content value (count × text × external links × headings × images). Extracts title, URL, image, price, date, text. Verified on HN (30 articles), Lobste.rs (25 stories), Wikipedia (50 references), DuckDuckGo, StackOverflow, Reddit, GitHub, MDN.
+**Auto-extract (`extract=auto`)** — deterministic structural list extraction. For every element with 3+ children, groups by structural signature, scores by content value (count x text x external links x headings x images). Extracts title, URL, image, price, date, text. Verified on HN (30 articles), Lobste.rs (25 stories), Wikipedia (50 references), DuckDuckGo, StackOverflow, Reddit, GitHub, MDN.
 
-**Collect (`act collect`)** | native scroll+dedupe loop for infinite feeds. Auto-extract, dedupe by URL/title/text, scroll, repeat until max or no new items. ONE call, ONE artifact. Verified: 80 items from infinite-scroll test page, 0 duplicates.
+**Collect (`act collect`)** — native scroll+dedupe loop for infinite feeds. Auto-extract, dedupe by URL/title/text, scroll, repeat until max or no new items. ONE call, ONE artifact. Verified: 80 items from infinite-scroll test page, 0 duplicates.
 
 **Big data goes to files.** Extracts over ~6KB are written to `~/.blade/artifacts/` and the response gives you the path + preview. Read the file.
 
-### `state` | cookies, storage, tabs, sessions
+### `state` — cookies, storage, tabs, sessions
 
 | Call | What it does |
 |---|---|
@@ -172,7 +177,7 @@ Navigate and act already return page state. Use see for:
 | `state op=save name=login` | Save session (cookies + storage) |
 | `state op=load name=login` | Restore session |
 
-### `run` | batch + branch + JS
+### `run` — batch + branch + JS
 
 All act fields work in steps (ref, text, label, nth, js, key, url, etc). Plus `if` and `while` control flow.
 
@@ -185,9 +190,22 @@ All act fields work in steps (ref, text, label, nth, js, key, url, etc). Plus `i
 ]}
 ```
 
-### `vision` | screenshot (last resort)
+### `vision` — screenshot (last resort)
 
 Returns base64 PNG. `vision marks=true` overlays numbered ref badges on elements so you can say "click e5" after seeing the screenshot. The structural model is almost always better: cheaper, more reliable, gives you refs to act on.
+
+## 🏗️ Architecture
+
+<div align="center">
+<img src="Assets/svg/architecture.svg" width="800" alt="Architecture: Agent → MCP → CDP → Chromium + Live Page Model" />
+</div>
+
+The **Live Page Model** is the core innovation. It holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations AND re-renders. No more "stale element" failures.
+
+Three pillars:
+- **Stable refs** (`e1`, `e2`, ...) — semantic anchors that self-heal across navigations and re-renders
+- **Structural fingerprints** (`fp=0xdeadbeef`) — FNV-1a hash of ancestor chain, tag, children, identity attributes
+- **Deltas only** (`{ -x, +y }`) — every action returns what changed, not the whole world
 
 ## 🧬 Re-render immunity
 
@@ -211,6 +229,10 @@ The agent sees `↺ e2 (re-render survived)` in the delta. The ref never died. T
 
 ## 🛡️ Stealth system
 
+<div align="center">
+<img src="Assets/svg/stealth-layers.svg" width="800" alt="6-layer stealth system" />
+</div>
+
 Six layers. All on by default. No config needed.
 
 | Layer | What it does |
@@ -220,7 +242,7 @@ Six layers. All on by default. No config needed.
 | **Behavior** | Bezier mouse paths with overshoot+correction, log-normal typing cadence, idle hum (mouse movement during idle), smooth scroll |
 | **Coherence** | Per-domain stealth memory (timezone + locale), geo-consistent identity, WebRTC fail-closed, stable canvas/audio (no noise by default) |
 | **Residue** | cdc_ property removal, native toString integrity, MutationObserver for late artifacts |
-| **Seasoning** | Persistent browser profile (localStorage survives restarts), storage quota, font audit |
+| **Seasoning** | Persistent browser profile (localStorage survives restarts), storage quota, font audit, window.chrome object |
 
 **Verified against real detection sites:**
 
@@ -236,6 +258,10 @@ Run `bladebro audit` to verify your own setup.
 
 ## 📊 Comparison
 
+<div align="center">
+<img src="Assets/svg/token-efficiency.svg" width="800" alt="Token efficiency comparison" />
+</div>
+
 | | Bladebro | Playwright MCP | Chrome DevTools MCP |
 |---|---|---|---|
 | Tool defs | ~1,900 tokens | ~13,700 tokens | ~8,000 tokens |
@@ -244,14 +270,14 @@ Run `bladebro audit` to verify your own setup.
 | Re-render immunity | Yes (structural fingerprints) | No | No |
 | Auto-extraction | Template-free (extract=auto) | No | No |
 | Infinite scroll collect | Yes (act collect) | No | No |
-| Batch actions | Yes (act batch, D49) | No | No |
+| Batch actions | Yes (act batch) | No | No |
 | Shadow DOM | Pierced (deepAll) | Partial | Partial |
 | PDF export | Yes (act pdf) | No | No |
 | Download handling | Yes (act download) | No | No |
 | Runtime | None (static binary) | Node.js | Node.js |
 | Process model | Long-lived daemon (stateful) | Stateless (reconnect per call) | Stateless |
 | Page model | Persistent, ref-stable, diff-first | None | None |
-| Binary size | 5.6MB | ~50MB (node + deps) | ~50MB (node + deps) |
+| Binary size | 5.7 MB | ~50 MB (node + deps) | ~50 MB (node + deps) |
 | Install | `npm install -g bladebro` | npm + playwright install | npm |
 | Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
@@ -266,6 +292,16 @@ Run `bladebro audit` to verify your own setup.
 | Cross-origin iframes are invisible | SecurityError on `contentDocument`. Deliberate limitation; would need `Runtime.enable` (breaks stealth). |
 | macOS/Windows binaries cross-compiled | Built via cargo-zigbuild (zig linker) from Linux, not native-tested on real macOS/Windows machines. File an issue if something breaks. |
 | `BLADE_NOISE=1` can *hurt* stealth | FingerprintJS ML detects noise injection as "browser tampering." Off by default. Only use if you know why. |
+
+## 🧱 Honest limits
+
+| What it can NOT do | Why |
+|---|---|
+| Solve CAPTCHAs | Deliberate. CAPTCHA solving is a separate problem. You get a `blocked:` verdict and can hand off to a solver. |
+| Run browser extensions | CDP does not support extension loading. Would break the stealth profile. |
+| Access cross-origin iframe content | SecurityError. Would need `Runtime.enable` which defuses the stealth protocol layer. |
+| Record video of the session | CDP does not expose frame buffers. Use screenshots (`vision`) instead. |
+| Run on ARM Linux | No cross-compile target for aarch64 Linux yet. x86_64 Linux, x86_64/arm64 macOS, x86_64 Windows are supported. |
 
 ## 🔄 Update hub
 

@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="320" viewBox="0 0 800 320" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0a0f"/>
+      <stop offset="1" stop-color="#12121a"/>
+    </linearGradient>
+    <linearGradient id="bb" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#00d4aa"/>
+      <stop offset="1" stop-color="#00b894"/>
+    </linearGradient>
+    <linearGradient id="comp" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff6b6b"/>
+      <stop offset="1" stop-color="#ee5a5a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="800" height="320" rx="12" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="32" text-anchor="middle" font-family="'SF Pro Display', system-ui, sans-serif"
+        font-size="16" font-weight="700" fill="#8888a0" letter-spacing="2">FEWER TOOLS, MORE POWER</text>
+
+  <!-- Left: Bladebro (5 tools) -->
+  <g transform="translate(60, 60)">
+    <text x="140" y="0" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="800" fill="#00d4aa">Bladebro</text>
+    <text x="140" y="16" text-anchor="middle" font-family="monospace" font-size="10" fill="#8888a0">5 tools · ~1,900 tokens</text>
+
+    <!-- 5 tool cards -->
+    <g transform="translate(0, 30)">
+      <rect x="0" y="0" width="280" height="34" rx="8" fill="#0d0d14" stroke="#00d4aa" stroke-width="1" opacity="0.7"/>
+      <rect x="8" y="6" width="46" height="22" rx="5" fill="#00d4aa" opacity="0.25"/>
+      <text x="31" y="21" text-anchor="middle" font-family="monospace" font-size="11" font-weight="700" fill="#00d4aa">act</text>
+      <text x="68" y="21" font-family="monospace" font-size="9" fill="#aaa8b8">25 actions · delta-first · batch · self-healing</text>
+    </g>
+    <g transform="translate(0, 70)">
+      <rect x="0" y="0" width="280" height="34" rx="8" fill="#0d0d14" stroke="#00d4aa" stroke-width="1" opacity="0.7"/>
+      <rect x="8" y="6" width="46" height="22" rx="5" fill="#00d4aa" opacity="0.25"/>
+      <text x="31" y="21" text-anchor="middle" font-family="monospace" font-size="11" font-weight="700" fill="#00d4aa">see</text>
+      <text x="68" y="21" font-family="monospace" font-size="9" fill="#aaa8b8">observe · filter · extract · search · logs</text>
+    </g>
+    <g transform="translate(0, 110)">
+      <rect x="0" y="0" width="280" height="34" rx="8" fill="#0d0d14" stroke="#00d4aa" stroke-width="1" opacity="0.7"/>
+      <rect x="8" y="6" width="46" height="22" rx="5" fill="#00d4aa" opacity="0.25"/>
+      <text x="31" y="21" text-anchor="middle" font-family="monospace" font-size="11" font-weight="700" fill="#00d4aa">state</text>
+      <text x="68" y="21" font-family="monospace" font-size="9" fill="#aaa8b8">cookies · tabs · sessions · storage</text>
+    </g>
+    <g transform="translate(0, 150)">
+      <rect x="0" y="0" width="280" height="34" rx="8" fill="#0d0d14" stroke="#00d4aa" stroke-width="1" opacity="0.7"/>
+      <rect x="8" y="6" width="46" height="22" rx="5" fill="#00d4aa" opacity="0.25"/>
+      <text x="31" y="21" text-anchor="middle" font-family="monospace" font-size="11" font-weight="700" fill="#00d4aa">run</text>
+      <text x="68" y="21" font-family="monospace" font-size="9" fill="#aaa8b8">batch + branch + JS control flow</text>
+    </g>
+    <g transform="translate(0, 190)">
+      <rect x="0" y="0" width="280" height="34" rx="8" fill="#0d0d14" stroke="#00d4aa" stroke-width="1" opacity="0.7"/>
+      <rect x="8" y="6" width="46" height="22" rx="5" fill="#00d4aa" opacity="0.25"/>
+      <text x="31" y="21" text-anchor="middle" font-family="monospace" font-size="11" font-weight="700" fill="#00d4aa">vision</text>
+      <text x="68" y="21" font-family="monospace" font-size="9" fill="#aaa8b8">screenshot · ref marks · last resort</text>
+    </g>
+  </g>
+
+  <!-- Divider -->
+  <line x1="400" y1="60" x2="400" y2="280" stroke="#333346" stroke-width="1.5" stroke-dasharray="4,4"/>
+
+  <!-- Right: Competitors (20+ tools) -->
+  <g transform="translate(460, 60)">
+    <text x="140" y="0" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="800" fill="#ff6b6b">Competitors</text>
+    <text x="140" y="16" text-anchor="middle" font-family="monospace" font-size="10" fill="#8888a0">20+ tools · ~13,700 tokens</text>
+
+    <!-- Wall of tools -->
+    <g transform="translate(0, 30)" font-family="monospace" font-size="9" fill="#ff6b6b" opacity="0.6">
+      <g transform="translate(0, 0)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">navigate</text>
+      </g>
+      <g transform="translate(70, 0)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">click</text>
+      </g>
+      <g transform="translate(140, 0)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">fill</text>
+      </g>
+      <g transform="translate(210, 0)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">select</text>
+      </g>
+
+      <g transform="translate(0, 26)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">hover</text>
+      </g>
+      <g transform="translate(70, 26)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">type</text>
+      </g>
+      <g transform="translate(140, 26)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">press</text>
+      </g>
+      <g transform="translate(210, 26)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">scroll</text>
+      </g>
+
+      <g transform="translate(0, 52)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">wait</text>
+      </g>
+      <g transform="translate(70, 52)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">screenshot</text>
+      </g>
+      <g transform="translate(140, 52)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">eval</text>
+      </g>
+      <g transform="translate(210, 52)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">content</text>
+      </g>
+
+      <g transform="translate(0, 78)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">snapshot</text>
+      </g>
+      <g transform="translate(70, 78)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">tabs</text>
+      </g>
+      <g transform="translate(140, 78)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">cookie</text>
+      </g>
+      <g transform="translate(210, 78)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">pdf</text>
+      </g>
+
+      <g transform="translate(0, 104)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">back</text>
+      </g>
+      <g transform="translate(70, 104)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">forward</text>
+      </g>
+      <g transform="translate(140, 104)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">reload</text>
+      </g>
+      <g transform="translate(210, 104)">
+        <rect x="0" y="0" width="60" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.4"/>
+        <text x="30" y="12" text-anchor="middle">upload</text>
+      </g>
+
+      <g transform="translate(35, 130)">
+        <rect x="0" y="0" width="200" height="18" rx="4" fill="#0d0d14" stroke="#ff6b6b" stroke-width="0.5" opacity="0.3"/>
+        <text x="100" y="12" text-anchor="middle">+ 4 more...</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Bottom: 5x cheaper badge -->
+  <g transform="translate(280, 270)">
+    <rect x="0" y="0" width="240" height="36" rx="18" fill="url(#bb)" opacity="0.15" stroke="#00d4aa" stroke-width="1"/>
+    <text x="120" y="23" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#00d4aa">5x cheaper · 5x fewer tools</text>
+  </g>
+</svg>
