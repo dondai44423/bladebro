@@ -1191,21 +1191,13 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             if std::env::var("NAV_TIMING").is_ok() {
                 eprintln!("[nav-timing] navigate completed: {:?}", _rt.elapsed());
             }
-            // Slim summary: no ref tree (was ~9KB). Agent calls see mode=model
-            // for interactive elements, see mode=content to read page text,
-            // see mode=outline for headings.
-            let m = page.model();
-            let in_flight = page.in_flight();
-            let mut summary = format!(
-                "Page: {} | {} actionable{}",
-                crate::page::model::short_url(m.url()),
-                m.actionables(),
-                if in_flight > 0 { format!(" | {} requests in flight", in_flight) } else { String::new() }
-            );
-            if !m.title().is_empty() {
-                summary = format!("title: {}\n{}", crate::page::model::truncate(m.title(), 80), summary);
-            }
-            return Ok(format!("{verdict}\n{}", summary));
+            // Top interactive elements (budget 2000). Agent gets enough
+            // refs to act on common pages (login, search, main links)
+            // without a separate see call. For dense pages, use
+            // see mode=model (more refs) or mode=content (read text).
+            // view() already includes the page header + title + elements.
+            let top = page.view(2000);
+            return Ok(format!("{verdict}\n{}", top));
         }
         "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies" | "set-cookie" => {
             // Allow state ops as action shortcuts in batch/run steps.

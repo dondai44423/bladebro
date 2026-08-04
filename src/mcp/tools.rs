@@ -20,7 +20,7 @@ pub fn all_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "act",
-            description: "Do something on the page. Returns a verdict + delta. navigate returns a slim summary (URL, title, element count, no ref tree) — use see mode=model for interactive elements or see mode=content to read.\n\
+            description: "Do something on the page. Returns a verdict + delta. navigate returns top interactive elements (budget 2000 chars) — enough refs to act on common pages. For dense pages use see mode=model (more refs) or mode=content (read text).\n\
 ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for type/fill) > x,y (canvas/coords). Add role= or nth= if ambiguous.\n\
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call. set-cookie uses url for cookie scope, not navigation.\n\

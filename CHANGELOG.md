@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.10] - 2026-08-04
+
+### Fixed
+
+- **navigate response balanced**: Now returns top interactive elements (budget 2000 chars) instead of either the full ~9KB ref tree or a bare one-liner. Agent gets enough refs to act on common pages (login forms, search bars, main links) without a separate `see` call, while still being 4.7x smaller than before. Landmarks (nav/footer) are folded to one-liners.
+
 ## [3.0.9] - 2026-08-04
 
 ### Added
