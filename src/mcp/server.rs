@@ -783,6 +783,28 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     let press = args.get("press").and_then(|p| p.as_str()).unwrap_or("");
     let nth = args.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
 
+    // Navigate first if url is given for a non-navigate action.
+    // Previously url was silently ignored for fill/type/click etc.
+    // causing the action to run on the wrong page.
+    // Skip for actions that handle url themselves (download, collect)
+    // and state ops (set-cookie uses url for cookie scope, open-tab for tab URL).
+    if !url.is_empty()
+        && action_str != "navigate"
+        && action_str != "download"
+        && action_str != "collect"
+        && action_str != "state"
+        && action_str != "set-cookie"
+        && action_str != "cookies"
+        && action_str != "del-cookie"
+        && action_str != "open-tab"
+        && action_str != "close-tab"
+        && action_str != "switch-tab"
+        && action_str != "save"
+        && action_str != "load"
+    {
+        page.navigate(url).await?;
+    }
+
     // Resource blocking (W1): `act navigate block=images,fonts,...`.
     // Applied before the navigation so the rules are live for the load.
     if action_str == "navigate" {
@@ -947,7 +969,10 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 count += 1;
             }
             let last_delta = if !submit.is_empty() {
-                let resolved = if submit.starts_with('e') {
+                // Refs are 'e' followed by digits (e1, e2, ...).
+                // 'Edit', 'Enter', 'Email' start with 'e' but are text, not refs.
+                let is_ref = submit.starts_with('e') && submit[1..].chars().all(|c| c.is_ascii_digit());
+                let resolved = if is_ref {
                     submit.to_string()
                 } else {
                     resolve_text_target(page, submit, None, None).await?
@@ -1423,10 +1448,45 @@ fn auto_extract_expr(limit: usize) -> String {
 const PRICE=/([$€£¥₹]\s?\d[\d,]*(?:\.\d{1,2})?|\b\d+[\.,]\d{2}\b)/;
 const DATE=/(\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[\/]\d{1,2}[\/]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s*\d{2,4}\b|\b\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago\b)/i;
 const HOST=location.hostname;
+// Non-content link patterns: vote buttons, comment links, action items.
+// These should NOT be selected as the primary link for an extracted item.
+const ACT_PAT=/^(vote|upvote|downvote|comment|comments|discuss|reply|replies|share|save|hide|flag|report|favorite|fav|like|dislike|follow|Subscribe|Pin|Unpin|More|less|edit|delete|remove|add|new|open|show|expand|collapse|permalink|embed|cite|parent|context|full story|read more|continue reading|view|all|next|prev|previous)$/i;
+const ACT_HREF=/\/vote|\/comment|\/reply|\/action|javascript:|#comment|#respond|#reply/i;
 function sig(el){const k=[...el.children].map(c=>c.tagName).join(',');return el.tagName+'['+k+']';}
 function txt(el){return(el.innerText||el.textContent||'').replace(/\s+/g,' ').trim();}
 function links(el){return[...el.querySelectorAll('a[href]')];}
 function extLink(el){return links(el).find(a=>a.hostname&&a.hostname!==HOST);}
+function isActionLink(a){
+const t=txt(a).toLowerCase();
+// Single-word action links.
+if(t.split(/\s+/).length<=3&&ACT_PAT.test(t))return true;
+// Href patterns that indicate action links.
+if(ACT_HREF.test(a.href))return true;
+// Vote/comment counts (e.g., "42 comments", "5 points").
+if(/\d+\s+(point|comment|vote|reply|reaction)/i.test(t))return true;
+return false;
+}
+function bestLink(item,title){
+const lnks=links(item).filter(a=>!isActionLink(a)&&a.offsetParent!==null);
+if(lnks.length===0)return null;
+// External link preferred (article, product, external resource).
+const ext=lnks.find(a=>a.hostname&&a.hostname!==HOST);
+if(ext)return ext;
+// Prefer links whose text closely matches the title (the item's own link).
+if(title){
+const norm=s=>s.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
+const tn=norm(title);
+if(tn){
+const match=lnks.find(a=>{const an=norm(txt(a));return an&&tn.includes(an)&&an.length>3});
+if(match)return match;
+}
+}
+// Prefer the link with the most text (most descriptive = content link).
+return lnks.reduce((best,a)=>{
+const at=txt(a).length,bt=txt(best).length;
+return at>bt?a:best;
+},lnks[0]);
+}
 let best=null,bestScore=0,bestSig='';
 for(const c of document.querySelectorAll('*')){
 const kids=[...c.children].filter(k=>k.nodeType===1);
@@ -1436,19 +1496,21 @@ for(const k of kids){const s=sig(k);if(!groups[s])groups[s]=[];groups[s].push(k)
 for(const s in groups){
 const items=groups[s];
 if(items.length<3)continue;
-let totalText=0,extCount=0,hCount=0,imgCount=0;
+let totalText=0,extCount=0,hCount=0,imgCount=0,linkCount=0;
 for(const it of items){
 totalText+=txt(it).length;
 if(extLink(it))extCount++;
 if(it.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'))hCount++;
 if(it.querySelector('img[src]'))imgCount++;
+if(links(it).length>0)linkCount++;
 }
 const count=items.length;
 const avgText=totalText/count;
 if(avgText<5)continue;
 const tf=Math.min(Math.max(avgText/50,0.5),4);
 const ef=extCount/count,hf=hCount/count,imf=imgCount/count;
-const score=count*tf*(1+ef*2+hf+imf*0.5);
+const lf=linkCount/count;
+const score=count*tf*(1+ef*2+hf+imf*0.5+lf*0.3);
 if(score>bestScore){bestScore=score;best=c;bestSig=s;}
 }
 }
@@ -1461,10 +1523,14 @@ const t=txt(item);const o={};
 const h=item.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]');
 let title=h?txt(h):'';
 if(!title){title=t.split(' ').slice(0,12).join(' ').slice(0,140);}
-const allLinks=links(item);
-const ext=extLink(item);
-const link=ext||allLinks[0];
-if(link){const lt=txt(link);if(lt&&!title)title=lt.slice(0,140);}
+const link=bestLink(item,title);
+if(link){
+const lt=txt(link);
+// Use link text as title if we don't have one and the link has good text.
+if(lt&&(!title||title.length<10||lt.length>title.length*1.5)){
+title=lt.slice(0,140);
+}
+}
 if(title)o.title=title.slice(0,140);
 if(link){o.url=link.href;}
 const img=item.querySelector('img[src]');
@@ -1517,6 +1583,15 @@ async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String> {
 async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(100) as usize;
+    let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
+
+    // Navigate first if url is provided. Without this, collect
+    // extracts from whatever page happens to be current (Bug: asked
+    // for Reddit, got eBay items).
+    if !url.is_empty() {
+        page.navigate(url).await?;
+    }
+
     let mut all_items: Vec<serde_json::Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut no_new_streak = 0u32;
@@ -1626,6 +1701,13 @@ async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
         "cookies" => StateOp::GetCookies { urls: vec![] },
         "set-cookie" => StateOp::SetCookie {
             name: name.into(), value: value.into(),
+            // CDP Network.setCookie requires either url or domain.
+            // Prefer url when the agent provides it; fall back to the
+            // current page's url so the call never fails for missing scope.
+            url: if !url.is_empty() { Some(url.into()) } else {
+                let current = page.model().url().to_string();
+                if current.is_empty() || current == "about:blank" { None } else { Some(current) }
+            },
             domain: None, path: None, secure: None, http_only: None, same_site: None,
         },
         "del-cookie" => StateOp::DeleteCookies { name: name.into(), domain: None },
@@ -1882,22 +1964,93 @@ async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
 
-    // If a URL is provided, navigate to it first. The navigation will
-    // trigger the download (if the URL is a download endpoint).
     if !url.is_empty() {
-        let delta = page.navigate(url).await?;
-        // Brief settle in case the server redirects to a download.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        // If the navigation resulted in a page load (not a download),
-        // the download may be triggered by JS on the page. Wait for settle.
-        if !delta.navigated && page.downloads().lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty() {
-            crate::page::wait_for_settle_with_network(
-                page.cdp_ref(),
-                std::time::Duration::from_secs(3),
-                Some(page.in_flight_ref()),
-            ).await?;
+        // Use fetch + Blob + <a download> to trigger a download without
+        // navigating away from the current page. Direct navigation loads
+        // PDFs in Chrome's viewer instead of downloading them.
+        let js_url = serde_json::to_string(url)
+            .map_err(|_| crate::error::BladeError::Other("invalid URL for download".into()))?;
+        let js_expr = format!(
+            r#"(async function() {{
+                try {{
+                    const resp = await fetch({js_url});
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    const blob = await resp.blob();
+                    const a = document.createElement('a');
+                    const objUrl = URL.createObjectURL(blob);
+                    a.href = objUrl;
+                    const fname = ({js_url}).split('/').pop().split('?')[0].split('#')[0] || 'download';
+                    a.download = fname;
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(() => {{ URL.revokeObjectURL(objUrl); document.body.removeChild(a); }}, 10000);
+                    return 'fetch-ok';
+                }} catch(e) {{
+                    return 'fetch-failed:' + e.message;
+                }}
+            }})()"#,
+        );
+        let res = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
+            "expression": js_expr,
+            "awaitPromise": true,
+            "returnByValue": true,
+        }))).await?;
+        let outcome = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+        if outcome.starts_with("fetch-failed") {
+            let err = &outcome["fetch-failed:".len()..];
+            if err.contains("CORS") || err.contains("Failed to fetch") || err.contains("NetworkError") {
+                // CORS-protected URL. Fall back to opening a new tab —
+                // Chrome may still download it if the server returns
+                // Content-Disposition: attachment.
+                let create_res = page.cdp_ref().send("Target.createTarget", Some(serde_json::json!({
+                    "url": url,
+                }))).await?;
+                let new_id = create_res.get("targetId").and_then(|v| v.as_str())
+                    .ok_or_else(|| crate::error::BladeError::Other("no targetId for download tab".into()))?;
+                // Wait for download from global tracker, then close tab.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                let downloads = page.downloads();
+                let start_count = {
+                    let q = downloads.lock().unwrap_or_else(|e| e.into_inner());
+                    q.len()
+                };
+                let mut found = None;
+                loop {
+                    {
+                        let q = downloads.lock().unwrap_or_else(|e| e.into_inner());
+                        if q.len() > start_count {
+                            if let Some(d) = q.iter().last() {
+                                if d.state == "completed" {
+                                    found = Some((d.path.clone(), d.url.clone(), d.received_bytes));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if std::time::Instant::now() >= deadline { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                // Close the download tab regardless of outcome.
+                let _ = page.cdp_ref().send("Target.closeTarget", Some(serde_json::json!({
+                    "targetId": new_id,
+                }))).await;
+                match found {
+                    Some((path, dl_url, size)) => {
+                        return Ok(format!(
+                            "download complete: {} ({} bytes)\nfrom: {}",
+                            path, size, dl_url
+                        ));
+                    }
+                    None => {
+                        return Err(crate::error::BladeError::Other("URL is CORS-protected and Chrome opened it in the viewer instead of downloading.\n\
+                             The URL serves content inline (e.g. PDF, HTML) without Content-Disposition: attachment.\n\
+                             Workaround: navigate to the page that links to this file, then click the download link:\n\
+                             act navigate url=... ; act click text=\"Download\" ; act download".to_string()));
+                    }
+                }
+            }
+            return Err(crate::error::BladeError::Other(format!("download failed: {err}")));
         }
     }
 
@@ -2093,7 +2246,42 @@ async fn execute_step(
                 }
             }
         }
+        "download" => {
+            match handle_download(page, step).await {
+                Ok(result) => {
+                    observations.push(format!("step {path}: {result}"));
+                }
+                Err(BladeError::Closed) => return Err(BladeError::Closed),
+                Err(e) => {
+                    let _ = page.recapture().await;
+                    let view = page.view(2000);
+                    return Err(crate::error::BladeError::Other(format!(
+                        "step {path} download failed: {e}\n\n--- current page state ---\n{view}"
+                    )));
+                }
+            }
+        }
+        "collect" => {
+            match handle_collect(page, step).await {
+                Ok(result) => {
+                    observations.push(format!("step {path}: {result}"));
+                }
+                Err(BladeError::Closed) => return Err(BladeError::Closed),
+                Err(e) => {
+                    let _ = page.recapture().await;
+                    let view = page.view(2000);
+                    return Err(crate::error::BladeError::Other(format!(
+                        "step {path} collect failed: {e}\n\n--- current page state ---\n{view}"
+                    )));
+                }
+            }
+        }
         _ => {
+            // Navigate first if url is given for a non-navigate action.
+            let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if !step_url.is_empty() && action_str != "navigate" {
+                page.navigate(step_url).await?;
+            }
             let action = build_action(step, page).await?;
             match page.act(action).await {
                 Ok((delta, verdict)) => {

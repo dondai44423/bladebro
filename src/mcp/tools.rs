@@ -22,7 +22,8 @@ pub fn all_tools() -> Vec<ToolDef> {
             name: "act",
             description: "Do something on the page. Returns a verdict + delta (what changed), so you DON'T need `see` afterward.\n\
 ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for type/fill) > x,y (canvas/coords). Add role= or nth= if ambiguous.\n\
-ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= navigates first), collect(infinite-scroll auto-extract), pdf, batch(steps, halts on nav), back/forward/reload.\n\
+ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, halts on nav), back/forward/reload.\n\
+url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call. set-cookie uses url for cookie scope, not navigation.\n\
 Use fill for forms (not individual type calls). Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
             input_schema: json!({
                 "type": "object",
@@ -38,7 +39,7 @@ Use fill for forms (not individual type calls). Use run instead of batch for bra
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches."},
                     "key": {"type": "string", "description": "Key: Enter, Tab, Escape, ArrowDown, etc."},
-                    "url": {"type": "string"},
+                    "url": {"type": "string", "description": "For navigate: target URL. For download: file URL (fetched via JS, no navigation). For collect: page to navigate to first. For set-cookie: cookie scope URL. For other actions: navigates to this URL first, then performs the action."},
                     "dx": {"type": "integer"},
                     "dy": {"type": "integer"},
                     "condition": {

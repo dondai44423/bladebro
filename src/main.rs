@@ -424,8 +424,10 @@ async fn cmd_state(base: &str, sub: &str, args: &[String]) -> Result<()> {
         "set-cookie" => {
             let name = args.first().ok_or_else(|| BladeError::Other("set-cookie needs name".into()))?;
             let value = args.get(1).ok_or_else(|| BladeError::Other("set-cookie needs value".into()))?;
+            let url = args.get(2).cloned();
             StateOp::SetCookie {
                 name: name.clone(), value: value.clone(),
+                url,
                 domain: None, path: None, secure: None,
                 http_only: None, same_site: None,
             }

@@ -19,6 +19,8 @@ pub enum StateOp {
     SetCookie {
         name: String,
         value: String,
+        /// Page URL — CDP uses this to derive domain. Preferred over `domain`.
+        url: Option<String>,
         domain: Option<String>,
         path: Option<String>,
         secure: Option<bool>,
@@ -134,6 +136,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
         StateOp::SetCookie {
             name,
             value,
+            url,
             domain,
             path,
             secure,
@@ -145,7 +148,11 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 "name": name,
                 "value": value,
             });
-            if let Some(d) = domain {
+            // CDP Network.setCookie requires either `url` or `domain`.
+            // Prefer `url` when given — Chrome derives the domain from it.
+            if let Some(u) = url {
+                params["url"] = json!(u);
+            } else if let Some(d) = domain {
                 params["domain"] = json!(d);
             }
             if let Some(p) = path {

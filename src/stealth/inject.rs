@@ -10,7 +10,9 @@
 //! 4. Injection (this file): native-lie toString masking (S9), cdc_ removal,
 //!    outer dims, WebGL1+2, screen geometry, permissions, Web API polyfills
 //!    (WebShare, ContentIndex, ContactsManager, downlinkMax),
-//!    seeded canvas noise, seeded audio noise.
+//!    seeded canvas noise, seeded audio noise,
+//!    window.chrome object, speech synthesis voices, battery API,
+//!    WebRTC IP leak prevention, error stack normalization.
 //! 5. Biometrics: Bezier mouse paths, log-normal typing cadence — in action.rs.
 //! 6. Xvfb: Headful mode on virtual display (eliminates headless signals at root).
 //!
@@ -103,6 +105,143 @@ if(navigator.connection){
   if(_pr&&!('downlinkMax' in _pr)){_defGet(_pr,'downlinkMax',function(){return Infinity;});}
   if(typeof window.NetworkInformation==='undefined'){_defCtor('NetworkInformation',navigator.connection.constructor);}
 }
+}catch(e){}
+
+// ── Additional stealth layers ───────────────────────────────
+
+// window.chrome object: real Chrome has chrome.app, chrome.runtime,
+// chrome.csi(), chrome.loadTimes(). Headless may be missing these.
+try{
+if(!window.chrome){window.chrome={};}
+if(!window.chrome.app){window.chrome.app={isInstalled:false,InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'}};}
+if(!window.chrome.runtime){window.chrome.runtime={OnInstalledReason:{CHROME_UPDATE:'chrome_update',INSTALL:'install',SHARED_MODULE_UPDATE:'shared_module_update',UPDATE:'update'},OnRestartRequiredReason:{APP_UPDATE:'app_update',OS_UPDATE:'os_update',PERIODIC:'periodic'},PlatformArch:{ARM:'arm',MIPS:'mips',MIPS64:'mips64',X86_32:'x86-32',X86_64:'x86-64'},PlatformNaclArch:{ARM:'arm',MIPS:'mips',MIPS64:'mips64',X86_32:'x86-32',X86_64:'x86-64'},PlatformOs:{ANDROID:'android',CROS:'cros',FUCHSIA:'fuchsia',LINUX:'linux',MAC:'mac',OPENBSD:'openbsd',WIN:'win'},RequestUpdateCheckStatus:{NO_UPDATE:'no_update',THROTTLED:'throttled',UPDATE_AVAILABLE:'update_available'}};}
+if(!window.chrome.csi){window.chrome.csi=function csi(){return{startE:Date.now(),onloadT:Date.now()+100,pageT:1000,tran:15};};_lie(window.chrome.csi,'csi');}
+if(!window.chrome.loadTimes){window.chrome.loadTimes=function loadTimes(){return{commitLoadTime:Date.now()/1000,connectionInfo:'h2',finishDocumentLoadTime:Date.now()/1000+0.1,finishLoadTime:Date.now()/1000+0.2,firstPaintAfterLoadTime:0,firstPaintTime:Date.now()/1000+0.05,navigationType:'Other',npnNegotiatedProtocol:'h2',requestTime:Date.now()/1000-0.5,startLoadTime:Date.now()/1000-0.5,wasAlternateProtocolAvailable:false,wasFetchedViaSpdy:true,wasNpnNegotiated:true};};_lie(window.chrome.loadTimes,'loadTimes');}
+}catch(e){}
+
+// Speech synthesis voices: headless returns empty array.
+// Real Linux Chrome has at least a few voices.
+try{
+if(typeof speechSynthesis!=='undefined'&&speechSynthesis.getVoices().length===0){
+  var _voices=[
+    {voiceURI:'Google US English',name:'Google US English',lang:'en-US',localService:false,default:true},
+    {voiceURI:'Google UK English Female',name:'Google UK English Female',lang:'en-GB',localService:false,default:false},
+    {voiceURI:'Google UK English Male',name:'Google UK English Male',lang:'en-GB',localService:false,default:false}
+  ];
+  var _gv=function getVoices(){return _voices;};
+  try{Object.defineProperty(speechSynthesis,'getVoices',{value:_gv,writable:true,configurable:true,enumerable:true});}catch(e){speechSynthesis.getVoices=_gv;}
+  _lie(_gv,'getVoices');
+}
+}catch(e){}
+
+// Battery API: headless may not have navigator.getBattery.
+try{
+if(!navigator.getBattery){
+  var _gb=function getBattery(){return Promise.resolve({charging:true,chargingTime:0,dischargingTime:Infinity,level:1,onchargingchange:null,onchargingtimechange:null,ondischargingtimechange:null,onlevelchange:null});};
+  _defFn(Navigator.prototype,'getBattery',_gb);
+}
+}catch(e){}
+
+// WebRTC: patch RTCPeerConnection to prevent IP leak via ICE candidates.
+// The --force-webrtc-ip-handling-policy launch flag handles the network
+// layer, but JS-level ICE candidate gathering can still leak. This patch
+// filters out host candidates that reveal the real IP.
+try{
+if(typeof RTCPeerConnection!=='undefined'){
+  var _origRTC=RTCPeerConnection.prototype;
+  var _origAddIceCandidate=_origRTC.addIceCandidate;
+  var _origCreateOffer=_origRTC.createOffer;
+  var _origCreateAnswer=_origRTC.createAnswer;
+  var _origSetLocalDescription=_origRTC.setLocalDescription;
+  // Filter ICE candidates: remove host candidates (real IP leak).
+  function _filterSDP(sdp){
+    if(!sdp)return sdp;
+    return sdp.replace(/a=candidate:[^\r\n]*typ host[^\r\n]*/g,'').replace(/a=candidate:[^\r\n]*typ srflx[^\r\n]*/g,'');
+  }
+  var _co=function createOffer(opts){
+    return _origCreateOffer.call(this,opts).then(function(offer){
+      if(offer&&offer.sdp){offer.sdp=_filterSDP(offer.sdp);}
+      return offer;
+    });
+  };
+  var _ca=function createAnswer(opts){
+    return _origCreateAnswer.call(this,opts).then(function(answer){
+      if(answer&&answer.sdp){answer.sdp=_filterSDP(answer.sdp);}
+      return answer;
+    });
+  };
+  try{Object.defineProperty(_origRTC,'createOffer',{value:_co,writable:true,configurable:true,enumerable:true});}catch(e){}
+  try{Object.defineProperty(_origRTC,'createAnswer',{value:_ca,writable:true,configurable:true,enumerable:true});}catch(e){}
+  _lie(_co,'createOffer');
+  _lie(_ca,'createAnswer');
+}
+}catch(e){}
+
+// Error stack normalization: headless Chrome may have different
+// stack frame URLs (chrome://, devtools://, extensions://).
+try{
+var _origError=window.Error;
+var _newError=function Error(msg){
+  var e=new _origError(msg);
+  if(e.stack){
+    // Normalize stack: remove CDP-injected frames, normalize URLs.
+    e.stack=e.stack.replace(/chrome-extension:\/\/[^\s]*/g,'').replace(/devtools:\/\/[^\s]*/g,'').replace(/chrome:\/\/[^\s]*/g,'');
+  }
+  return e;
+};
+_newError.prototype=_origError.prototype;
+_newError.captureStackTrace=_origError.captureStackTrace;
+try{Object.defineProperty(window,'Error',{value:_newError,writable:true,configurable:true,enumerable:true});}catch(e){}
+}catch(e){}
+
+// Document.visibilityState: should be 'visible' in headful mode.
+// Some headless configurations report 'hidden' or 'prerender'.
+try{
+if(document.visibilityState!=='visible'){
+  _defGet(document,'visibilityState',function visibilityState(){return 'visible';});
+  _defGet(document,'hidden',function hidden(){return false;});
+}
+}catch(e){}
+
+// Performance timing: add realistic navigation timing if missing.
+try{
+if(!performance.timing){
+  var _now=Date.now();
+  var _timing={
+    navigationStart:_now-1000,
+    unloadEventStart:0,unloadEventEnd:0,
+    redirectStart:0,redirectEnd:0,
+    fetchStart:_now-900,
+    domainLookupStart:_now-850,domainLookupEnd:_now-800,
+    connectStart:_now-800,connectEnd:_now-700,
+    secureConnectionStart:_now-750,
+    requestStart:_now-700,
+    responseStart:_now-600,responseEnd:_now-500,
+    domLoading:_now-400,
+    domInteractive:_now-300,
+    domContentLoadedEventStart:_now-250,domContentLoadedEventEnd:_now-200,
+    domComplete:_now-100,
+    loadEventStart:_now-50,loadEventEnd:_now
+  };
+  _defGet(performance,'timing',function timing(){return _timing;});
+}
+}catch(e){}
+
+// Notification.permission: should be 'default' (not 'denied').
+try{
+if(typeof Notification!=='undefined'&&Notification.permission==='denied'){
+  _defGet(Notification,'permission',function permission(){return 'default';});
+}
+}catch(e){}
+
+// iframe contentWindow: some sites check iframe.contentWindow.navigator.webdriver.
+// Ensure iframes inherit the stealth context.
+try{
+var _origAttachShadow=Element.prototype.attachShadow;
+// Patch iframe creation to inject stealth into child frames.
+// Note: this is a best-effort approach; full iframe stealth requires
+// per-frame injection which CDP handles via Page.addScriptToEvaluateOnNewDocument
+// with runAt:'document_start' (which we already use).
 }catch(e){}
 
 // V8: console capture for driver introspection (see logs=console).

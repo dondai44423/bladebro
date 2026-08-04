@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.6] - 2026-08-04
+
+### Fixed
+
+- **collect ignores url param**: `collect url=...` now navigates to the URL first before extracting items. Previously the url param was silently ignored, causing extraction from the wrong page.
+- **download navigates instead of downloading**: `download url=...` now uses `fetch()` + Blob + `<a download>` to trigger the download without navigating away from the current page. Falls back to opening a new tab for CORS-protected URLs. Previously navigated the current page to the URL, loading PDFs in Chrome's viewer instead of downloading them.
+- **set-cookie broken**: `set-cookie` now passes the `url` param to CDP `Network.setCookie`. Falls back to the current page URL when no url is given. Previously CDP rejected the call with "url or domain must be specified".
+- **fill/act with url param doesn't navigate**: `act type url=...`, `act click url=...`, `act fill url=...` etc. now navigate to the URL first, then perform the action. Previously the url param was silently ignored for non-navigate actions, causing the action to run on the wrong page.
+- **Auto-extract picks wrong hrefs**: auto-extract now uses a smart link selection algorithm that filters out action links (vote, comment, share, etc.), prefers links whose text matches the item title, and falls back to the link with the most text. Previously picked the first link or any external link, which on sites like Hacker News selected vote links instead of story links.
+- **fill submit false positive**: `fill submit="Edit"` no longer treats "Edit" as a ref (refs are `e` + digits only). Previously any text starting with `e` was treated as a ref.
+- **run steps with url param**: `run` steps now navigate first when a `url` param is given for non-navigate actions. Previously the url param was ignored in `run` steps.
+- **download/collect double navigation**: `act download url=...` and `act collect url=...` no longer trigger the navigate-first logic (these actions handle their own URL logic). Previously navigated twice.
+- **state ops double navigation**: `act set-cookie url=...`, `act open-tab url=...`, etc. no longer trigger the navigate-first logic (state ops use url for their own purposes). Previously navigated the current page AND performed the state op.
+- **run sequences support download/collect**: `run` steps now support `download` and `collect` actions. Previously these actions were only available via `act`.
+
+### Added
+
+- **Stealth: window.chrome object**: ensures `window.chrome.app`, `chrome.runtime`, `chrome.csi()`, `chrome.loadTimes()` exist with realistic values. Headless Chrome may be missing these.
+- **Stealth: speech synthesis voices**: adds synthetic voice entries when `speechSynthesis.getVoices()` returns empty (a headless tell).
+- **Stealth: battery API**: adds `navigator.getBattery()` when missing (headless Chrome lacks battery info).
+- **Stealth: WebRTC IP leak prevention**: patches `RTCPeerConnection.createOffer/createAnswer` to filter host ICE candidates from SDP, preventing real IP leaks even with proxy.
+- **Stealth: error stack normalization**: removes `chrome://`, `devtools://`, `chrome-extension://` frames from error stack traces.
+- **Stealth: document.visibilityState**: ensures `visibilityState` is `"visible"` and `hidden` is `false` in headful mode.
+- **Stealth: performance timing**: adds realistic navigation timing entries when `performance.timing` is missing.
+- **Stealth: notification permission**: ensures `Notification.permission` is `"default"` (not `"denied"`, which is a headless tell).
+
+### Changed
+
+- **Tool defs**: `url` field description now documents all action-specific behaviors (navigate, download, collect, set-cookie, pre-navigation). ACTIONS line updated for download/collect.
+
 ### Fixed
 
 - **Typing reliability**: per-character key-event typing now verifies the value was actually set. If the input remains empty (framework-controlled inputs, certain focus states), falls back to JS value setting with full event dispatch (`input`, `change`, `keydown`, `keyup`). Eliminates "value empty" failures on forms that reject CDP key injection.
