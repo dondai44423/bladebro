@@ -816,16 +816,43 @@ async fn handle_tools_call(
 /// first — it has all elements from all frames, so label addressing works
 /// for iframe content too. Falls back to live DOM search via find_by_text
 /// if the LPM has no matches (e.g. the page changed since last capture).
+///
+/// Three-tier matching: exact/contains name → alias group → type-based.
+/// Alias groups map common synonyms (username→acct, password→pw, etc.).
+/// Type-based uses the HTML input type as a universal hint.
 async fn resolve_text_target(
     page: &mut Page,
     query: &str,
     role_filter: Option<&str>,
     nth: Option<usize>,
 ) -> Result<String> {
-    // Phase 1: Search the LPM directly. All elements from all frames are
-    // here with their semantic names. This is faster and more reliable
-    // than a live DOM search, and it works for iframe content.
     let q = query.to_lowercase();
+
+    // Alias groups: all names in a group are interchangeable.
+    // When the query matches any name in a group, any element whose
+    // name is also in that group is a candidate.
+    const FIELD_ALIASES: &[&[&str]] = &[
+        &["username", "user", "login", "acct", "account", "userid", "user id",
+          "uid", "uname", "login name", "loginid", "login id", "signin",
+          "sign in", "user name", "member", "handle", "nick", "nickname"],
+        &["password", "pw", "passwd", "pwd", "pass", "secret",
+          "current password", "new password", "confirm password"],
+        &["email", "mail", "e mail", "e-mail", "emailaddress",
+          "email address", "eml", "emailaddr"],
+        &["search", "query", "find", "filter", "keyword", "q", "s"],
+        &["phone", "tel", "mobile", "phone number", "mobile number",
+          "telephone", "contact", "cell", "cellphone"],
+        &["name", "fullname", "full name", "first name", "firstname",
+          "given name", "family name", "last name", "lastname", "display name"],
+    ];
+
+    // Find which alias group the query belongs to (if any).
+    let alias_group: Option<&[&str]> = FIELD_ALIASES
+        .iter()
+        .find(|g| g.iter().any(|a| *a == q))
+        .copied();
+
+    // Phase 1: Search the LPM directly.
     let mut lpm_matches: Vec<(String, String, String, Vec<usize>, i64)> = Vec::new();
     for el in page.model().elements() {
         let role = &el.raw.role;
@@ -841,9 +868,30 @@ async fn resolve_text_target(
         else if name.contains(query) { score = 70; }
         else if name_lower.contains(&q) { score = 60; }
         else {
-            // Check aria-label, placeholder, title as fallbacks.
+            // Check placeholder as fallback.
             let al = el.raw.placeholder.as_deref().unwrap_or("");
             if !al.is_empty() && al.to_lowercase().contains(&q) { score = 30; }
+        }
+        // Alias group matching: if both query and element name are in
+        // the same alias group, it's a strong match (score 55).
+        if score == 0 {
+            if let Some(group) = alias_group {
+                if group.iter().any(|a| *a == name_lower) {
+                    score = 55;
+                }
+            }
+        }
+        // Type-based matching: if query matches the HTML input type.
+        if score == 0 {
+            if let Some(ref ty) = el.raw.element_type {
+                let ty_lower = ty.to_lowercase();
+                let type_match = (q == "password" && ty_lower == "password")
+                    || (q == "email" && ty_lower == "email")
+                    || (q == "search" && ty_lower == "search")
+                    || (q == "phone" && ty_lower == "tel")
+                    || (q == "url" && ty_lower == "url");
+                if type_match { score = 50; }
+            }
         }
         if score > 0 {
             lpm_matches.push((
@@ -857,23 +905,48 @@ async fn resolve_text_target(
     }
     if !lpm_matches.is_empty() {
         lpm_matches.sort_by_key(|b| std::cmp::Reverse(b.4));
-        // nth: 1-based pick from the scored match list.
         if let Some(n) = nth {
             if n >= 1 && n <= lpm_matches.len() {
                 return Ok(lpm_matches[n - 1].0.clone());
             }
-            // nth out of range — fall through to show the list.
         }
-        if lpm_matches.len() == 1 {
-            return Ok(lpm_matches[0].0.clone());
-        }
-        // Auto-pick the top match.
         return Ok(lpm_matches[0].0.clone());
     }
 
-    // Phase 2: Live DOM search via find_by_text. Used when the LPM
-    // has no matches (page changed since last capture, or the element
-    // is new on the page).
+    // Phase 2: Positional fallback for forms. If the query is a common
+    // field type (username/password/email) and there are textboxes in
+    // the model, pick the first textbox for username/email and the
+    // password-typed one for password.
+    if let Some(group) = alias_group {
+        let is_username_like = group.iter().any(|a| {
+            *a == "username" || *a == "user" || *a == "login" || *a == "acct"
+        });
+        let is_password_like = group.iter().any(|a| *a == "password" || *a == "pw");
+        if is_username_like || is_password_like {
+            let textboxes: Vec<_> = page.model().elements().iter()
+                .filter(|e| e.raw.role == "textbox" || e.raw.role == "combobox")
+                .collect();
+            if is_password_like {
+                // Prefer password-typed inputs.
+                if let Some(pw) = textboxes.iter().find(|e| {
+                    e.raw.element_type.as_deref() == Some("password")
+                }) {
+                    return Ok(pw.ref_id.clone());
+                }
+            }
+            if is_username_like && !textboxes.is_empty() {
+                // First non-password textbox is the username field.
+                if let Some(tb) = textboxes.iter().find(|e| {
+                    e.raw.element_type.as_deref() != Some("password")
+                }) {
+                    return Ok(tb.ref_id.clone());
+                }
+            }
+        }
+    }
+
+    // Phase 3: Live DOM search via find_by_text. Used when the LPM
+    // has no matches (page changed since last capture).
     let matches = crate::action::find_by_text(page.cdp_ref(), query, role_filter).await?;
     if matches.is_empty() {
         let view = page.view(2000);
@@ -882,14 +955,12 @@ async fn resolve_text_target(
             query, view
         )));
     }
-    // nth: 1-based pick from the scored match list.
     if let Some(n) = nth {
         if n >= 1 && n <= matches.len() {
             let m = &matches[n - 1];
             return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
         }
     }
-    // Smart disambiguation: auto-pick the top match.
     if matches.len() == 1 {
         let m = &matches[0];
         return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
@@ -1619,50 +1690,37 @@ async fn handle_template_extract(
 fn auto_extract_expr(limit: usize) -> String {
     let lim = limit.min(500);
     r#"(()=>{
-const PRICE=/([$€£¥₹]\s?\d[\d,]*(?:\.\d{1,2})?|\b\d+[\.,]\d{2}\b)/;
+// Price: currency symbol required (no bare decimal numbers — false positives).
+const PRICE=/([$€£¥₹]\s?\d[\d,]*(?:\.\d{1,2})?)/;
 const DATE=/(\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[\/]\d{1,2}[\/]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s*\d{2,4}\b|\b\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago\b)/i;
 const HOST=location.hostname;
-// Non-content link patterns: vote buttons, comment links, action items.
-// These should NOT be selected as the primary link for an extracted item.
 const ACT_PAT=/^(vote|upvote|downvote|comment|comments|discuss|reply|replies|share|save|hide|flag|report|favorite|fav|like|dislike|follow|Subscribe|Pin|Unpin|More|less|edit|delete|remove|add|new|open|show|expand|collapse|permalink|embed|cite|parent|context|full story|read more|continue reading|view|all|next|prev|previous)$/i;
 const ACT_HREF=/\/vote|\/comment|\/reply|\/action|javascript:|#comment|#respond|#reply/i;
 function sig(el){const k=[...el.children].map(c=>c.tagName).join(',');return el.tagName+'['+k+']';}
 function txt(el){return(el.innerText||el.textContent||'').replace(/\s+/g,' ').trim();}
 function links(el){return[...el.querySelectorAll('a[href]')];}
 function extLink(el){return links(el).find(a=>a.hostname&&a.hostname!==HOST);}
+function norm(s){return s.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();}
 function isActionLink(a){
 const t=txt(a).toLowerCase();
-// Single-word action links.
 if(t.split(/\s+/).length<=3&&ACT_PAT.test(t))return true;
-// Href patterns that indicate action links.
 if(ACT_HREF.test(a.href))return true;
-// Vote/comment counts (e.g., "42 comments", "5 points").
 if(/\d+\s+(point|comment|vote|reply|reaction)/i.test(t))return true;
 return false;
 }
 function bestLink(item,title){
 const lnks=links(item).filter(a=>!isActionLink(a)&&a.offsetParent!==null);
 if(lnks.length===0)return null;
-// External link preferred (article, product, external resource).
 const ext=lnks.find(a=>a.hostname&&a.hostname!==HOST);
 if(ext)return ext;
-// Prefer links whose text closely matches the title (the item's own link).
 if(title){
-const norm=s=>s.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();
 const tn=norm(title);
-if(tn){
-const match=lnks.find(a=>{const an=norm(txt(a));return an&&tn.includes(an)&&an.length>3});
-if(match)return match;
+if(tn){const match=lnks.find(a=>{const an=norm(txt(a));return an&&tn.includes(an)&&an.length>3});if(match)return match;}
 }
+return lnks.reduce((best,a)=>{const at=txt(a).length,bt=txt(best).length;return at>bt?a:best;},lnks[0]);
 }
-// Prefer the link with the most text (most descriptive = content link).
-return lnks.reduce((best,a)=>{
-const at=txt(a).length,bt=txt(best).length;
-return at>bt?a:best;
-},lnks[0]);
-}
-let best=null,bestScore=0,bestSig='';
 const SKIP_TAGS=new Set(['STYLE','SCRIPT','HEAD','NOSCRIPT','SVG','TEMPLATE','LINK','META','BR','HR','PATH','DEFS','USE','G','RECT','CIRCLE','LINE','POLYGON','POLYLINE']);
+let best=null,bestScore=0,bestSig='';
 for(const c of document.querySelectorAll('*')){
 if(SKIP_TAGS.has(c.tagName))continue;
 const kids=[...c.children].filter(k=>k.nodeType===1&&k.offsetParent!==null);
@@ -1672,55 +1730,50 @@ for(const k of kids){const s=sig(k);if(!groups[s])groups[s]=[];groups[s].push(k)
 for(const s in groups){
 const items=groups[s];
 if(items.length<3)continue;
-// Skip containers whose children are non-content (style/script/svg).
 if(items[0]&&SKIP_TAGS.has(items[0].tagName))continue;
 let totalText=0,extCount=0,hCount=0,imgCount=0,linkCount=0;
-for(const it of items){
-totalText+=txt(it).length;
-if(extLink(it))extCount++;
-if(it.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'))hCount++;
-if(it.querySelector('img[src]'))imgCount++;
-if(links(it).length>0)linkCount++;
-}
-const count=items.length;
-const avgText=totalText/count;
+for(const it of items){totalText+=txt(it).length;if(extLink(it))extCount++;if(it.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'))hCount++;if(it.querySelector('img[src]'))imgCount++;if(links(it).length>0)linkCount++;}
+const count=items.length;const avgText=totalText/count;
 if(avgText<5)continue;
 const tf=Math.min(Math.max(avgText/50,0.5),4);
-const ef=extCount/count,hf=hCount/count,imf=imgCount/count;
-const lf=linkCount/count;
-const score=count*tf*(1+ef*2+hf+imf*0.5+lf*0.3);
+const score=count*tf*(1+(extCount/count)*2+(hCount/count)+(imgCount/count)*0.5+(linkCount/count)*0.3);
 if(score>bestScore){bestScore=score;best=c;bestSig=s;}
 }
 }
 if(!best)return JSON.stringify({error:'no repeated list found',items:[]});
-const tagName=best.tagName.toLowerCase();
-const cls=(best.className&&best.className.baseVal!==undefined?best.className.baseVal:best.className)||'';
-const container=tagName+(cls?('.'+cls.split(/\s+/)[0]):'');
+// Field extraction: clean, typed, deduplicated. No 'text' field.
 const items=[...best.children].filter(k=>k.nodeType===1&&sig(k)===bestSig).map(item=>{
-const t=txt(item);const o={};
+const fullText=txt(item);const o={};
+// Title: heading → longest link text → first sentence.
 const h=item.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]');
 let title=h?txt(h):'';
-if(!title){title=t.split(' ').slice(0,12).join(' ').slice(0,140);}
 const link=bestLink(item,title);
-if(link){
-const lt=txt(link);
-// Use link text as title if we don't have one and the link has good text.
-if(lt&&(!title||title.length<10||lt.length>title.length*1.5)){
-title=lt.slice(0,140);
-}
-}
-if(title)o.title=title.slice(0,140);
-if(link){o.url=link.href;}
+if(link){const lt=txt(link);if(lt&&(!title||title.length<10||lt.length>title.length*1.5))title=lt.slice(0,200);}
+if(!title){const sentence=fullText.split(/\.|!|\?/)[0];title=(sentence&&sentence.length>10?sentence:fullText).slice(0,200);}
+if(title)o.title=title.slice(0,200);
+if(link)o.url=link.href;
+// Image.
 const img=item.querySelector('img[src]');
 if(img){o.image=img.src;if(img.alt)o.image_alt=img.alt.slice(0,100);}
-const pr=t.match(PRICE);if(pr)o.price=pr[0];
-const dt=t.match(DATE);if(dt)o.date=dt[0];
-if(t&&t!==(o.title||''))o.text=t.slice(0,200);
+// Price: currency symbol required, not in title.
+const pr=(fullText.match(PRICE)||[])[0];
+if(pr&&!title.includes(pr))o.price=pr;
+// Date: only in non-title text.
+const nonTitle=fullText.slice((title||'').length);
+const dt=(nonTitle.match(DATE)||[])[0];
+if(dt)o.date=dt;
+// Description: non-link, non-heading text. Only if different from title.
+const clone=item.cloneNode(true);
+clone.querySelectorAll('a,script,style,noscript,svg').forEach(e=>e.remove());
+const hd=clone.querySelector('h1,h2,h3,h4,h5,h6');
+if(hd)hd.remove();
+const desc=(clone.innerText||clone.textContent||'').replace(/\s+/g,' ').trim();
+if(desc&&desc.length>15){const dn=norm(desc),tn=norm(title||'');if(dn&&!tn.includes(dn)&&!dn.includes(tn))o.description=desc.slice(0,300);}
 return o;
 }).filter(o=>Object.keys(o).length>0).slice(0,"#.to_string()
     + &lim.to_string()
     + r#");
-return JSON.stringify({container,count:items.length,items});
+return JSON.stringify({container:best.tagName.toLowerCase(),count:items.length,items});
 })()"#
 }
 

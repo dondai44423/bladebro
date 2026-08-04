@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.11] - 2026-08-04
+
+### Fixed
+
+- **Label matching for unnamed inputs**: The `name()` function now checks HTML `autocomplete` attribute (W3C standard), HTML `name` attribute (humanized), and input `type` (password/email/search/tel/url). Forms that previously showed `(unnamed)` now show their HTML name or type. HN login: `e2 textbox "acct"` and `e6 textbox "password"` instead of `(unnamed)`.
+- **Alias-based label addressing**: `resolve_text_target` now maps common field synonyms: username\u2194acct/user/login/uid, password\u2192pw/passwd/pwd, email\u2192mail, search\u2192query, phone\u2192tel. `label="username"` resolves to `name="acct"` via alias matching. Also matches by HTML input type (query "password" matches `type="password"`).
+- **Positional fallback for forms**: When no match is found by name, alias, or type, the resolver picks the first non-password textbox for username-like queries and the password-typed input for password queries.
+- **Auto-extract noise removed**: Removed the noisy `text` field that duplicated title content. Price regex now requires a currency symbol (no more false positives from bare decimal numbers). Date extraction only searches non-title text. Added a `description` field that extracts non-link, non-heading text only when substantially different from the title.
+
+### Changed
+
+- **Auto-extract field order**: title (heading \u2192 longest link \u2192 first sentence) \u2192 url \u2192 image \u2192 price \u2192 date \u2192 description. Clean, typed, deduplicated.
+
 ## [3.0.10] - 2026-08-04
 
 ### Fixed
