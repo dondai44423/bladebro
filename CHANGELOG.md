@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.8] - 2026-08-04
+
+### Added
+
+- **Fingerprint seed persistence**: The stealth seed (drives canvas/audio noise, fingerprint-derived values) is now generated once and stored in `~/.blade/.fingerprint.json`. Subsequent sessions reuse the same seed, so canvas/audio fingerprints stay stable across visits. Sites tracking fingerprint consistency see the same device, not a new one each launch.
+- **Profile warming**: On first run only, Bladebro auto-visits 3 top sites (Google, GitHub, Wikipedia) to seed HTTP cache, HSTS, cookies, and browsing history. The profile starts looking like a real used browser instead of a blank slate. Runs once, takes ~4-6 seconds, never repeats (unless the profile is deleted).
+- **Periodic profile sync-back**: Every 60 seconds while Chrome is alive, the session profile is synced to the template. SIGKILL or crash only loses up to 60 seconds of state instead of everything since the last graceful shutdown.
+- **Proxy/timezone/locale consistency warnings**: If `BLADE_PROXY`, `BLADE_TZ`, or `BLADE_LOCALE` changes between sessions, a warning is printed. A browser that switches IP or timezone between visits is a strong bot signal.
+
+### Changed
+
+- **Profile copy cache pruning**: `Cache`, `Code Cache`, `GPUCache`, `blob_storage`, and shader cache directories are now skipped during profile copy. Profile size dropped from ~850 MB to ~3 MB, making Chrome launch significantly faster.
+- **Profile copy depth limit**: Increased from 4 to 6 levels to capture deeply nested seasoning-relevant data (IndexedDB, WebStorage).
+- **Fingerprint seed entropy**: Seeds are now generated from `/dev/urandom` on Unix (was time-based), providing better entropy.
+
+### Fixed
+
+- **Corrupted fingerprint recovery**: If `~/.blade/.fingerprint.json` is corrupted or unreadable, a new seed is generated automatically instead of crashing.
+- **Re-warming on profile deletion**: If the template profile is manually deleted, the warming marker is reset and warming runs again on next launch.
+
 ## [3.0.7] - 2026-08-04
 
 ### Fixed

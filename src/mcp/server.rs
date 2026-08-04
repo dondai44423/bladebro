@@ -229,6 +229,40 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
+/// Warm the profile on first run: navigate to a few top sites to seed
+/// cache, cookies, HSTS, and browsing history. Only runs once (when
+/// `~/.blade/.warmed` doesn't exist). Best-effort: failed navigations are
+/// skipped, never fatal. Total time: ~4-6s.
+async fn warm_profile(page: &mut Page) {
+    let sites = [
+        "https://www.google.com",
+        "https://github.com",
+        "https://www.wikipedia.org",
+    ];
+    let mut ok = 0;
+    for url in &sites {
+        // Navigate with a short timeout — if a site is unreachable,
+        // skip it. Don't let warming block the agent's first action.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            page.navigate(url),
+        ).await {
+            Ok(Ok(_)) => {
+                ok += 1;
+                // Brief pause to let cookies/cache settle.
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            _ => continue, // timeout or error — skip this site
+        }
+    }
+    if ok > 0 {
+        eprintln!("[bladebro] profile warmed ({ok}/{} sites visited)", sites.len());
+    } else {
+        eprintln!("[bladebro] WARNING: profile warming failed (all sites unreachable)");
+        crate::session_profile::SessionProfile::release_warming();
+    }
+}
+
 /// The stdio JSON-RPC loop, shared by both transports.
 ///
 /// Chrome is NOT launched at startup. The server starts with no browser
@@ -265,6 +299,11 @@ async fn serve(
     let idle_secs = idle_timeout_secs();
     let mut idle_check = tokio::time::interval(std::time::Duration::from_secs(15));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Periodic profile sync-back: every 60s while Chrome is alive,
+    // sync the session profile to the template. SIGKILL resilience —
+    // even a force-kill only loses up to 60s of state.
+    let mut last_sync = std::time::Instant::now();
+    let sync_interval = std::time::Duration::from_secs(60);
     // Set when Chrome is relaunched after a crash/idle — the
     // next response tells the agent its page state was reset.
     let mut relaunch_note: Option<String> = None;
@@ -370,6 +409,13 @@ async fn serve(
                                     if let Some(ref bc) = block_classes {
                                         if let Some(ref mut p) = page {
                                             let _ = p.set_block_classes(bc).await;
+                                        }
+                                    }
+                                    // First-run warming: seed cache/cookies/HSTS
+                                    // by visiting a few top sites. Only runs once.
+                                    if crate::session_profile::SessionProfile::claim_warming() {
+                                        if let Some(ref mut p) = page {
+                                            warm_profile(p).await;
                                         }
                                     }
                                 }
@@ -568,6 +614,17 @@ async fn serve(
                 }
             }
             _ = idle_check.tick() => {
+                // Periodic sync-back for SIGKILL resilience.
+                if browser.is_some() && last_sync.elapsed() >= sync_interval {
+                    if let Some(ref b) = browser {
+                        let dir = b.profile_dir().to_path_buf();
+                        // Offload to blocking thread: profile copy is I/O-heavy.
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::session_profile::SessionProfile::sync_back_only(&dir);
+                        }).await;
+                    }
+                    last_sync = std::time::Instant::now();
+                }
                 if idle_secs > 0
                     && browser.is_some()
                     && last_activity.elapsed().as_secs() > idle_secs

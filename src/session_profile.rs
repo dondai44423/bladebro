@@ -49,6 +49,17 @@ const SKIP_ON_COPY: &[&str] = &[
     ".blade-owner",
     "Crashpad",
     "RunningChromeVersion",
+    // Performance caches: large, regenerated on demand, and not needed
+    // for seasoning (trust signals). Skipping these cuts the profile copy
+    // from ~hundreds of MB to ~tens of MB — much faster launch.
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    " DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "blob_storage",
 ];
 
 /// A per-process session profile. Cleaned up by [`cleanup`]
@@ -123,6 +134,62 @@ impl SessionProfile {
             return;
         }
         Self::sync_back_and_remove(&self.dir);
+    }
+
+    /// Non-destructive periodic sync-back: copies the session profile to
+    /// the template WITHOUT removing the session dir. Called every 60s
+    /// during the MCP serve loop for SIGKILL resilience — if the process
+    /// is force-killed, the template has a recent snapshot instead of the
+    /// state from the last graceful shutdown.
+    ///
+    /// Uses the same sole-survivor + lockfile logic as the final cleanup.
+    pub fn sync_back_only(dir: &Path) {
+        if !other_live_sessions_exist() {
+            let template = platform::blade_dir().join("profile");
+            let lock = platform::blade_dir().join(".template.lock");
+            if std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock)
+                .is_ok()
+            {
+                let tmp = platform::blade_dir().join(".profile.sync");
+                let _ = std::fs::remove_dir_all(&tmp);
+                copy_profile(dir, &tmp);
+                if tmp.is_dir() {
+                    let _ = std::fs::remove_dir_all(&template);
+                    let _ = std::fs::rename(&tmp, &template);
+                }
+                let _ = std::fs::remove_file(&lock);
+            }
+        }
+    }
+
+    /// Claim first-run warming via an O_EXCL marker file. Returns true if
+    /// this process should warm the profile (first run ever, or previous
+    /// warming failed and the marker was released). Also re-warms if the
+    /// template profile is empty/missing (e.g. manually deleted).
+    pub fn claim_warming() -> bool {
+        let marker = platform::blade_dir().join(".warmed");
+        // If the template profile is empty or missing, warming is needed
+        // regardless of the marker (the profile was deleted/reset).
+        let template = platform::blade_dir().join("profile");
+        let template_empty = !template.is_dir()
+            || template.read_dir().map(|mut d| d.next().is_none()).unwrap_or(true);
+        if template_empty {
+            let _ = std::fs::remove_file(&marker);
+        }
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&marker)
+            .is_ok()
+    }
+
+    /// Release the warming marker on failure so the next launch retries.
+    pub fn release_warming() {
+        let marker = platform::blade_dir().join(".warmed");
+        let _ = std::fs::remove_file(&marker);
     }
 
     /// Static cleanup for after the Browser (and its profile)
@@ -410,9 +477,10 @@ fn copy_profile(src: &Path, dst: &Path) {
 }
 
 fn copy_dir_filtered(src: &Path, dst: &Path, depth: usize) {
-    // Bound recursion — Chrome profiles nest cache dirs deeply
-    // and none of it matters for seasoning.
-    if depth > 4 {
+    // Bound recursion — Chrome profiles nest cache dirs deeply.
+    // 6 levels covers the deepest seasoning-relevant structure
+    // (Default/WebStorage/<id>/CacheStorage/<origin>/files).
+    if depth > 6 {
         return;
     }
     let entries = match std::fs::read_dir(src) {

@@ -446,11 +446,9 @@ pub const STEALTH_SCRIPT_TEMPLATE: &str = STEALTH_CORE;
 /// Canvas/audio noise is opt-in via BLADE_NOISE=1. BLADE_WEBGL=spoof|real
 /// forces the GL decision. Returns the script identifier.
 pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<ScriptId> {
-    // Generate a seed for canvas/audio noise (stable per session).
-    let seed: u32 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u32)
-        .unwrap_or(42);
+    // Persistent seed: stable across sessions (canvas/audio fingerprint
+    // consistency). Generated once, stored in ~/.blade/.fingerprint.json.
+    let seed: u32 = crate::fingerprint::load_or_create_seed();
 
     // One environment probe drives every adaptive decision (S8/S15).
     let env = probe_environment(cdp).await;

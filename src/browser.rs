@@ -338,6 +338,11 @@ impl Browser {
         self.port
     }
 
+    /// The session profile directory (for periodic sync-back).
+    pub fn profile_dir(&self) -> &std::path::Path {
+        self.profile.dir()
+    }
+
     /// `host:port` string for CDP HTTP discovery calls.
     pub fn base(&self) -> String {
         format!("127.0.0.1:{}", self.port)
