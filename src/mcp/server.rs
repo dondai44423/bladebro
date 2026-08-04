@@ -141,13 +141,13 @@ async fn attach_pipe(client: &CdpClient) -> Result<CdpSession> {
 }
 
 /// Idle timeout: Chrome is shut down after this many seconds of no tool
-/// calls, freeing RAM. 0 disables. Default: 300 (5 minutes).
+/// calls, freeing RAM. 0 disables. Default: 600 (10 minutes).
 /// Configurable via `BLADE_IDLE_TIMEOUT` env var (seconds).
 fn idle_timeout_secs() -> u64 {
     std::env::var("BLADE_IDLE_TIMEOUT")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(300)
+        .unwrap_or(600)
 }
 
 /// Launch Chrome and create a fresh `Page`. Used for three purposes:
@@ -268,6 +268,8 @@ async fn serve(
     // Set when Chrome is relaunched after a crash/idle — the
     // next response tells the agent its page state was reset.
     let mut relaunch_note: Option<String> = None;
+    // Track resource-blocking config so it survives idle shutdown/relaunch.
+    let mut block_classes: Option<String> = None;
 
     eprintln!(
         "[bladebro] MCP server ready (Chrome launches on first tool call{}",
@@ -364,6 +366,12 @@ async fn serve(
                                 Ok((new_page, new_browser)) => {
                                     browser = new_browser;
                                     page = Some(new_page);
+                                    // Restore resource blocking after relaunch.
+                                    if let Some(ref bc) = block_classes {
+                                        if let Some(ref mut p) = page {
+                                            let _ = p.set_block_classes(bc).await;
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     eprintln!("[bladebro] Chrome launch failed: {e}");
@@ -414,6 +422,12 @@ async fn serve(
                                     Ok((new_page, new_browser)) => {
                                         browser = new_browser;
                                         page = Some(new_page);
+                                        // Restore resource blocking after relaunch.
+                                        if let Some(ref bc) = block_classes {
+                                            if let Some(ref mut p) = page {
+                                                let _ = p.set_block_classes(bc).await;
+                                            }
+                                        }
                                         relaunch_note = Some(
                                             "note: Chrome crashed and was restarted — page state reset to about:blank. Navigate to continue.".into()
                                         );
@@ -514,6 +528,21 @@ async fn serve(
                             shape_result(result, version);
                         }
                         last_activity = std::time::Instant::now();
+                        // Track block config for restoration after relaunch.
+                        if block_classes.is_none() {
+                            let rules = page.as_ref().map(|p| p.block_rules()).unwrap_or(0);
+                            if rules != 0 {
+                                // Reconstruct classes from rules — the mask bits.
+                                let mut classes = Vec::new();
+                                if rules & 1 != 0 { classes.push("images"); }
+                                if rules & 2 != 0 { classes.push("fonts"); }
+                                if rules & 4 != 0 { classes.push("media"); }
+                                if rules & 8 != 0 { classes.push("trackers"); }
+                                if !classes.is_empty() {
+                                    block_classes = Some(classes.join(","));
+                                }
+                            }
+                        }
                         Some(resp)
                     }
                     // Removed in 2026-07-28; kept for legacy keepalive clients.
@@ -726,14 +755,68 @@ async fn handle_tools_call(
     }
 }
 
-/// M3: Resolve a text query to an element ref via find_by_text. Returns the
-/// ref id for a unique match, or an ambiguity/not-found error.
+/// M3: Resolve a text query to an element ref. Searches the LPM (page model)
+/// first — it has all elements from all frames, so label addressing works
+/// for iframe content too. Falls back to live DOM search via find_by_text
+/// if the LPM has no matches (e.g. the page changed since last capture).
 async fn resolve_text_target(
     page: &mut Page,
     query: &str,
     role_filter: Option<&str>,
     nth: Option<usize>,
 ) -> Result<String> {
+    // Phase 1: Search the LPM directly. All elements from all frames are
+    // here with their semantic names. This is faster and more reliable
+    // than a live DOM search, and it works for iframe content.
+    let q = query.to_lowercase();
+    let mut lpm_matches: Vec<(String, String, String, Vec<usize>, i64)> = Vec::new();
+    for el in page.model().elements() {
+        let role = &el.raw.role;
+        if role == "hidden" { continue; }
+        if let Some(rf) = role_filter {
+            if role != rf { continue; }
+        }
+        let name = &el.raw.name;
+        let name_lower = name.to_lowercase();
+        let mut score = 0i64;
+        if name == query { score = 100; }
+        else if name_lower == q { score = 80; }
+        else if name.contains(query) { score = 70; }
+        else if name_lower.contains(&q) { score = 60; }
+        else {
+            // Check aria-label, placeholder, title as fallbacks.
+            let al = el.raw.placeholder.as_deref().unwrap_or("");
+            if !al.is_empty() && al.to_lowercase().contains(&q) { score = 30; }
+        }
+        if score > 0 {
+            lpm_matches.push((
+                el.ref_id.clone(),
+                role.clone(),
+                name.clone(),
+                el.raw.frame.clone(),
+                score,
+            ));
+        }
+    }
+    if !lpm_matches.is_empty() {
+        lpm_matches.sort_by_key(|b| std::cmp::Reverse(b.4));
+        // nth: 1-based pick from the scored match list.
+        if let Some(n) = nth {
+            if n >= 1 && n <= lpm_matches.len() {
+                return Ok(lpm_matches[n - 1].0.clone());
+            }
+            // nth out of range — fall through to show the list.
+        }
+        if lpm_matches.len() == 1 {
+            return Ok(lpm_matches[0].0.clone());
+        }
+        // Auto-pick the top match.
+        return Ok(lpm_matches[0].0.clone());
+    }
+
+    // Phase 2: Live DOM search via find_by_text. Used when the LPM
+    // has no matches (page changed since last capture, or the element
+    // is new on the page).
     let matches = crate::action::find_by_text(page.cdp_ref(), query, role_filter).await?;
     if matches.is_empty() {
         let view = page.view(2000);
@@ -742,27 +825,20 @@ async fn resolve_text_target(
             query, view
         )));
     }
-    // nth: 1-based pick from the scored match list. Lets the agent
-    // resolve ambiguity in ONE retry call without a full see.
+    // nth: 1-based pick from the scored match list.
     if let Some(n) = nth {
         if n >= 1 && n <= matches.len() {
             let m = &matches[n - 1];
             return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
         }
-        // nth out of range — fall through to the list so the agent
-        // sees the valid range with refs.
     }
-    // Smart disambiguation: matches are sorted by score (desc).
-    // Auto-pick the top match — if scores differ, it's the clear winner.
-    // If tied, pick the first; agent can override with nth=N or ref=.
-    // Adopt ALL matches so their refs are available in the page model.
+    // Smart disambiguation: auto-pick the top match.
     if matches.len() == 1 {
         let m = &matches[0];
         return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
     }
     let top = &matches[0];
     let id = page.model_mut().adopt(&top.sig, &top.role, &top.name, &top.frame);
-    // Adopt remaining matches so refs are in the model for recovery.
     for m in &matches[1..] {
         let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
     }
@@ -1019,13 +1095,12 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     Ok(verdict) => {
                         ok_count += 1;
                         let vline = verdict.lines().next().unwrap_or("ok").trim().to_string();
-                        verdicts.push(format!("step{}[{}]: {}", i+1, step_action, vline));
-                        // Halt if this step navigated (post-fill submit, link click).
-                        // Wrong-page clicks are the worst failure mode in batches.
+                        // Don't halt on navigation — just note it and continue.
+                        // The next step will act on the new page (refs auto-heal).
                         if page.model().url() != start_url {
-                            halted = Some(i+1);
-                            verdicts.push(format!("step{}[{}]: HALT (navigated → {})", i+1, step_action, page.model().url()));
-                            break;
+                            verdicts.push(format!("step{}[{}]: {} (navigated → {})", i+1, step_action, vline, page.model().url()));
+                        } else {
+                            verdicts.push(format!("step{}[{}]: {}", i+1, step_action, vline));
                         }
                     }
                     Err(e) => {
@@ -1039,7 +1114,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let final_delta = page.recapture().await?;
             let view = page.delta_view(&final_delta, 8000);
             let summary = if let Some(halt) = halted {
-                format!("batch halt at step {halt} ({ok_count} ok)")
+                format!("batch stopped at step {halt} ({ok_count} ok)")
             } else {
                 format!("batch ({} steps, {} ok)", steps.len(), ok_count)
             };
@@ -1221,7 +1296,26 @@ async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     if !extract.is_empty() {
         let expr = match extract {
             "links" => r#"(()=>{const links=[...document.querySelectorAll('a[href]')];return JSON.stringify(links.map(a=>({text:(a.textContent||'').trim().slice(0,80),href:a.href})).filter(l=>l.text||l.href));})()"#,
-            "forms" => r#"(()=>{const forms=[...document.querySelectorAll('form')];return JSON.stringify(forms.map(f=>({action:f.action,method:(f.method||'get').toLowerCase(),fields:[...f.elements].filter(e=>e.tagName!=='FIELDSET').map(e=>({tag:e.tagName.toLowerCase(),type:e.type||null,name:e.name||'',label:(e.labels&&e.labels[0]?e.labels[0].textContent:'').trim().slice(0,60)||e.placeholder||''}))})));})()"#,
+            "forms" => r#"(()=>{
+function extractForms(doc){
+const forms=[...doc.querySelectorAll('form')];
+return forms.map(f=>({action:f.action,method:(f.method||'get').toLowerCase(),fields:[...f.elements].filter(e=>e.tagName!=='FIELDSET'&&e.tagName!=='BUTTON').map(e=>{
+// Label resolution priority: <label for=id> > aria-label > aria-labelledby > placeholder > wrapping <label> > preceding text
+var label='';
+if(e.id){var lbl=doc.querySelector('label[for="'+e.id+'"]');if(lbl)label=lbl.textContent.trim().slice(0,60);}
+if(!label&&e.getAttribute('aria-label'))label=e.getAttribute('aria-label').trim().slice(0,60);
+if(!label&&e.getAttribute('aria-labelledby')){var lb=doc.getElementById(e.getAttribute('aria-labelledby'));if(lb)label=lb.textContent.trim().slice(0,60);}
+if(!label&&e.placeholder)label=e.placeholder.trim().slice(0,60);
+if(!label&&e.closest('label'))label=e.closest('label').textContent.trim().slice(0,60);
+return{tag:e.tagName.toLowerCase(),type:e.type||null,name:e.name||'',label:label};
+})}));
+}
+var allForms=extractForms(document);
+// Search iframes too (W3Schools TryIt etc render forms in iframes).
+try{for(const ifr of document.querySelectorAll('iframe')){try{if(ifr.contentDocument){allForms=allForms.concat(extractForms(ifr.contentDocument));}}catch(e){}}
+}catch(e){}
+return JSON.stringify(allForms);
+})()"#,
             _ => return Err(BladeError::Other(format!("unknown extract type: {extract} (use 'links' or 'forms')"))),
         };
         let res = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
@@ -1488,14 +1582,18 @@ return at>bt?a:best;
 },lnks[0]);
 }
 let best=null,bestScore=0,bestSig='';
+const SKIP_TAGS=new Set(['STYLE','SCRIPT','HEAD','NOSCRIPT','SVG','TEMPLATE','LINK','META','BR','HR','PATH','DEFS','USE','G','RECT','CIRCLE','LINE','POLYGON','POLYLINE']);
 for(const c of document.querySelectorAll('*')){
-const kids=[...c.children].filter(k=>k.nodeType===1);
+if(SKIP_TAGS.has(c.tagName))continue;
+const kids=[...c.children].filter(k=>k.nodeType===1&&k.offsetParent!==null);
 if(kids.length<3)continue;
 const groups={};
 for(const k of kids){const s=sig(k);if(!groups[s])groups[s]=[];groups[s].push(k);}
 for(const s in groups){
 const items=groups[s];
 if(items.length<3)continue;
+// Skip containers whose children are non-content (style/script/svg).
+if(items[0]&&SKIP_TAGS.has(items[0].tagName))continue;
 let totalText=0,extCount=0,hCount=0,imgCount=0,linkCount=0;
 for(const it of items){
 totalText+=txt(it).length;
@@ -1698,7 +1796,18 @@ async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
     }
 
     let op = match op_str {
-        "cookies" => StateOp::GetCookies { urls: vec![] },
+        "cookies" => {
+            // If url is provided, filter cookies to that domain.
+            // Otherwise, use the current page URL so the agent gets
+            // relevant cookies, not a 100+ line dump of all browser cookies.
+            let filter_url = if !url.is_empty() {
+                Some(url.to_string())
+            } else {
+                let current = page.model().url().to_string();
+                if current.is_empty() || current == "about:blank" { None } else { Some(current) }
+            };
+            StateOp::GetCookies { urls: filter_url.map(|u| vec![u]).unwrap_or_default() }
+        },
         "set-cookie" => StateOp::SetCookie {
             name: name.into(), value: value.into(),
             // CDP Network.setCookie requires either url or domain.
@@ -1710,7 +1819,17 @@ async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
             },
             domain: None, path: None, secure: None, http_only: None, same_site: None,
         },
-        "del-cookie" => StateOp::DeleteCookies { name: name.into(), domain: None },
+        "del-cookie" => StateOp::DeleteCookies {
+            name: name.into(),
+            domain: args.get("domain").and_then(|d| d.as_str()).map(String::from),
+            // CDP Network.deleteCookies requires either url or domain.
+            // Prefer url when the agent provides it; fall back to the
+            // current page's url so the call never fails for missing scope.
+            url: if !url.is_empty() { Some(url.into()) } else {
+                let current = page.model().url().to_string();
+                if current.is_empty() || current == "about:blank" { None } else { Some(current) }
+            },
+        },
         "ls" => StateOp::GetLocalStorage,
         "ss" => StateOp::GetSessionStorage,
         "set-ls" => StateOp::SetLocalStorage { key: name.into(), value: value.into() },
@@ -1829,8 +1948,15 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
 /// Result is JSON-stringified, capped at 4KB inline; bigger
 /// payloads go to an artifact file (V10).
 async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> {
-    let expression = if ref_id.is_empty() {
+    // Detect top-level `return` — a bare `return` outside a function
+    // throws SyntaxError: Illegal return statement. Auto-wrap in IIFE.
+    let js_wrapped = if js.trim().starts_with("return") || js.contains("\nreturn") {
+        format!("(function(){{ {js} }})()")
+    } else {
         js.to_string()
+    };
+    let expression = if ref_id.is_empty() {
+        js_wrapped
     } else {
         page.ensure_ref(ref_id).await?;
         let (sig, frame) = {
@@ -1853,7 +1979,7 @@ async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> 
             + "for(const n of all){const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;const s=fps+'|'+r+'|'+nm+'|'+counts[key];if(s===sig){el=n;break}}"
             + "if(!el)return{__blade_not_found:true};"
             + "const result=((el)=>{return("
-            + js
+            + &js_wrapped
             + ");})(el);return{__blade_result:result===undefined?null:result}})("
             + &sig_js
             + ","
@@ -1894,7 +2020,39 @@ async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> 
         Some(v) => serde_json::to_string_pretty(v)?,
         None => "undefined".to_string(),
     };
-    format_eval_result(&json_str).await
+    let result = format_eval_result(&json_str).await?;
+
+    // Bug 3: Detect window.open popups. After eval, if the expression
+    // contained window.open, check for new page targets and report them.
+    // Without --disable-popup-blocking, popups are silently swallowed.
+    if js.contains("window.open") || js.contains("open('") || js.contains("open(\"") {
+        if let Ok(targets) = page.cdp_ref().send("Target.getTargets", None).await {
+            if let Some(infos) = targets.get("targetInfos").and_then(|t| t.as_array()) {
+                let page_targets: Vec<&Value> = infos.iter()
+                    .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+                    .collect();
+                if page_targets.len() > 1 {
+                    let new_tabs: Vec<String> = page_targets.iter()
+                        .filter_map(|t| {
+                            let id = t.get("targetId").and_then(|v| v.as_str()).unwrap_or("");
+                            let url = t.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                            if !url.is_empty() && url != "about:blank" {
+                                Some(format!("{} → {}", id, &url[..url.len().min(60)]))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if !new_tabs.is_empty() {
+                        return Ok(format!("{result}\n\u{2713} popup tabs created: {}\n  use state tabs / switch-tab to access",
+                            new_tabs.join(", ")));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 /// Format an eval result: inline if small, artifact file if big.

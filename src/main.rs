@@ -434,7 +434,7 @@ async fn cmd_state(base: &str, sub: &str, args: &[String]) -> Result<()> {
         }
         "del-cookie" => {
             let name = args.first().ok_or_else(|| BladeError::Other("del-cookie needs name".into()))?;
-            StateOp::DeleteCookies { name: name.clone(), domain: None }
+            StateOp::DeleteCookies { name: name.clone(), domain: None, url: None }
         }
         "ls" | "localStorage" => StateOp::GetLocalStorage,
         "ss" | "sessionStorage" => StateOp::GetSessionStorage,

@@ -26,6 +26,12 @@ const STEALTH_FLAGS: &[&str] = &[
     "--disable-dev-shm-usage",
     "--disable-background-networking",
     "--disable-sync",
+    // Allow window.open popups (OAuth, payment flows). Without this,
+    // Chrome blocks popups and the agent gets no feedback.
+    "--disable-popup-blocking",
+    // Download PDFs instead of opening in Chrome's viewer.
+    // Without this, PDF URLs open inline and can't be captured as downloads.
+    "--disable-features=PdfPlugin",
     // S17: force WebRTC to only use proxied UDP — prevents ICE candidate
     // leaks of the real IP when a proxy is active. No effect without proxy.
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",

@@ -137,7 +137,7 @@ pub struct TextMatch {
     pub score: i64,
 }
 
-/// Find actionable elements by text/label query. Returns up to 5 matches
+/// Find actionable elements by text/label query. Returns up to 30 matches
 /// sorted by relevance score. Used by text addressing (M3): `act click text="Sign in"`
 /// resolves the text to an element ref without a prior `see` call.
 pub async fn find_by_text(
@@ -177,7 +177,7 @@ pub async fn find_by_text(
         + "else if(al.toLowerCase().includes(q))score=30;else if(ph.toLowerCase().includes(q))score=25;}"
         + "if(score>0)results.push({sig,score,role:r,name:nm,frame:[]});"
         + "}"
-        + "results.sort((a,b)=>b.score-a.score);return results.slice(0,5);})"
+        + "results.sort((a,b)=>b.score-a.score);return results.slice(0,30);})"
         + "(" + &query_js + "," + &role_js + ")";
 
     let res = cdp

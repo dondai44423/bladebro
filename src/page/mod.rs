@@ -347,19 +347,22 @@ impl Page {
         let network_task = tokio::spawn(async move {
             use std::collections::HashMap;
             let mut rx = cdp_for_net.subscribe();
-            // Track request IDs, not a raw counter: requestWillBeSent fires
+            // Track request IDs with timestamps: requestWillBeSent fires
             // once per REDIRECT HOP for the same requestId while
             // loadingFinished fires once — a counter drifts +1 per hop and
             // eventually every settle waits the full timeout.
-            let mut open: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Timestamps let us sweep stale entries (data URLs, long-poll,
+            // server-sent events that never fire loadingFinished).
+            let mut open: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
             // Pending request metadata for the V8 net log.
             let mut pending: HashMap<String, (String, String, i64)> = HashMap::new();
+            let mut last_sweep = std::time::Instant::now();
             loop {
                 match rx.recv().await {
                     Ok(ev) if ev.method == "Network.requestWillBeSent" => {
                         let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
                         if !id.is_empty() {
-                            open.insert(id.to_string());
+                            open.insert(id.to_string(), std::time::Instant::now());
                             let req = ev.params.get("request");
                             let method = req.and_then(|r| r.get("method")).and_then(|m| m.as_str()).unwrap_or("GET").to_string();
                             let url = req.and_then(|r| r.get("url")).and_then(|u| u.as_str()).unwrap_or("").to_string();
@@ -407,6 +410,14 @@ impl Page {
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+                // Periodic sweep: remove entries older than 30 seconds.
+                // Data URLs, long-poll connections, and server-sent events
+                // may never fire loadingFinished, leaving stale entries.
+                if last_sweep.elapsed().as_secs() >= 5 {
+                    let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
+                    open.retain(|_, ts| *ts > cutoff);
+                    last_sweep = std::time::Instant::now();
                 }
                 net_counter.store(open.len(), std::sync::atomic::Ordering::Relaxed);
             }

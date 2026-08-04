@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.7] - 2026-08-04
+
+### Fixed
+
+- **del-cookie now works**: CDP `Network.deleteCookies` requires `url` or `domain`; both are now passed (from args or current page URL). Added `domain` param to the state schema.
+- **Label-based addressing works for iframe content**: `resolve_text_target` now searches the Live Page Model first (all elements from all frames) before falling back to live DOM search. Fixes the delta-shows-label-but-addressing-fails class of bugs.
+- **window.open popups no longer swallowed**: Added `--disable-popup-blocking` launch flag. After eval, new page targets are detected and reported to the agent.
+- **Idle shutdown no longer nukes state**: Timeout increased from 5 to 10 minutes. Resource-blocking config is now tracked and automatically restored after a relaunch.
+- **find returns up to 30 matches** (was capped at 5, causing agents to draw wrong conclusions about page contents).
+- **extract=forms searches iframes**: Forms inside iframes (e.g. W3Schools TryIt) are now extracted. Label detection improved: checks `<label for>`, `aria-label`, `aria-labelledby`, `placeholder`, and wrapping `<label>`.
+- **Auto-extract no longer grabs CSS on SPAs**: Added SKIP_TAGS filter that excludes `<style>`, `<script>`, `<head>`, `<noscript>`, `<svg>`, `<template>` from the container search.
+- **PDFs download instead of opening in viewer**: Added `--disable-features=PdfPlugin` launch flag. `navigator.pdfViewerEnabled` is patched to `true` to maintain fingerprint consistency.
+- **eval handles top-level `return`**: Bare `return` statements are auto-wrapped in an IIFE. No more `SyntaxError: Illegal return statement`.
+- **batch continues through navigation**: Steps that trigger navigation no longer halt the batch. Subsequent steps act on the new page with fresh refs. Batch only stops on actual errors.
+- **cookies filtered by domain**: The `cookies` state op now uses the current page URL to filter results, preventing 100+ line dumps. Added `url` param for explicit domain filtering.
+- **Request telemetry no longer inflated**: Network tracker uses timestamped entries with a 30-second sweep, cleaning up stale requests from data URLs, long-polling, and server-sent events.
+
+### Added
+
+- **6 new stealth layers**: `navigator.pdfViewerEnabled`, `navigator.presentation`, `navigator.scheduling`, `navigator.connection` (effectiveType, rtt, downlink, saveData), `navigator.cookieEnabled`, screen `colorDepth`/`pixelDepth`.
+- **`domain` param** for `del-cookie` state op.
+
+### Changed
+
+- **Idle timeout**: Default 5 min → 10 min (agents need more thinking time between calls).
+- **batch tool description**: Updated to reflect that navigation no longer halts execution.
+
 ## [3.0.6] - 2026-08-04
 
 ### Fixed

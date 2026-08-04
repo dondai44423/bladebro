@@ -22,7 +22,7 @@ pub fn all_tools() -> Vec<ToolDef> {
             name: "act",
             description: "Do something on the page. Returns a verdict + delta (what changed), so you DON'T need `see` afterward.\n\
 ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for type/fill) > x,y (canvas/coords). Add role= or nth= if ambiguous.\n\
-ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, halts on nav), back/forward/reload.\n\
+ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call. set-cookie uses url for cookie scope, not navigation.\n\
 Use fill for forms (not individual type calls). Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
             input_schema: json!({
@@ -68,7 +68,7 @@ Use fill for forms (not individual type calls). Use run instead of batch for bra
                     "submit": {"type": "string", "description": "Fill: ref or text of submit button."},
                     "steps": {
                         "type": "array",
-                        "description": "Batch: sequential steps, same fields as act (action, ref, text, label, role, nth, key, url, dx, dy). Halts on nav/error.",
+                        "description": "Batch: sequential steps, same fields as act (action, ref, text, label, role, nth, key, url, dx, dy). Navigation doesn't halt — subsequent steps act on the new page. Stops on error only.",
                         "items": {
                             "type": "object",
                             "required": ["action"],
@@ -126,7 +126,8 @@ State ops (open-tab, save, load, etc.) also work as steps in batch and run.",
                     },
                     "name": {"type": "string", "description": "Cookie name, storage key, or session name."},
                     "value": {"type": "string", "description": "Cookie or storage value."},
-                    "url": {"type": "string", "description": "URL for open-tab."},
+                    "url": {"type": "string", "description": "URL for open-tab, cookie scope (set-cookie/del-cookie), or domain filter (cookies)."},
+                    "domain": {"type": "string", "description": "Domain for del-cookie (alternative to url)."},
                     "target_id": {"type": "string", "description": "Tab id for close-tab/switch-tab."},
                     "classes": {"type": "string", "description": "Block: comma-separated (images, fonts, media, trackers)."},
                     "clear": {"type": "boolean", "description": "Block: true to stop all blocking."}

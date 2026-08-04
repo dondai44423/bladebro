@@ -27,8 +27,8 @@ pub enum StateOp {
         http_only: Option<bool>,
         same_site: Option<String>,
     },
-    /// Delete cookies by name (optionally filtered by domain).
-    DeleteCookies { name: String, domain: Option<String> },
+    /// Delete cookies by name (optionally filtered by domain or url).
+    DeleteCookies { name: String, domain: Option<String>, url: Option<String> },
     /// Read all localStorage keys/values.
     GetLocalStorage,
     /// Read all sessionStorage keys/values.
@@ -176,10 +176,14 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             })
         }
 
-        StateOp::DeleteCookies { name, domain } => {
+        StateOp::DeleteCookies { name, domain, url } => {
             cdp.enable("Network").await?;
             let mut params = json!({ "name": name });
-            if let Some(d) = domain {
+            // CDP Network.deleteCookies requires either url or domain.
+            // Prefer url when given (Chrome derives domain), fall back to domain.
+            if let Some(u) = url {
+                params["url"] = json!(u);
+            } else if let Some(d) = domain {
                 params["domain"] = json!(d);
             }
             cdp.send("Network.deleteCookies", Some(params)).await?;

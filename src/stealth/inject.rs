@@ -234,6 +234,58 @@ if(typeof Notification!=='undefined'&&Notification.permission==='denied'){
 }
 }catch(e){}
 
+// navigator.pdfViewerEnabled: real Chrome has this as true.
+// --disable-features=PdfPlugin makes it false (for download support),
+// so patch it back to true to maintain the fingerprint.
+try{
+if(navigator.pdfViewerEnabled===false){
+  _defGet(Navigator.prototype,'pdfViewerEnabled',function pdfViewerEnabled(){return true;});
+}
+}catch(e){}
+
+// navigator.presentation: real Chrome has the Presentation API.
+try{
+if(!navigator.presentation){
+  _defFn(Navigator.prototype,'presentation',{});
+}
+}catch(e){}
+
+// navigator.connection: more realistic values for a broadband connection.
+// Headless may report unrealistic values or missing properties.
+try{
+if(navigator.connection){
+  var _cp=Object.getPrototypeOf(navigator.connection);
+  if(_cp){
+    if(!('effectiveType' in _cp))_defGet(_cp,'effectiveType',function(){return '4g';});
+    if(!('rtt' in _cp))_defGet(_cp,'rtt',function(){return 50;});
+    if(!('downlink' in _cp))_defGet(_cp,'downlink',function(){return 10;});
+    if(!('saveData' in _cp))_defGet(_cp,'saveData',function(){return false;});
+  }
+}
+}catch(e){}
+
+// navigator.scheduling: Chrome has the Scheduling API.
+try{
+if(!navigator.scheduling&&!('scheduling' in navigator)){
+  var _sch={isInputPending:function isInputPending(){return false;},isInputPendingOrAvailable:function(){return false;}};
+  _defFn(Navigator.prototype,'scheduling',_sch);
+}
+}catch(e){}
+
+// navigator.cookieEnabled: should be true (Chrome default).
+try{
+if(!navigator.cookieEnabled){
+  _defGet(Navigator.prototype,'cookieEnabled',function cookieEnabled(){return true;});
+}
+}catch(e){}
+
+// Screen colorDepth/pixelDepth: should be 24 (standard).
+try{
+var _sp2=(typeof Screen!=='undefined'&&Screen.prototype)?Screen.prototype:Object.getPrototypeOf(screen);
+if(screen.colorDepth!==24){_defGet(_sp2,'colorDepth',function colorDepth(){return 24;});}
+if(screen.pixelDepth!==24){_defGet(_sp2,'pixelDepth',function pixelDepth(){return 24;});}
+}catch(e){}
+
 // iframe contentWindow: some sites check iframe.contentWindow.navigator.webdriver.
 // Ensure iframes inherit the stealth context.
 try{
