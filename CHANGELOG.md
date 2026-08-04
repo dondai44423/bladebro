@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **License switched from MIT to AGPL-3.0**: Protects against SaaS exploitation while remaining fully open source. Internal use is unrestricted. Network-facing service deployments must share modified source.
+
+### Fixed
+
+- **Update check fails when GitHub API rate-limited**: Version checks and updates now use non-rate-limited sources (github.com releases redirect + npm registry) instead of the GitHub API (60 req/hr unauthenticated). No API key needed.
+
 ## [3.0.12] - 2026-08-04
 
 ### Security

@@ -2,7 +2,7 @@
   "name": "bladebro-darwin-arm64",
   "version": "3.0.12",
   "description": "Bladebro binary for macOS Apple Silicon",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "os": [
     "darwin"
   ],

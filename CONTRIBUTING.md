@@ -65,4 +65,4 @@ Write tests that would have caught the bug you're fixing. Tests live in `tests/`
 
 ## License
 
-By contributing, you agree your changes are licensed under the project's MIT license.
+By contributing, you agree your changes are licensed under the project's AGPL-3.0 license.
