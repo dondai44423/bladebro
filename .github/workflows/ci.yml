@@ -18,7 +18,7 @@ jobs:
         rust-version: ["stable"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust ${{ matrix.rust-version }}
         uses: dtolnay/rust-toolchain@master
