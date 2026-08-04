@@ -152,6 +152,8 @@ async fn update(args: &[String]) -> Result<()> {
 
 /// `bladebro -v` / `bladebro --version` — show version + update status.
 ///
+/// Uses `fetch_latest_tag()` (non-rate-limited github.com redirect + npm)
+/// instead of `fetch_latest()` (GitHub API, 60 req/hr unauthenticated).
 /// Three honest states, never a misleading "up to date":
 /// - behind:  update available
 /// - equal:   on the latest release
@@ -167,18 +169,18 @@ async fn show_version() -> Result<()> {
         println!("  install: source build");
     }
 
-    match version::fetch_latest().await {
-        Ok(latest) => {
-            match version::compare_versions(latest.tag(), CURRENT_VERSION) {
+    match version::fetch_latest_tag().await {
+        Ok(latest_tag) => {
+            match version::compare_versions(&latest_tag, CURRENT_VERSION) {
                 std::cmp::Ordering::Greater => {
-                    println!("  update available: {}", latest.tag());
+                    println!("  update available: {latest_tag}");
                     println!("  run: bladebro -u");
                 }
                 std::cmp::Ordering::Equal => {
                     println!("  on the latest release");
                 }
                 std::cmp::Ordering::Less => {
-                    println!("  ahead of the latest release ({})", latest.tag());
+                    println!("  ahead of the latest release ({latest_tag})");
                     println!("  (local build is newer — dev build or pending release)");
                 }
             }

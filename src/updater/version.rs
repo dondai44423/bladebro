@@ -33,14 +33,115 @@ pub struct Asset {
     pub size: u64,
 }
 
+/// Fetch the latest version tag WITHOUT hitting the GitHub API.
+///
+/// Uses two non-rate-limited sources in order:
+/// 1. `github.com/.../releases/latest` — 301 redirect to the tag page.
+///    Parse the version from the redirect URL. Zero rate limit.
+/// 2. npm registry `registry.npmjs.org/bladebro/latest` — returns JSON
+///    with the latest published version. Zero rate limit.
+///
+/// This is used for `-v` / `--version` (just need the version string)
+/// and as a fallback for `update` when the API is rate-limited.
+pub async fn fetch_latest_tag() -> Result<String> {
+    if std::env::var("BLADE_NO_UPDATE_CHECK")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return Err(BladeError::Other(
+            "update check disabled (BLADE_NO_UPDATE_CHECK)".into(),
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("bladebro-updater")
+        .redirect(reqwest::redirect::Policy::none()) // don't follow, read Location
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
+
+    // 1. GitHub releases/latest redirect.
+    let url = format!("https://github.com/{}/releases/latest", super::GITHUB_REPO);
+    if let Ok(resp) = client.get(&url).send().await {
+        if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
+            if let Ok(loc_str) = loc.to_str() {
+                // URL format: https://github.com/dondai44423/bladebro/releases/tag/v3.0.12
+                if let Some(tag) = loc_str.rsplit('/').next() {
+                    let tag = tag.strip_prefix('v').unwrap_or(tag);
+                    return Ok(tag.to_string());
+                }
+            }
+        }
+        // Some CDNs/proxies eat the 301. Fall through to npm.
+    }
+
+    // 2. npm registry fallback.
+    let npm_url = "https://registry.npmjs.org/bladebro/latest";
+    if let Ok(resp) = client.get(npm_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(ver) = json.get("version").and_then(|v| v.as_str()) {
+                    return Ok(ver.to_string());
+                }
+            }
+        }
+    }
+
+    Err(BladeError::Other(
+        "cannot reach GitHub or npm registry for version check".into(),
+    ))
+}
+
+/// Construct a synthetic Release from a tag.
+/// Used when the API is rate-limited but we got the tag from
+/// `fetch_latest_tag()`. Download URLs are predictable:
+///   https://github.com/{repo}/releases/download/v{tag}/bladebro-{os}-{arch}
+/// We add both new and legacy asset names so `find_asset` can match.
+pub fn synthetic_release(tag: &str) -> Release {
+    let tag_name = format!("v{tag}");
+    let base = format!(
+        "https://github.com/{}/releases/download/{}",
+        super::GITHUB_REPO,
+        tag_name
+    );
+
+    let mut assets = Vec::new();
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+
+    // New naming: bladebro-{os}-{arch}
+    assets.push(Asset {
+        name: platform_asset_name(),
+        browser_download_url: format!("{}/{}", base, platform_asset_name()),
+        size: 0, // unknown, skip pre-flight disk check
+    });
+
+    // Legacy naming: bladebro-{os}-{x86_64|aarch64}
+    let legacy = legacy_platform_asset_name();
+    if legacy != platform_asset_name() {
+        assets.push(Asset {
+            name: legacy.clone(),
+            browser_download_url: format!("{}/{}", base, legacy),
+            size: 0,
+        });
+    }
+
+    // Drop the ext for the legacy name comparison (already includes it).
+    let _ = ext;
+
+    Release {
+        tag_name,
+        assets,
+        body: None,
+        draft: false,
+        prerelease: false,
+    }
+}
+
 /// Fetch the latest stable release from GitHub.
 ///
-/// Fetches the 10 most recent releases and picks the highest
-/// version by semver order — not GitHub's created_at ordering,
-/// which breaks when an old release is edited or re-tagged.
-/// Drafts are skipped. Prereleases are only returned when no
-/// stable release exists (early-project phase).
-/// Uses GITHUB_TOKEN env var if set (5000 req/hr vs 60 unauthenticated).
+/// Tries the API first (with GITHUB_TOKEN if set: 5000 req/hr vs 60).
+/// If the API is rate-limited, falls back to `fetch_latest_tag()` +
+/// `synthetic_release()` so updates keep working without a token.
 pub async fn fetch_latest() -> Result<Release> {
     if std::env::var("BLADE_NO_UPDATE_CHECK")
         .map(|v| v == "1")
@@ -77,17 +178,22 @@ pub async fn fetch_latest() -> Result<Release> {
         .build()
         .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
 
-    let resp = client
+    let resp = match client
         .get(&url)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .map_err(|e| BladeError::Other(format!("cannot reach GitHub: {e}")))?;
+    {
+        Ok(r) => r,
+        Err(_e) => {
+            // Network error \u2014 try lightweight fallback.
+            return fetch_latest_fallback().await;
+        }
+    };
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
-        return Err(BladeError::Other(
-            "GitHub API rate limited. Set GITHUB_TOKEN for higher limits.".into(),
-        ));
+        // Rate limited — use lightweight fallback.
+        return fetch_latest_fallback().await;
     }
     if !resp.status().is_success() {
         return Err(BladeError::Other(format!(
@@ -116,6 +222,14 @@ pub async fn fetch_latest() -> Result<Release> {
         }
     }
     best.ok_or_else(|| BladeError::Other("no releases found".into()))
+}
+
+/// Fallback when the GitHub API is rate-limited or unreachable.
+/// Gets the tag from `fetch_latest_tag()` and constructs a synthetic
+/// release with predicted download URLs.
+async fn fetch_latest_fallback() -> Result<Release> {
+    let tag = fetch_latest_tag().await?;
+    Ok(synthetic_release(&tag))
 }
 
 // ── version comparison ───────────────────────────────────────────
