@@ -1188,11 +1188,24 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else {
                 "outcome: already here".to_string()
             };
-            let view = page.delta_view(&delta, 8000);
             if std::env::var("NAV_TIMING").is_ok() {
-                eprintln!("[nav-timing] delta_view: {:?} ({} bytes)", _rt.elapsed(), view.len());
+                eprintln!("[nav-timing] navigate completed: {:?}", _rt.elapsed());
             }
-            return Ok(format!("{verdict}\n{}", view));
+            // Slim summary: no ref tree (was ~9KB). Agent calls see mode=model
+            // for interactive elements, see mode=content to read page text,
+            // see mode=outline for headings.
+            let m = page.model();
+            let in_flight = page.in_flight();
+            let mut summary = format!(
+                "Page: {} | {} actionable{}",
+                crate::page::model::short_url(m.url()),
+                m.actionables(),
+                if in_flight > 0 { format!(" | {} requests in flight", in_flight) } else { String::new() }
+            );
+            if !m.title().is_empty() {
+                summary = format!("title: {}\n{}", crate::page::model::truncate(m.title(), 80), summary);
+            }
+            return Ok(format!("{verdict}\n{}", summary));
         }
         "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies" | "set-cookie" => {
             // Allow state ops as action shortcuts in batch/run steps.
@@ -1297,6 +1310,24 @@ async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     let logs = args.get("logs").and_then(|l| l.as_str()).unwrap_or("");
     let template = args.get("template").cloned();
     let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
+    let mode = args.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+
+    // mode=content: clean markdown extraction for reading. No refs, no
+    // actionability markers — just the page text as structured markdown.
+    // Headings, links, lists, code blocks, tables preserved.
+    if mode == "content" {
+        let md = page.markdown(budget).await?;
+        if md.is_empty() {
+            return Ok("page has no text content (may be a SPA that hasn't rendered — try waiting, or use mode=model for interactive elements)".into());
+        }
+        return Ok(md);
+    }
+
+    // mode=outline: just headings. Ultra-minimal for "what's on this page".
+    if mode == "outline" {
+        let out = page.outline().await?;
+        return Ok(out);
+    }
 
     // V8: logs — console (injection hook) or network (tracker ring).
     if !logs.is_empty() {

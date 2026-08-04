@@ -651,6 +651,18 @@ impl Page {
         capture_content(&self.cdp, budget).await
     }
 
+    /// Extract page content as clean markdown (semantic content extraction).
+    /// Returns headings, paragraphs, links, lists, code — no ref IDs, no
+    /// actionability markers. For reading, not acting.
+    pub async fn markdown(&self, budget: usize) -> Result<String> {
+        crate::page::perception::capture_markdown(&self.cdp, budget).await
+    }
+
+    /// Extract just the page title + heading hierarchy. Ultra-minimal.
+    pub async fn outline(&self) -> Result<String> {
+        crate::page::perception::capture_outline(&self.cdp).await
+    }
+
     /// The delta since the last capture, rendered (the observation).
     pub fn delta_view(&self, d: &PageDelta, budget: usize) -> String {
         self.lpm.compress_delta(d, budget, self.in_flight.load(std::sync::atomic::Ordering::Relaxed))

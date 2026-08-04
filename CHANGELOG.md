@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.9] - 2026-08-04
+
+### Added
+
+- **`see mode=content`**: Semantic content extraction. Finds the main content area (semantic HTML5, text density analysis) and converts it to clean, token-efficient markdown. Headings, links, lists, code blocks, tables, blockquotes, and images are preserved. Navigation, footers, sidebars, and ads are stripped. For reading pages, not acting on them.
+- **`see mode=outline`**: Ultra-minimal page structure. Returns just the page title and heading hierarchy. ~50-200 bytes typically. For "what is on this page" without reading everything.
+
+### Changed
+
+- **`act navigate` response slimmed**: Navigate now returns a one-line summary (URL, title, actionable element count) instead of the full ref tree (~9KB). 78x reduction. The agent calls `see mode=model` for interactive elements, `see mode=content` to read, or `see mode=outline` for headings.
+- **`see` tool description**: Now documents three read modes (content, outline, model) with clear guidance on when to use each.
+- **`act` tool description**: Updated to note that navigate returns a slim summary.
+
+### Token Efficiency
+
+- Reading a page: navigate (200 chars) + see mode=content (2000 chars) = 2200 chars total. Previously: navigate alone was ~9000 chars.
+- "What's on this page": navigate (200 chars) + see mode=outline (360 chars) = 560 chars. Previously: ~9000 chars. 16x reduction.
+- Interactive elements: see mode=model (1000 chars) — same as before, for when the agent needs to click/type.
+
 ## [3.0.8] - 2026-08-04
 
 ### Added

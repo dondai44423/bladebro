@@ -627,7 +627,7 @@ fn format_element(el: &PageElement) -> String {
     s
 }
 
-fn truncate(s: &str, n: usize) -> String {
+pub fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
@@ -642,7 +642,7 @@ pub fn truncate_pub(s: &str, n: usize) -> String {
     truncate(s, n)
 }
 
-fn short_url(u: &str) -> String {
+pub fn short_url(u: &str) -> String {
     // Strip scheme for brevity in the scene header.
     let s = u
         .strip_prefix("https://")

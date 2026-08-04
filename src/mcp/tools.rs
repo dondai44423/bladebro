@@ -20,7 +20,7 @@ pub fn all_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "act",
-            description: "Do something on the page. Returns a verdict + delta (what changed), so you DON'T need `see` afterward.\n\
+            description: "Do something on the page. Returns a verdict + delta. navigate returns a slim summary (URL, title, element count, no ref tree) — use see mode=model for interactive elements or see mode=content to read.\n\
 ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for type/fill) > x,y (canvas/coords). Add role= or nth= if ambiguous.\n\
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call. set-cookie uses url for cookie scope, not navigation.\n\
@@ -87,13 +87,22 @@ Use fill for forms (not individual type calls). Use run instead of batch for bra
         },
         ToolDef {
             name: "see",
-            description: "Observe WITHOUT acting. You RARELY need this — act and navigate already return the page state (delta). Use see for: filter (zoom into dense pages by role), find (search elements by text, returns refs), extract=auto (template-free list extraction), extract=json+template (custom extraction), extract=links|forms, content=true (page text), scope=eN (element subtree text), logs=console|network (errors first).\n\
-Big data (>6KB) goes to a file path — read the file, don't re-extract.",
+            description: "Observe WITHOUT acting. Three read modes:\n\
+mode=content: page text as clean markdown (headings, links, lists, code). For READING pages — articles, docs, search results. No ref IDs.\n\
+mode=outline: just the page title + heading hierarchy. Ultra-minimal for 'what is on this page'.\n\
+mode=model (default): interactive elements with refs for clicking/typing. Use when you need to ACT.\n\
+Other params: filter (zoom by role), find (search by text, returns refs), extract=auto (template-free list extraction), extract=json+template (custom), extract=links|forms, content=true (legacy: text with model), scope=eN (subtree text), logs=console|network.\n\
+Big data (>6KB) goes to a file path.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "filter": {"type": "string", "description": "Filter by role/name (comma-separated)."},
-                    "content": {"type": "boolean", "description": "Include page's visible text."},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["model", "content", "outline"],
+                        "description": "model (default): interactive elements with refs. content: page text as markdown for reading. outline: headings only, ultra-minimal."
+                    },
+                    "filter": {"type": "string", "description": "Filter by role/name (comma-separated). model mode only."},
+                    "content": {"type": "boolean", "description": "Include page's visible text. model mode only. Use mode=content instead for clean markdown."},
                     "find": {"type": "string", "description": "Search elements by text. Returns refs + scores."},
                     "extract": {
                         "type": "string",

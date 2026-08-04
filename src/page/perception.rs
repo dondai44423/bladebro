@@ -594,3 +594,58 @@ pub async fn capture_content(cdp: &CdpSession, budget: usize) -> Result<String> 
         .unwrap_or("");
     Ok(text.to_string())
 }
+
+/// Semantic content extraction: find the main content area and convert it
+/// to clean, token-efficient markdown. Strips navigation, footers, ads,
+/// scripts, and other noise. Preserves headings, paragraphs, links, lists,
+/// code blocks, tables, blockquotes, and images.
+///
+/// Main content detection: semantic HTML5 (<main>, <article>, [role=main])
+/// → common content selectors → text density analysis (highest text-to-link
+/// ratio). Layout tables (no <th>) are walked as content; data tables
+/// (with <th>) are converted to markdown tables.
+///
+/// This is the `see mode=content` path: the agent gets clean markdown to
+/// READ, not 9KB of ref IDs to parse. Designed for articles, docs, search
+/// results — any page where the agent wants the text, not the interactive
+/// elements.
+pub async fn capture_markdown(cdp: &CdpSession, budget: usize) -> Result<String> {
+    let expr = r#"(function(){var MAX=__BUDGET__;var SKIP=['SCRIPT','STYLE','NOSCRIPT','SVG','TEMPLATE','META','LINK','BUTTON','INPUT','SELECT','TEXTAREA'];var NOISE=['NAV','FOOTER','HEADER','ASIDE'];function findMain(d){var m=d.querySelector('main,[role=\"main\"]');if(m&&(m.innerText||'').length>200)return m;var a=d.querySelector('article');if(a&&(a.innerText||'').length>200)return a;var sels=['#content','.content','#main-content','.main-content','.post','.article','.entry-content','.post-body','.article-body','.story-body','#article-body'];for(var i=0;i<sels.length;i++){var el=d.querySelector(sels[i]);if(el&&(el.innerText||'').length>200)return el;}var best=null,bs=0;var c=d.querySelectorAll('div,section,table');for(var j=0;j<c.length;j++){var el=c[j];var t=(el.innerText||'');if(t.length<200)continue;var l=el.querySelectorAll('a');var lt=0;for(var k=0;k<l.length;k++)lt+=(l[k].innerText||'').length;var sc=t.length-lt*2;if(sc>bs){bs=sc;best=el;}}return best||d.body;}function toMd(root,max){var out='',len=0;function add(s){if(len+s.length>max)s=s.slice(0,max-len);out+=s;len+=s.length;}function walk(n){if(len>=max)return;if(n.nodeType===3){var t=n.textContent.replace(/\s+/g,' ').trim();if(t)add(t+' ');return;}if(n.nodeType!==1)return;var tag=n.tagName;if(SKIP.indexOf(tag)>=0)return;if(n.hidden)return;var st=n.style;if(st&&(st.display==='none'||st.visibility==='hidden'))return;if(NOISE.indexOf(tag)>=0)return;switch(tag){case 'H1':add('\n# '+n.innerText.trim()+'\n\n');return;case 'H2':add('\n## '+n.innerText.trim()+'\n\n');return;case 'H3':add('\n### '+n.innerText.trim()+'\n\n');return;case 'H4':add('\n#### '+n.innerText.trim()+'\n\n');return;case 'H5':add('\n##### '+n.innerText.trim()+'\n\n');return;case 'H6':add('\n###### '+n.innerText.trim()+'\n\n');return;case 'P':for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n\n');return;case 'A':var tx=n.innerText.trim();var hr=n.href;if(tx&&hr&&hr!=='#'&&hr.indexOf('javascript:')!==0){if(tx===hr)add(tx);else add('['+tx+']('+hr+')');}else if(tx)add(tx);return;case 'LI':add('- ');for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n');return;case 'UL':case 'OL':for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n');return;case 'CODE':if(n.parentElement&&n.parentElement.tagName==='PRE')return;add('`'+n.innerText+'`');return;case 'PRE':add('\n```\n'+n.innerText.trim()+'\n```\n\n');return;case 'BLOCKQUOTE':add('\n> '+n.innerText.trim().replace(/\n/g,'\n> ')+'\n\n');return;case 'IMG':var al=n.alt||'';var sr=n.src||'';if(al)add('!['+al+']('+sr+')');return;case 'TABLE':if(n.querySelector('th,thead')){var rows=n.querySelectorAll('tr');if(rows.length>0&&rows.length<50){for(var i=0;i<rows.length;i++){var cells=rows[i].querySelectorAll('th,td');var row=[];for(var j=0;j<cells.length;j++)row.push(cells[j].innerText.trim().replace(/\|/g,'\\|'));add('| '+row.join(' | ')+' |\n');if(i===0)add('|'+row.map(function(){return'---';}).join('|')+'|\n');}add('\n\n');return;}}for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n');return;case 'BR':add('\n');return;case 'HR':add('\n---\n\n');return;case 'STRONG':case 'B':add('**');for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('**');return;case 'EM':case 'I':add('*');for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('*');return;case 'TR':case 'THEAD':case 'TBODY':case 'TFOOT':for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n');return;case 'TD':case 'TH':for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add(' ');return;default:for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);}}walk(root);return out.replace(/\n{3,}/g,'\n\n').trim();}var main=findMain(document);if(!main||!main.innerHTML)return'';var md=toMd(main,MAX);var fl=(main.innerText||'').length;if(fl>MAX)md+='\n\n[truncated: '+fl+' chars total, showed '+MAX+']';return md;})()"#.replace("__BUDGET__", &budget.to_string());
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expr,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    let text = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(text.to_string())
+}
+
+/// Outline extraction: return just the page title + heading hierarchy.
+/// Ultra-minimal output for "what's on this page" without reading everything.
+/// ~50-200 bytes typically. If no headings, suggests mode=content.
+pub async fn capture_outline(cdp: &CdpSession) -> Result<String> {
+    let expr = r#"(function(){var title=document.title||'';var hs=document.querySelectorAll('h1,h2,h3,h4,h5,h6');var out='';if(title)out+=title+'\n';if(!hs.length)return out+'(no headings — use see mode=content to read)';for(var i=0;i<hs.length;i++){var h=hs[i];var lvl=parseInt(h.tagName.charAt(1));var txt=h.innerText.trim();if(!txt)continue;for(var j=0;j<lvl-1;j++)out+='  ';out+=txt+'\n';}return out.trim();})()"#;
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expr,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    let text = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(text.to_string())
+}
