@@ -35,7 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 # Decode Page.printToPDF output (base64) into PDF bytes for the artifact file.
 # Compile-time only, no transitive deps.
-base64 = "0.22"
+base64 = "0.23"
 
 [profile.release]
 opt-level = 3
