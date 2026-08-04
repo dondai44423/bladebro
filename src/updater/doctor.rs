@@ -343,21 +343,11 @@ async fn check_network() -> Check {
             fix: None,
         },
         Err(e) => {
-            let msg = format!("{e}");
-            if msg.contains("rate limit") {
-                Check {
-                    name: "GitHub connectivity",
-                    status: Status::Warn,
-                    detail: "rate limited (unauthenticated)".into(),
-                    fix: Some("Set GITHUB_TOKEN for higher API limits".into()),
-                }
-            } else {
-                Check {
-                    name: "GitHub connectivity",
-                    status: Status::Fail,
-                    detail: format!("cannot reach GitHub: {msg}"),
-                    fix: Some("Check your internet connection and firewall settings".into()),
-                }
+            Check {
+                name: "GitHub connectivity",
+                status: Status::Fail,
+                detail: format!("cannot reach GitHub: {e}"),
+                fix: Some("Check your internet connection and firewall settings".into()),
             }
         }
     }

@@ -1,19 +1,14 @@
 //! Version checking against GitHub releases.
 
 use crate::error::{BladeError, Result};
-use serde::Deserialize;
 
 /// A GitHub release.
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct Release {
     pub tag_name: String,
-    #[serde(default)]
     pub assets: Vec<Asset>,
-    #[serde(default)]
     pub body: Option<String>,
-    #[serde(default)]
     pub draft: bool,
-    #[serde(default)]
     pub prerelease: bool,
 }
 
@@ -25,24 +20,19 @@ impl Release {
 }
 
 /// A release asset (downloadable binary).
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct Asset {
     pub name: String,
     pub browser_download_url: String,
-    #[serde(default)]
     pub size: u64,
 }
 
-/// Fetch the latest version tag WITHOUT hitting the GitHub API.
+/// Fetch the latest version tag from non-rate-limited sources.
 ///
-/// Uses two non-rate-limited sources in order:
-/// 1. `github.com/.../releases/latest` — 301 redirect to the tag page.
-///    Parse the version from the redirect URL. Zero rate limit.
-/// 2. npm registry `registry.npmjs.org/bladebro/latest` — returns JSON
-///    with the latest published version. Zero rate limit.
+/// 1. `github.com/.../releases/latest` — 301 redirect, parse tag from URL.
+/// 2. npm registry — JSON with the latest published version.
 ///
-/// This is used for `-v` / `--version` (just need the version string)
-/// and as a fallback for `update` when the API is rate-limited.
+/// No API key needed. No rate limits. Works for all users out of the box.
 pub async fn fetch_latest_tag() -> Result<String> {
     if std::env::var("BLADE_NO_UPDATE_CHECK")
         .map(|v| v == "1")
@@ -92,11 +82,10 @@ pub async fn fetch_latest_tag() -> Result<String> {
     ))
 }
 
-/// Construct a synthetic Release from a tag.
-/// Used when the API is rate-limited but we got the tag from
-/// `fetch_latest_tag()`. Download URLs are predictable:
+/// Construct a Release from a tag.
+/// Download URLs are predictable:
 ///   https://github.com/{repo}/releases/download/v{tag}/bladebro-{os}-{arch}
-/// We add both new and legacy asset names so `find_asset` can match.
+/// Both new and legacy asset names are included so `find_asset` can match.
 pub fn synthetic_release(tag: &str) -> Release {
     let tag_name = format!("v{tag}");
     let base = format!(
@@ -125,8 +114,7 @@ pub fn synthetic_release(tag: &str) -> Release {
         });
     }
 
-    // Drop the ext for the legacy name comparison (already includes it).
-    let _ = ext;
+    let _ = ext; // ext already baked into platform_asset_name / legacy name
 
     Release {
         tag_name,
@@ -137,97 +125,11 @@ pub fn synthetic_release(tag: &str) -> Release {
     }
 }
 
-/// Fetch the latest stable release from GitHub.
+/// Fetch the latest release.
 ///
-/// Tries the API first (with GITHUB_TOKEN if set: 5000 req/hr vs 60).
-/// If the API is rate-limited, falls back to `fetch_latest_tag()` +
-/// `synthetic_release()` so updates keep working without a token.
+/// Uses `fetch_latest_tag()` (github.com redirect + npm, no rate limits)
+/// and constructs download URLs via `synthetic_release()`. No API key needed.
 pub async fn fetch_latest() -> Result<Release> {
-    if std::env::var("BLADE_NO_UPDATE_CHECK")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        return Err(BladeError::Other(
-            "update check disabled (BLADE_NO_UPDATE_CHECK)".into(),
-        ));
-    }
-
-    let url = format!(
-        "https://api.github.com/repos/{}/releases?per_page=10",
-        super::GITHUB_REPO
-    );
-    let mut client_builder = reqwest::Client::builder()
-        .user_agent("bladebro-updater")
-        .timeout(std::time::Duration::from_secs(10));
-
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
-            client_builder = client_builder.default_headers({
-                let mut h = reqwest::header::HeaderMap::new();
-                if let Ok(v) =
-                    reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                {
-                    h.insert(reqwest::header::AUTHORIZATION, v);
-                }
-                h
-            });
-        }
-    }
-
-    let client = client_builder
-        .build()
-        .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
-
-    let resp = match client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_e) => {
-            // Network error \u2014 try lightweight fallback.
-            return fetch_latest_fallback().await;
-        }
-    };
-
-    if resp.status() == reqwest::StatusCode::FORBIDDEN {
-        // Rate limited — use lightweight fallback.
-        return fetch_latest_fallback().await;
-    }
-    if !resp.status().is_success() {
-        return Err(BladeError::Other(format!(
-            "GitHub API returned {}",
-            resp.status()
-        )));
-    }
-
-    let releases: Vec<Release> = resp
-        .json::<Vec<Release>>()
-        .await
-        .map_err(|e| BladeError::Other(format!("cannot parse release: {e}")))?;
-
-    let mut best: Option<Release> = None;
-    for r in releases.into_iter().filter(|r| !r.draft) {
-        let replace = match &best {
-            None => true,
-            Some(b) => {
-                let cmp = compare_versions(r.tag(), b.tag());
-                cmp == std::cmp::Ordering::Greater
-                    || (cmp == std::cmp::Ordering::Equal && b.prerelease && !r.prerelease)
-            }
-        };
-        if replace {
-            best = Some(r);
-        }
-    }
-    best.ok_or_else(|| BladeError::Other("no releases found".into()))
-}
-
-/// Fallback when the GitHub API is rate-limited or unreachable.
-/// Gets the tag from `fetch_latest_tag()` and constructs a synthetic
-/// release with predicted download URLs.
-async fn fetch_latest_fallback() -> Result<Release> {
     let tag = fetch_latest_tag().await?;
     Ok(synthetic_release(&tag))
 }
