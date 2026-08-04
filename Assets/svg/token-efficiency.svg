@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="800" height="260" viewBox="0 0 800 260" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="280" viewBox="0 0 800 280" fill="none">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0a0a0f"/>
@@ -18,45 +18,44 @@
     </linearGradient>
   </defs>
 
-  <rect width="800" height="260" rx="12" fill="url(#bg)"/>
+  <rect width="800" height="280" rx="12" fill="url(#bg)"/>
 
   <!-- Title -->
   <text x="400" y="32" text-anchor="middle" font-family="'SF Pro Display', system-ui, sans-serif"
         font-size="16" font-weight="700" fill="#8888a0" letter-spacing="2">TOKEN EFFICIENCY</text>
   <text x="400" y="50" text-anchor="middle" font-family="monospace" font-size="10" fill="#666680">tool definitions token count</text>
 
-  <!-- Bars -->
   <!-- Bladebro: 1,900 tokens -->
-  <g transform="translate(60, 75)">
-    <text x="0" y="14" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#00d4aa">Bladebro</text>
-    <rect x="120" y="0" width="76" height="28" rx="6" fill="url(#bb)" opacity="0.3"/>
-    <rect x="120" y="0" width="76" height="28" rx="6" fill="none" stroke="#00d4aa" stroke-width="1.5"/>
-    <text x="208" y="18" font-family="monospace" font-size="11" font-weight="700" fill="#00d4aa">~1,900</text>
+  <g transform="translate(80, 70)">
+    <text x="0" y="0" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#00d4aa">Bladebro</text>
+    <text x="660" y="0" text-anchor="end" font-family="monospace" font-size="13" font-weight="700" fill="#00d4aa">~1,900</text>
+    <rect x="0" y="8" width="62" height="22" rx="5" fill="url(#bb)" opacity="0.35"/>
+    <rect x="0" y="8" width="62" height="22" rx="5" fill="none" stroke="#00d4aa" stroke-width="1.5"/>
   </g>
 
   <!-- Chrome DevTools MCP: 8,000 tokens -->
-  <g transform="translate(60, 120)">
-    <text x="0" y="14" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#ff9f43">Chrome DevTools MCP</text>
-    <rect x="120" y="0" width="320" height="28" rx="6" fill="url(#comp2)" opacity="0.25"/>
-    <rect x="120" y="0" width="320" height="28" rx="6" fill="none" stroke="#ff9f43" stroke-width="1.5" opacity="0.7"/>
-    <text x="452" y="18" font-family="monospace" font-size="11" font-weight="700" fill="#ff9f43">~8,000</text>
+  <g transform="translate(80, 120)">
+    <text x="0" y="0" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#ff9f43">Chrome DevTools MCP</text>
+    <text x="660" y="0" text-anchor="end" font-family="monospace" font-size="13" font-weight="700" fill="#ff9f43">~8,000</text>
+    <rect x="0" y="8" width="262" height="22" rx="5" fill="url(#comp2)" opacity="0.3"/>
+    <rect x="0" y="8" width="262" height="22" rx="5" fill="none" stroke="#ff9f43" stroke-width="1.5" opacity="0.7"/>
   </g>
 
   <!-- Playwright MCP: 13,700 tokens -->
-  <g transform="translate(60, 165)">
-    <text x="0" y="14" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#ff6b6b">Playwright MCP</text>
-    <rect x="120" y="0" width="548" height="28" rx="6" fill="url(#comp1)" opacity="0.25"/>
-    <rect x="120" y="0" width="548" height="28" rx="6" fill="none" stroke="#ff6b6b" stroke-width="1.5" opacity="0.7"/>
-    <text x="680" y="18" font-family="monospace" font-size="11" font-weight="700" fill="#ff6b6b">~13,700</text>
+  <g transform="translate(80, 170)">
+    <text x="0" y="0" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#ff6b6b">Playwright MCP</text>
+    <text x="660" y="0" text-anchor="end" font-family="monospace" font-size="13" font-weight="700" fill="#ff6b6b">~13,700</text>
+    <rect x="0" y="8" width="448" height="22" rx="5" fill="url(#comp1)" opacity="0.3"/>
+    <rect x="0" y="8" width="448" height="22" rx="5" fill="none" stroke="#ff6b6b" stroke-width="1.5" opacity="0.7"/>
   </g>
 
   <!-- Scale -->
-  <g transform="translate(60, 210)" font-family="monospace" font-size="8" fill="#444458">
-    <line x1="0" y1="0" x2="680" y2="0" stroke="#333346" stroke-width="1"/>
+  <g transform="translate(80, 225)" font-family="monospace" font-size="8" fill="#444458">
+    <line x1="0" y1="0" x2="660" y2="0" stroke="#333346" stroke-width="1"/>
     <text x="0" y="14">0</text>
-    <text x="170" y="14">5K</text>
-    <text x="340" y="14">10K</text>
-    <text x="510" y="14">15K</text>
-    <text x="680" y="14">20K</text>
+    <text x="165" y="14">5K</text>
+    <text x="330" y="14">10K</text>
+    <text x="495" y="14">15K</text>
+    <text x="660" y="14" text-anchor="end">20K</text>
   </g>
 </svg>
