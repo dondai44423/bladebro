@@ -100,7 +100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.1] - 2026-08-03
 
-### Added — v3 "I don't believe this works"
+### Added
 
 - **npm distribution**: `npm install -g bladebro` ships a prebuilt binary. No Rust, no compilation. Per-platform packages via `optionalDependencies` with `os`/`cpu` fields (npm handles resolution natively). `scripts/publish-npm.sh` automates the full publish pipeline (version sync, build, publish, propagation wait).
 - **Re-render immunity (D48)**: structural fingerprint identity for every captured element. FNV-1a hash over ancestor chain + tag + children + identity attributes. When React/Vue/Angular re-renders (DOM nodes replaced, text changes), refs survive via fingerprint match instead of being invalidated. The agent sees `↺ e2 (re-render survived)` in the delta. No other agent browser does this.
