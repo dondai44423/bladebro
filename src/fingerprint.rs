@@ -128,20 +128,13 @@ fn generate_seed() -> u32 {
             }
         }
     }
-    #[cfg(not(unix))]
-    {
-        // Windows: use system time + process id for entropy.
-        let pid = std::process::id();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        return ((now ^ (pid as u64 * 0x9e3779b97f4a7c15)) & 0xffffffff) as u32;
-    }
-    std::time::SystemTime::now()
+    // Fallback for all platforms: system time + process id.
+    let pid = std::process::id();
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u32)
-        .unwrap_or(42)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    ((now ^ (pid as u64 * 0x9e3779b97f4a7c15)) & 0xffffffff) as u32
 }
 
 #[cfg(test)]
