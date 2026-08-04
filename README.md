@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="Assets/svg/hero.svg" width="800" alt="Bladebro" />
+<img src="Assets/png/hero.png" width="800" alt="Bladebro" />
 
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
@@ -106,7 +106,7 @@ bladebro audit   # stealth verification
 ## 🎯 The 5 tools
 
 <div align="center">
-<img src="Assets/svg/tools-comparison.svg" width="800" alt="Tool comparison: 5 tools vs 20+" />
+<img src="Assets/png/tools-comparison.png" width="800" alt="Tool comparison: 5 tools vs 20+" />
 </div>
 
 ### `act` — act, then observe
@@ -197,7 +197,7 @@ Returns base64 PNG. `vision marks=true` overlays numbered ref badges on elements
 ## 🏗️ Architecture
 
 <div align="center">
-<img src="Assets/svg/architecture.svg" width="800" alt="Architecture: Agent → MCP → CDP → Chromium + Live Page Model" />
+<img src="Assets/png/architecture.png" width="800" alt="Architecture: Agent → MCP → CDP → Chromium + Live Page Model" />
 </div>
 
 The **Live Page Model** is the core innovation. It holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations AND re-renders. No more "stale element" failures.
@@ -230,7 +230,7 @@ The agent sees `↺ e2 (re-render survived)` in the delta. The ref never died. T
 ## 🛡️ Stealth system
 
 <div align="center">
-<img src="Assets/svg/stealth-layers.svg" width="800" alt="6-layer stealth system" />
+<img src="Assets/png/stealth-layers.png" width="800" alt="6-layer stealth system" />
 </div>
 
 Six layers. All on by default. No config needed.
@@ -259,7 +259,7 @@ Run `bladebro audit` to verify your own setup.
 ## 📊 Comparison
 
 <div align="center">
-<img src="Assets/svg/token-efficiency.svg" width="800" alt="Token efficiency comparison" />
+<img src="Assets/png/token-efficiency.png" width="800" alt="Token efficiency comparison" />
 </div>
 
 | | Bladebro | Playwright MCP | Chrome DevTools MCP |
