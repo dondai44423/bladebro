@@ -113,22 +113,29 @@ echo "[8/9] pushed"
 # 8. GitHub release with ALL 4 platform binaries.
 echo "[9/9] Creating GitHub release with binaries..."
 
-# Prepare asset files with the correct names (matching what the updater expects).
+# Prepare asset files with BOTH naming conventions.
+# New: bladebro-{os}-{arch} (npm-consistent, matches npm package names)
+# Legacy: bladebro-{os}-{x86_64|aarch64} (for old binaries pre-v3.0.3)
+# Old binaries only know the legacy name — without it, `bladebro -u` fails.
 TMPDIR_RELEASE=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_RELEASE"' EXIT
 
 cp target/release/bladebro "$TMPDIR_RELEASE/bladebro-linux-x64"
+cp target/release/bladebro "$TMPDIR_RELEASE/bladebro-linux-x86_64"
 
 if [[ -f target/x86_64-pc-windows-gnu/release/bladebro.exe ]]; then
     cp target/x86_64-pc-windows-gnu/release/bladebro.exe "$TMPDIR_RELEASE/bladebro-windows-x64.exe"
+    cp target/x86_64-pc-windows-gnu/release/bladebro.exe "$TMPDIR_RELEASE/bladebro-windows-x86_64.exe"
 fi
 
 if [[ -f target/x86_64-apple-darwin/release/bladebro ]]; then
     cp target/x86_64-apple-darwin/release/bladebro "$TMPDIR_RELEASE/bladebro-darwin-x64"
+    cp target/x86_64-apple-darwin/release/bladebro "$TMPDIR_RELEASE/bladebro-macos-x86_64"
 fi
 
 if [[ -f target/aarch64-apple-darwin/release/bladebro ]]; then
     cp target/aarch64-apple-darwin/release/bladebro "$TMPDIR_RELEASE/bladebro-darwin-arm64"
+    cp target/aarch64-apple-darwin/release/bladebro "$TMPDIR_RELEASE/bladebro-macos-aarch64"
 fi
 
 # Create release with all available binaries.
@@ -142,10 +149,19 @@ if [[ ${#ASSETS[@]} -eq 0 ]]; then
     exit 1
 fi
 
-gh release create "v$VERSION" "${ASSETS[@]}" \
-    --title "v$VERSION" \
-    --notes-from-tag 2>/dev/null \
-|| gh release create "v$VERSION" "${ASSETS[@]}" --title "v$VERSION" --generate-notes
+# Create release first (without assets, to avoid timeout), then upload.
+gh release create "v$VERSION" \
+    --title "v$VERSION" --latest \
+    --generate-notes 2>/dev/null \
+|| gh release create "v$VERSION" --title "v$VERSION" --latest --notes "Release v$VERSION"
+
+# Upload assets one at a time for reliability.
+for f in "$TMPDIR_RELEASE"/bladebro-*; do
+    [[ -f "$f" ]] || continue
+    name=$(basename "$f")
+    echo "  uploading $name..."
+    gh release upload "v$VERSION" "$f" --clobber 2>&1 | head -1
+done
 
 # 9. Publish to npm (if publish-npm.sh exists).
 if [[ -f scripts/publish-npm.sh ]]; then
@@ -157,10 +173,10 @@ fi
 echo ""
 echo "=== RELEASED v$VERSION ==="
 echo "Binaries uploaded: ${#ASSETS[@]}"
-echo "  - bladebro-linux-x64"
-[[ -f "$TMPDIR_RELEASE/bladebro-windows-x64.exe" ]] && echo "  - bladebro-windows-x64.exe"
-[[ -f "$TMPDIR_RELEASE/bladebro-darwin-x64" ]] && echo "  - bladebro-darwin-x64"
-[[ -f "$TMPDIR_RELEASE/bladebro-darwin-arm64" ]] && echo "  - bladebro-darwin-arm64"
+echo "  New naming (npm-consistent):"
+echo "    - bladebro-linux-x64, bladebro-windows-x64.exe, bladebro-darwin-x64, bladebro-darwin-arm64"
+echo "  Legacy naming (old binaries pre-v3.0.3):"
+echo "    - bladebro-linux-x86_64, bladebro-windows-x86_64.exe, bladebro-macos-x86_64, bladebro-macos-aarch64"
 echo ""
 echo "Verify: bladebro -v  (should show update available for older installs)"
 echo "Verify: bladebro -u  (should download and install the new version)"
