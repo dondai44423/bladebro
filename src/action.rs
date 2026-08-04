@@ -145,6 +145,9 @@ pub async fn find_by_text(
     query: &str,
     role_filter: Option<&str>,
 ) -> Result<Vec<TextMatch>> {
+    if query.trim().is_empty() {
+        return Err(BladeError::Other("find query must not be empty".into()));
+    }
     let query_js = serde_json::to_string(query)?;
     let role_js = match role_filter {
         Some(r) => serde_json::to_string(r)?,
@@ -372,9 +375,10 @@ pub async fn check_condition(
             }
         }
         "element" => {
-            let needle = text.to_lowercase().replace('"', "\\\"");
+            let needle_js = serde_json::to_string(&text.to_lowercase())
+                .unwrap_or_else(|_| "\"\"".to_string());
             let check = format!(
-                "(()=>{{const d=document;if(!d||!d.body)return false;const sel='{selector}';const all=[...d.querySelectorAll(sel)];const vis=n=>{{const r=n.getBoundingClientRect();if(r.width===0||r.height===0)return false;const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;return true;}};const nodes=all.filter(vis);const t=\"{needle}\".toLowerCase();return nodes.some(n=>{{const role=(n.getAttribute('role')||n.tagName.toLowerCase());const name=(n.getAttribute('aria-label')||n.textContent||n.placeholder||'').trim();return role.toLowerCase().includes(t)||name.toLowerCase().includes(t);}});}})()",
+                "(()=>{{const d=document;if(!d||!d.body)return false;const sel='{selector}';const all=[...d.querySelectorAll(sel)];const vis=n=>{{const r=n.getBoundingClientRect();if(r.width===0||r.height===0)return false;const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;return true;}};const nodes=all.filter(vis);const t={needle_js}.toLowerCase();return nodes.some(n=>{{const role=(n.getAttribute('role')||n.tagName.toLowerCase());const name=(n.getAttribute('aria-label')||n.textContent||n.placeholder||'').trim();return role.toLowerCase().includes(t)||name.toLowerCase().includes(t);}});}})()",
                 selector = crate::page::perception::JS_SELECTOR
             );
             loop {
@@ -472,6 +476,7 @@ pub async fn check_condition(
                         Some(json!({
                             "expression": text,
                             "returnByValue": true,
+                            "awaitPromise": true,
                         })),
                     )
                     .await;

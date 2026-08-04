@@ -93,7 +93,7 @@ pub fn stabilize(
                 .push(ref_id.as_str());
         }
     }
-    eprintln!("DEBUG stabilize: prev_by_fp={:?}", prev_by_fp);
+
 
     let mut result = StabilizeResult::default();
     let mut used_prev: std::collections::HashSet<String> = std::collections::HashSet::new();

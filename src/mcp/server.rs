@@ -575,18 +575,18 @@ async fn serve(
                         }
                         last_activity = std::time::Instant::now();
                         // Track block config for restoration after relaunch.
-                        if block_classes.is_none() {
+                        // Always sync from current page state so changes are captured.
+                        {
                             let rules = page.as_ref().map(|p| p.block_rules()).unwrap_or(0);
                             if rules != 0 {
-                                // Reconstruct classes from rules — the mask bits.
                                 let mut classes = Vec::new();
                                 if rules & 1 != 0 { classes.push("images"); }
                                 if rules & 2 != 0 { classes.push("fonts"); }
                                 if rules & 4 != 0 { classes.push("media"); }
                                 if rules & 8 != 0 { classes.push("trackers"); }
-                                if !classes.is_empty() {
-                                    block_classes = Some(classes.join(","));
-                                }
+                                block_classes = Some(classes.join(","));
+                            } else {
+                                block_classes = None;
                             }
                         }
                         Some(resp)
@@ -1834,7 +1834,6 @@ async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
         let mut new_count = 0usize;
         for item in items {
             let key = item.get("url").or_else(|| item.get("title"))
-                .or_else(|| item.get("text"))
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
             if key.is_empty() || seen.insert(key) {
                 all_items.push(item);

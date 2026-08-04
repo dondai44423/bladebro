@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.12] - 2026-08-04
+
+### Security
+
+- **JS injection fix in condition evaluation**: The `wait condition=element` path used manual quote escaping that missed backslash escaping, allowing a crafted query to break out of the JS string literal. Replaced with `serde_json::to_string` for proper escaping of all special characters.
+
+### Fixed
+
+- **Debug print removed from ref stabilizer**: A `DEBUG stabilize` `eprintln!` was dumping internal fingerprint data to stderr on every page capture. Removed — it was a data leak and a performance bottleneck on capture-heavy pages.
+- **Profile cache dir typo**: `DawnGraphiteCache` had a leading space in the skip list (`" DawnGraphiteCache"`), meaning it was never skipped during profile copy. This bloated the seasoned profile with GPU shader cache data. Fixed.
+- **Action state not reset on error**: `is_busy` was set to `true` before action dispatch but never reset to `false` on error paths (stale ref, element not found, CDP failure). This permanently disabled the idle-hum background task after any action error, degrading stealth for the rest of the session. Now resets on all error paths.
+- **Block config tracking**: Resource blocking configuration was only tracked once (when `block_classes.is_none()`), so changes after the first detection weren't preserved across Chrome relaunches. Now syncs from the current page state on every tool call.
+- **Filtered view count**: The "more matching" count in `see filter=...` used `out.lines().count()` (all output lines including header) instead of counting only printed element lines. Fixed with an explicit counter.
+- **Dead code in collect dedup**: The `collect` loop referenced the `text` field for deduplication, which was removed in v3.0.11. Cleaned up.
+- **Empty query validation**: `find_by_text` with an empty or whitespace-only query previously matched every element on the page. Now returns a clear error.
+- **Async JS conditions not awaited**: `wait condition=js` was missing `awaitPromise: true` in the `Runtime.evaluate` call, so async JS expressions (returning a Promise) would resolve to a Promise object instead of the awaited value. Fixed.
+- **URL normalization for idempotent navigate**: `normalize_url` did not strip default ports (`:443` for HTTPS, `:80` for HTTP), so navigating to `https://example.com:443` when already on `https://example.com` triggered an unnecessary reload. Fixed.
+
 ## [3.0.11] - 2026-08-04
 
 ### Fixed

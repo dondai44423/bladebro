@@ -55,7 +55,7 @@ const SKIP_ON_COPY: &[&str] = &[
     "Cache",
     "Code Cache",
     "GPUCache",
-    " DawnGraphiteCache",
+    "DawnGraphiteCache",
     "DawnWebGPUCache",
     "GrShaderCache",
     "ShaderCache",

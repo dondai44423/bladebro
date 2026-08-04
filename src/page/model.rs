@@ -413,10 +413,10 @@ impl LivePageModel {
         if !self.title.is_empty() {
             out.push_str(&format!("title: {}\n", truncate(&self.title, 80)));
         }
-        for el in &matching {
+        for (printed, el) in matching.iter().enumerate() {
             let line = format_element(el);
             if out.len() + line.len() > budget {
-                out.push_str(&format!("…({} more matching)\n", matching.len() - out.lines().count() + 1));
+                out.push_str(&format!("…({} more matching)\n", matching.len() - printed));
                 break;
             }
             out.push_str(&line);

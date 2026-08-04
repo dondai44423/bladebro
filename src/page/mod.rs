@@ -748,13 +748,17 @@ impl Page {
                         ).await?
                     }
                     None => {
+                        self.is_busy.store(false, std::sync::atomic::Ordering::Relaxed);
                         return Err(BladeError::ElementNotFound(format!(
                             "{ref_id} not in the live DOM and cannot be re-resolved"
                         )));
                     }
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                self.is_busy.store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(e);
+            }
         };
         let verdict = match heal_note {
             Some(note) => format!("{verdict} [{note}]"),
@@ -1093,13 +1097,22 @@ fn extract_domain(url: &str) -> String {
 
 /// Normalize a URL for comparison: strip scheme, fragment, trailing slash.
 fn normalize_url(url: &str) -> String {
-    let s = url
+    let (s, https) = url
         .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
+        .map(|s| (s, true))
+        .or_else(|| url.strip_prefix("http://").map(|s| (s, false)))
+        .unwrap_or((url, false));
     let s = s.split('#').next().unwrap_or(s);
-    let s = s.strip_suffix('/').unwrap_or(s);
-    s.to_string()
+    // Strip default ports: :443 on https, :80 on http (host part only).
+    let default_port = if https { ":443" } else { ":80" };
+    let s = if let Some(slash) = s.find('/') {
+        let (host, path) = s.split_at(slash);
+        let host = host.strip_suffix(default_port).unwrap_or(host);
+        format!("{host}{path}")
+    } else {
+        s.strip_suffix(default_port).unwrap_or(s).to_string()
+    };
+    s.strip_suffix('/').unwrap_or(&s).to_string()
 }
 
 impl Drop for Page {
