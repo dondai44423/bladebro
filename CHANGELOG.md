@@ -7,24 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **License switched from MIT to AGPL-3.0**: Protects against SaaS exploitation while remaining fully open source. Internal use is unrestricted. Network-facing service deployments must share modified source.
-
-### Fixed
-
-- **User-Agent hardcoded to Linux x86_64 + stale Chrome version**: The UA override was hardcoded to "Linux x86_64" and Chrome 150, causing a fingerprint mismatch on macOS and Windows. Now reads the real UA from the browser at attach time, only overrides when headless ("HeadlessChrome" detected), and replaces just "HeadlessChrome" with "Chrome" while preserving the real Chrome version and OS platform.
-- **Windows Chrome discovery missing per-user install path**: Chrome installed without admin rights goes to `%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`, which was not checked. Added.
-- **Unknown wait condition silently returned true**: A typo in `condition` (e.g. "elemnt") fell through to the settle path and returned true, giving the agent a false positive that the condition was met. Unknown conditions now return false.
+## [3.0.13] - 2026-08-05
 
 ### Added
 
-- **Native pi agent support**: `pi install npm:bladebro` now works out of the box. A TypeScript extension (`pi-extension.ts`) spawns the binary as a stdio MCP subprocess, discovers tools via `tools/list`, and registers all 5 tools natively with pi via `pi.registerTool()`. No MCP adapter, no config files, no proxy tool. Tool definitions come from the binary at startup — zero maintenance when Rust tool defs change. Auto-updates via `pi update --extensions`.
+- **Native pi agent support**: `pi install npm:bladebro` registers all 5 tools natively in the pi coding agent. A TypeScript extension spawns the binary as a stdio MCP subprocess, discovers tools via `tools/list`, and registers them via `pi.registerTool()`. No MCP adapter, no config files, no proxy tool. Tool definitions come from the binary at startup — auto-adapts to any tool def changes with zero extension maintenance. Auto-updates via `pi update --extensions`.
 - **Label addressing for click and hover**: `act click label="Submit"` and `act hover label="Menu"` now work, same as `type` and `fill`. Previously only `text` was supported for click/hover targeting.
 
 ### Fixed
 
+- **User-Agent hardcoded to Linux x86_64 + stale Chrome version**: On macOS/Windows the UA reported Linux, a fingerprint mismatch. Now reads the real UA from the browser at attach time, only overrides when headless ("HeadlessChrome" detected), preserving the real Chrome version and OS platform.
+- **Windows Chrome discovery missing per-user install path**: Chrome installed without admin rights goes to `%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`, which was not checked. Added.
+- **Unknown wait condition silently returned true**: A typo in `condition` fell through to the settle path and returned true, giving a false positive. Unknown conditions now return false.
 - **Update check fails when GitHub API rate-limited**: Version checks and updates now use non-rate-limited sources (github.com releases redirect + npm registry) instead of the GitHub API (60 req/hr unauthenticated). No API key needed.
+- **npm optionalDependencies version mismatch**: Platform packages were pinned to 3.0.5 in the meta package. Now synced to the current version.
+
+### Changed
+
+- **License switched from MIT to AGPL-3.0**: Protects against SaaS exploitation while remaining fully open source. Internal use is unrestricted. Network-facing service deployments must share modified source.
 
 ## [3.0.12] - 2026-08-04
 
