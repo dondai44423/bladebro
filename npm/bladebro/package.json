@@ -12,6 +12,7 @@
     "url": "https://github.com/dondai44423/bladebro/issues"
   },
   "keywords": [
+    "pi-package",
     "browser",
     "automation",
     "agent",
@@ -24,11 +25,19 @@
     "puppeteer",
     "playwright"
   ],
+  "pi": {
+    "extensions": ["./pi-extension.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
   "bin": {
     "bladebro": "bin.js"
   },
   "files": [
     "bin.js",
+    "pi-extension.ts",
     "README.md",
     "LICENSE"
   ],

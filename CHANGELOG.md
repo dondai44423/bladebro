@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native pi agent support**: `pi install npm:bladebro` now works out of the box. A TypeScript extension (`pi-extension.ts`) spawns the binary as a stdio MCP subprocess, discovers tools via `tools/list`, and registers all 5 tools natively with pi via `pi.registerTool()`. No MCP adapter, no config files, no proxy tool. Tool definitions come from the binary at startup — zero maintenance when Rust tool defs change. Auto-updates via `pi update --extensions`.
 - **Label addressing for click and hover**: `act click label="Submit"` and `act hover label="Menu"` now work, same as `type` and `fill`. Previously only `text` was supported for click/hover targeting.
 
 ### Fixed
