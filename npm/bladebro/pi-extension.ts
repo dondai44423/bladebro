@@ -16,6 +16,10 @@
  *
  * Chrome launches lazily inside the binary (first tools/call only).
  * The binary process itself starts in milliseconds.
+ *
+ * Auto-adapt: tool descriptions, schemas, new tools, removed tools,
+ * changed parameters — all fetched from the binary at session start.
+ * The extension never hardcodes tool definitions.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -129,7 +133,7 @@ class McpStdio {
     }
   }
 
-  private request(method: string, params: any, timeoutMs = 60000): Promise<any> {
+  private request(method: string, params: any, timeoutMs = 180000): Promise<any> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       const timer = setTimeout(() => {
@@ -163,12 +167,13 @@ class McpStdio {
     this.alive = false;
     try { this.proc.stdin?.end(); } catch {}
     this.proc.kill("SIGTERM");
-    // Wait up to 2s for graceful exit, then SIGKILL.
+    // Wait up to 5s for graceful exit (Chrome shutdown takes up to 3s),
+    // then SIGKILL. The orphan reaper handles any leaked Chrome.
     await new Promise<void>((resolve) => {
       const t = setTimeout(() => {
         this.proc?.kill("SIGKILL");
         resolve();
-      }, 2000);
+      }, 5000);
       this.proc?.on("exit", () => { clearTimeout(t); resolve(); });
     });
     this.proc = null;
@@ -180,6 +185,31 @@ class McpStdio {
 export default function bladebroExtension(pi: ExtensionAPI) {
   let client: McpStdio | null = null;
   let binaryPath: string | null = null;
+  // Restart lock: prevents concurrent restarts from spawning
+  // multiple binaries. When two parallel tool calls both see
+  // isAlive() === false, they share the same restart promise.
+  let restartPromise: Promise<void> | null = null;
+
+  async function ensureClient(): Promise<McpStdio> {
+    if (client?.isAlive()) return client;
+    if (restartPromise) {
+      await restartPromise;
+      return client!;
+    }
+    if (!binaryPath) throw new Error("Bladebro binary not available");
+    const p = (async () => {
+      const c = new McpStdio();
+      await c.start(binaryPath!);
+      client = c;
+    })();
+    restartPromise = p;
+    try {
+      await p;
+    } finally {
+      restartPromise = null;
+    }
+    return client!;
+  }
 
   pi.on("session_start", async (_event, ctx) => {
     binaryPath = resolveBinary();
@@ -192,9 +222,8 @@ export default function bladebroExtension(pi: ExtensionAPI) {
       return;
     }
 
-    client = new McpStdio();
     try {
-      await client.start(binaryPath);
+      await ensureClient();
     } catch (err: any) {
       ctx.ui.notify(`Bladebro: failed to start: ${err.message}`, "error");
       client = null;
@@ -204,7 +233,7 @@ export default function bladebroExtension(pi: ExtensionAPI) {
     // Discover tools from the binary and register them natively.
     let tools: any[];
     try {
-      tools = await client.listTools();
+      tools = await client!.listTools();
     } catch (err: any) {
       ctx.ui.notify(`Bladebro: tools/list failed: ${err.message}`, "error");
       return;
@@ -218,13 +247,9 @@ export default function bladebroExtension(pi: ExtensionAPI) {
         parameters: Type.Unsafe(tool.inputSchema),
         async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
           // Ensure the binary is alive — restart if it died.
-          if (!client?.isAlive()) {
-            if (!binaryPath) throw new Error("Bladebro binary not available");
-            client = new McpStdio();
-            await client.start(binaryPath);
-          }
-
-          const result = await client.callTool(tool.name, params);
+          // ensureClient handles the restart race condition.
+          const c = await ensureClient();
+          const result = await c.callTool(tool.name, params);
           return {
             content: result.content || [],
             details: {},
