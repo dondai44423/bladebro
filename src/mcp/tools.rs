@@ -21,7 +21,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         ToolDef {
             name: "act",
             description: "Do something on the page. Returns a verdict + delta. navigate returns top interactive elements (budget 2000 chars) — enough refs to act on common pages. For dense pages use see mode=model (more refs) or mode=content (read text).\n\
-ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for type/fill) > x,y (canvas/coords). Add role= or nth= if ambiguous.\n\
+ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > x,y (canvas/coords). Add role= or nth= if ambiguous.\n\
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call. set-cookie uses url for cookie scope, not navigation.\n\
 Use fill for forms (not individual type calls). Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
@@ -35,7 +35,7 @@ Use fill for forms (not individual type calls). Use run instead of batch for bra
                     },
                     "ref": {"type": "string", "description": "Element ref id (e.g. 'e5'). Self-heals."},
                     "text": {"type": "string", "description": "Visible text, value to type, file path, or URL (action-dependent)."},
-                    "label": {"type": "string", "description": "Field label for type/fill."},
+                    "label": {"type": "string", "description": "Field label for click/type/fill/hover."},
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches."},
                     "key": {"type": "string", "description": "Key: Enter, Tab, Escape, ArrowDown, etc."},

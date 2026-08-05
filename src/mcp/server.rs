@@ -1029,8 +1029,11 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 } else if !text.is_empty() {
                     let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                     resolve_text_target(page, text, rf, nth).await?
+                } else if !label.is_empty() {
+                    let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                    resolve_text_target(page, label, rf, nth).await?
                 } else {
-                    return Err(BladeError::Other("click requires 'ref', 'text', or 'x'+'y'".into()));
+                    return Err(BladeError::Other("click requires 'ref', 'text', 'label', or 'x'+'y'".into()));
                 };
                 Action::Click { ref_id: resolved }
             }
@@ -1083,8 +1086,11 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else if !text.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, text, rf, nth).await?
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                resolve_text_target(page, label, rf, nth).await?
             } else {
-                return Err(BladeError::Other("hover requires 'ref' or 'text'".into()));
+                return Err(BladeError::Other("hover requires 'ref', 'text', or 'label'".into()));
             };
             Action::Hover { ref_id: resolved }
         }
@@ -2013,9 +2019,12 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             } else if !text.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, text, rf, nth).await?
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                resolve_text_target(page, label, rf, nth).await?
             } else {
                 return Err(crate::error::BladeError::Other(
-                    "click step requires 'ref' or 'text'".into(),
+                    "click step requires 'ref', 'text', or 'label'".into(),
                 ));
             };
             Ok(Action::Click { ref_id: resolved })
@@ -2050,9 +2059,12 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             } else if !text.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, text, rf, nth).await?
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                resolve_text_target(page, label, rf, nth).await?
             } else {
                 return Err(crate::error::BladeError::Other(
-                    "hover step requires 'ref' or 'text'".into(),
+                    "hover step requires 'ref', 'text', or 'label'".into(),
                 ));
             };
             Ok(Action::Hover { ref_id: resolved })

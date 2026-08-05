@@ -505,10 +505,14 @@ pub async fn check_condition(
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
         }
-        _ => {
-            // "settle", "network", or unknown — wait for DOM to settle.
+        "settle" | "network" => {
             let _ = wait_for_settle(cdp, timeout).await;
             true
+        }
+        _ => {
+            // Unknown condition name — return false so the agent sees
+            // the condition wasn't met instead of a false positive.
+            false
         }
     }
 }

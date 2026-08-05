@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **User-Agent hardcoded to Linux x86_64 + stale Chrome version**: The UA override was hardcoded to "Linux x86_64" and Chrome 150, causing a fingerprint mismatch on macOS and Windows. Now reads the real UA from the browser at attach time, only overrides when headless ("HeadlessChrome" detected), and replaces just "HeadlessChrome" with "Chrome" while preserving the real Chrome version and OS platform.
+- **Windows Chrome discovery missing per-user install path**: Chrome installed without admin rights goes to `%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`, which was not checked. Added.
+- **Unknown wait condition silently returned true**: A typo in `condition` (e.g. "elemnt") fell through to the settle path and returned true, giving the agent a false positive that the condition was met. Unknown conditions now return false.
+
+### Added
+
+- **Label addressing for click and hover**: `act click label="Submit"` and `act hover label="Menu"` now work, same as `type` and `fill`. Previously only `text` was supported for click/hover targeting.
+
+### Fixed
+
 - **Update check fails when GitHub API rate-limited**: Version checks and updates now use non-rate-limited sources (github.com releases redirect + npm registry) instead of the GitHub API (60 req/hr unauthenticated). No API key needed.
 
 ## [3.0.12] - 2026-08-04

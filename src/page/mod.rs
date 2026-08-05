@@ -141,39 +141,72 @@ impl Page {
         // standalone command, enable only turns on event notifications.
         cdp.enable("Network").await?;
         cdp.enable("DOM").await?;
-        // Override the User-Agent to replace "HeadlessChrome" with "Chrome".
-        // Uses Network.setUserAgentOverride with full Client Hints metadata
-        // so the UA string, Sec-CH-UA headers, and navigator.userAgentData
-        // are all consistent. This is a CDP-level override, not a JS override —
-        // it can't be detected via property descriptor inspection.
-        if let Err(e) = cdp
-            .send(
-                "Network.setUserAgentOverride",
-                Some(serde_json::json!({
-                    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-                    "platform": "Linux x86_64",
-                    "userAgentMetadata": {
-                        "brands": [
-                            {"brand": "Chromium", "version": "150"},
-                            {"brand": "Google Chrome", "version": "150"},
-                            {"brand": "Not:A-Brand", "version": "99"}
-                        ],
-                        "fullVersionList": [
-                            {"brand": "Chromium", "version": "150.0.7871.128"},
-                            {"brand": "Google Chrome", "version": "150.0.7871.128"}
-                        ],
-                        "platform": "Linux",
-                        "platformVersion": "6.5.0",
-                        "architecture": "x86",
-                        "model": "",
-                        "mobile": false,
-                        "bitness": "64"
-                    }
-                })),
-            )
-            .await
-        {
-            eprintln!["[bladebro] WARNING: UA override failed: {e}"];
+        // UA override: only needed in headless mode where the UA contains
+        // "HeadlessChrome". In headful mode (Xvfb or native), the real UA
+        // is already correct. Read the real UA + platform, and if headless,
+        // replace just "HeadlessChrome" with "Chrome" — preserving the real
+        // Chrome version and OS. This is a CDP-level override, not JS.
+        let ua_info = cdp.send("Runtime.evaluate", Some(serde_json::json!({
+            "expression": "JSON.stringify({ua:navigator.userAgent,plt:navigator.platform})",
+            "returnByValue": true,
+        }))).await.ok()
+            .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).map(String::from))
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
+        let need_override = ua_info.as_ref()
+            .and_then(|v| v.get("ua").and_then(|u| u.as_str()))
+            .map(|ua| ua.contains("HeadlessChrome"))
+            .unwrap_or(true);
+
+        if need_override {
+            let real_ua = ua_info.as_ref()
+                .and_then(|v| v.get("ua").and_then(|u| u.as_str()))
+                .unwrap_or("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36");
+            let fixed_ua = real_ua.replace("HeadlessChrome", "Chrome");
+            let real_platform = ua_info.as_ref()
+                .and_then(|v| v.get("plt").and_then(|p| p.as_str()))
+                .unwrap_or("Linux x86_64");
+
+            // Parse Chrome version from the UA string (e.g. "Chrome/150.0.7871.128").
+            let chrome_ver = fixed_ua.split("Chrome/").nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .unwrap_or("150.0.0.0");
+            let major = chrome_ver.split('.').next().unwrap_or("150");
+
+            // Derive userAgentMetadata platform fields from navigator.platform.
+            let (meta_platform, arch, bitness) = if real_platform.contains("Mac") {
+                ("macOS", "x86", "64")
+            } else if real_platform.contains("Win") {
+                ("Windows", "x86", "64")
+            } else if real_platform.contains("aarch64") || real_platform.contains("arm") {
+                ("Linux", "arm", "64")
+            } else {
+                ("Linux", "x86", "64")
+            };
+
+            if let Err(e) = cdp.send("Network.setUserAgentOverride", Some(serde_json::json!({
+                "userAgent": fixed_ua,
+                "platform": real_platform,
+                "userAgentMetadata": {
+                    "brands": [
+                        {"brand": "Chromium", "version": major},
+                        {"brand": "Google Chrome", "version": major},
+                        {"brand": "Not:A-Brand", "version": "99"}
+                    ],
+                    "fullVersionList": [
+                        {"brand": "Chromium", "version": chrome_ver},
+                        {"brand": "Google Chrome", "version": chrome_ver}
+                    ],
+                    "platform": meta_platform,
+                    "platformVersion": "",
+                    "architecture": arch,
+                    "model": "",
+                    "mobile": false,
+                    "bitness": bitness
+                }
+            }))).await {
+                eprintln!["[bladebro] WARNING: UA override failed: {e}"];
+            }
         }
         // S6: geo-consistent identity — timezone and locale must match the
         // proxy's geographic location. Without a proxy, the system timezone

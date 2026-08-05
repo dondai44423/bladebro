@@ -600,6 +600,15 @@ fn find_chrome() -> Result<String> {
         }
     }
 
+    // Windows per-user install (default when installing without admin rights).
+    #[cfg(target_os = "windows")]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let p = format!("{local}\\Google\\Chrome\\Application\\chrome.exe");
+        if std::path::Path::new(&p).exists() {
+            return Ok(p);
+        }
+    }
+
     if std::path::Path::new("/nix/store").exists() {
         if let Some(path) = find_in_nix_store() {
             return Ok(path);
