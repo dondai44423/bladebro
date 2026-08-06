@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.0.13] - 2026-08-05
+## [3.0.14] - 2026-08-06
+
+### Added
+
+- **Self-improving domain knowledge base**: Bladebro now learns from every session and compounds with use. Per-domain consent dialog selectors are learned from successful dismissals and auto-applied on subsequent visits (confidence-scored, learn-only-from-success). Visit tracking and global stats persist across restarts. Stored in `~/.blade/knowledge/domains/`.
+- **Behavioral fingerprint persistence**: Biometric parameters (click precision, mouse curvature, typing speed, inter-action gaps, idle hum interval) are generated once per installation and reused forever. The browser now maintains a consistent behavioral identity across sessions. Stored in `~/.blade/knowledge/behavior.json`.
+
+### Changed
+
+- **Biometrics now use persistent profile**: All hardcoded behavioral parameters in `biometrics.rs` and `hum.rs` now read from the `BehavioralProfile` static, loaded once via `LazyLock`. Same installation, same personality, every session.
 
 ### Added
 

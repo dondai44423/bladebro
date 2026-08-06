@@ -506,6 +506,58 @@ pub async fn dismiss_consent(cdp: &CdpSession) -> Result<Option<String>> {
     Ok(framework)
 }
 
+/// Try a stored consent selector first (one cheap querySelector+click),
+/// fall back to full [`dismiss_consent`] detection if it doesn't match.
+///
+/// This is the knowledge-base integration point: on known sites, a trusted
+/// CSS selector (confidence >= 0.7) skips the full 20-line detection JS,
+/// saving one large `Runtime.evaluate`. On unknown or changed sites, the
+/// full detection runs as usual — zero regression for cold starts.
+///
+/// Returns the selector that was clicked (stored selector, new selector, or
+/// `"generic"`), or `None` if no consent dialog was found.
+pub async fn dismiss_consent_with_stored(
+    cdp: &CdpSession,
+    stored: Option<&str>,
+) -> Result<Option<String>> {
+    let policy =
+        std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
+    if policy == "off" {
+        return Ok(None);
+    }
+
+    // Try the stored selector first — skip the full detection JS if it works.
+    if let Some(sel) = stored.filter(|s| !s.is_empty() && *s != "generic") {
+        let sel_json = serde_json::to_string(sel).unwrap_or_default();
+        let expr = format!(
+            "(()={{const b=document.querySelector({sel_json});if(b){{b.click();return {sel_json};}}return null;}})()"
+        );
+        let res = cdp
+            .send(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": expr,
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
+        if res.get("exceptionDetails").is_none() {
+            if let Some(v) = res
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+            {
+                if !v.is_empty() {
+                    return Ok(Some(v.to_string()));
+                }
+            }
+        }
+    }
+
+    // Fall through to full detection.
+    dismiss_consent(cdp).await
+}
+
 /// M6: Detect block/challenge pages (Cloudflare, DataDome, PerimeterX, reCAPTCHA, Akamai).
 /// Returns the block type if detected, or None.
 /// S12: remediation ladder — actionable steps for each block type.

@@ -123,7 +123,7 @@ impl InterceptState {
 }
 
 /// Extract the host (no port, no path) from a URL. Lowercased.
-fn url_host(url: &str) -> String {
+pub fn url_host(url: &str) -> String {
     let after_scheme = url.split("://").nth(1).unwrap_or(url);
     let host_port = after_scheme.split('/').next().unwrap_or("");
     let host = host_port.split(':').next().unwrap_or("");

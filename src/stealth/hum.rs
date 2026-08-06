@@ -106,8 +106,8 @@ async fn hum_loop(cdp: CdpSession, last_epoch: Arc<AtomicU64>, is_busy: Arc<Atom
             )
             .await;
 
-        // Next hum in 1-4s (log-normal, median 2s).
-        let interval = log_normal(&mut rng, 2000.0, 0.5);
+        // Next hum (log-normal from persistent profile — same fidgeting pattern every session).
+        let interval = log_normal(&mut rng, crate::knowledge::BEHAVIOR.hum_interval_ms, 0.5);
         tokio::time::sleep(interval).await;
     }
 }

@@ -24,5 +24,6 @@ pub mod browser;
 pub mod platform;
 pub mod updater;
 pub mod artifacts;
+pub mod knowledge;
 
 pub use error::{BladeError, Result};

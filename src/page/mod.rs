@@ -12,7 +12,7 @@ pub mod refs;
 use std::time::Duration;
 
 pub use model::{LivePageModel, PageDelta, PageElement};
-pub use perception::{capture, capture_content, dismiss_consent, detect_block, wait_for_load, wait_for_settle, wait_for_settle_with_network, PageCapture, RawElement};
+pub use perception::{capture, capture_content, dismiss_consent, dismiss_consent_with_stored, detect_block, wait_for_load, wait_for_settle, wait_for_settle_with_network, PageCapture, RawElement};
 pub use refs::{RefEntry, StateChange, StateProbe};
 
 use std::sync::{Arc, Mutex};
@@ -115,6 +115,9 @@ pub struct Page {
     downloads: std::sync::Arc<Mutex<Vec<DownloadInfo>>>,
     /// Download-watch task handle, aborted on shutdown.
     download_task: Option<tokio::task::JoinHandle<()>>,
+    /// Domain knowledge base (consent selectors, block configs, timing).
+    /// Set by the MCP server after attach. None during attach (cold start).
+    knowledge: Option<crate::knowledge::SharedKnowledge>,
 }
 
 impl std::fmt::Debug for Page {
@@ -515,12 +518,19 @@ impl Page {
             intercept_task: Some(intercept_task),
             downloads,
             download_task: Some(download_task),
+            knowledge: None,
         })
     }
 
     /// The download tracker (V19). Newest download last.
     pub fn downloads(&self) -> std::sync::Arc<Mutex<Vec<DownloadInfo>>> {
         self.downloads.clone()
+    }
+
+    /// Set the domain knowledge base. Called by the MCP server after attach.
+    /// Enables consent auto-apply, visit tracking, and cross-session learning.
+    pub fn set_knowledge(&mut self, kb: crate::knowledge::SharedKnowledge) {
+        self.knowledge = Some(kb);
     }
 
     /// List the browser's page targets — over the pipe's browser-level
@@ -1031,12 +1041,27 @@ impl Page {
         wait_for_settle_with_network(&self.cdp, Duration::from_secs(3), Some(&self.in_flight)).await?;
         _t("settle");
         // M4+M6: Check for consent banners and block pages after navigation.
-        let consent = dismiss_consent(&self.cdp).await.unwrap_or(None);
+        // Knowledge-base integration: try stored consent selector first,
+        // learn from successful dismissals, record the visit.
+        let domain = crate::knowledge::domain_from_url(url);
+        let stored_consent = self.knowledge.as_ref()
+            .and_then(|kb| kb.lock().ok())
+            .and_then(|kb| kb.get_consent(&domain).map(|c| c.selector.clone()));
+        let consent = dismiss_consent_with_stored(&self.cdp, stored_consent.as_deref()).await.unwrap_or(None);
         let blocked = detect_block(&self.cdp).await.unwrap_or(None);
-        if let Some(ref fw) = consent {
+        // Learn from successful consent dismissal (only specific selectors, not "generic").
+        if let Some(ref result) = consent {
+            if result != "generic" && !result.is_empty() && !domain.is_empty() {
+                if let Some(kb) = self.knowledge.as_ref() {
+                    if let Ok(mut kb) = kb.lock() {
+                        kb.learn_consent_result(&domain, result);
+                        kb.record_consent_dismissed();
+                    }
+                }
+            }
             if let Ok(mut a) = self.ambient.lock() {
                 a.push(format!("consent: {} ({})",
-                    if std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".into()) != "accept" { "rejected" } else { "accepted" }, fw));
+                    if std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".into()) != "accept" { "rejected" } else { "accepted" }, result));
             }
         }
         if let Some(ref bt) = blocked {
@@ -1044,6 +1069,15 @@ impl Page {
                 a.push(format!("blocked: {}", bt));
                 for step in crate::page::perception::remediation_ladder(bt) {
                     a.push(format!("  remediation: {}", step));
+                }
+            }
+        }
+        // Record visit + navigation for this domain.
+        if !domain.is_empty() {
+            if let Some(kb) = self.knowledge.as_ref() {
+                if let Ok(mut kb) = kb.lock() {
+                    kb.record_visit(&domain);
+                    kb.record_navigation();
                 }
             }
         }

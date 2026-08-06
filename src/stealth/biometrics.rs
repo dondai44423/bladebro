@@ -104,8 +104,10 @@ pub struct PathPoint {
 /// - `rng`: PRNG.
 pub fn mouse_path(start: (f64, f64), target: (f64, f64), rng: &mut Rng) -> Vec<PathPoint> {
     // Gaussian offset from exact center — humans don't click pixel-perfect.
-    let click_x = gaussian(rng, target.0, 2.5);
-    let click_y = gaussian(rng, target.1, 2.5);
+    // Precision comes from the persistent behavioral profile (same "person" every session).
+    let precision = crate::knowledge::BEHAVIOR.click_precision;
+    let click_x = gaussian(rng, target.0, precision);
+    let click_y = gaussian(rng, target.1, precision);
 
     let dx = click_x - start.0;
     let dy = click_y - start.1;
@@ -118,7 +120,7 @@ pub fn mouse_path(start: (f64, f64), target: (f64, f64), rng: &mut Rng) -> Vec<P
     // Control points: offset perpendicular to the start→end line.
     // The offset magnitude is proportional to distance but capped, with
     // random sign and magnitude — this creates the natural curve.
-    let curve_amount = (dist * 0.15).min(80.0);
+    let curve_amount = (dist * crate::knowledge::BEHAVIOR.curve_factor).min(80.0);
     let cp1_offset = gaussian(rng, 0.0, curve_amount);
     let cp2_offset = gaussian(rng, 0.0, curve_amount * 0.7);
 
@@ -161,8 +163,11 @@ pub fn mouse_path(start: (f64, f64), target: (f64, f64), rng: &mut Rng) -> Vec<P
         });
     }
 
-    // Overshoot: go 5-15px past the target, then correct back.
-    let overshoot_dist = rng.range(5, 15) as f64;
+    // Overshoot: go past the target, then correct back. Range from behavioral profile.
+    let overshoot_dist = rng.range(
+        crate::knowledge::BEHAVIOR.overshoot_min,
+        crate::knowledge::BEHAVIOR.overshoot_max,
+    ) as f64;
     let overshoot_dir_x = dx / dist.max(1.0);
     let overshoot_dir_y = dy / dist.max(1.0);
     let over_x = click_x + overshoot_dir_x * overshoot_dist;
@@ -213,17 +218,25 @@ pub fn typing_cadence(text: &str, rng: &mut Rng) -> Vec<Duration> {
                 // Rare "thinking" pause: 500-2000ms.
                 log_normal(rng, 800.0, 0.4)
             } else {
-                // Normal keystroke: log-normal around 90ms.
-                log_normal(rng, 90.0, 0.3)
+                // Normal keystroke: log-normal from persistent profile.
+                log_normal(
+                    rng,
+                    crate::knowledge::BEHAVIOR.typing_mean_ms,
+                    crate::knowledge::BEHAVIOR.typing_sigma,
+                )
             }
         })
         .collect()
 }
 
 /// Inter-action delay: how long to pause between sequential actions.
-/// Log-normal around 400ms — humans don't chain actions instantly.
+/// Log-normal from persistent profile — same "person" pauses the same way every session.
 pub fn action_gap(rng: &mut Rng) -> Duration {
-    log_normal(rng, 400.0, 0.35)
+    log_normal(
+        rng,
+        crate::knowledge::BEHAVIOR.action_gap_mean_ms,
+        crate::knowledge::BEHAVIOR.action_gap_sigma,
+    )
 }
 
 // ---- Tests ----

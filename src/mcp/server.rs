@@ -309,6 +309,9 @@ async fn serve(
     let mut relaunch_note: Option<String> = None;
     // Track resource-blocking config so it survives idle shutdown/relaunch.
     let mut block_classes: Option<String> = None;
+    // Domain knowledge base: consent selectors, visit tracking, stats.
+    // Loaded once at startup, synced to disk periodically + on shutdown.
+    let knowledge = crate::knowledge::load_shared();
 
     eprintln!(
         "[bladebro] MCP server ready (Chrome launches on first tool call{}",
@@ -405,6 +408,10 @@ async fn serve(
                                 Ok((new_page, new_browser)) => {
                                     browser = new_browser;
                                     page = Some(new_page);
+                                    // Set knowledge base on the new page.
+                                    if let Some(ref mut p) = page {
+                                        p.set_knowledge(knowledge.clone());
+                                    }
                                     // Restore resource blocking after relaunch.
                                     if let Some(ref bc) = block_classes {
                                         if let Some(ref mut p) = page {
@@ -468,6 +475,10 @@ async fn serve(
                                     Ok((new_page, new_browser)) => {
                                         browser = new_browser;
                                         page = Some(new_page);
+                                        // Set knowledge base on the new page.
+                                        if let Some(ref mut p) = page {
+                                            p.set_knowledge(knowledge.clone());
+                                        }
                                         // Restore resource blocking after relaunch.
                                         if let Some(ref bc) = block_classes {
                                             if let Some(ref mut p) = page {
@@ -623,6 +634,16 @@ async fn serve(
                             crate::session_profile::SessionProfile::sync_back_only(&dir);
                         }).await;
                     }
+                    // Sync knowledge base to disk (prune + write).
+                    {
+                        let kb = knowledge.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok(mut kb) = kb.lock() {
+                                kb.prune();
+                                kb.sync();
+                            }
+                        }).await;
+                    }
                     last_sync = std::time::Instant::now();
                 }
                 if idle_secs > 0
@@ -648,6 +669,11 @@ async fn serve(
         shutdown_browser(b).await;
     }
     drop(page);
+    // Sync knowledge base to disk on shutdown.
+    if let Ok(mut kb) = knowledge.lock() {
+        kb.prune();
+        kb.sync();
+    }
     Ok(())
 }
 

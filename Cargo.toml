@@ -1,6 +1,6 @@
 [package]
 name = "bladebro"
-version = "3.0.13"
+version = "3.0.14"
 edition = "2021"
 rust-version = "1.86"
 license = "AGPL-3.0-only"
