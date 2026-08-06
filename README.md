@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="Assets/png/hero.png" width="500" alt="Bladebro" />
+
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
 Re-render-immune refs · batch actions · auto-extract · infinite-scroll collect · 6-layer stealth · delta-first
