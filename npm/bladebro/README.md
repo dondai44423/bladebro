@@ -1,6 +1,6 @@
 # Bladebro
 
-God-tier agentic browser driver for AI agents. Few tools, full control, real stealth, max token efficiency.
+Stealthy and efficient agentic browser driver for AI agents. Few tools, full control, real stealth, max token efficiency.
 
 ## Install
 
