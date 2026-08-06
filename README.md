@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="Assets/png/hero.png" width="500" alt="Bladebro" />
+<img src="Assets/png/hero.png" width="800" alt="Bladebro" />
 
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
