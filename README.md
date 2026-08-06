@@ -28,6 +28,14 @@ npm install -g bladebro && bladebro mcp
 
 Bladebro is an **agentic browser driver** built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results: the agent sees what *changed*, not the whole world, every single time.
 
+<p align="center">
+  <a href="Assets/video/Demo.mp4">
+    <img src="Assets/video/demo-poster.png" width="720" alt="Bladebro demo video" />
+  </a>
+</p>
+
+<p align="center"><sub>Bladebro drives Amazon, Reddit, Wikipedia, fills a form, and manages tabs — all through 5 tools. Click to play.</sub></p>
+
 Built in **Rust**. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent. Native on Linux, macOS, and Windows.
 
 Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and the new stateless per-request negotiation with `server/discover`, dual-dialect. Works with every MCP client, old and new.
