@@ -1723,7 +1723,7 @@ fn auto_extract_expr(limit: usize) -> String {
     let lim = limit.min(500);
     r#"(()=>{
 // Price: currency symbol required (no bare decimal numbers — false positives).
-const PRICE=/([$€£¥₹]\s?\d[\d,]*(?:\.\d{1,2})?)/;
+const PRICE=/([$€£¥₹]\s?\d[\d,]*(?:[.,]\d{1,2})?)/;
 const DATE=/(\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[\/]\d{1,2}[\/]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s*\d{2,4}\b|\b\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago\b)/i;
 const HOST=location.hostname;
 const ACT_PAT=/^(vote|upvote|downvote|comment|comments|discuss|reply|replies|share|save|hide|flag|report|favorite|fav|like|dislike|follow|Subscribe|Pin|Unpin|More|less|edit|delete|remove|add|new|open|show|expand|collapse|permalink|embed|cite|parent|context|full story|read more|continue reading|view|all|next|prev|previous)$/i;
@@ -1751,6 +1751,14 @@ if(tn){const match=lnks.find(a=>{const an=norm(txt(a));return an&&tn.includes(an
 }
 return lnks.reduce((best,a)=>{const at=txt(a).length,bt=txt(best).length;return at>bt?a:best;},lnks[0]);
 }
+// Shopping field extraction (universal e-commerce enhancement).
+function rating(el){const a=el.querySelector('[aria-label*="star"],[aria-label*="rating"]');if(a){const al=a.getAttribute('aria-label')||'';const m=al.match(/(\d+\.?\d*)\s*out of\s*\d+/i)||al.match(/(\d+\.?\d*)/);if(m)return parseFloat(m[1]);}const r=el.querySelector('[data-testid*="rating"],[class*="rating"],[class*="star"],[data-hook*="rating"]');if(r){const m=(r.innerText||'').match(/(\d+\.?\d*)/);if(m)return parseFloat(m[1]);}return null;}
+function reviews(el){const t=txt(el);const m=t.match(/(\d[\d,]*)\s*(?:global\s+)?(?:ratings?|reviews?)/i);if(m)return parseInt(m[1].replace(/,/g,''),10);return null;}
+function avail(el){const t=txt(el).toLowerCase();if(/in stock|in-store only/.test(t))return 'in stock';if(/out of stock|currently unavailable/.test(t))return 'out of stock';const ol=t.match(/only\s+(\d+)\s+left/i);if(ol)return 'only '+ol[1]+' left';const sh=t.match(/usually ships[^.]{0,50}/i);if(sh)return sh[0].trim();if(/pre-order/i.test(t))return 'pre-order';return null;}
+function origPrice(el){const d=el.querySelector('del,s,[data-testid*="original"],[class*="was-price"],[class*="list-price"],[class*="original-price"]');if(d){const m=(d.innerText||'').match(PRICE);if(m)return m[0];}const t=txt(el);const m=t.match(/was\s+([$€£¥₹]\s?\d[\d,]*(?:[.,]\d{1,2})?)/i);if(m)return m[1];return null;}
+function isSponsored(el){const t=txt(el).toLowerCase();if(t.includes('sponsored')||t.includes('sponsored ad'))return true;const b=el.querySelector('[data-testid*="sponsored"],[class*="sponsored"],[aria-label*="sponsored"]');return!!b;}
+function isProductPage(){const b=document.body;if(!b)return false;const t=(b.innerText||'').toLowerCase();const hp=/[$€£¥₹]\s?\d/.test(t);const cb=document.querySelector('#add-to-cart-button,#buy-now-button,[data-testid*="add-to-cart"],[data-testid*="buy-now"],button[name*="cart"],input[name*="cart"],#add-to-cart,#buy-now');const hc=/add to cart|buy now|add to basket|add to bag|in winkelwagen|au panier/i.test(t);const u=location.href.toLowerCase();const pu=/\/dp\/|\/gp\/product\/|\/product\/|\/itm\/|\/products\/|\/p\//.test(u);const h1=document.querySelector('h1');const hh=h1&&h1.innerText.trim().length>5;return hp&&(cb||hc)&&(pu||hh);}
+function extractProduct(){const o={};const h1=document.querySelector('h1');const title=h1?h1.innerText.trim():document.title;if(title)o.title=title.slice(0,300);o.url=location.href;const pe=document.querySelector('#priceblock_ourprice,#priceblock_dealprice,.a-price .a-offscreen,[data-testid*="price"],[class*="price"]:not([class*="was"]):not([class*="original"]):not([class*="save"]),[id*="price"]:not([id*="was"]):not([id*="original"])');if(pe){const m=(pe.innerText||'').match(PRICE);if(m)o.price=m[0];}if(!o.price){const m=(document.body.innerText||'').match(PRICE);if(m)o.price=m[0];}const op=origPrice(document.body);if(op)o.original_price=op;const rt=rating(document.body);if(rt!==null)o.rating=rt;const rv=reviews(document.body);if(rv!==null)o.reviews=rv;const av=avail(document.body);if(av)o.availability=av;const img=document.querySelector('#landingImage,#imgBlkFront,[data-testid*="product-image"],.product-image img,img[class*="product"]:not([src*="logo"]):not([src*="icon"]):not([src*="sprite"])');if(img&&img.src){o.image=img.src;if(img.alt)o.image_alt=img.alt.slice(0,100);}const fs=[];const sec=(h1||pe||document.body).closest('section,div,main,[role="main"]')||document.body;if(sec){const bs=sec.querySelectorAll('li,[role="listitem"]');for(const b of bs){const bt=(b.innerText||'').trim();if(bt.length>10&&bt.length<300&&fs.length<10&&!/add to cart|buy now|sign in|subscribe|follow/i.test(bt))fs.push(bt);}}if(fs.length>0)o.features=fs;return o;}
 const SKIP_TAGS=new Set(['STYLE','SCRIPT','HEAD','NOSCRIPT','SVG','TEMPLATE','LINK','META','BR','HR','PATH','DEFS','USE','G','RECT','CIRCLE','LINE','POLYGON','POLYLINE']);
 let best=null,bestScore=0,bestSig='';
 for(const c of document.querySelectorAll('*')){
@@ -1772,7 +1780,7 @@ const score=count*tf*(1+(extCount/count)*2+(hCount/count)+(imgCount/count)*0.5+(
 if(score>bestScore){bestScore=score;best=c;bestSig=s;}
 }
 }
-if(!best)return JSON.stringify({error:'no repeated list found',items:[]});
+if(!best){if(isProductPage()){const p=extractProduct();if(Object.keys(p).length>1)return JSON.stringify({container:'product',count:1,items:[p]});}return JSON.stringify({error:'no repeated list found',items:[]});}
 // Field extraction: clean, typed, deduplicated. No 'text' field.
 const items=[...best.children].filter(k=>k.nodeType===1&&sig(k)===bestSig).map(item=>{
 const fullText=txt(item);const o={};
@@ -1801,6 +1809,12 @@ const hd=clone.querySelector('h1,h2,h3,h4,h5,h6');
 if(hd)hd.remove();
 const desc=(clone.innerText||clone.textContent||'').replace(/\s+/g,' ').trim();
 if(desc&&desc.length>15){const dn=norm(desc),tn=norm(title||'');if(dn&&!tn.includes(dn)&&!dn.includes(tn))o.description=desc.slice(0,300);}
+// Shopping fields (universal e-commerce enhancement).
+const rt=rating(item);if(rt!==null)o.rating=rt;
+const rv=reviews(item);if(rv!==null)o.reviews=rv;
+const av=avail(item);if(av)o.availability=av;
+const op=origPrice(item);if(op)o.original_price=op;
+if(isSponsored(item))o.sponsored=true;
 return o;
 }).filter(o=>Object.keys(o).length>0).slice(0,"#.to_string()
     + &lim.to_string()

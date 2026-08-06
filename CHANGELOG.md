@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Shopping-aware auto-extract**: `see extract=auto` now extracts product-specific fields from e-commerce listing pages: rating, review count, availability, original (strikethrough) price, and sponsored/ad flag. Works universally across all shopping sites. Existing fields (title, url, image, price, date, description) are unchanged.
+- **Single-product fallback in auto-extract**: When `extract=auto` is called on a product detail page (no repeated list structure), the driver now detects the product page and extracts structured product data (title, price, original price, rating, reviews, availability, features, image) as a single-item result. Previously returned "no repeated list found" on product pages.
+- **Product page content extraction**: `see mode=content` on product detail pages now returns a focused product summary (title, price, rating, availability, key features, image) instead of the full page text. Saves 80-90% tokens on large e-commerce product pages. Falls back to existing content extraction for non-product pages.
+- **Pre-seeded consent knowledge for major e-commerce sites**: Known consent dialog selectors for major shopping domains are pre-seeded at trust threshold on first load, so consent banners are auto-dismissed on the first visit without learning. Never overwrites user-learned data.
+
+### Changed
+
+- **Price regex now supports decimal commas**: European price formats are now matched in auto-extract. Previously only decimal points were matched.
+
 ## [3.0.14] - 2026-08-06
 
 ### Added

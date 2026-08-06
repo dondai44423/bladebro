@@ -296,7 +296,37 @@ impl KnowledgeBase {
                 kb.stats = stats;
             }
         }
+        kb.pre_seed();
         kb
+    }
+
+    /// Pre-seed known domain knowledge for major sites. Only adds entries
+    /// that don't already exist — never overwrites user-learned data.
+    /// Pre-seeded entries start at TRUST_THRESHOLD so they're auto-applied
+    /// immediately. If the selector is wrong or stale, the confidence system
+    /// handles it (downgrade, eviction, fallback to full detection).
+    fn pre_seed(&mut self) {
+        let now = now_secs();
+        // Amazon EU cookie consent (same selector across all Amazon EU TLDs).
+        for domain in &["amazon.com", "amazon.co.uk", "amazon.de", "amazon.fr", "amazon.it", "amazon.es", "amazon.nl"] {
+            let need = match self.domains.get(*domain) {
+                None => true,
+                Some(dk) => dk.consent.is_none(),
+            };
+            if need {
+                let dk = self.domains.entry(domain.to_string()).or_default();
+                dk.consent = Some(ConsentKnowledge {
+                    selector: "#sp-cc-rejectall-link".to_string(),
+                    framework: "amazon".to_string(),
+                    confidence: TRUST_THRESHOLD,
+                    last_validated: now,
+                    success_count: 0,
+                    fail_count: 0,
+                });
+                dk.last_visit = now;
+            }
+        }
+        self.dirty = true;
     }
 
     /// Atomically write all dirty domain knowledge + stats to disk.
@@ -755,5 +785,32 @@ mod tests {
 
         std::env::remove_var("BLADE_HOME");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pre_seed_amazon_consent() {
+        let mut kb = KnowledgeBase::default();
+        kb.pre_seed();
+        // Amazon.com should have consent at trust threshold.
+        let c = kb.get_consent("amazon.com").expect("amazon.com should be pre-seeded");
+        assert_eq!(c.selector, "#sp-cc-rejectall-link");
+        assert_eq!(c.framework, "amazon");
+        assert!((c.confidence - 0.7).abs() < 0.01, "should start at trust threshold");
+        // Other Amazon TLDs should also be seeded.
+        assert!(kb.get_consent("amazon.co.uk").is_some());
+        assert!(kb.get_consent("amazon.de").is_some());
+        assert!(kb.get_consent("amazon.fr").is_some());
+    }
+
+    #[test]
+    fn pre_seed_does_not_overwrite_existing() {
+        let mut kb = KnowledgeBase::default();
+        // Simulate user-learned consent for amazon.com.
+        kb.learn_consent("amazon.com", "#user-learned-btn", "test");
+        kb.pre_seed();
+        // Pre-seed should NOT overwrite the user-learned selector.
+        let dk = kb.domains.get("amazon.com").unwrap();
+        let c = dk.consent.as_ref().unwrap();
+        assert_eq!(c.selector, "#user-learned-btn", "pre-seed should not overwrite existing");
     }
 }
