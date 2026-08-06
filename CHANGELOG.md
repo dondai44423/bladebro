@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.17] - 2026-08-06
+
+### Fixed
+
+- **Eval variable leakage**: `act eval` now always wraps JS in an IIFE, preventing `const`/`let` declarations from leaking to global scope. Previously, running `const posts = [...]` in one eval call caused `Identifier 'posts' has already been declared` in the next. Expressions without `return` are auto-wrapped with `return(...)`.
+- **Fill submit button reliability**: `act fill` now waits 300ms after filling fields before clicking submit (lets field validation settle). If the mouse click on the submit button has no effect, it automatically falls back to `el.click()` via JS. Previously, submit buttons that don't respond to CDP mouse events required a manual `eval` workaround.
+- **Batch auto-settle**: `act batch` now detects when a step causes navigation and automatically waits 500ms + recaptures the model before the next step. This prevents the next step from acting on a half-rendered SPA page. `run` (execute_step) gets the same treatment for navigate and regular action steps.
+
+### Changed
+
+- **Tool definitions clarified**: `fill` description now explicitly states it REQUIRES a `fields` array (not `ref`+`text` at top level). `batch` description advises using `text`/`label` addressing in steps instead of `ref` (refs go stale after navigation). `see` description adds eval guidance (variables are auto-scoped). `submit` schema notes JS click fallback.
+
 ## [3.0.16] - 2026-08-06
 
 ### Changed

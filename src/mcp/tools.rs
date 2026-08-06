@@ -24,6 +24,8 @@ pub fn all_tools() -> Vec<ToolDef> {
 ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > x,y. Add role= or nth= if ambiguous.\n\
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call.\n\
+fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit gets JS click fallback if mouse click fails.\n\
+batch: use text/label addressing in steps (not ref) — refs go stale after navigation. Auto-settles after each navigation (500ms + recapture).\n\
 Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
             input_schema: json!({
                 "type": "object",
@@ -53,7 +55,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "slim": {"type": "boolean", "description": "Skip delta, return verdict only."},
                     "fields": {
                         "type": "array",
-                        "description": "Fill: [{ref|label, text|option, check}]. Auto-detects field type.",
+                        "description": "Fill: REQUIRED. [{ref|label, text|option, check}]. Auto-detects field type (text, checkbox, select).",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -65,7 +67,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                             }
                         }
                     },
-                    "submit": {"type": "string", "description": "Fill: ref or text of submit button."},
+                    "submit": {"type": "string", "description": "Fill: ref or text of submit button. JS click fallback if mouse click fails."},
                     "steps": {
                         "type": "array",
                         "description": "Batch: sequential steps, same fields as act (action, ref, text, label, role, nth, key, url, dx, dy). Navigation doesn't halt — subsequent steps act on the new page. Stops on error only.",
@@ -92,6 +94,7 @@ mode=content: page text as clean markdown. For READING articles, docs. Use budge
 mode=outline: title + heading hierarchy only. Cheapest \"what's on this page\" check.\n\
 mode=model (default): interactive elements with refs. Use when you need to ACT.\n\
 For structured list data (products, posts, search results, listings): use extract=auto FIRST — extracts all items with fields (title, price, url, rating, score) in ONE call. Cheaper than clicking into each item.\n\
+eval (act eval) is for custom JS extraction when extract=auto does not cover your use case. Variables are auto-scoped (no leakage between calls).\n\
 Other params: filter (zoom by role), find (search by text → refs), extract=json+template (custom), extract=links|forms, logs=console|network.\n\
 Big data (>12KB) goes to a file path with inline preview.",
             input_schema: json!({

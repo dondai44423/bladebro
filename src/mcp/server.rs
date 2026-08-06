@@ -1213,9 +1213,25 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 } else {
                     resolve_text_target(page, submit, None, None).await?
                 };
-                let (delta, verdict) = page.act(Action::Click { ref_id: resolved }).await?;
-                last_verdict = verdict;
-                delta
+                // Wait briefly for field validation to settle before clicking submit.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let (delta, verdict) = page.act(Action::Click { ref_id: resolved.clone() }).await?;
+                last_verdict = verdict.clone();
+                // If the mouse click had no effect (no navigation, no DOM change),
+                // the submit button may be a div styled as a button or require
+                // JS dispatch. Try el.click() as a fallback.
+                if !delta.navigated && delta.is_empty() {
+                    match handle_eval(page, "el ? (el.click(), true) : false", &resolved).await {
+                        Ok(_) => {
+                            last_verdict = format!("{verdict} (submit via JS click fallback)");
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            page.recapture().await?
+                        }
+                        Err(_) => delta,
+                    }
+                } else {
+                    delta
+                }
             } else {
                 page.recapture().await?
             };
@@ -1249,19 +1265,25 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let mut ok_count = 0usize;
             let mut halted: Option<usize> = None;
             let start_url = page.model().url().to_string();
+            let mut prev_url = start_url.clone();
             for (i, step) in steps.iter().enumerate() {
                 let step_action = step.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
                 match Box::pin(handle_act(step, page)).await {
                     Ok(verdict) => {
                         ok_count += 1;
                         let vline = verdict.lines().next().unwrap_or("ok").trim().to_string();
-                        // Don't halt on navigation — just note it and continue.
-                        // The next step will act on the new page (refs auto-heal).
-                        if page.model().url() != start_url {
-                            verdicts.push(format!("step{}[{}]: {} (navigated → {})", i+1, step_action, vline, page.model().url()));
+                        let curr_url = page.model().url().to_string();
+                        // Auto-settle: if this step caused navigation, give the
+                        // SPA time to render and recapture for fresh refs.
+                        // Without this, the next step acts on a half-rendered page.
+                        if curr_url != prev_url {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            let _ = page.recapture().await;
+                            verdicts.push(format!("step{}[{}]: {} (→ {})", i+1, step_action, vline, curr_url));
                         } else {
                             verdicts.push(format!("step{}[{}]: {}", i+1, step_action, vline));
                         }
+                        prev_url = curr_url;
                     }
                     Err(e) => {
                         halted = Some(i+1);
@@ -2161,12 +2183,16 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
 /// Result is JSON-stringified, capped at 4KB inline; bigger
 /// payloads go to an artifact file (V10).
 async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> {
-    // Detect top-level `return` — a bare `return` outside a function
-    // throws SyntaxError: Illegal return statement. Auto-wrap in IIFE.
-    let js_wrapped = if js.trim().starts_with("return") || js.contains("\nreturn") {
+    // Always wrap in IIFE to prevent variable leakage to global scope.
+    // Without this, `const posts = [...]` in one eval call causes
+    // "Identifier 'posts' has already been declared" in the next.
+    // If the code has a `return`, let it control the IIFE return.
+    // If not, treat the whole thing as an expression and return it.
+    let has_return = js.contains("return");
+    let js_wrapped = if has_return {
         format!("(function(){{ {js} }})()")
     } else {
-        js.to_string()
+        format!("(function(){{ return ({js}); }})()")
     };
     let expression = if ref_id.is_empty() {
         js_wrapped
@@ -2550,6 +2576,10 @@ async fn execute_step(
         "navigate" => {
             let url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
             let delta = page.navigate(url).await?;
+            if delta.navigated {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let _ = page.recapture().await;
+            }
             observations.push(format!("step {path}: {}", page.delta_view(&delta, 4000)));
         }
         "read" => {
@@ -2656,6 +2686,10 @@ async fn execute_step(
             let action = build_action(step, page).await?;
             match page.act(action).await {
                 Ok((delta, verdict)) => {
+                    if delta.navigated {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let _ = page.recapture().await;
+                    }
                     observations.push(format!("step {path}: {verdict}\n{}", page.delta_view(&delta, 4000)));
                 }
                 // Closed propagates unwrapped so serve() self-heals.
