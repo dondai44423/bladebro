@@ -20,11 +20,11 @@ pub fn all_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "act",
-            description: "Do something on the page. Returns a verdict + delta. navigate returns top interactive elements (budget 2000 chars) — enough refs to act on common pages. For dense pages use see mode=model (more refs) or mode=content (read text).\n\
-ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > x,y (canvas/coords). Add role= or nth= if ambiguous.\n\
+            description: "Do something on the page. Returns verdict + delta. navigate returns refs + content preview — usually enough to act without a separate see call.\n\
+ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > x,y. Add role= or nth= if ambiguous.\n\
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
-url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call. set-cookie uses url for cookie scope, not navigation.\n\
-Use fill for forms (not individual type calls). Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
+url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call.\n\
+Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
             input_schema: json!({
                 "type": "object",
                 "required": ["action"],
@@ -39,7 +39,7 @@ Use fill for forms (not individual type calls). Use run instead of batch for bra
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches."},
                     "key": {"type": "string", "description": "Key: Enter, Tab, Escape, ArrowDown, etc."},
-                    "url": {"type": "string", "description": "For navigate: target URL. For download: file URL (fetched via JS, no navigation). For collect: page to navigate to first. For set-cookie: cookie scope URL. For other actions: navigates to this URL first, then performs the action."},
+                    "url": {"type": "string", "description": "For navigate: target URL. For download: file URL. For collect: page to navigate to first. For other actions: navigates to this URL first, then performs the action."},
                     "dx": {"type": "integer"},
                     "dy": {"type": "integer"},
                     "condition": {
@@ -88,11 +88,12 @@ Use fill for forms (not individual type calls). Use run instead of batch for bra
         ToolDef {
             name: "see",
             description: "Observe WITHOUT acting. Three read modes:\n\
-mode=content: page text as clean markdown (headings, links, lists, code). For READING pages — articles, docs, search results. No ref IDs.\n\
-mode=outline: just the page title + heading hierarchy. Ultra-minimal for 'what is on this page'.\n\
-mode=model (default): interactive elements with refs for clicking/typing. Use when you need to ACT.\n\
-Other params: filter (zoom by role), find (search by text, returns refs), extract=auto (template-free list extraction), extract=json+template (custom), extract=links|forms, content=true (legacy: text with model), scope=eN (subtree text), logs=console|network.\n\
-Big data (>6KB) goes to a file path.",
+mode=content: page text as clean markdown. For READING articles, docs. Use budget=N to cap output, scope=eN for one element's subtree.\n\
+mode=outline: title + heading hierarchy only. Cheapest \"what's on this page\" check.\n\
+mode=model (default): interactive elements with refs. Use when you need to ACT.\n\
+For structured list data (products, posts, search results, listings): use extract=auto FIRST — extracts all items with fields (title, price, url, rating, score) in ONE call. Cheaper than clicking into each item.\n\
+Other params: filter (zoom by role), find (search by text → refs), extract=json+template (custom), extract=links|forms, logs=console|network.\n\
+Big data (>12KB) goes to a file path with inline preview.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -107,7 +108,7 @@ Big data (>6KB) goes to a file path.",
                     "extract": {
                         "type": "string",
                         "enum": ["links", "forms", "json", "auto"],
-                        "description": "auto (template-free), json (needs template), links, forms."
+                        "description": "auto (template-free, site-aware), json (needs template), links, forms."
                     },
                     "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}."},
                     "limit": {"type": "integer", "description": "Max items for extract. Default 50."},
@@ -121,7 +122,7 @@ Big data (>6KB) goes to a file path.",
             name: "state",
             description: "Browser state: tabs, cookies, sessions, storage, resource blocking.\n\
 LOGIN PERSISTENCE: save <name> after login → load <name> in a later session (restores cookies+storage, then navigate to site).\n\
-TABS: tabs (list), open-tab <url>, switch-tab <id>, close-tab <id>.\n\
+TABS: tabs (list), open-tab <url> (returns tab ID — save it for switch-tab), switch-tab <id>, close-tab <id>.\n\
 COOKIES/STORAGE: cookies, set-cookie, ls/ss, set-ls/set-ss, clear-ls/clear-ss.\n\
 BLOCKING: op=block classes=\"images,fonts,media,trackers\" (inert assets only, never first-party scripts).\n\
 State ops (open-tab, save, load, etc.) also work as steps in batch and run.",

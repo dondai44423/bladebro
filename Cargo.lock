@@ -37,7 +37,7 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "bladebro"
-version = "3.0.15"
+version = "3.0.16"
 dependencies = [
  "anyhow",
  "base64",

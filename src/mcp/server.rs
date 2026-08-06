@@ -1294,13 +1294,18 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             if std::env::var("NAV_TIMING").is_ok() {
                 eprintln!("[nav-timing] navigate completed: {:?}", _rt.elapsed());
             }
-            // Top interactive elements (budget 2000). Agent gets enough
-            // refs to act on common pages (login, search, main links)
-            // without a separate see call. For dense pages, use
-            // see mode=model (more refs) or mode=content (read text).
-            // view() already includes the page header + title + elements.
-            let top = page.view(2000);
-            return Ok(format!("{verdict}\n{}", top));
+            // Refs (budget 3000) + brief content preview (1500 chars).
+            // The agent gets enough to act AND read — skipping a separate
+            // see call for most tasks. For dense pages use see mode=model
+            // (more refs) or mode=content (full text).
+            let top = page.view(3000);
+            if delta.navigated {
+                let content = page.content(1500).await.unwrap_or_default();
+                if !content.is_empty() {
+                    return Ok(format!("{verdict}\n{top}\n--- content ---\n{content}"));
+                }
+            }
+            return Ok(format!("{verdict}\n{top}"));
         }
         "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies" | "set-cookie" => {
             // Allow state ops as action shortcuts in batch/run steps.
@@ -1376,7 +1381,17 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             if is_scroll {
                 Ok(format!("{verdict}{expect_note}\n{}", page.view(8000)))
             } else {
-                Ok(format!("{verdict}{expect_note}\n{}", page.delta_view(&delta, 8000)))
+                let view = page.delta_view(&delta, 8000);
+                if delta.navigated {
+                    let content = page.content(1500).await.unwrap_or_default();
+                    if !content.is_empty() {
+                        Ok(format!("{verdict}{expect_note}\n{view}\n--- content ---\n{content}"))
+                    } else {
+                        Ok(format!("{verdict}{expect_note}\n{view}"))
+                    }
+                } else {
+                    Ok(format!("{verdict}{expect_note}\n{view}"))
+                }
             }
         }
         // Error context: recapture and include available elements so the
@@ -1854,9 +1869,9 @@ async fn run_auto_extract(page: &Page, limit: usize) -> Result<serde_json::Value
 async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String> {
     let val = run_auto_extract(page, limit).await?;
     let json_str = serde_json::to_string(&val)?;
-    if json_str.len() > 6000 {
+    if json_str.len() > 12000 {
         let path = crate::artifacts::write_artifact(&json_str, "json")?;
-        let preview: String = json_str.chars().take(600).collect();
+        let preview: String = json_str.chars().take(1000).collect();
         return Ok(format!(
             "extract auto ({} bytes) → {path}\npreview: {preview}…\nread the file for the full data",
             json_str.len(),
@@ -1915,8 +1930,12 @@ async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
     }
 
     let json = serde_json::to_string_pretty(&all_items)?;
+    if json.len() <= 12000 {
+        return Ok(format!("collected {} items:\n{json}", all_items.len()));
+    }
     let path = crate::artifacts::write_artifact(&json, "json")?;
-    Ok(format!("collected {} items ({} bytes) → {path}", all_items.len(), json.len()))
+    let preview: String = json.chars().take(1000).collect();
+    Ok(format!("collected {} items ({} bytes) → {path}\npreview: {preview}…", all_items.len(), json.len()))
 }
 
 async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
@@ -2251,12 +2270,12 @@ async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> 
 
 /// Format an eval result: inline if small, artifact file if big.
 async fn format_eval_result(json_str: &str) -> Result<String> {
-    const INLINE_CAP: usize = 4000;
+    const INLINE_CAP: usize = 8000;
     if json_str.len() <= INLINE_CAP {
         Ok(format!("result: {json_str}"))
     } else {
         let path = crate::artifacts::write_artifact(json_str, "json")?;
-        let preview: String = json_str.chars().take(500).collect();
+        let preview: String = json_str.chars().take(1000).collect();
         Ok(format!(
             "result ({} bytes) → {path}\npreview: {preview}…\nread the file for the full result",
             json_str.len()

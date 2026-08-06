@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.16] - 2026-08-06
+
+### Changed
+
+- **Navigate returns content preview**: `act navigate` now returns a 1500-char content snapshot alongside the element refs, eliminating the `navigate → see` two-call pattern for most tasks. The agent gets enough to act AND read in one response.
+- **Click navigation returns content preview**: When a click triggers a page navigation, the response now includes a content preview of the new page, eliminating the `click → see` pattern.
+- **Extract inline threshold raised**: `see extract=auto` now returns results inline up to 12KB (was 6KB), and `act collect` returns inline up to 12KB. Eliminates the `extract → read file` pattern for most real-world extractions. Preview length increased from 600 to 1000 chars.
+- **Eval inline cap raised**: `act eval` results now return inline up to 8KB (was 4KB), reducing file-offload for common eval use cases.
+- **Navigate element budget increased**: 2000 → 3000 chars, showing more actionable elements on dense pages without a separate `see` call.
+- **Tool definitions rewritten for efficiency**: `act` description now notes navigate returns content preview (skip `see`). `see` description now strongly recommends `extract=auto` for structured list data before clicking into items, and guides toward `scope` and `budget` for focused reading. `state` description notes `open-tab` returns the tab ID.
+
 ## [3.0.15] - 2026-08-06
 
 ### Added
