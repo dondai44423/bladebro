@@ -172,7 +172,7 @@ Navigate and act already return page state. Use `see` for:
 | `see logs="network"` | Requests with status, failures first |
 | `see scope=e5` | One element's subtree text |
 
-**Auto-extract (`extract=auto`)** — deterministic structural list extraction. For every element with 3+ children, groups by structural signature, scores by content value. Extracts title, URL, image, price, date, description. Verified on HN (30 articles), Lobste.rs (25 stories), Wikipedia (50 references), DuckDuckGo, StackOverflow, Reddit, GitHub, MDN.
+**Auto-extract (`extract=auto`)** — deterministic structural list extraction. For every element with 3+ children, groups by structural signature, scores by content value. Extracts title, URL, image, price, date, description. **Site-aware**: shopping sites get rating/reviews/availability, Reddit gets score/comments/author, GitHub gets stars/forks/labels. Verified on HN, Lobste.rs, Wikipedia, DuckDuckGo, StackOverflow, Reddit, GitHub, MDN, Amazon.
 
 **Collect (`act collect`)** — native scroll+dedupe loop for infinite feeds. Auto-extract, dedupe by URL/title, scroll, repeat until max or no new items. ONE call, ONE artifact. Verified: 80 items from infinite-scroll test page, 0 duplicates.
 
@@ -295,9 +295,9 @@ Six layers. All on by default. No config needed.
 
 | Layer | What it does |
 |---|---|
-| **Protocol** | No `Runtime.enable` (defuses DataDome console trap), CDP over pipe (zero listening ports, Unix) |
+| **Protocol** | No `Runtime.enable` (defuses DataDome console trap), CDP over pipe (zero listening ports, Unix), isolated world for DOM reads (invisible to anti-bot scripts) |
 | **Environment** | UA override (no HeadlessChrome), WebGL renderer, outerWidth/innerWidth, screen geometry, hardwareConcurrency, deviceMemory, permissions, mediaDevices |
-| **Behavior** | Bezier mouse paths with overshoot+correction, log-normal typing cadence, idle hum (mouse movement during idle), smooth scroll. **Persistent behavioral fingerprint** — same personality every session. |
+| **Behavior** | Bezier mouse paths with overshoot+correction, `movementX`/`movementY` deltas on every event, micro-tremors before clicks, non-zero key press duration, log-normal typing cadence, idle hum, smooth scroll. **Persistent behavioral fingerprint** — same personality every session. |
 | **Coherence** | Per-domain stealth memory (timezone + locale), geo-consistent identity, WebRTC fail-closed, stable canvas/audio (no noise by default) |
 | **Residue** | cdc_ property removal, native toString integrity, MutationObserver for late artifacts |
 | **Seasoning** | Persistent browser profile (localStorage survives restarts), storage quota, font audit, window.chrome object |
@@ -310,6 +310,7 @@ Six layers. All on by default. No config needed.
 | bot.sannysoft.com | ALL PASS |
 | incolumitas.com | 8/8 automated tests PASS (webdriver=false, no UA leak, no override/overflow) |
 | CreepJS | headless: 33% (one sub-test; core indicators clean) |
+| PerimeterX/HUMAN (Zillow, Fiverr) | Full page load, no block |
 | Boot self-check | 4/4 OK |
 
 Run `bladebro audit` to verify your own setup.
@@ -324,10 +325,10 @@ Run `bladebro audit` to verify your own setup.
 |---|---|---|---|
 | Tool defs | ~1,900 tokens | ~13,700 tokens | ~8,000 tokens |
 | Per-click result | 60-570 tokens (delta) | 2,000+ tokens (full page) | 2,000+ tokens |
-| Stealth | 6-layer, built-in | None | None |
+| Stealth | 6-layer, behavioral biometrics, isolated world | None | None |
 | Re-render immunity | Yes (structural fingerprints) | No | No |
 | Self-improvement | Yes (learns across sessions) | No | No |
-| Auto-extraction | Template-free (extract=auto) | No | No |
+| Auto-extraction | Template-free, site-aware (shopping, Reddit, GitHub) | No | No |
 | Infinite scroll collect | Yes (act collect) | No | No |
 | Batch actions | Yes (act batch) | No | No |
 | Shadow DOM | Pierced (deepAll) | Partial | Partial |

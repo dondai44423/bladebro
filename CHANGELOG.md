@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.15] - 2026-08-06
 
 ### Added
 
@@ -13,9 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single-product fallback in auto-extract**: When `extract=auto` is called on a product detail page (no repeated list structure), the driver now detects the product page and extracts structured product data (title, price, original price, rating, reviews, availability, features, image) as a single-item result. Previously returned "no repeated list found" on product pages.
 - **Product page content extraction**: `see mode=content` on product detail pages now returns a focused product summary (title, price, rating, availability, key features, image) instead of the full page text. Saves 80-90% tokens on large e-commerce product pages. Falls back to existing content extraction for non-product pages.
 - **Pre-seeded consent knowledge for major e-commerce sites**: Known consent dialog selectors for major shopping domains are pre-seeded at trust threshold on first load, so consent banners are auto-dismissed on the first visit without learning. Never overwrites user-learned data.
+- **Reddit-aware auto-extract**: `see extract=auto` on Reddit now extracts platform-specific fields: score (upvotes), comment count, author (u/username), and subreddit (r/subreddit). Reads `shreddit-post` element attributes directly for accurate data extraction through shadow DOM. Post titles and URLs are correctly identified as post titles and Reddit comment links, not external link URLs. Previously, Reddit posts had shopping fields (rating, reviews) that were false positives.
+- **Reddit post detail content extraction**: `see mode=content` on Reddit post pages (URLs containing `/comments/`) now returns a focused summary with post title, subreddit and author metadata, and the post body plus top comments. Ads and promoted content are filtered out.
+- **GitHub-aware auto-extract**: `see extract=auto` on GitHub now extracts platform-specific fields: star count, fork count, stars-today (trending), issue/PR number, labels, and status (open/closed). Previously, GitHub items had shopping fields (rating) that were false positives from star-count elements.
+- **GitHub repo page content extraction**: `see mode=content` on GitHub repository pages now returns a focused summary with repo name, description, star and fork counts, topics, and README preview instead of the full page dump (file listing, sponsor info, etc.).
+- **Site-conditional field extraction**: Auto-extract now detects the site (Reddit, GitHub, or shopping) and applies only the relevant field extractors. Shopping fields (rating, reviews, availability) no longer fire on Reddit or GitHub, eliminating false-positive fields from star buttons, vote counts, and timestamp elements.
+- **Isolated world for DOM operations**: DOM queries can now run in an isolated execution world (`Page.createIsolatedWorld`) that is invisible to main-world anti-bot scripts. Patched DOM methods and `Error.stack` traps in the page's JavaScript cannot observe Bladebro's operations. The context is lazily created and reset on navigation.
 
 ### Changed
 
+- **Mouse events now include movementX/movementY deltas**: All `Input.dispatchMouseEvent` calls (clicks, moves, idle hum) now calculate and include `movementX`/`movementY` coordinate deltas. Behavioral biometric systems (PerimeterX/HUMAN, DataDome, Kasada) track these deltas; missing or always-zero values were an instant bot flag. A shared last-mouse-position tracker on the Page struct maintains continuity between action dispatch and idle hum.
+- **Mouse micro-tremors before clicks**: 2-4 tiny jitter points (1-3px gaussian displacement) are now dispatched before each click, simulating involuntary hand tremors. A perfectly stationary cursor before a click is a bot signal.
+- **Key press duration is now non-zero**: 40-110ms delay between `keyDown` and `keyUp` events, matching real human key hold times. Previously keyDown and keyUp were dispatched with zero delay.
+- **Error constructor masked by native-lie registry**: The patched `Error` constructor is now registered in the lie registry so `Error.toString()` returns `[native code]`. Previously the constructor itself was a detection vector.
+- **Console hooks moved to Console.prototype**: Console method hooks (log, info, warn, error, debug) are now installed on `Console.prototype` instead of the `console` instance. `Object.getOwnPropertyDescriptor(console, 'log')` now returns `undefined`, matching real Chrome. Own properties on the console instance were a detection signal.
+- **Removed navigator.presentation fake**: The fake `navigator.presentation` object (a plain `{}` set via `defineProperty`) created a detectable data descriptor. Real Chrome only exposes this on HTTPS origins; missing it is normal and less suspicious than a wrong-shaped object.
 - **Price regex now supports decimal commas**: European price formats are now matched in auto-extract. Previously only decimal points were matched.
 
 ## [3.0.14] - 2026-08-06

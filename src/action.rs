@@ -18,10 +18,12 @@
 
 use std::time::Duration;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::stealth::biometrics::gaussian;
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
 use crate::page::perception::JS_PREAMBLE;
@@ -626,26 +628,53 @@ async fn find_by_sig(
 /// Dispatch a human-like mouse move from a random start point to `target`.
 /// Returns the final (click) position after bezier path + overshoot correction.
 /// Shared by click (adds press/release after) and hover (no click).
-async fn dispatch_mouse_move(cdp: &CdpSession, target: (f64, f64)) -> Result<(f64, f64)> {
+async fn dispatch_mouse_move(
+    cdp: &CdpSession,
+    target: (f64, f64),
+    last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
+) -> Result<(f64, f64)> {
     let mut rng = crate::stealth::Rng::new();
     // Random start point — offset from the target by 100-300px.
-    let angle = rng.uniform() * 2.0 * std::f64::consts::PI;
-    let start_dist = 100.0 + rng.uniform() * 200.0;
-    let start = (target.0 + angle.cos() * start_dist, target.1 + angle.sin() * start_dist);
+    // If we have a last position, start from there instead (continuity).
+    let start = {
+        let lm = last_mouse.lock().unwrap();
+        if let Some((lx, ly)) = *lm {
+            (lx, ly)
+        } else {
+            let angle = rng.uniform() * 2.0 * std::f64::consts::PI;
+            let start_dist = 100.0 + rng.uniform() * 200.0;
+            (target.0 + angle.cos() * start_dist, target.1 + angle.sin() * start_dist)
+        }
+    };
 
     // Generate the bezier path with overshoot + gaussian click offset.
     let path = crate::stealth::mouse_path(start, target, &mut rng);
 
     // Move along the path, dispatching mouseMoved events with natural delays.
+    // Include movementX/movementY deltas — PerimeterX/HUMAN tracks these
+    // coordinate deltas as behavioral biometrics; missing or zero values
+    // are an instant bot flag.
     // 5s timeout: if Chrome is stuck (e.g. new tab loading), don't hang 30s.
     let to = Duration::from_secs(5);
     for pt in &path {
+        let (mx, my) = {
+            let lm = last_mouse.lock().unwrap();
+            lm.map(|(lx, ly)| (
+                (pt.x - lx).round() as i64,
+                (pt.y - ly).round() as i64,
+            )).unwrap_or((0, 0))
+        };
         cdp.send_with_timeout(
             "Input.dispatchMouseEvent",
-            Some(json!({"type": "mouseMoved", "x": pt.x, "y": pt.y})),
+            Some(json!({
+                "type": "mouseMoved",
+                "x": pt.x, "y": pt.y,
+                "movementX": mx, "movementY": my,
+            })),
             to,
         )
         .await?;
+        *last_mouse.lock().unwrap() = Some((pt.x, pt.y));
         tokio::time::sleep(pt.delay).await;
     }
 
@@ -655,15 +684,52 @@ async fn dispatch_mouse_move(cdp: &CdpSession, target: (f64, f64)) -> Result<(f6
 
 /// Dispatch a real mouse click at (x, y) via `Input.dispatchMouseEvent`,
 /// with a human-like bezier mouse path from a random start point.
-async fn dispatch_mouse_click(cdp: &CdpSession, x: f64, y: f64) -> Result<()> {
-    let (cx, cy) = dispatch_mouse_move(cdp, (x, y)).await?;
+async fn dispatch_mouse_click(
+    cdp: &CdpSession,
+    x: f64,
+    y: f64,
+    last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
+) -> Result<()> {
+    let (cx, cy) = dispatch_mouse_move(cdp, (x, y), last_mouse).await?;
 
     let mut rng = crate::stealth::Rng::new();
     let to = Duration::from_secs(5);
+    // Micro-tremors: 2-4 tiny jitter points (1-3px) before clicking.
+    // Real humans have involuntary hand tremors even when "holding still".
+    // A perfectly stationary cursor before a click is a bot signal.
+    let tremor_count = rng.range(2, 5) as usize;
+    for _ in 0..tremor_count {
+        let jx = gaussian(&mut rng, 0.0, 1.5).clamp(-3.0, 3.0);
+        let jy = gaussian(&mut rng, 0.0, 1.5).clamp(-3.0, 3.0);
+        let tx = cx + jx;
+        let ty = cy + jy;
+        let (mx, my) = {
+            let lm = last_mouse.lock().unwrap();
+            lm.map(|(lx, ly)| (
+                (tx - lx).round() as i64,
+                (ty - ly).round() as i64,
+            )).unwrap_or((0, 0))
+        };
+        cdp.send_with_timeout(
+            "Input.dispatchMouseEvent",
+            Some(json!({
+                "type": "mouseMoved",
+                "x": tx, "y": ty,
+                "movementX": mx, "movementY": my,
+            })),
+            to,
+        )
+        .await?;
+        *last_mouse.lock().unwrap() = Some((tx, ty));
+        tokio::time::sleep(Duration::from_millis(rng.range(15, 45) as u64)).await;
+    }
     // Press + release at the final position.
     cdp.send_with_timeout(
         "Input.dispatchMouseEvent",
-        Some(json!({"type": "mousePressed", "x": cx, "y": cy, "button": "left", "clickCount": 1})),
+        Some(json!({
+            "type": "mousePressed", "x": cx, "y": cy, "button": "left", "clickCount": 1,
+            "movementX": 0, "movementY": 0,
+        })),
         to,
     )
     .await?;
@@ -671,7 +737,10 @@ async fn dispatch_mouse_click(cdp: &CdpSession, x: f64, y: f64) -> Result<()> {
     tokio::time::sleep(Duration::from_millis(50 + rng.range(0, 70) as u64)).await;
     cdp.send_with_timeout(
         "Input.dispatchMouseEvent",
-        Some(json!({"type": "mouseReleased", "x": cx, "y": cy, "button": "left", "clickCount": 1})),
+        Some(json!({
+            "type": "mouseReleased", "x": cx, "y": cy, "button": "left", "clickCount": 1,
+            "movementX": 0, "movementY": 0,
+        })),
         to,
     )
     .await?;
@@ -706,6 +775,9 @@ async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
         "windowsVirtualKeyCode": vk,
     });
     cdp.send("Input.dispatchKeyEvent", Some(key_down)).await?;
+    // Key press duration: 40-110ms — real humans hold before releasing.
+    let mut rng = crate::stealth::Rng::new();
+    tokio::time::sleep(Duration::from_millis(40 + rng.range(0, 70) as u64)).await;
     cdp.send("Input.dispatchKeyEvent", Some(key_up)).await?;
     Ok(())
 }
@@ -786,8 +858,9 @@ pub async fn perform(
     cdp: &CdpSession,
     lpm: &mut LivePageModel,
     action: &Action,
+    last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> Result<(PageDelta, String)> {
-    perform_with_network(cdp, lpm, action, None).await
+    perform_with_network(cdp, lpm, action, None, last_mouse).await
 }
 
 /// Mutation watcher: installed before an action dispatch so the next
@@ -819,6 +892,7 @@ pub async fn perform_with_network(
     lpm: &mut LivePageModel,
     action: &Action,
     in_flight: Option<&AtomicUsize>,
+    last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> Result<(PageDelta, String)> {
     // Resolve ref → (sig, frame) for ref-targeted actions.
     let sig_frame = match action.ref_id() {
@@ -838,28 +912,7 @@ pub async fn perform_with_network(
             let _ = cdp.send("Runtime.evaluate", Some(json!({
                 "expression": MUT_WATCH,
             }))).await;
-            let mut rng = crate::stealth::biometrics::Rng::new();
-            let target = (*x, *y);
-            let angle = rng.uniform() * 2.0 * std::f64::consts::PI;
-            let start_dist = 100.0 + rng.uniform() * 200.0;
-            let start = (target.0 + angle.cos() * start_dist, target.1 + angle.sin() * start_dist);
-            let path = crate::stealth::mouse_path(start, target, &mut rng);
-            let to = Duration::from_secs(5);
-            for point in &path {
-                cdp.send_with_timeout("Input.dispatchMouseEvent", Some(json!({
-                    "type": "mouseMoved", "x": point.x, "y": point.y,
-                })), to).await?;
-                tokio::time::sleep(point.delay).await;
-            }
-            cdp.send_with_timeout("Input.dispatchMouseEvent", Some(json!({
-                "type": "mousePressed", "x": target.0, "y": target.1,
-                "button": "left", "clickCount": 1,
-            })), to).await?;
-            tokio::time::sleep(std::time::Duration::from_millis(50 + rng.range(0, 80) as u64)).await;
-            cdp.send_with_timeout("Input.dispatchMouseEvent", Some(json!({
-                "type": "mouseReleased", "x": target.0, "y": target.1,
-                "button": "left", "clickCount": 1,
-            })), to).await?;
+            dispatch_mouse_click(cdp, *x, *y, last_mouse).await?;
         }
         Action::Click { ref_id } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
@@ -905,7 +958,7 @@ pub async fn perform_with_network(
                         if let Some(box_) = found.box_ {
                             let cx = box_[0] + box_[2] / 2.0;
                             let cy = box_[1] + box_[3] / 2.0;
-                            if dispatch_mouse_click(cdp, cx, cy).await.is_err() {
+                            if dispatch_mouse_click(cdp, cx, cy, last_mouse).await.is_err() {
                                 continue;
                             }
                         } else {
@@ -995,6 +1048,9 @@ pub async fn perform_with_network(
                     })),
                 )
                 .await?;
+                // Key press duration: 40-110ms between keyDown and keyUp.
+                // Real humans hold a key before releasing; zero duration is a bot tell.
+                tokio::time::sleep(Duration::from_millis(40 + rng.range(0, 70) as u64)).await;
                 cdp.send(
                     "Input.dispatchKeyEvent",
                     Some(json!({
@@ -1165,11 +1221,11 @@ pub async fn perform_with_network(
             // The human-like path triggers CSS :hover and JS
             // mouseover/mouseenter. On dispatch failure (page
             // navigating mid-hover), re-resolve and retry once.
-            if dispatch_mouse_move(cdp, (cx, cy)).await.is_err() {
+            if dispatch_mouse_move(cdp, (cx, cy), last_mouse).await.is_err() {
                 let retry = find_by_sig(cdp, sig, frame, "hover", None).await?;
                 if retry.ok {
                     if let Some(b2) = retry.box_ {
-                        dispatch_mouse_move(cdp, (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0)).await?;
+                        dispatch_mouse_move(cdp, (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0), last_mouse).await?;
                     }
                 }
             }

@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use crate::cdp::{CdpClient, CdpSession};
 use crate::cdp::list_page_targets;
 use crate::error::{BladeError, Result};
+use serde_json::{json, Value};
 
 /// Information about a JavaScript dialog (alert/confirm/prompt/beforeunload)
 /// that was auto-dismissed by the dialog handler task.
@@ -118,6 +119,16 @@ pub struct Page {
     /// Domain knowledge base (consent selectors, block configs, timing).
     /// Set by the MCP server after attach. None during attach (cold start).
     knowledge: Option<crate::knowledge::SharedKnowledge>,
+    /// Last mouse position — shared between action dispatch and idle hum.
+    /// Used to calculate movementX/movementY deltas for behavioral biometrics.
+    /// PerimeterX/HUMAN specifically tracks these coordinate deltas; missing
+    /// or always-zero values are an instant bot flag.
+    last_mouse: Arc<std::sync::Mutex<Option<(f64, f64)>>>,
+    /// Isolated world execution context ID for DOM operations. None until
+    /// lazily created. Reset on navigation. In the isolated world, DOM
+    /// methods are native (not patched by anti-bot scripts), and
+    /// Error.stack traces don't contain main-world eval frames.
+    isolated_ctx: Arc<std::sync::Mutex<Option<i64>>>,
 }
 
 impl std::fmt::Debug for Page {
@@ -482,10 +493,12 @@ impl Page {
         // S4+S5: shared action state for pacing + idle hum.
         let last_action_epoch = Arc::new(AtomicU64::new(0));
         let is_busy = Arc::new(AtomicBool::new(false));
+        let last_mouse = Arc::new(std::sync::Mutex::new(None));
         let hum_task = crate::stealth::spawn_hum(
             cdp.clone(),
             last_action_epoch.clone(),
             is_busy.clone(),
+            last_mouse.clone(),
         );
 
         // Request-interception task: answers Fetch.requestPaused events
@@ -519,6 +532,8 @@ impl Page {
             downloads,
             download_task: Some(download_task),
             knowledge: None,
+            last_mouse,
+            isolated_ctx: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -531,6 +546,76 @@ impl Page {
     /// Enables consent auto-apply, visit tracking, and cross-session learning.
     pub fn set_knowledge(&mut self, kb: crate::knowledge::SharedKnowledge) {
         self.knowledge = Some(kb);
+    }
+
+    /// Shared last-mouse-position tracker for movementX/movementY calculation.
+    /// Used by action dispatch and idle hum to produce realistic mouse deltas.
+    pub fn last_mouse(&self) -> Arc<std::sync::Mutex<Option<(f64, f64)>>> {
+        self.last_mouse.clone()
+    }
+
+    /// Evaluate a JS expression in an isolated world. The isolated world has
+    /// DOM access but its own JavaScript context — anti-bot scripts in the
+    /// main world cannot observe our queries via patched DOM methods or
+    /// Error.stack frames. Lazily creates the world; recreates on navigation.
+    /// Falls back to regular Runtime.evaluate if the isolated world fails.
+    pub async fn eval_isolated(&self, expr: &str) -> Result<Value> {
+        // Try to get or create the isolated world context.
+        let ctx_id = {
+            let guard = self.isolated_ctx.lock().unwrap();
+            *guard
+        };
+
+        if let Some(id) = ctx_id {
+            // Try the isolated world first.
+            let res = self.cdp.send("Runtime.callFunctionOn", Some(json!({
+                "executionContextId": id,
+                "functionDeclaration": format!("function() {{ return ({expr}); }}"),
+                "returnByValue": true,
+                "awaitPromise": true,
+            }))).await;
+
+            match res {
+                Ok(v) => return Ok(v),
+                Err(_) => {
+                    // Context is stale (navigation) — clear and recreate.
+                    *self.isolated_ctx.lock().unwrap() = None;
+                }
+            }
+        }
+
+        // Lazily create the isolated world.
+        let frame_id = self.cdp.send("Page.getFrameTree", None).await
+            .ok()
+            .and_then(|v| v.get("frameTree")?.get("frame")?.get("id")?.as_str().map(String::from))
+            .unwrap_or_default();
+        if let Ok(v) = self.cdp.send("Page.createIsolatedWorld", Some(json!({
+            "frameId": frame_id,
+            "worldName": "",
+            "grantUniveralAccess": true,
+        }))).await {
+            if let Some(id) = v.get("executionContextId").and_then(|i| i.as_i64()) {
+                *self.isolated_ctx.lock().unwrap() = Some(id);
+                return self.cdp.send("Runtime.callFunctionOn", Some(json!({
+                    "executionContextId": id,
+                    "functionDeclaration": format!("function() {{ return ({expr}); }}"),
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                }))).await;
+            }
+        }
+
+        // Fallback: regular Runtime.evaluate.
+        self.cdp.send("Runtime.evaluate", Some(json!({
+            "expression": expr,
+            "returnByValue": true,
+            "awaitPromise": true,
+        }))).await
+    }
+
+    /// Reset the isolated world context (call on navigation).
+    pub fn reset_isolated(&self) {
+        *self.isolated_ctx.lock().unwrap() = None;
     }
 
     /// List the browser's page targets — over the pipe's browser-level
@@ -774,7 +859,7 @@ impl Page {
             Vec::new()
         };
         let result = crate::action::perform_with_network(
-            &self.cdp, &mut self.lpm, &action, Some(&self.in_flight)
+            &self.cdp, &mut self.lpm, &action, Some(&self.in_flight), &self.last_mouse
         ).await;
         // V1b: DOM-drift heal. The model had the ref, but the live
         // DOM moved (SPA re-render between captures). Re-resolve the
@@ -787,7 +872,7 @@ impl Page {
                     Some(note) => {
                         heal_note = Some(note);
                         crate::action::perform_with_network(
-                            &self.cdp, &mut self.lpm, &action, Some(&self.in_flight)
+                            &self.cdp, &mut self.lpm, &action, Some(&self.in_flight), &self.last_mouse
                         ).await?
                     }
                     None => {
@@ -1021,6 +1106,8 @@ impl Page {
         // handled by apply_domain_profile swapping the registration.
         // S11: apply per-domain stealth settings from ~/.blade/profiles.json.
         self.apply_domain_profile(url).await;
+        // Reset isolated world on navigation — old context is destroyed.
+        self.reset_isolated();
         let _nav_t = std::time::Instant::now();
         let _t = |label: &str| {
             if std::env::var("NAV_TIMING").is_ok() {

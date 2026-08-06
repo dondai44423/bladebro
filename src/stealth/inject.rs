@@ -191,6 +191,7 @@ var _newError=function Error(msg){
 };
 _newError.prototype=_origError.prototype;
 _newError.captureStackTrace=_origError.captureStackTrace;
+_lie(_newError,'Error');
 try{Object.defineProperty(window,'Error',{value:_newError,writable:true,configurable:true,enumerable:true});}catch(e){}
 }catch(e){}
 
@@ -243,12 +244,9 @@ if(navigator.pdfViewerEnabled===false){
 }
 }catch(e){}
 
-// navigator.presentation: real Chrome has the Presentation API.
-try{
-if(!navigator.presentation){
-  _defFn(Navigator.prototype,'presentation',{});
-}
-}catch(e){}
+// navigator.presentation: REMOVED — adding a fake {} via _defFn creates
+// a detectable data descriptor. Real Chrome only exposes this on HTTPS.
+// Missing it is normal and less suspicious than a wrong-shaped object.
 
 // navigator.connection: more realistic values for a broadband connection.
 // Headless may report unrealistic values or missing properties.
@@ -308,7 +306,10 @@ function _uxp(l,a){try{var p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.pus
 ['log','info','warn','error','debug'].forEach(function(m){
   var _o=console[m];
   var _h=function(){_uxp(m,arguments);return _o.apply(console,arguments);};
-  try{Object.defineProperty(console,m,{value:_h,writable:true,configurable:true,enumerable:true});}catch(e){console[m]=_h;}
+  // Override on Console.prototype, not the console instance.
+  // Own properties on the console instance are a detection vector
+  // (Object.getOwnPropertyDescriptor(console,'log') should be undefined).
+  try{var _cp=Object.getPrototypeOf(console);Object.defineProperty(_cp,m,{value:_h,writable:true,configurable:true,enumerable:true});}catch(e){console[m]=_h;}
   _lie(_h,m);
 });
 window.addEventListener('error',function(e){_uxp('exception',[String(e.message||'')+' @'+String(e.filename||'')+':'+String(e.lineno||'')]);});

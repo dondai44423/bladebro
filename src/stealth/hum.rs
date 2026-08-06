@@ -23,13 +23,19 @@ pub fn spawn_hum(
     cdp: CdpSession,
     last_action_epoch: Arc<AtomicU64>,
     is_busy: Arc<AtomicBool>,
+    last_mouse: Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        hum_loop(cdp, last_action_epoch, is_busy).await;
+        hum_loop(cdp, last_action_epoch, is_busy, last_mouse).await;
     })
 }
 
-async fn hum_loop(cdp: CdpSession, last_epoch: Arc<AtomicU64>, is_busy: Arc<AtomicBool>) {
+async fn hum_loop(
+    cdp: CdpSession,
+    last_epoch: Arc<AtomicU64>,
+    is_busy: Arc<AtomicBool>,
+    last_mouse: Arc<std::sync::Mutex<Option<(f64, f64)>>>,
+) {
     let mut rng = Rng::new();
     // Random-walk starting position — center of a typical viewport.
     let (mut mx, mut my) = (480.0_f64, 270.0_f64);
@@ -92,19 +98,31 @@ async fn hum_loop(cdp: CdpSession, last_epoch: Arc<AtomicU64>, is_busy: Arc<Atom
         let jy = rng.range(-12, 12) as f64;
         let xmax = (vw - 20.0).max(21.0);
         let ymax = (vh - 20.0).max(21.0);
-        mx = (mx + jx).clamp(20.0, xmax);
-        my = (my + jy).clamp(20.0, ymax);
-
+        let new_x = (mx + jx).clamp(20.0, xmax);
+        let new_y = (my + jy).clamp(20.0, ymax);
+        // movementX/movementY deltas — PerimeterX/HUMAN tracks these.
+        let (dmx, dmy) = {
+            let lm = last_mouse.lock().unwrap();
+            lm.map(|(lx, ly)| (
+                (new_x - lx).round() as i64,
+                (new_y - ly).round() as i64,
+            )).unwrap_or((jx as i64, jy as i64))
+        };
         let _ = cdp
             .send(
                 "Input.dispatchMouseEvent",
                 Some(json!({
                     "type": "mouseMoved",
-                    "x": mx,
-                    "y": my,
+                    "x": new_x,
+                    "y": new_y,
+                    "movementX": dmx,
+                    "movementY": dmy,
                 })),
             )
             .await;
+        *last_mouse.lock().unwrap() = Some((new_x, new_y));
+        mx = new_x;
+        my = new_y;
 
         // Next hum (log-normal from persistent profile — same fidgeting pattern every session).
         let interval = log_normal(&mut rng, crate::knowledge::BEHAVIOR.hum_interval_ms, 0.5);

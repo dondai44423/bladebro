@@ -1,6 +1,6 @@
 {
   "name": "bladebro-darwin-x64",
-  "version": "3.0.14",
+  "version": "3.0.15",
   "description": "Bladebro binary for macOS Intel",
   "license": "AGPL-3.0-only",
   "os": [
