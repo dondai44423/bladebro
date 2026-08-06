@@ -371,6 +371,30 @@ Run `bladebro audit` to verify your own setup.
 | Record video of the session | CDP does not expose frame buffers. Use screenshots (`vision`) instead. |
 | Run on ARM Linux | No cross-compile target for aarch64 Linux yet. x86_64 Linux, x86_64/arm64 macOS, x86_64 Windows are supported. |
 
+## 💖 Sponsors
+
+Bladebro is open source and free to use. If your company relies on it, consider sponsoring development.
+
+| Tier | Price | What you get |
+|---|---|---|
+| 🥉 Bronze | $25/mo | Name + link in Sponsors section |
+| 🥈 Silver | $100/mo | Small logo + link in Sponsors section |
+| 🥇 Gold | $250/mo | Large logo + link, pinned at top |
+
+One-time sponsorships are also welcome at any amount.
+
+Email [bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com) to become a sponsor.
+
+<!-- Add sponsor logos below as they come in -->
+
+<div align="center">
+
+<!-- <a href="https://example.com"><img src="sponsor-logo.png" width="200" alt="Sponsor Name" /></a> -->
+
+</div>
+
+---
+
 ## 🔄 Update hub
 
 | Command | What it does |
