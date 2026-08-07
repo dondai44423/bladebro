@@ -329,27 +329,46 @@ Run `bladebro audit` to verify your own setup.
 <img src="Assets/png/token-efficiency.png" width="800" alt="Token efficiency comparison" />
 </div>
 
-| | Bladebro | Playwright MCP | Chrome DevTools MCP |
-|---|---|---|---|
-| Tool defs | ~1,900 tokens | ~13,700 tokens | ~8,000 tokens |
-| Per-click result | 60-570 tokens (delta) | 2,000+ tokens (full page) | 2,000+ tokens |
-| Stealth | 6-layer, behavioral biometrics, isolated world | None | None |
-| Re-render immunity | Yes (structural fingerprints) | No | No |
-| Self-improvement | Yes (learns across sessions) | No | No |
-| Auto-extraction | Template-free, site-aware (shopping, Reddit, GitHub) | No | No |
-| Infinite scroll collect | Yes (act collect) | No | No |
-| Batch actions | Yes (act batch) | No | No |
-| Shadow DOM | Pierced (deepAll) | Partial | Partial |
-| PDF export | Yes (act pdf) | No | No |
-| Download handling | Yes (act download) | No | No |
-| Runtime | None (static binary) | Node.js | Node.js |
-| Process model | Long-lived daemon (stateful) | Stateless (reconnect per call) | Stateless |
-| Page model | Persistent, ref-stable, diff-first | None | None |
-| Binary size | 5.7 MB | ~50 MB (node + deps) | ~50 MB (node + deps) |
-| Install | `npm install -g bladebro` | npm + playwright install | npm |
-| Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
+| | Bladebro | agent-browser | Playwright MCP | Chrome DevTools MCP |
+|---|---|---|---|---|
+| Tool defs | ~1,900 tokens | 0 (CLI) | ~13,700 tokens | ~8,000 tokens |
+| Per-click result | 60-570 tokens (delta) | ~1,400 tokens (snapshot) | 2,000+ tokens (full page) | 2,000+ tokens |
+| Stealth | 6-layer, behavioral biometrics, isolated world | None | None | None |
+| Re-render immunity | Yes (structural fingerprints) | No | No | No |
+| Self-improvement | Yes (learns across sessions) | No | No | No |
+| Auto-extraction | Template-free, site-aware (shopping, Reddit, GitHub) | No | No | No |
+| Infinite scroll collect | Yes (act collect) | No | No | No |
+| Batch actions | Yes (act batch) | No | No | No |
+| Shadow DOM | Pierced (deepAll) | Partial | Partial | Partial |
+| PDF export | Yes (act pdf) | Yes | No | No |
+| Download handling | Yes (act download) | Yes | No | No |
+| Runtime | None (static binary) | Node.js daemon | Node.js | Node.js |
+| Process model | Long-lived daemon (stateful) | Long-lived daemon | Stateless | Stateless |
+| Page model | Persistent, ref-stable, diff-first | Accessibility tree snapshot | None | None |
+| Binary size | 5.7 MB | ~50 MB (node + deps) | ~50 MB (node + deps) | ~50 MB (node + deps) |
+| Install | `npm install -g bladebro` | npm + agent-browser install | npm + playwright install | npm |
+| Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
 **5x more token-efficient** than every competitor. The Live Page Model holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page.
+
+### Live head-to-head: Bladebro vs agent-browser
+
+Tested on real sites with agent-browser v0.33.2 at its best (headed, system Chromium, persistent profile, custom UA) vs Bladebro v3.0.21 defaults.
+
+| Task | agent-browser | Bladebro |
+|---|---|---|
+| Wikipedia (navigate + read) | 153K chars, 3 calls | 82K chars, 2 calls (**47% less**) |
+| Hacker News (interactive elements) | 14K chars, 2 calls | 5.5K chars, 1 call (**61% less**) |
+| Reddit (search) | 5.7K chars, 2 calls (no URLs) | 4.5K chars, 2 calls (URLs + content) |
+| Zillow (PerimeterX) | **Blocked** (Press & Hold challenge) | **Full access** (searched Seattle, 992 listings) |
+| HN (structured extraction) | No feature (parse 14K chars manually) | 30 items as JSON, 1 call |
+
+Key findings:
+
+- **Stealth is the biggest gap.** agent-browser gets flagged by PerimeterX even headed. Bladebro's behavioral biometrics (bezier mouse, movementX/movementY, micro-tremors, human typing cadence, no Runtime.enable) are built into the CDP layer. Not a config option.
+- **Token efficiency.** Bladebro returns model + content + URLs in one navigate call. agent-browser needs separate open + snapshot + read calls.
+- **Noise folding.** Bladebro folds nav/footer elements and shows "193 more" instead of listing everything. agent-browser dumps the full tree.
+- **Structured extraction.** Bladebro has `see extract=auto` (template-free, site-aware JSON). agent-browser has no equivalent.
 
 ## ⚠️ Gotchas
 
