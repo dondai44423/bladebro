@@ -404,6 +404,10 @@ One-time sponsorships are also welcome at any amount.
 
 Email [bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com) to become a sponsor.
 
+Or buy me a coffee:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
+
 <!-- Add sponsor logos below as they come in -->
 
 <div align="center">
