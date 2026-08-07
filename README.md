@@ -371,6 +371,29 @@ Key findings:
 - **Noise folding.** Bladebro folds nav/footer elements and shows "193 more" instead of listing everything. agent-browser dumps the full tree.
 - **Structured extraction.** Bladebro has `see extract=auto` (template-free, site-aware JSON). agent-browser has no equivalent.
 
+### Stealth benchmark: Bladebro vs Camoufox
+
+This is a pure stealth comparison, not an agent browser comparison. Camoufox is a patched Firefox for web scraping, not an agent tool. But since people ask, here's how they compare on detection sites.
+
+Both tested headed, same machine, same network, no proxy. 8 detection sites.
+
+| Detection site | Camoufox | Bladebro |
+|---|---|---|
+| Sannysoft | 1 fail (Chrome obj, expected for Firefox) | All pass |
+| CreepJS | Fingerprint computed | chromium 0%, headless 0% |
+| BotD | Pass | Pass |
+| Pixelscan | Bot check pass, masking detected | Bot check pass, masking detected |
+| FingerprintJS | Pass | Pass |
+| Zillow (PerimeterX) | Pass | Pass |
+| Reddit | Pass | Pass |
+| Fiverr (HUMAN) | Pass | Pass |
+
+Near equal on stealth. Both pass real-world bot protection. Both get masking flagged on Pixelscan (expected for any anti-detect tool, flagged our real browser too). Neither was blocked anywhere.
+
+Camoufox is impressive considering their situation: a year-long maintenance gap, stale fingerprints, and they still match. Respect for that.
+
+The difference: Bladebro ships this stealth out of the box as an agent tool. No setup, no config, no Python venv. `npm install -g bladebro && bladebro mcp` and you're behind 6 layers of behavioral biometrics on a stock Chromium. Camoufox needs Python, a venv, and a Playwright script to drive it.
+
 ## ⚠️ Gotchas
 
 | Surprise | Why |
