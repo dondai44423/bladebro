@@ -37,6 +37,11 @@
 use crate::cdp::CdpSession;
 use crate::error::Result;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether GL spoofing was applied to the main page. Set by `apply()`, read
+/// by `worker_gl_spoof()` to decide if worker injection is needed.
+static GL_SPOOFED: AtomicBool = AtomicBool::new(false);
 
 pub type ScriptId = String;
 
@@ -149,10 +154,8 @@ if(!navigator.getBattery){
 try{
 if(typeof RTCPeerConnection!=='undefined'){
   var _origRTC=RTCPeerConnection.prototype;
-  var _origAddIceCandidate=_origRTC.addIceCandidate;
   var _origCreateOffer=_origRTC.createOffer;
   var _origCreateAnswer=_origRTC.createAnswer;
-  var _origSetLocalDescription=_origRTC.setLocalDescription;
   // Filter ICE candidates: remove host candidates (real IP leak).
   function _filterSDP(sdp){
     if(!sdp)return sdp;
@@ -170,10 +173,20 @@ if(typeof RTCPeerConnection!=='undefined'){
       return answer;
     });
   };
+  // Also patch addIceCandidate to filter host candidates from trickle ICE.
+  var _origAIC=_origRTC.addIceCandidate;
+  var _aic=function addIceCandidate(candidate){
+    if(candidate&&candidate.candidate){
+      if(candidate.candidate.indexOf('typ host')!==-1){return Promise.resolve();}
+    }
+    return _origAIC.call(this,candidate);
+  };
   try{Object.defineProperty(_origRTC,'createOffer',{value:_co,writable:true,configurable:true,enumerable:true});}catch(e){}
   try{Object.defineProperty(_origRTC,'createAnswer',{value:_ca,writable:true,configurable:true,enumerable:true});}catch(e){}
+  try{Object.defineProperty(_origRTC,'addIceCandidate',{value:_aic,writable:true,configurable:true,enumerable:true});}catch(e){}
   _lie(_co,'createOffer');
   _lie(_ca,'createAnswer');
+  _lie(_aic,'addIceCandidate');
 }
 }catch(e){}
 
@@ -191,6 +204,8 @@ var _newError=function Error(msg){
 };
 _newError.prototype=_origError.prototype;
 _newError.captureStackTrace=_origError.captureStackTrace;
+_newError.stackTraceLimit=_origError.stackTraceLimit;
+try{Object.defineProperty(_newError,'length',{value:_origError.length,configurable:false,enumerable:false});}catch(e){}
 _lie(_newError,'Error');
 try{Object.defineProperty(window,'Error',{value:_newError,writable:true,configurable:true,enumerable:true});}catch(e){}
 }catch(e){}
@@ -263,10 +278,13 @@ if(navigator.connection){
 }catch(e){}
 
 // navigator.scheduling: Chrome has the Scheduling API.
+// Use getter (not data property) — real Chrome exposes it as an accessor.
 try{
 if(!navigator.scheduling&&!('scheduling' in navigator)){
-  var _sch={isInputPending:function isInputPending(){return false;},isInputPendingOrAvailable:function(){return false;}};
-  _defFn(Navigator.prototype,'scheduling',_sch);
+  var _sch={isInputPending:function isInputPending(){return false;},isInputPendingOrAvailable:function isInputPendingOrAvailable(){return false;}};
+  _lie(_sch.isInputPending,'isInputPending');
+  _lie(_sch.isInputPendingOrAvailable,'isInputPendingOrAvailable');
+  _defGet(Navigator.prototype,'scheduling',function scheduling(){return _sch;});
 }
 }catch(e){}
 
@@ -282,16 +300,6 @@ try{
 var _sp2=(typeof Screen!=='undefined'&&Screen.prototype)?Screen.prototype:Object.getPrototypeOf(screen);
 if(screen.colorDepth!==24){_defGet(_sp2,'colorDepth',function colorDepth(){return 24;});}
 if(screen.pixelDepth!==24){_defGet(_sp2,'pixelDepth',function pixelDepth(){return 24;});}
-}catch(e){}
-
-// iframe contentWindow: some sites check iframe.contentWindow.navigator.webdriver.
-// Ensure iframes inherit the stealth context.
-try{
-var _origAttachShadow=Element.prototype.attachShadow;
-// Patch iframe creation to inject stealth into child frames.
-// Note: this is a best-effort approach; full iframe stealth requires
-// per-frame injection which CDP handles via Page.addScriptToEvaluateOnNewDocument
-// with runAt:'document_start' (which we already use).
 }catch(e){}
 
 // V8: console capture for driver introspection (see logs=console).
@@ -330,13 +338,37 @@ var obs=new MutationObserver(function(){var q=Object.getOwnPropertyNames(documen
 /// real value is coherent across page + worker + OffscreenCanvas scopes
 /// (CreepJS hasBadWebGL compares page GPU vs worker GPU — a spoof in only one
 /// scope is itself the flag).
+/// D22: Renderer string uses Linux/Mesa format (OpenGL ES 3.2, not macOS
+/// OpenGL 4.1) for platform consistency. GL capability limits spoofed to match
+/// real Intel UHD 630: MAX_TEXTURE_SIZE/MAX_VIEWPORT_DIMS/MAX_RENDERBUFFER_SIZE/
+/// MAX_CUBE_MAP_TEXTURE_SIZE = 16384 (SwiftShader reports 8192),
+/// ALIASED_POINT_SIZE_RANGE = [1,255] (SwiftShader reports [1,1] — a dead
+/// giveaway), ALIASED_LINE_WIDTH_RANGE = [1,1024] (SwiftShader reports [1,1023]),
+/// MAX_VERTEX_TEXTURE_IMAGE_UNITS = 16 (SwiftShader reports 64).
 const GL_SPOOF: &str = r#"
-// WebGL 1+2 vendor/renderer (hides SwiftShader on GPU-less displays).
+// WebGL 1+2 vendor/renderer + GL capability limits (hides SwiftShader on GPU-less displays).
+// Renderer string uses Linux/Mesa format for platform consistency (D22).
+// SwiftShader reports MAX_TEXTURE_SIZE=8192, MAX_VIEWPORT_DIMS=[8192,8192].
+// Real Intel UHD 630 on Linux/Mesa reports 16384 for all. Pixelscan
+// cross-references GL capability limits against the claimed GPU.
 try{
-var _fv='Google Inc. (Intel)',_fr='ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.1)';
+var _fv='Google Inc. (Intel)',_fr='ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL ES 3.2)';
+// GL capability limits that differ between SwiftShader and real Intel UHD 630.
+var _glLimits={3379:16384,34024:16384,34076:16384,35661:16};
+var _glVP=new Int32Array([16384,16384]);
+var _glPtR=new Float32Array([1,255]);
+var _glLwR=new Float32Array([1,1024]);
 function _mkGP(proto){
   var orig=proto.getParameter;
-  var f=function getParameter(p){if(p===37445)return _fv;if(p===37446)return _fr;return orig.call(this,p);};
+  var f=function getParameter(p){
+    if(p===37445)return _fv;
+    if(p===37446)return _fr;
+    if(p===3386)return _glVP;
+    if(p===33902)return _glPtR;
+    if(p===33901)return _glLwR;
+    if(_glLimits[p]!==undefined)return _glLimits[p];
+    return orig.call(this,p);
+  };
   try{Object.defineProperty(proto,'getParameter',{value:f,writable:true,configurable:true,enumerable:true});_lie(f,'getParameter');}catch(e){}
 }
 _mkGP(WebGLRenderingContext.prototype);
@@ -499,7 +531,9 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
 
     let mut script = String::with_capacity(STEALTH_CORE.len() + GL_SPOOF.len() + MEDIA_PATCH.len() + LOCALE_OVERRIDE.len() + NOISE.len() + STEALTH_TAIL.len());
     script.push_str(STEALTH_CORE);
+    GL_SPOOFED.store(spoof_gl, Ordering::Relaxed);
     if spoof_gl {
+        eprintln!("[stealth] registering WebGL spoof (page + worker)");
         script.push_str(GL_SPOOF);
     }
     if patch_media {
@@ -536,4 +570,36 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         .to_string();
 
     Ok(id)
+}
+
+/// Worker GL spoof script — self-contained (no _lie dependency) for Worker
+/// contexts. Returns None when GL spoof is not active on the main page.
+/// D22: Injected via CDP Target.setAutoAttach into each worker target.
+pub fn worker_gl_spoof() -> Option<String> {
+    if !GL_SPOOFED.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(r#"try{
+var _fv='Google Inc. (Intel)',_fr='ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL ES 3.2)';
+var _glLimits={3379:16384,34024:16384,34076:16384,35661:16};
+var _glVP=new Int32Array([16384,16384]);
+var _glPtR=new Float32Array([1,255]);
+var _glLwR=new Float32Array([1,1024]);
+function _mkGP(proto){
+  var orig=proto.getParameter;
+  var f=function getParameter(p){
+    if(p===37445)return _fv;
+    if(p===37446)return _fr;
+    if(p===3386)return _glVP;
+    if(p===33902)return _glPtR;
+    if(p===33901)return _glLwR;
+    if(_glLimits[p]!==undefined)return _glLimits[p];
+    return orig.call(this,p);
+  };
+  try{Object.defineProperty(proto,'getParameter',{value:f,writable:true,configurable:true,enumerable:true});
+  }catch(e){}
+}
+if(typeof WebGLRenderingContext!=='undefined')_mkGP(WebGLRenderingContext.prototype);
+if(typeof WebGL2RenderingContext!=='undefined')_mkGP(WebGL2RenderingContext.prototype);
+}catch(e){}"#.to_string())
 }

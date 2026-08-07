@@ -438,3 +438,31 @@ Pre-release. Hardening pass complete, CLI update pending.
 [Unreleased]: https://github.com/dondai44423/bladebro/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/dondai44423/bladebro/releases/tag/v1.0.0
 [0.9.0]: https://github.com/dondai44423/bladebro/releases/tag/v0.9.0
+
+## [3.0.22] - 2026-08-07
+
+### Stealth hardening
+
+- **Worker GL spoof**: WebGL parameters in Worker/ServiceWorker contexts
+  now match the main page (was leaking real SwiftShader renderer — a major
+  detection vector for CreepJS `hasBadWebGL` and Pixelscan)
+- **GL capability limits**: MAX_TEXTURE_SIZE, MAX_VIEWPORT_DIMS,
+  MAX_RENDERBUFFER_SIZE, MAX_CUBE_MAP_TEXTURE_SIZE spoofed to 16384
+  (SwiftShader reported 8192 — an immediate inconsistency flag)
+- **ALIASED_POINT_SIZE_RANGE**: spoofed to [1,255] (SwiftShader reported
+  [1,1] — a dead giveaway)
+- **ALIASED_LINE_WIDTH_RANGE**: spoofed to [1,1024] (SwiftShader: [1,1023])
+- **MAX_VERTEX_TEXTURE_IMAGE_UNITS**: spoofed to 16 (SwiftShader: 64)
+- **Renderer string**: Linux/Mesa format `OpenGL ES 3.2` (was macOS
+  `OpenGL 4.1` — platform mismatch on Linux)
+- **Worker GL injection**: via CDP `Target.setAutoAttach` (invisible to
+  page JS — no Worker constructor patching that broke sites)
+- **Scheduling API**: fixed data descriptor to accessor property (was
+  detectable via `Object.getOwnPropertyDescriptor`)
+- **Scheduling API**: inner functions now registered with native-lie
+  toString masking
+- **WebRTC**: `addIceCandidate` now filters host candidates (was only
+  filtering `createOffer`/`createAnswer` — trickle ICE still leaked)
+- **Error constructor**: `stackTraceLimit` and `length` now preserved
+  (were missing — detectable via static property check)
+- Removed dead iframe stealth code (no-op `_origAttachShadow` assignment)

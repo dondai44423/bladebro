@@ -262,6 +262,55 @@ impl Page {
         let active_locale = std::env::var("BLADE_LOCALE").ok().filter(|s| !s.is_empty());
         wait_for_load(&cdp, Duration::from_secs(10)).await?;
 
+        // D22: Worker GL spoof — inject the GL spoof into Worker contexts too.
+        // The main page GL spoof (via Page.addScriptToEvaluateOnNewDocument)
+        // does NOT reach Worker contexts. Without this, Pixelscan/CreepJS
+        // compare page GL (spoofed Intel) vs worker GL (real SwiftShader) and
+        // flag "masking detected". We use CDP Target.setAutoAttach to inject
+        // invisibly — no JS-level Worker constructor patching (which broke
+        // sites via blob URLs in the previous attempt).
+        let worker_gl = crate::stealth::worker_gl_spoof();
+        if let Some(ref script) = worker_gl {
+            let _ = cdp.send("Target.setAutoAttach", Some(serde_json::json!({
+                "autoAttach": true,
+                "flatten": true,
+                "waitForDebuggerOnStart": true
+            }))).await;
+            let client = cdp.client().clone();
+            let worker_script = script.clone();
+            tokio::spawn(async move {
+                let sub = client.subscribe();
+                let mut rx = sub;
+                loop {
+                    match rx.recv().await {
+                        Ok(event) if event.method == "Target.attachedToTarget" => {
+                            let target_info = event.params.get("targetInfo");
+                            let target_type = target_info
+                                .and_then(|t| t.get("type"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("");
+                            if target_type == "worker" || target_type == "service_worker" {
+                                let session_id = event.params
+                                    .get("sessionId")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("");
+                                if !session_id.is_empty() {
+                                    let worker_session = CdpSession::child(client.clone(), session_id);
+                                    let _ = worker_session.send("Runtime.evaluate", Some(serde_json::json!({
+                                        "expression": worker_script,
+                                        "returnByValue": true,
+                                    }))).await;
+                                    let _ = worker_session.send("Runtime.runIfWaitingForDebugger", None).await;
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
         // M17: Set download behavior so downloads don't hang the browser.
         let download_dir = std::env::temp_dir().join("bladebro-downloads");
         std::fs::create_dir_all(&download_dir).ok();
