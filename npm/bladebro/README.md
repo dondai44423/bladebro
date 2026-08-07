@@ -49,4 +49,4 @@ Other platforms: [build from source](https://github.com/dondai44423/bladebro#bui
 
 ## License
 
-AGPL-3.0
+Apache-2.0

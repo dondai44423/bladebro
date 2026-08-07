@@ -1,8 +1,8 @@
 {
   "name": "bladebro",
-  "version": "3.0.23",
+  "version": "3.0.24",
   "description": "Stealthy and efficient agentic browser driver for AI agents. Few tools, full control, real stealth, max token efficiency.",
-  "license": "AGPL-3.0-only",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/dondai44423/bladebro"
@@ -44,10 +44,10 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "bladebro-linux-x64": "3.0.23",
-    "bladebro-darwin-x64": "3.0.23",
-    "bladebro-darwin-arm64": "3.0.23",
-    "bladebro-windows-x64": "3.0.23"
+    "bladebro-linux-x64": "3.0.24",
+    "bladebro-darwin-x64": "3.0.24",
+    "bladebro-darwin-arm64": "3.0.24",
+    "bladebro-windows-x64": "3.0.24"
   },
   "engines": {
     "node": ">=14"

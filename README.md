@@ -10,7 +10,7 @@ One MCP server · one persistent page model · zero Node.js · one binary · Lin
 
 [![npm version](https://img.shields.io/npm/v/bladebro?color=00d4aa&label=npm&style=flat-square)](https://www.npmjs.com/package/bladebro)
 [![Rust](https://img.shields.io/badge/Rust-1.86+-ce422b?style=flat-square)](https://www.rust-lang.org)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-00d4aa&style=flat-square)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-00d4aa&style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?color=00d4aa&label=release&style=flat-square)](https://github.com/dondai44423/bladebro/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI&style=flat-square)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/npm/dw/bladebro?color=7c5cfc&label=downloads&style=flat-square)](https://www.npmjs.com/package/bladebro)
@@ -456,4 +456,4 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Run `cargo clippy --release
 
 ## 📄 License
 
-AGPL-3.0 | see [LICENSE](LICENSE).
+Apache-2.0 | see [LICENSE](LICENSE).

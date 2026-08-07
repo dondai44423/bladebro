@@ -1,8 +1,8 @@
 {
   "name": "bladebro-windows-x64",
-  "version": "3.0.23",
+  "version": "3.0.24",
   "description": "Bladebro binary for Windows x86_64",
-  "license": "AGPL-3.0-only",
+  "license": "Apache-2.0",
   "os": [
     "win32"
   ],

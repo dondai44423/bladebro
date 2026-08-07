@@ -1,9 +1,9 @@
 [package]
 name = "bladebro"
-version = "3.0.23"
+version = "3.0.24"
 edition = "2021"
 rust-version = "1.86"
-license = "AGPL-3.0-only"
+license = "Apache-2.0"
 description = "An agentic browser driver for AI — few tools, full control, real stealth, god-tier token efficiency."
 repository = "https://github.com/dondai44423/bladebro"
 

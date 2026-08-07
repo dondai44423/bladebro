@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [3.0.24] - 2026-08-08
+
+### Changed
+
+- **License switched from AGPL-3.0 to Apache-2.0**: Unlocks enterprise adoption (Google, Apple, and most Fortune 500 companies ban AGPL in their codebases). Apache-2.0 is the industry standard for infrastructure tools (Kubernetes, Playwright, TensorFlow) and includes a patent grant that protects contributors and users. The SaaS exploitation scenario AGPL protected against is not applicable to a local browser driver tool.
+
 ## [3.0.23] - 2026-08-07
 
 ### Changed
