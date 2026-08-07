@@ -15,6 +15,7 @@ One MCP server · one persistent page model · zero Node.js · one binary · Lin
 [![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI&style=flat-square)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/npm/dw/bladebro?color=7c5cfc&label=downloads&style=flat-square)](https://www.npmjs.com/package/bladebro)
 [![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?color=ff9f43&style=flat-square)](https://github.com/dondai44423/bladebro)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
 ```bash
 npm install -g bladebro && bladebro mcp
@@ -403,10 +404,6 @@ Bladebro is open source and free to use. If you want to support it, consider spo
 One-time sponsorships are also welcome at any amount.
 
 Email [bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com) to become a sponsor.
-
-Or buy me a coffee:
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
 <!-- Add sponsor logos below as they come in -->
 
