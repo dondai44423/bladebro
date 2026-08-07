@@ -29,7 +29,7 @@ npm install -g bladebro && bladebro mcp
 Bladebro is an **agentic browser driver** built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results: the agent sees what *changed*, not the whole world, every single time.
 
 <p align="center">
-  <a href="https://files.catbox.moe/e91zwh.mp4">
+  <a href="https://files.catbox.moe/44hv2w.mp4">
     <img src="Assets/video/demo-poster.png" width="720" alt="Bladebro demo video — click to play" />
   </a>
 </p>
