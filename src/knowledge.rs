@@ -160,7 +160,7 @@ pub struct BehavioralProfile {
 
 fn default_click_precision() -> f64 { 2.5 }
 fn default_curve_factor() -> f64 { 0.15 }
-fn default_typing_mean() -> f64 { 90.0 }
+fn default_typing_mean() -> f64 { 55.0 }
 fn default_typing_sigma() -> f64 { 0.3 }
 fn default_gap_mean() -> f64 { 400.0 }
 fn default_gap_sigma() -> f64 { 0.35 }

@@ -1031,38 +1031,48 @@ pub async fn perform_with_network(
             if !found.ok {
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
             }
-            // Human-like typing: per-character key events with log-normal cadence.
-            let mut rng = crate::stealth::Rng::new();
-            let cadence = crate::stealth::typing_cadence(text, &mut rng);
-            for (i, ch) in text.chars().enumerate() {
-                let ch_str = ch.to_string();
-                let (code, vk) = char_to_key_code(ch);
-                cdp.send(
-                    "Input.dispatchKeyEvent",
-                    Some(json!({
-                        "type": "keyDown",
-                        "key": ch_str,
-                        "text": ch_str,
-                        "code": code,
-                        "windowsVirtualKeyCode": vk,
-                    })),
-                )
-                .await?;
-                // Key press duration: 40-110ms between keyDown and keyUp.
-                // Real humans hold a key before releasing; zero duration is a bot tell.
-                tokio::time::sleep(Duration::from_millis(40 + rng.range(0, 70) as u64)).await;
-                cdp.send(
-                    "Input.dispatchKeyEvent",
-                    Some(json!({
-                        "type": "keyUp",
-                        "key": ch_str,
-                        "code": code,
-                        "windowsVirtualKeyCode": vk,
-                    })),
-                )
-                .await?;
-                if i < cadence.len() {
-                    tokio::time::sleep(cadence[i]).await;
+            // Fast typing: use Input.insertText for bulk text entry (one CDP call
+            // for the entire string), then verify. This is what Chrome's IME input
+            // path uses — real humans trigger it via autocomplete, swipe typing,
+            // and paste-from-keyboard. Not a bot signal.
+            //
+            // Fall back to per-character key events if insertText fails (some
+            // inputs reject it — e.g. contenteditable with custom handlers).
+            let inserted = cdp.send("Input.insertText", Some(json!({
+                "text": text,
+            }))).await.is_ok();
+
+            if !inserted {
+                // Per-character key events fallback.
+                let mut rng = crate::stealth::Rng::new();
+                let cadence = crate::stealth::typing_cadence(text, &mut rng);
+                for (i, ch) in text.chars().enumerate() {
+                    let ch_str = ch.to_string();
+                    let (code, vk) = char_to_key_code(ch);
+                    cdp.send(
+                        "Input.dispatchKeyEvent",
+                        Some(json!({
+                            "type": "keyDown",
+                            "key": ch_str,
+                            "text": ch_str,
+                            "code": code,
+                            "windowsVirtualKeyCode": vk,
+                        })),
+                    )
+                    .await?;
+                    cdp.send(
+                        "Input.dispatchKeyEvent",
+                        Some(json!({
+                            "type": "keyUp",
+                            "key": ch_str,
+                            "code": code,
+                            "windowsVirtualKeyCode": vk,
+                        })),
+                    )
+                    .await?;
+                    if i < cadence.len() {
+                        tokio::time::sleep(cadence[i]).await;
+                    }
                 }
             }
             // Verify the value was actually set. Some inputs reject CDP

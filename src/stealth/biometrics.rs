@@ -206,17 +206,18 @@ pub fn click_target(path: &[PathPoint]) -> (f64, f64) {
 
 /// Generate human-like inter-key delays for typing `text`.
 ///
-/// Base cadence: log-normal around 90ms per keystroke. Longer pauses after
-/// spaces (word boundaries). Rare "thinking" pauses (1-3% chance, 500-2000ms).
+/// Base cadence: log-normal around 55ms per keystroke — matches a fast
+/// typist (120+ WPM). Longer pauses after spaces (word boundaries).
+/// Rare "thinking" pauses (1-3% chance, 300-1200ms).
 pub fn typing_cadence(text: &str, rng: &mut Rng) -> Vec<Duration> {
     text.chars()
         .map(|c| {
             if c == ' ' {
-                // Word boundary: longer pause, 150-400ms.
-                log_normal(rng, 200.0, 0.25)
+                // Word boundary: longer pause, 100-250ms.
+                log_normal(rng, 120.0, 0.25)
             } else if rng.uniform() < 0.02 {
-                // Rare "thinking" pause: 500-2000ms.
-                log_normal(rng, 800.0, 0.4)
+                // Rare "thinking" pause: 300-1200ms.
+                log_normal(rng, 500.0, 0.4)
             } else {
                 // Normal keystroke: log-normal from persistent profile.
                 log_normal(
