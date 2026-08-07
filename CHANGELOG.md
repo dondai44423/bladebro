@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Ad content filtering in content extraction**: `capture_content` (navigate content preview) and `capture_markdown` (`see mode=content`) now strip ad elements before extracting text. Ad containers, ad labels, ad feedback UI, sponsored content, and DFP/AdSense elements are removed via CSS selectors (`[class*='dfp']`, `[class*='advert']`, `[class*='sponsored']`, `[data-ad]`, `[class*='ad-feedback']`, `[class*='ads-label']`, `[class*='mol-ads']`, `ins.adsbygoogle`, etc.) in `capture_content`, and via an `isAd()` check in the `toMd` walk in `capture_markdown`. Refs and delta are unaffected — only the content text is cleaned. Previously, ad-heavy pages (CNN, Daily Mail, Newsweek) leaked ad feedback text and ad labels into the content preview and markdown extraction.
+
 ## [3.0.17] - 2026-08-06
 
 ### Fixed
