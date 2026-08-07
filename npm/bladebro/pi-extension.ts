@@ -24,6 +24,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -51,6 +52,185 @@ function resolveBinary(): string | null {
   } catch {
     return null;
   }
+}
+
+// ── TUI rendering helpers ─────────────────────────────────────────────
+
+/** Extract text from MCP tool result content blocks. */
+function getResultText(result: any): string {
+  if (!result?.content) return "";
+  return result.content
+    .filter((c: any) => c.type === "text")
+    .map((c: any) => c.text)
+    .join("\n");
+}
+
+/** Format the `act` tool call display. */
+function formatActCall(args: any, theme: any): string {
+  const action = args.action || "?";
+  const bold = (s: string) => theme.bold(s);
+  const accent = (s: string) => theme.fg("accent", s);
+  const muted = (s: string) => theme.fg("muted", s);
+  const title = bold("act");
+
+  switch (action) {
+    case "navigate": {
+      const url = args.url || "";
+      return `${title} ${accent("navigate")} ${muted("→")} ${accent(url)}`;
+    }
+    case "click": {
+      const target = args.ref || args.text || args.label || "";
+      return `${title} ${accent("click")} ${muted(target)}`;
+    }
+    case "type": {
+      const target = args.ref || args.label || "";
+      const text = args.text || "";
+      const press = args.press ? ` ${muted("+ " + args.press)}` : "";
+      return `${title} ${accent("type")} ${muted(target ? `${target} ` : "")}${muted(`"${text}"`)}${press}`;
+    }
+    case "scroll": {
+      const dy = args.dy || 0;
+      const dx = args.dx || 0;
+      const arrow = dy > 0 ? "↓" : dy < 0 ? "↑" : dx > 0 ? "→" : "←";
+      const mag = Math.abs(dy || dx);
+      return `${title} ${accent("scroll")} ${muted(`${arrow}${mag}`)}`;
+    }
+    case "fill": {
+      const n = args.fields?.length || 0;
+      const submit = args.submit ? ` ${muted("+ submit")}` : "";
+      return `${title} ${accent("fill")} ${muted(`(${n} field${n !== 1 ? "s" : ""})`)}${submit}`;
+    }
+    case "batch": {
+      const n = args.steps?.length || 0;
+      return `${title} ${accent("batch")} ${muted(`(${n} step${n !== 1 ? "s" : ""})`)}`;
+    }
+    case "hover": {
+      const target = args.ref || args.text || args.label || "";
+      return `${title} ${accent("hover")} ${muted(target)}`;
+    }
+    case "press": {
+      return `${title} ${accent("press")} ${muted(args.key || "")}`;
+    }
+    case "eval": {
+      const js = (args.js || "").slice(0, 50);
+      return `${title} ${accent("eval")} ${muted(`"${js}${js.length >= 50 ? "…" : ""}"`)}`;
+    }
+    case "wait": {
+      const cond = args.condition || "settle";
+      const t = args.timeout || 10;
+      return `${title} ${accent("wait")} ${muted(`${cond} (${t}s)`)}`;
+    }
+    case "read": {
+      return `${title} ${accent("read")} ${muted(args.ref || "")}`;
+    }
+    case "back": return `${title} ${accent("back")}`;
+    case "forward": return `${title} ${accent("forward")}`;
+    case "reload": return `${title} ${accent("reload")}`;
+    case "select": {
+      const target = args.ref || "";
+      const opt = args.option || "";
+      return `${title} ${accent("select")} ${muted(`${target} "${opt}"`)}`;
+    }
+    case "pdf": return `${title} ${accent("pdf")}`;
+    case "download": return `${title} ${accent("download")}`;
+    case "collect": return `${title} ${accent("collect")}`;
+    case "clear": return `${title} ${accent("clear")} ${muted(args.ref || "")}`;
+    case "upload": return `${title} ${accent("upload")} ${muted(args.ref || "")}`;
+    default: return `${title} ${accent(action)}`;
+  }
+}
+
+/** Format the `see` tool call display. */
+function formatSeeCall(args: any, theme: any): string {
+  const bold = (s: string) => theme.bold(s);
+  const accent = (s: string) => theme.fg("accent", s);
+  const muted = (s: string) => theme.fg("muted", s);
+  const title = bold("see");
+
+  const mode = args.mode;
+  if (mode === "content") return `${title} ${accent("content")}`;
+  if (mode === "outline") return `${title} ${accent("outline")}`;
+  if (mode === "model") return `${title} ${accent("model")}`;
+
+  const find = args.find;
+  if (find) return `${title} ${accent("find")} ${muted(`"${find}"`)}`;
+
+  const extract = args.extract;
+  if (extract) return `${title} ${accent(`extract=${extract}`)}`;
+
+  const scope = args.scope;
+  if (scope) return `${title} ${accent("scope")} ${muted(scope)}`;
+
+  const filter = args.filter;
+  if (filter) return `${title} ${accent("model")} ${muted(`[${filter}]`)}`;
+
+  const logs = args.logs;
+  if (logs) return `${title} ${accent("logs")} ${muted(logs)}`;
+
+  return `${title} ${accent("model")}`;
+}
+
+/** Format the `state` tool call display. */
+function formatStateCall(args: any, theme: any): string {
+  const bold = (s: string) => theme.bold(s);
+  const accent = (s: string) => theme.fg("accent", s);
+  const muted = (s: string) => theme.fg("muted", s);
+  const title = bold("state");
+
+  const op = args.op || "?";
+  const extra = args.url || args.name || "";
+  return `${title} ${accent(op)}${extra ? ` ${muted(extra)}` : ""}`;
+}
+
+/** Format the `run` tool call display. */
+function formatRunCall(args: any, theme: any): string {
+  const bold = (s: string) => theme.bold(s);
+  const title = bold("run");
+  return title;
+}
+
+/** Format the `vision` tool call display. */
+function formatVisionCall(args: any, theme: any): string {
+  const bold = (s: string) => theme.bold(s);
+  const title = bold("vision");
+  return title;
+}
+
+/** Format tool result for display. */
+function formatResult(text: string, expanded: boolean, isError: boolean, theme: any): string {
+  const out = (s: string) => theme.fg("toolOutput", s);
+  const warn = (s: string) => theme.fg("warning", s);
+  const muted = (s: string) => theme.fg("muted", s);
+  const accent = (s: string) => theme.fg("accent", s);
+
+  if (!text) return muted("(no output)");
+
+  const lines = text.split("\n");
+
+  if (isError) {
+    // Error: show all lines in warning color
+    return lines.map((l) => warn(l)).join("\n");
+  }
+
+  // Truncate if not expanded
+  const maxLines = expanded ? 9999 : 15;
+  const visible = lines.slice(0, maxLines);
+  const skipped = lines.length - visible.length;
+
+  const formatted = visible.map((line) => {
+    // Outcome lines → accent
+    if (line.startsWith("outcome:")) return accent(line);
+    // Warning lines (⚠) → warning color
+    if (line.includes("\u{26a0}")) return warn(line);
+    // Verdict lines with arrow → toolOutput
+    return out(line);
+  });
+
+  if (skipped > 0) {
+    formatted.push(muted(`  … ${skipped} more line${skipped !== 1 ? "s" : ""} (expand to view)`));
+  }
+
+  return formatted.join("\n");
 }
 
 // ── Minimal MCP stdio client ──────────────────────────────────────────
@@ -92,9 +272,6 @@ class McpStdio {
 
       this.proc.stdout!.on("data", (data: Buffer) => this.onData(data));
       this.proc.stderr!.on("data", (data: Buffer) => {
-        // Forward only errors/warnings to pi stderr. Info lines like
-        // "[bladebro] MCP server ready" are suppressed to keep the
-        // agent TUI clean on startup.
         const text = data.toString();
         for (const line of text.split("\n")) {
           const trimmed = line.trim();
@@ -105,7 +282,6 @@ class McpStdio {
         }
       });
 
-      // MCP initialize handshake, then signal ready.
       this.request("initialize", {
         protocolVersion: "2025-06-18",
         capabilities: {},
@@ -176,8 +352,6 @@ class McpStdio {
     this.alive = false;
     try { this.proc.stdin?.end(); } catch {}
     this.proc.kill("SIGTERM");
-    // Wait up to 5s for graceful exit (Chrome shutdown takes up to 3s),
-    // then SIGKILL. The orphan reaper handles any leaked Chrome.
     await new Promise<void>((resolve) => {
       const t = setTimeout(() => {
         this.proc?.kill("SIGKILL");
@@ -191,12 +365,17 @@ class McpStdio {
 
 // ── Extension ─────────────────────────────────────────────────────────
 
+const TOOL_FORMATTERS: Record<string, (args: any, theme: any) => string> = {
+  act: formatActCall,
+  see: formatSeeCall,
+  state: formatStateCall,
+  run: formatRunCall,
+  vision: formatVisionCall,
+};
+
 export default function bladebroExtension(pi: ExtensionAPI) {
   let client: McpStdio | null = null;
   let binaryPath: string | null = null;
-  // Restart lock: prevents concurrent restarts from spawning
-  // multiple binaries. When two parallel tool calls both see
-  // isAlive() === false, they share the same restart promise.
   let restartPromise: Promise<void> | null = null;
 
   async function ensureClient(): Promise<McpStdio> {
@@ -239,7 +418,6 @@ export default function bladebroExtension(pi: ExtensionAPI) {
       return;
     }
 
-    // Discover tools from the binary and register them natively.
     let tools: any[];
     try {
       tools = await client!.listTools();
@@ -249,14 +427,30 @@ export default function bladebroExtension(pi: ExtensionAPI) {
     }
 
     for (const tool of tools) {
+      const formatter = TOOL_FORMATTERS[tool.name];
+
       pi.registerTool({
         name: tool.name,
         label: tool.name,
         description: tool.description,
         parameters: Type.Unsafe(tool.inputSchema),
+        renderShell: "default",
+        renderCall(args: any, theme: any, context: any) {
+          const text = new Text("", 0, 0);
+          if (formatter) {
+            text.setText(formatter(args, theme));
+          } else {
+            text.setText(theme.bold(tool.name));
+          }
+          return text;
+        },
+        renderResult(result: any, options: any, theme: any, context: any) {
+          const text = context.lastComponent ?? new Text("", 0, 0);
+          const body = getResultText(result);
+          text.setText(formatResult(body, options.expanded, result.isError, theme));
+          return text;
+        },
         async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-          // Ensure the binary is alive — restart if it died.
-          // ensureClient handles the restart race condition.
           const c = await ensureClient();
           const result = await c.callTool(tool.name, params);
           return {
@@ -268,7 +462,7 @@ export default function bladebroExtension(pi: ExtensionAPI) {
       });
     }
 
-    ctx.ui.notify(`Bladebro: ${tools.length} tools ready`, "info");
+    ctx.ui.notify(`Bladebro ready (${tools.length} tools)`, "info");
   });
 
   pi.on("session_shutdown", async () => {
