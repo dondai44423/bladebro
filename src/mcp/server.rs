@@ -313,14 +313,9 @@ async fn serve(
     // Loaded once at startup, synced to disk periodically + on shutdown.
     let knowledge = crate::knowledge::load_shared();
 
-    eprintln!(
-        "[bladebro] MCP server ready (Chrome launches on first tool call{}",
-        if idle_secs > 0 {
-            format!(", idle timeout: {idle_secs}s)")
-        } else {
-            ")".to_string()
-        }
-    );
+    // No startup banner — keep stderr clean for MCP harnesses that
+    // forward stderr to the agent TUI.
+    // Chrome launches lazily on the first tool call.
 
     loop {
         tokio::select! {

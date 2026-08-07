@@ -92,8 +92,17 @@ class McpStdio {
 
       this.proc.stdout!.on("data", (data: Buffer) => this.onData(data));
       this.proc.stderr!.on("data", (data: Buffer) => {
-        // Route binary stderr to pi stderr for debugging.
-        process.stderr.write(data);
+        // Forward only errors/warnings to pi stderr. Info lines like
+        // "[bladebro] MCP server ready" are suppressed to keep the
+        // agent TUI clean on startup.
+        const text = data.toString();
+        for (const line of text.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          if (/error|panic|fatal|warn|fail/i.test(trimmed)) {
+            process.stderr.write(line + "\n");
+          }
+        }
       });
 
       // MCP initialize handshake, then signal ready.

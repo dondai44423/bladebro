@@ -11,10 +11,17 @@ use bladebro::Result;
 
 fn main() -> ExitCode {
     // Initialize structured logging; respect RUST_LOG.
+    // In MCP mode, default to warn only — info logs leak to the agent's
+    // TUI via stderr. RUST_LOG still overrides if explicitly set.
+    let default_filter = if std::env::args().any(|a| a == "mcp") {
+        "warn"
+    } else {
+        "warn,bladebro=info"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,bladebro=info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .init();
 
