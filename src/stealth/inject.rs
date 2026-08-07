@@ -37,6 +37,7 @@
 use crate::cdp::CdpSession;
 use crate::error::Result;
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Whether GL spoofing was applied to the main page. Set by `apply()`, read
@@ -333,34 +334,145 @@ const STEALTH_TAIL: &str = r#"
 var obs=new MutationObserver(function(){var q=Object.getOwnPropertyNames(document);for(var j=0;j<q.length;j++){if(q[j].indexOf('cdc_')===0){try{delete document[q[j]];}catch(e){}}}});obs.observe(document,{childList:true,subtree:true});setTimeout(function(){obs.disconnect();},3000);
 })();"#;
 
-/// WebGL spoof block — applied ONLY when the real renderer is a headless tell
-/// (SwiftShader / llvmpipe / softpipe / software). On real hardware GL, the
-/// real value is coherent across page + worker + OffscreenCanvas scopes
-/// (CreepJS hasBadWebGL compares page GPU vs worker GPU — a spoof in only one
-/// scope is itself the flag).
-/// D22: Renderer string uses Linux/Mesa format (OpenGL ES 3.2, not macOS
-/// OpenGL 4.1) for platform consistency. GL capability limits spoofed to match
-/// real Intel UHD 630: MAX_TEXTURE_SIZE/MAX_VIEWPORT_DIMS/MAX_RENDERBUFFER_SIZE/
-/// MAX_CUBE_MAP_TEXTURE_SIZE = 16384 (SwiftShader reports 8192),
-/// ALIASED_POINT_SIZE_RANGE = [1,255] (SwiftShader reports [1,1] — a dead
-/// giveaway), ALIASED_LINE_WIDTH_RANGE = [1,1024] (SwiftShader reports [1,1023]),
-/// MAX_VERTEX_TEXTURE_IMAGE_UNITS = 16 (SwiftShader reports 64).
-const GL_SPOOF: &str = r#"
-// WebGL 1+2 vendor/renderer + GL capability limits (hides SwiftShader on GPU-less displays).
-// Renderer string uses Linux/Mesa format for platform consistency (D22).
-// SwiftShader reports MAX_TEXTURE_SIZE=8192, MAX_VIEWPORT_DIMS=[8192,8192].
-// Real Intel UHD 630 on Linux/Mesa reports 16384 for all. Pixelscan
-// cross-references GL capability limits against the claimed GPU.
-try{
-var _fv='Google Inc. (Intel)',_fr='ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL ES 3.2)';
-// GL capability limits that differ between SwiftShader and real Intel UHD 630.
-var _glLimits={3379:16384,34024:16384,34076:16384,35661:16};
-var _glVP=new Int32Array([16384,16384]);
-var _glPtR=new Float32Array([1,255]);
-var _glLwR=new Float32Array([1,1024]);
-function _mkGP(proto){
+/// GPU profile for WebGL spoofing — detected from host hardware (lspci on
+/// Linux) so the spoofed renderer string and GL capability limits match the
+/// real GPU. Falls back to Intel UHD 630 when detection fails (Docker without
+/// pciutils, macOS, Windows). Override: BLADE_GPU=intel|amd|nvidia.
+#[derive(Clone)]
+struct GpuProfile {
+    gl_vendor: String,
+    gl_renderer: String,
+    max_texture_size: i32,      // 3379 (MAX_TEXTURE_SIZE)
+    max_renderbuffer_size: i32, // 34024
+    max_cube_map_size: i32,      // 34076
+    max_vtx_tex_units: i32,     // 35661
+    max_viewport_dims: [i32; 2], // 3386
+    point_size_range: [f32; 2],  // 33902
+    line_width_range: [f32; 2],  // 33901
+}
+
+static DETECTED_GPU: OnceLock<GpuProfile> = OnceLock::new();
+
+fn get_gpu_profile() -> GpuProfile {
+    DETECTED_GPU.get_or_init(detect_gpu).clone()
+}
+
+fn detect_gpu() -> GpuProfile {
+    if let Ok(gpu) = std::env::var("BLADE_GPU") {
+        match gpu.as_str() {
+            "amd" => { eprintln!("[stealth] BLADE_GPU=amd — using AMD Radeon profile"); return amd_profile(); }
+            "nvidia" => { eprintln!("[stealth] BLADE_GPU=nvidia — using NVIDIA GeForce profile"); return nvidia_profile(); }
+            _ => { eprintln!("[stealth] BLADE_GPU={gpu} — using Intel UHD 630 profile"); return intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)"); }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(p) = detect_gpu_lspci() {
+            eprintln!("[stealth] detected GPU: {}", p.gl_renderer);
+            return p;
+        }
+    }
+    eprintln!("[stealth] GPU detection failed — using Intel UHD 630 fallback");
+    intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)")
+}
+
+#[cfg(target_os = "linux")]
+fn detect_gpu_lspci() -> Option<GpuProfile> {
+    let output = std::process::Command::new("lspci").arg("-nn").output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let lower = line.to_lowercase();
+        if !lower.contains("vga") && !lower.contains("3d") && !lower.contains("display") {
+            continue;
+        }
+        // Intel
+        if lower.contains("intel") {
+            if lower.contains("alder lake-p") || lower.contains("adl-p") {
+                return Some(intel_profile("Mesa Intel(R) Graphics (ADL-P GT2)"));
+            }
+            if lower.contains("alder lake-s") || lower.contains("adl-s") || lower.contains("uhd 770") {
+                return Some(intel_profile("Mesa Intel(R) Graphics (ADL-S GT1)"));
+            }
+            if lower.contains("tiger lake") || lower.contains("tgl") {
+                return Some(intel_profile("Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2)"));
+            }
+            if lower.contains("coffee lake") || lower.contains("uhd 630") || lower.contains("cfl") {
+                return Some(intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)"));
+            }
+            if lower.contains("skylake") || lower.contains("hd 530") || lower.contains("skl") {
+                return Some(intel_profile("Mesa Intel(R) HD Graphics 530 (SKL GT2)"));
+            }
+            if lower.contains("haswell") || lower.contains("hsw") {
+                return Some(intel_profile("Mesa Intel(R) HD Graphics 4600 (HSW GT2)"));
+            }
+            return Some(intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)"));
+        }
+        // AMD/ATI
+        if lower.contains("amd") || lower.contains("ati") || lower.contains("radeon") {
+            return Some(amd_profile());
+        }
+        // NVIDIA
+        if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("quadro") {
+            return Some(nvidia_profile());
+        }
+    }
+    None
+}
+
+fn intel_profile(mesa_name: &str) -> GpuProfile {
+    GpuProfile {
+        gl_vendor: "Google Inc. (Intel)".into(),
+        gl_renderer: format!("ANGLE (Intel, {mesa_name}, OpenGL ES 3.2)"),
+        max_texture_size: 16384,
+        max_renderbuffer_size: 16384,
+        max_cube_map_size: 16384,
+        max_vtx_tex_units: 16,
+        max_viewport_dims: [16384, 16384],
+        point_size_range: [1.0, 255.0],
+        line_width_range: [1.0, 1024.0],
+    }
+}
+
+fn amd_profile() -> GpuProfile {
+    GpuProfile {
+        gl_vendor: "Google Inc. (AMD)".into(),
+        gl_renderer: "ANGLE (AMD, Mesa AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7), OpenGL ES 3.2)".into(),
+        max_texture_size: 16384,
+        max_renderbuffer_size: 16384,
+        max_cube_map_size: 16384,
+        max_vtx_tex_units: 32,
+        max_viewport_dims: [16384, 16384],
+        point_size_range: [1.0, 8192.0],
+        line_width_range: [1.0, 8192.0],
+    }
+}
+
+fn nvidia_profile() -> GpuProfile {
+    GpuProfile {
+        gl_vendor: "Google Inc. (NVIDIA)".into(),
+        gl_renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060, OpenGL ES 3.2)".into(),
+        max_texture_size: 32768,
+        max_renderbuffer_size: 32768,
+        max_cube_map_size: 32768,
+        max_vtx_tex_units: 32,
+        max_viewport_dims: [32768, 32768],
+        point_size_range: [1.0, 2048.0],
+        line_width_range: [1.0, 10.0],
+    }
+}
+
+/// Build GL spoof JS for the main page (has _lie from STEALTH_CORE).
+fn build_gl_spoof(p: &GpuProfile) -> String {
+    format!(
+        r#"try{{
+var _fv='{vendor}',_fr='{renderer}';
+var _glLimits={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mvtu}}};
+var _glVP=new Int32Array([{vp0},{vp1}]);
+var _glPtR=new Float32Array([{psr0},{psr1}]);
+var _glLwR=new Float32Array([{lwr0},{lwr1}]);
+function _mkGP(proto){{
   var orig=proto.getParameter;
-  var f=function getParameter(p){
+  var f=function getParameter(p){{
     if(p===37445)return _fv;
     if(p===37446)return _fr;
     if(p===3386)return _glVP;
@@ -368,13 +480,66 @@ function _mkGP(proto){
     if(p===33901)return _glLwR;
     if(_glLimits[p]!==undefined)return _glLimits[p];
     return orig.call(this,p);
-  };
-  try{Object.defineProperty(proto,'getParameter',{value:f,writable:true,configurable:true,enumerable:true});_lie(f,'getParameter');}catch(e){}
-}
+  }};
+  try{{Object.defineProperty(proto,'getParameter',{{value:f,writable:true,configurable:true,enumerable:true}});_lie(f,'getParameter');}}catch(e){{}}
+}}
 _mkGP(WebGLRenderingContext.prototype);
-if(typeof WebGL2RenderingContext!=='undefined'){_mkGP(WebGL2RenderingContext.prototype);}
-}catch(e){}
-"#;
+if(typeof WebGL2RenderingContext!=='undefined'){{_mkGP(WebGL2RenderingContext.prototype);}}
+}}catch(e){{}}"#,
+        vendor = p.gl_vendor,
+        renderer = p.gl_renderer,
+        mts = p.max_texture_size,
+        mrs = p.max_renderbuffer_size,
+        mcs = p.max_cube_map_size,
+        mvtu = p.max_vtx_tex_units,
+        vp0 = p.max_viewport_dims[0],
+        vp1 = p.max_viewport_dims[1],
+        psr0 = p.point_size_range[0],
+        psr1 = p.point_size_range[1],
+        lwr0 = p.line_width_range[0],
+        lwr1 = p.line_width_range[1],
+    )
+}
+
+/// Build GL spoof JS for Worker contexts (self-contained, no _lie).
+fn build_worker_gl_spoof(p: &GpuProfile) -> String {
+    format!(
+        r#"try{{
+var _fv='{vendor}',_fr='{renderer}';
+var _glLimits={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mvtu}}};
+var _glVP=new Int32Array([{vp0},{vp1}]);
+var _glPtR=new Float32Array([{psr0},{psr1}]);
+var _glLwR=new Float32Array([{lwr0},{lwr1}]);
+function _mkGP(proto){{
+  var orig=proto.getParameter;
+  var f=function getParameter(p){{
+    if(p===37445)return _fv;
+    if(p===37446)return _fr;
+    if(p===3386)return _glVP;
+    if(p===33902)return _glPtR;
+    if(p===33901)return _glLwR;
+    if(_glLimits[p]!==undefined)return _glLimits[p];
+    return orig.call(this,p);
+  }};
+  try{{Object.defineProperty(proto,'getParameter',{{value:f,writable:true,configurable:true,enumerable:true}});}}catch(e){{}}
+}}
+if(typeof WebGLRenderingContext!=='undefined')_mkGP(WebGLRenderingContext.prototype);
+if(typeof WebGL2RenderingContext!=='undefined')_mkGP(WebGL2RenderingContext.prototype);
+}}catch(e){{}}"#,
+        vendor = p.gl_vendor,
+        renderer = p.gl_renderer,
+        mts = p.max_texture_size,
+        mrs = p.max_renderbuffer_size,
+        mcs = p.max_cube_map_size,
+        mvtu = p.max_vtx_tex_units,
+        vp0 = p.max_viewport_dims[0],
+        vp1 = p.max_viewport_dims[1],
+        psr0 = p.point_size_range[0],
+        psr1 = p.point_size_range[1],
+        lwr0 = p.line_width_range[0],
+        lwr1 = p.line_width_range[1],
+    )
+}
 
 /// Media devices patch — applied ONLY when the real machine reports zero
 /// devices (a server tell; real desktops always have audio in/out). Returns
@@ -529,12 +694,13 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         eprintln!("[stealth] registering locale override: {l}");
     }
 
-    let mut script = String::with_capacity(STEALTH_CORE.len() + GL_SPOOF.len() + MEDIA_PATCH.len() + LOCALE_OVERRIDE.len() + NOISE.len() + STEALTH_TAIL.len());
+    let mut script = String::with_capacity(STEALTH_CORE.len() + 2048 + MEDIA_PATCH.len() + LOCALE_OVERRIDE.len() + NOISE.len() + STEALTH_TAIL.len());
     script.push_str(STEALTH_CORE);
     GL_SPOOFED.store(spoof_gl, Ordering::Relaxed);
     if spoof_gl {
-        eprintln!("[stealth] registering WebGL spoof (page + worker)");
-        script.push_str(GL_SPOOF);
+        let profile = get_gpu_profile();
+        eprintln!("[stealth] registering WebGL spoof: {} (page + worker)", profile.gl_renderer);
+        script.push_str(&build_gl_spoof(&profile));
     }
     if patch_media {
         script.push_str(MEDIA_PATCH);
@@ -579,27 +745,6 @@ pub fn worker_gl_spoof() -> Option<String> {
     if !GL_SPOOFED.load(Ordering::Relaxed) {
         return None;
     }
-    Some(r#"try{
-var _fv='Google Inc. (Intel)',_fr='ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL ES 3.2)';
-var _glLimits={3379:16384,34024:16384,34076:16384,35661:16};
-var _glVP=new Int32Array([16384,16384]);
-var _glPtR=new Float32Array([1,255]);
-var _glLwR=new Float32Array([1,1024]);
-function _mkGP(proto){
-  var orig=proto.getParameter;
-  var f=function getParameter(p){
-    if(p===37445)return _fv;
-    if(p===37446)return _fr;
-    if(p===3386)return _glVP;
-    if(p===33902)return _glPtR;
-    if(p===33901)return _glLwR;
-    if(_glLimits[p]!==undefined)return _glLimits[p];
-    return orig.call(this,p);
-  };
-  try{Object.defineProperty(proto,'getParameter',{value:f,writable:true,configurable:true,enumerable:true});
-  }catch(e){}
-}
-if(typeof WebGLRenderingContext!=='undefined')_mkGP(WebGLRenderingContext.prototype);
-if(typeof WebGL2RenderingContext!=='undefined')_mkGP(WebGL2RenderingContext.prototype);
-}catch(e){}"#.to_string())
+    let profile = get_gpu_profile();
+    Some(build_worker_gl_spoof(&profile))
 }

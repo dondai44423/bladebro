@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [3.0.23] - 2026-08-07
+
+### Changed
+
+- **Dynamic GPU detection for WebGL spoof**: Instead of hardcoding Intel UHD 630 for every GPU-less environment, Bladebro now detects the real GPU via `lspci` on Linux and generates a matching WebGL profile with the correct ANGLE renderer string and GL capability limits. Supports Intel (UHD 630, Iris Xe, Alder Lake, Tiger Lake, Skylake, Haswell), AMD (Radeon), and NVIDIA (GeForce). Falls back to Intel UHD 630 when `lspci` is unavailable (Docker without pciutils). Override with `BLADE_GPU=intel|amd|nvidia`.
+
+### Fixed
+
+- **WebGL renderer string no longer hardcoded**: Previously every headless/Xvfb instance claimed "Intel UHD 630 (CFL GT2)" regardless of the host's actual GPU. Now a machine with Alder Lake-P reports "Mesa Intel(R) Graphics (ADL-P GT2)" — matching the real hardware.
 ## [3.0.22] - 2026-08-07
 
 ### Stealth hardening
