@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Speed optimization across all tools**: Reduced per-action latency by tightening wait/settle/sleep timings without sacrificing stealth or quality. DOM settle poll interval 150ms→60ms, quiet threshold 300ms→150ms. Network drain GRACE 1200ms→600ms, poll 80ms→50ms. Click nav timeout 500ms→200ms, click settle 3s→2s. Post-action settle timeouts: Press/Select/Scroll/Hover 2-3s→1s, default 5s→3s. Removed redundant 300ms hover pre-sleep (settle handles it). Fill submit sleep 300ms→100ms. JS click fallback sleep 500ms→200ms. Batch auto-settle 500ms→200ms. Wait condition poll 300ms→100ms. Pacing medians reduced (click 800→500ms, type 500→350ms, scroll 400→250ms, back 1500→800ms, hover 600→400ms). Measured improvements: back 6x, scroll 4.6x, click 2x, hover 2.5x, see model 5-10x.
+
 ## [3.0.19] - 2026-08-07
 
 ### Fixed

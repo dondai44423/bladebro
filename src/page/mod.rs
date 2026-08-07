@@ -814,14 +814,14 @@ impl Page {
         let elapsed = now.saturating_sub(last);
 
         let (median_ms, sigma) = match action {
-            crate::action::Action::Click { .. } => (800.0, 0.6),
-            crate::action::Action::Type { .. } => (500.0, 0.4),
-            crate::action::Action::Scroll { .. } => (400.0, 0.5),
-            crate::action::Action::Back => (1500.0, 0.7),
-            crate::action::Action::Hover { .. } => (600.0, 0.5),
+            crate::action::Action::Click { .. } => (500.0, 0.5),
+            crate::action::Action::Type { .. } => (350.0, 0.4),
+            crate::action::Action::Scroll { .. } => (250.0, 0.4),
+            crate::action::Action::Back => (800.0, 0.6),
+            crate::action::Action::Hover { .. } => (400.0, 0.4),
             // Wait/Read are perception, not human actions — no pacing.
             crate::action::Action::Wait { .. } | crate::action::Action::Read { .. } => return,
-            _ => (600.0, 0.5),
+            _ => (400.0, 0.4),
         };
         let mut rng = crate::stealth::biometrics::Rng::new();
         let target = crate::stealth::biometrics::log_normal(&mut rng, median_ms, sigma);

@@ -373,7 +373,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         "element" => {
@@ -403,7 +403,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         "url" => {
@@ -433,7 +433,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         "text" => {
@@ -466,7 +466,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         "js" => {
@@ -504,7 +504,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         "settle" | "network" => {
@@ -989,14 +989,14 @@ pub async fn perform_with_network(
                         _ = sub_fires(&mut dlg_sub, "Page.javascriptDialogOpening") => true,
                     }
                 };
-                match tokio::time::timeout(Duration::from_millis(500), early).await {
+                match tokio::time::timeout(Duration::from_millis(200), early).await {
                     Ok(true) => dialog_fired = true,
                     Ok(false) => {
                         crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
                     }
                     _ => {}
                 }
-                wait_for_settle_with_network(cdp, Duration::from_secs(3), in_flight).await?;
+                wait_for_settle_with_network(cdp, Duration::from_secs(2), in_flight).await?;
                 let cap = capture(cdp).await?;
                 delta = lpm.ingest(cap);
 
@@ -1229,10 +1229,9 @@ pub async fn perform_with_network(
                     }
                 }
             }
-            // Hover-driven dropdowns appear within ~300ms — give
-            // the mutation watcher a beat to catch them before
-            // the settle wait decides nothing changed.
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            // Hover-driven dropdowns appear within ~150ms — the settle
+            // quiet threshold (150ms) catches them. No extra sleep needed.
+            // (Removed 300ms pre-settle sleep; settle already waits for DOM quiet.)
         }
         Action::Upload { ref_id, path } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
@@ -1299,13 +1298,12 @@ pub async fn perform_with_network(
     // and their DOM settles fast. Shorter nav check + shorter settle = faster.
     let nav_check_ms = match action {
         Action::Type { .. } | Action::Clear { .. } | Action::Scroll { .. } => 150,
-        _ => 500,
+        _ => 200,
     };
     let settle_secs = match action {
         Action::Type { .. } | Action::Clear { .. } => 1,
-        Action::Press { .. } | Action::Select { .. } => 2,
-        Action::Scroll { .. } | Action::Hover { .. } => 3,
-        _ => 5,
+        Action::Press { .. } | Action::Select { .. } | Action::Scroll { .. } | Action::Hover { .. } => 1,
+        _ => 3,
     };
 
     // Check if navigation was triggered (with a short timeout).

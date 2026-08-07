@@ -1209,7 +1209,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     resolve_text_target(page, submit, None, None).await?
                 };
                 // Wait briefly for field validation to settle before clicking submit.
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let (delta, verdict) = page.act(Action::Click { ref_id: resolved.clone() }).await?;
                 last_verdict = verdict.clone();
                 // If the mouse click had no effect (no navigation, no DOM change),
@@ -1219,7 +1219,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     match handle_eval(page, "el ? (el.click(), true) : false", &resolved).await {
                         Ok(_) => {
                             last_verdict = format!("{verdict} (submit via JS click fallback)");
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             page.recapture().await?
                         }
                         Err(_) => delta,
@@ -1272,7 +1272,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                         // SPA time to render and recapture for fresh refs.
                         // Without this, the next step acts on a half-rendered page.
                         if curr_url != prev_url {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             let _ = page.recapture().await;
                             verdicts.push(format!("step{}[{}]: {} (→ {})", i+1, step_action, vline, curr_url));
                         } else {

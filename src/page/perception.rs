@@ -342,9 +342,9 @@ pub async fn wait_for_settle_with_network(
             function fin(v){{if(done)return;done=true;try{{if(mo)mo.disconnect();}}catch(e){{}}res(v);}}\
             (function tick(){{\
                 var now=performance.now();\
-                if(document.readyState!=='loading'&&(now-last)>=300){{fin('settled');return;}}\
+                if(document.readyState!=='loading'&&(now-last)>=150){{fin('settled');return;}}\
                 if((now-t0)>={ms}){{fin('timeout');return;}}\
-                setTimeout(tick,150);\
+                setTimeout(tick,60);\
             }})();\
         }})",
     );
@@ -373,7 +373,7 @@ pub async fn wait_for_settle_with_network(
         // it has plateaued for GRACE, when it hits zero, or at the hard
         // deadline. Fast by default; agents needing full network quiet
         // can `act wait condition=network` explicitly.
-        const GRACE: Duration = Duration::from_millis(1200);
+        const GRACE: Duration = Duration::from_millis(600);
         let hard_deadline = tokio::time::Instant::now() + timeout;
         let mut lowest = counter.load(Ordering::Relaxed);
         let mut last_new_low = tokio::time::Instant::now();
@@ -394,7 +394,7 @@ pub async fn wait_for_settle_with_network(
                 // finished or only persistent connections remain.
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(80)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
     Ok(())
