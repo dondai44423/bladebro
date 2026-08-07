@@ -373,7 +373,7 @@ Run `bladebro audit` to verify your own setup.
 
 ## 💖 Sponsors
 
-Bladebro is open source and free to use. If your company relies on it, consider sponsoring development.
+Bladebro is open source and free to use. If you want to support it, consider sponsoring development.
 
 | Tier | Price | What you get |
 |---|---|---|
