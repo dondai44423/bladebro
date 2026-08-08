@@ -43,7 +43,7 @@ Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and 
 
 ### What makes it different
 
-| Innovation | What it means | Status |
+| Features | What it means | Status |
 |---|---|---|
 | **Re-render immunity** | Refs survive React/Vue/Angular DOM replacement via structural fingerprints. No other agent browser does this. | Live-verified |
 | **Self-improvement** | Learns consent selectors, biometrics, and per-domain patterns across sessions. Compounds with use, never degrades. | v3.0.14 |
@@ -53,7 +53,6 @@ Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and 
 | **6-layer stealth** | Protocol, environment, behavior, coherence, residue, seasoning. All on by default. | incolumitas 8/8 |
 | **Delta-first tokens** | Every action returns what changed, not the whole page. 5x cheaper than competitors. | ~1,900-token tool defs |
 | **Self-healing refs** | Stale refs re-resolve automatically. Agent never sees "element not found" after navigation. | 26/26 sites |
-| **Pi agent native** | `pi install npm:bladebro` — 5 tools registered as first-class pi tools. Zero config. | v3.0.13 |
 
 ## 🚀 Install
 
