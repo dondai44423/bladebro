@@ -111,19 +111,8 @@ Just tell your agent to add Bladebro to its MCP config. For Claude Desktop, Curs
 }
 ```
 
-**Where's the config file?**
 
-| Agent | Config file path |
-|---|---|
-| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Cursor | Settings > MCP > Add new MCP server |
-| Cline / Roo Code | `.cline/mcp_settings.json` in your project |
-| Any MCP client | Check your client's docs for "MCP server config" |
-
-No Chrome process to manage. Bladebro launches Chrome automatically on the first tool call and kills it on exit.
-
-Using pi? One command, no config:
+### Using pi? One command, no config:
 
 ```bash
 pi install npm:bladebro
