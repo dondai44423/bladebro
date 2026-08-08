@@ -326,6 +326,11 @@ pub fn reap_orphans() {
                     }
                 }
             }
+            // Sync the dead session's state (cookies, localStorage)
+            // back to the template BEFORE removing it. Without this,
+            // sessions that were killed without graceful shutdown
+            // lose all their state — the reaper just deleted the dir.
+            SessionProfile::sync_back_only(&dir);
             let _ = std::fs::remove_dir_all(&dir);
             eprintln!("[bladebro] reaped dead session profile {}", name);
         }
@@ -540,5 +545,62 @@ mod tests {
         let dst = std::env::temp_dir().join("bladebro-test-copy-dst2");
         let _ = std::fs::remove_dir_all(&dst);
         copy_profile(&src, &dst); // must not panic
+    }
+
+    /// Verify the reaper syncs a dead session's state back to the
+    /// template BEFORE deleting it. This is the fix for issue #5:
+    /// cookies were lost when sessions were killed without graceful
+    /// shutdown, because the reaper just deleted the session dir.
+    #[test]
+    fn reaper_syncs_back_before_delete() {
+        let blade_dir = platform::blade_dir();
+        let profiles_dir = blade_dir.join("profiles");
+        let template_dir = blade_dir.join("profile");
+
+        // Use a unique session dir name to avoid collisions
+        let test_pid = 999_999_999u32; // guaranteed dead pid
+        let sess_dir = profiles_dir.join(format!("sess-{test_pid}"));
+        let _ = std::fs::remove_dir_all(&sess_dir);
+
+        // Create a fake session profile with a cookie file
+        std::fs::create_dir_all(sess_dir.join("Default")).unwrap();
+        std::fs::write(sess_dir.join(".blade-owner"), test_pid.to_string()).unwrap();
+        std::fs::write(
+            sess_dir.join("Default/Cookies"),
+            b"fake-cookie-db-data",
+        ).unwrap();
+
+        // Snapshot template state before
+        let template_cookie_before = template_dir.join("Default/Cookies");
+        let had_template = template_cookie_before.exists();
+        let template_content_before = if had_template {
+            std::fs::read(&template_cookie_before).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Run the reaper
+        reap_orphans();
+
+        // Session dir should be gone
+        assert!(!sess_dir.exists(), "reaper should have removed session dir");
+
+        // Template should have the cookie file from the session
+        assert!(
+            template_cookie_before.exists(),
+            "template should have Cookies file after reaper synced"
+        );
+        let template_content_after = std::fs::read(&template_cookie_before).unwrap_or_default();
+        assert_eq!(
+            template_content_after, b"fake-cookie-db-data",
+            "template cookie DB should contain session data"
+        );
+
+        // Restore template if it existed before
+        if had_template {
+            let _ = std::fs::write(&template_cookie_before, &template_content_before);
+        } else {
+            let _ = std::fs::remove_file(&template_cookie_before);
+        }
     }
 }

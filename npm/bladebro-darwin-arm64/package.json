@@ -1,6 +1,6 @@
 {
   "name": "bladebro-darwin-arm64",
-  "version": "3.0.24",
+  "version": "3.0.25",
   "description": "Bladebro binary for macOS Apple Silicon",
   "license": "Apache-2.0",
   "os": [
