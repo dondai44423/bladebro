@@ -105,7 +105,7 @@ if [[ "$REMOTE_URL" != *"@github.com"* ]]; then
         trap 'git remote set-url origin "https://github.com/dondai44423/bladebro.git"' EXIT
     fi
 fi
-git push origin master:main --tags
+git push origin main --tags
 git remote set-url origin "https://github.com/dondai44423/bladebro.git" 2>/dev/null || true
 trap - EXIT
 echo "[8/9] pushed"
