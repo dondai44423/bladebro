@@ -557,12 +557,26 @@ mod tests {
         let profiles_dir = blade_dir.join("profiles");
         let template_dir = blade_dir.join("profile");
 
-        // Use a unique session dir name to avoid collisions
+        // Clean ALL stale session dirs + locks so they don't interfere.
+        // (Live testing leaves orphaned session dirs with dead owners.)
+        if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        let _ = std::fs::remove_file(blade_dir.join(".template.lock"));
+        let _ = std::fs::remove_dir_all(blade_dir.join(".profile.sync"));
+
+        // Snapshot the entire template so we can restore it after.
+        let template_backup = std::env::temp_dir().join("bladebro-test-template-backup");
+        let _ = std::fs::remove_dir_all(&template_backup);
+        if template_dir.is_dir() {
+            copy_profile(&template_dir, &template_backup);
+        }
+
+        // Create a fake dead session with a marker file.
         let test_pid = 999_999_999u32; // guaranteed dead pid
         let sess_dir = profiles_dir.join(format!("sess-{test_pid}"));
-        let _ = std::fs::remove_dir_all(&sess_dir);
-
-        // Create a fake session profile with a cookie file
         std::fs::create_dir_all(sess_dir.join("Default")).unwrap();
         std::fs::write(sess_dir.join(".blade-owner"), test_pid.to_string()).unwrap();
         std::fs::write(
@@ -570,37 +584,33 @@ mod tests {
             b"fake-cookie-db-data",
         ).unwrap();
 
-        // Snapshot template state before
-        let template_cookie_before = template_dir.join("Default/Cookies");
-        let had_template = template_cookie_before.exists();
-        let template_content_before = if had_template {
-            std::fs::read(&template_cookie_before).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        // Run the reaper
+        // Run the reaper.
         reap_orphans();
 
-        // Session dir should be gone
+        // Session dir should be gone.
         assert!(!sess_dir.exists(), "reaper should have removed session dir");
 
-        // Template should have the cookie file from the session
+        // Template should have the marker file from the session,
+        // proving sync_back ran before deletion.
+        let template_cookie = template_dir.join("Default/Cookies");
         assert!(
-            template_cookie_before.exists(),
+            template_cookie.exists(),
             "template should have Cookies file after reaper synced"
         );
-        let template_content_after = std::fs::read(&template_cookie_before).unwrap_or_default();
+        let content = std::fs::read(&template_cookie).unwrap_or_default();
         assert_eq!(
-            template_content_after, b"fake-cookie-db-data",
+            content, b"fake-cookie-db-data",
             "template cookie DB should contain session data"
         );
 
-        // Restore template if it existed before
-        if had_template {
-            let _ = std::fs::write(&template_cookie_before, &template_content_before);
-        } else {
-            let _ = std::fs::remove_file(&template_cookie_before);
+        // Restore the original template.
+        let _ = std::fs::remove_dir_all(&template_dir);
+        if template_backup.is_dir() {
+            let tmp = blade_dir.join(".profile.restore");
+            let _ = std::fs::remove_dir_all(&tmp);
+            copy_profile(&template_backup, &tmp);
+            let _ = std::fs::rename(&tmp, &template_dir);
         }
+        let _ = std::fs::remove_dir_all(&template_backup);
     }
 }

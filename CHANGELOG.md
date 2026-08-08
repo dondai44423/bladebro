@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [3.0.27] - 2026-08-08
+
+### Fixed
+- JS challenge pages (Reddit, Cloudflare) no longer trigger false block reports. The browser solves these challenges automatically, but the challenge page would settle and be captured before the JS finished computing. Now waits up to 5s for either a URL redirect or the block to disappear before reporting a block.
+- `detect_block` no longer false-positives on pages that include reCAPTCHA for login/signup but are not actually blocked (e.g. Reddit's normal pages).
+
 ## [3.0.26] - 2026-08-08
 
 ## [3.0.26] - 2026-08-08

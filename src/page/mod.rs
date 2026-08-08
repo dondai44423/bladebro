@@ -1185,6 +1185,41 @@ impl Page {
             .and_then(|kb| kb.get_consent(&domain).map(|c| c.selector.clone()));
         let consent = dismiss_consent_with_stored(&self.cdp, stored_consent.as_deref()).await.unwrap_or(None);
         let blocked = detect_block(&self.cdp).await.unwrap_or(None);
+        // JS challenge handling: many anti-bot systems (Reddit, Cloudflare)
+        // serve a JS challenge page that a real browser solves automatically.
+        // The challenge page is simple HTML and settles fast, so detect_block
+        // fires BEFORE the challenge JS has time to compute + redirect.
+        // Wait up to 5s polling for either a URL change OR the block
+        // disappearing (some challenges solve in-place without redirect).
+        // If either happens, the challenge was solved — do NOT report a block.
+        let blocked = if blocked.is_some() {
+            let pre_url = eval_location_href(&self.cdp).await;
+            let mut solved = false;
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let post_url = eval_location_href(&self.cdp).await;
+                if post_url != pre_url && !post_url.is_empty() {
+                    solved = true;
+                    break;
+                }
+                // Also check if the block disappeared without a URL change
+                // (some challenges solve in-place, replacing page content).
+                if detect_block(&self.cdp).await.unwrap_or(None).is_none() {
+                    solved = true;
+                    break;
+                }
+            }
+            if solved {
+                wait_for_settle_with_network(
+                    &self.cdp, Duration::from_secs(3), Some(&self.in_flight),
+                ).await?;
+                None // clear block — was a JS challenge, not a real block
+            } else {
+                blocked
+            }
+        } else {
+            blocked
+        };
         // Learn from successful consent dismissal (only specific selectors, not "generic").
         if let Some(ref result) = consent {
             if result != "generic" && !result.is_empty() && !domain.is_empty() {
@@ -1290,6 +1325,18 @@ struct DomainProfile {
 }
 
 /// Extract the registrable domain from a URL for profile lookup.
+/// Get the current page URL via CDP. Used by JS challenge detection
+/// to detect redirects after a challenge page is served.
+async fn eval_location_href(cdp: &CdpSession) -> String {
+    cdp.send("Runtime.evaluate", Some(json!({
+        "expression": "location.href",
+        "returnByValue": true,
+    }))).await
+        .ok()
+        .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
 fn extract_domain(url: &str) -> String {
     url.split("://").nth(1).unwrap_or(url)
         .split('/').next().unwrap_or("")
