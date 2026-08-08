@@ -8,12 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.0.25] - 2026-08-08
+## [3.0.26] - 2026-08-08
 
-## [3.0.25] - 2026-08-08
+## [3.0.26] - 2026-08-08
 
 
-## [3.0.25] - 2026-08-08
+## [3.0.26] - 2026-08-08
 
 ### Fixed
 - Session profile state (cookies, localStorage) is now synced back to the persistent template when the reaper cleans up dead sessions. Previously, sessions that were killed without graceful shutdown (SIGKILL, crash, or Windows process termination) lost all their state because the reaper deleted the session directory without merging its contents back to the template.
