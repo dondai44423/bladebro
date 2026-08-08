@@ -176,7 +176,7 @@ Every `act` returns an **outcome verdict + page delta**. Click auto-escalates: m
 
 **`slim=true`** — returns verdict only, no delta. Use when you know what happens next.
 
-### `see` — observe (rarely needed)
+### `see` — observe
 
 Navigate and act already return page state. Use `see` for:
 
