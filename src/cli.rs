@@ -943,6 +943,7 @@ pub async fn run_daemon() -> Result<()> {
 }
 
 /// Launch Chrome and create a Page for the daemon.
+#[cfg(unix)]
 async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
     let browser = crate::browser::Browser::launch(0).await?;
     let base = browser.base();
