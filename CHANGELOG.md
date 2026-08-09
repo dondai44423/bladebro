@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-09
+
 ### Added
 - First-class CLI with the same power as the MCP server. All 5 tools (act, see, state, run, vision) available from the command line.
 - Daemon mode: `bladebro daemon` starts a persistent Chrome session via Unix socket. Subsequent commands connect to the daemon, keeping Chrome alive across commands. Same lifecycle as MCP (lazy launch, self-healing, idle timeout, reaper).
