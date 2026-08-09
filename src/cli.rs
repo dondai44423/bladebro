@@ -788,6 +788,7 @@ fn parse_run_args(args: &[String]) -> Result<Value> {
 
 /// Wait for a termination signal (SIGTERM/SIGINT/SIGHUP on Unix, Ctrl+C on Windows).
 /// Same as the MCP server's signal handler.
+#[cfg(unix)]
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
