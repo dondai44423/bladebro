@@ -85,30 +85,6 @@ That's it. The extension spawns the binary as a stdio MCP subprocess, discovers 
 
 Tool definitions come from the binary at startup, so they auto-adapt to any tool def changes with zero extension maintenance. Auto-updates via `pi update --extensions`.
 
-### CLI (first-class)
-
-Bladebro has a first-class CLI with the same power as the MCP server. Same 5 tools, same stealth, same page model. No MCP client needed.
-
-```bash
-# Start a persistent session (Chrome stays alive across commands)
-bladebro daemon
-
-# In another terminal (or script):
-bladebro nav https://news.ycombinator.com
-bladebro see content
-bladebro act click e5
-bladebro see model --json | jq .text
-bladebro stop
-```
-
-Or one-shot mode (launches Chrome per command):
-
-```bash
-bladebro see content https://example.com --no-daemon
-```
-
-The CLI calls the exact same handler functions as the MCP server. Any feature update auto-propagates to both surfaces.
-
 ### From source
 
 **Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.86+. Linux: Xvfb for headless servers (macOS/Windows run headful natively).
@@ -120,7 +96,18 @@ cargo build --release
 ./target/release/bladebro mcp
 ```
 
-### Connect your AI agent
+## 🔌 Two ways to use Bladebro
+
+Bladebro gives you the **same 5 tools, same stealth, same page model** through two interfaces. Pick one or use both.
+
+| | MCP Server | CLI |
+|---|---|---|
+| **Best for** | AI agents (Claude, Cursor, pi, Cline) | Shell scripts, CI/CD, quick one-offs |
+| **How it works** | stdio JSON-RPC server | Direct command line |
+| **Setup** | Add to MCP config | Just run `bladebro <command>` |
+| **Session** | One Chrome per agent session | Daemon (persistent) or one-shot |
+
+### Option 1: MCP Server (for AI agents)
 
 Just tell your agent to add Bladebro to its MCP config. For Claude Desktop, Cursor, and most MCP clients, add this to your config file:
 
@@ -141,6 +128,77 @@ Just tell your agent to add Bladebro to its MCP config. For Claude Desktop, Curs
 ```bash
 pi install npm:bladebro
 ```
+
+### Option 2: CLI (for shell scripts and direct use)
+
+The CLI has the **exact same power** as the MCP server. Same handlers, same stealth, same page model. Any feature update auto-propagates to both surfaces automatically.
+
+**Daemon mode** (persistent Chrome, zero startup delay after first launch):
+
+```bash
+# Start the daemon (Chrome stays alive across commands)
+bladebro daemon
+
+# All commands now connect to the daemon instead of launching new Chrome
+bladebro nav https://news.ycombinator.com
+bladebro see content
+bladebro act click e5
+bladebro see model --json | jq .text
+bladebro state cookies
+bladebro vision --marks
+bladebro stop
+```
+
+**One-shot mode** (no daemon, launches Chrome per command):
+
+```bash
+bladebro see content https://example.com --no-daemon
+bladebro nav https://news.ycombinator.com --no-daemon
+```
+
+**All 5 tools work from the CLI:**
+
+```bash
+# Navigate
+bladebro nav https://example.com
+
+# Read the page (6 modes: model, content, outline, extract, links, forms)
+bladebro see model                   # interactive elements with refs
+bladebro see content                # clean markdown
+bladebro see outline                 # heading hierarchy
+bladebro see extract auto            # auto-detect structured data
+
+# Interact (20+ actions: click, type, fill, scroll, press, hover, ...)
+bladebro act click e5                # click element e5
+bladebro act type e12 "hello world"  # type text
+bladebro act scroll 0 500            # scroll down
+bladebro act press Enter             # press a key
+bladebro act fill '[{"label":"Email","text":"a@b.com"},{"label":"Password","text":"secret"}]' --submit e20
+
+# Manage state
+bladebro state cookies               # list cookies
+bladebro state tabs                   # list tabs
+bladebro state open-tab https://example.com
+
+# Batch actions
+bladebro run '[{"action":"click","ref":"e5"},{"action":"type","ref":"e12","text":"hello"}]'
+
+# Screenshot
+bladebro vision                      # save screenshot to /tmp
+bladebro vision --marks              # with numbered ref badges
+
+# JSON output for scripts and agents
+bladebro see model --json | jq .text
+bladebro act click e5 --json | jq .is_error
+```
+
+**Flags:**
+
+| Flag | What it does |
+|---|---|
+| `--json` | Structured JSON output `{ok, text, image, is_error}` for scripts and agents |
+| `--no-daemon` | Force one-shot mode (launch Chrome per command) |
+| `--marks` | Overlay numbered ref badges on screenshot (vision only) |
 
 ### Diagnostics
 
