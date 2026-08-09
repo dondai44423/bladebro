@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- CLI one-shot mode: Chrome + Xvfb now always cleaned up on error paths. Previously, if any step between Browser::launch and browser.shutdown failed, the ? operator would early-return and Chrome would be orphaned.
+- CLI daemon: signal handling added (SIGTERM/SIGINT/SIGHUP). Previously, kill or Ctrl+C would kill the daemon but leave Chrome + Xvfb running.
+- CLI daemon: launch_browser now cleans up Chrome on partial failure.
+- CLI daemon: send_to_daemon error now falls back to one-shot mode.
+- CLI daemon: periodic profile sync (every 60s) added, matching the MCP server.
+- CLI vision: screenshot path uses timestamp instead of PID, preventing overwrites in daemon mode.
+- MCP server: launch_browser now cleans up Chrome on partial failure for both WS and pipe transports.
+
 ## [3.1.1] - 2026-08-09
 
 ### Added

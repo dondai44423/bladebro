@@ -222,34 +222,52 @@ async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool) ->
     if !no_daemon && daemon_running() {
         #[cfg(unix)]
         {
-            let result = send_to_daemon(tool, args)?;
-            print_result(&result, json_mode);
-            return Ok(());
+            match send_to_daemon(tool, args) {
+                Ok(result) => {
+                    print_result(&result, json_mode);
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Daemon was running but crashed between check and send.
+                    // Fall back to one-shot instead of erroring.
+                    eprintln!("[bladebro] daemon connection failed ({e}), falling back to one-shot");
+                    // Clean up stale socket so daemon_running() returns false next time.
+                    let _ = std::fs::remove_file(socket_path());
+                }
+            }
         }
     }
 
     // One-shot: launch Chrome, run, exit.
+    // Use a guard to ensure browser is ALWAYS shut down, even on error.
     let browser = crate::browser::Browser::launch(0).await?;
     let base = browser.base();
-    let target = crate::cdp::first_page_target(&base).await?;
-    let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
-    let mut page = Page::attach(
-        crate::cdp::CdpSession::root(client),
-        &base,
-        None,
-    ).await?;
 
-    // Warm profile on first run.
-    if crate::session_profile::SessionProfile::claim_warming() {
-        warm_profile(&mut page).await;
-    }
+    // All operations after launch are in a block so we can ensure cleanup.
+    let result = async {
+        let target = crate::cdp::first_page_target(&base).await?;
+        let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
+        let mut page = Page::attach(
+            crate::cdp::CdpSession::root(client),
+            &base,
+            None,
+        ).await?;
 
-    let result = dispatch(tool, args, &mut page).await?;
-    print_result(&result, json_mode);
+        // Warm profile on first run.
+        if crate::session_profile::SessionProfile::claim_warming() {
+            warm_profile(&mut page).await;
+        }
 
-    // Graceful shutdown.
+        let result = dispatch(tool, args, &mut page).await?;
+        print_result(&result, json_mode);
+        Ok(())
+    }.await;
+
+    // ALWAYS shut down Chrome, even if the above failed.
+    // Without this, any error between launch and shutdown orphans Chrome + Xvfb.
     let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
-    Ok(())
+
+    result
 }
 
 /// Print result in human or JSON format.
@@ -264,7 +282,7 @@ fn print_result(result: &ToolResult, json_mode: bool) {
         println!("{v}");
     } else if let Some(ref img) = result.image {
         // Vision: save screenshot to temp file, print path.
-        let path = std::env::temp_dir().join(format!("bladebro-screenshot-{}.png", std::process::id()));
+        let path = std::env::temp_dir().join(format!("bladebro-screenshot-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
         if let Ok(data) = base64_decode(img) {
             if std::fs::write(&path, data).is_ok() {
                 println!("{}\nsaved: {}", result.text, path.display());
@@ -768,6 +786,27 @@ fn parse_run_args(args: &[String]) -> Result<Value> {
     Ok(json!({ "steps": steps }))
 }
 
+/// Wait for a termination signal (SIGTERM/SIGINT/SIGHUP on Unix, Ctrl+C on Windows).
+/// Same as the MCP server's signal handler.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).ok();
+        let mut int = signal(SignalKind::interrupt()).ok();
+        let mut hup = signal(SignalKind::hangup()).ok();
+        tokio::select! {
+            _ = async { if let Some(s) = &mut term { s.recv().await } else { std::future::pending().await } } => {}
+            _ = async { if let Some(s) = &mut int { s.recv().await } else { std::future::pending().await } } => {}
+            _ = async { if let Some(s) = &mut hup { s.recv().await } else { std::future::pending().await } } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 // ── Daemon ──────────────────────────────────────────────────────────────
 
 /// Start the CLI daemon: persistent Chrome + Unix socket server.
@@ -799,9 +838,18 @@ pub async fn run_daemon() -> Result<()> {
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let knowledge = crate::knowledge::load_shared();
+    // Periodic profile sync: every 60s while Chrome is alive,
+    // sync the session profile to the template. SIGKILL resilience.
+    let mut last_sync = std::time::Instant::now();
+    let sync_interval = std::time::Duration::from_secs(60);
 
     loop {
         tokio::select! {
+            // Graceful shutdown on SIGTERM/SIGINT/SIGHUP.
+            _ = wait_for_shutdown_signal() => {
+                eprintln!("[bladebro] termination signal \u{2014} shutting down Chrome gracefully");
+                break;
+            }
             // Accept new connections.
             accept = listener.accept() => {
                 let (stream, _) = match accept {
@@ -932,6 +980,16 @@ pub async fn run_daemon() -> Result<()> {
                     }
                     page = None;
                 }
+                // Periodic profile sync (same as MCP server).
+                if browser.is_some() && last_sync.elapsed() > sync_interval {
+                    last_sync = std::time::Instant::now();
+                    if let Some(ref b) = browser {
+                        let dir = b.profile_dir().to_path_buf();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::session_profile::SessionProfile::sync_back_only(&dir);
+                        }).await;
+                    }
+                }
             }
         }
     }
@@ -951,18 +1009,30 @@ pub async fn run_daemon() -> Result<()> {
 }
 
 /// Launch Chrome and create a Page for the daemon.
+/// Cleans up the browser if any step after launch fails.
 #[cfg(unix)]
 async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
     let browser = crate::browser::Browser::launch(0).await?;
     let base = browser.base();
-    let target = crate::cdp::first_page_target(&base).await?;
-    let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
-    let page = Page::attach(
-        crate::cdp::CdpSession::root(client),
-        &base,
-        None,
-    ).await?;
-    Ok((page, Some(browser)))
+    let result = async {
+        let target = crate::cdp::first_page_target(&base).await?;
+        let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
+        let page = Page::attach(
+            crate::cdp::CdpSession::root(client),
+            &base,
+            None,
+        ).await?;
+        Ok(page)
+    }.await;
+
+    match result {
+        Ok(page) => Ok((page, Some(browser))),
+        Err(e) => {
+            // Clean up the browser we just launched.
+            let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+            Err(e)
+        }
+    }
 }
 
 /// Stop the daemon by sending a stop command.

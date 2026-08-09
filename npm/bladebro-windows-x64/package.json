@@ -1,6 +1,6 @@
 {
   "name": "bladebro-windows-x64",
-  "version": "3.1.0",
+  "version": "3.1.2",
   "description": "Bladebro binary for Windows x86_64",
   "license": "Apache-2.0",
   "os": [

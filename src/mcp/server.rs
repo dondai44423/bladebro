@@ -166,9 +166,18 @@ async fn launch_browser(
         #[cfg(unix)]
         {
             let (browser, client) = crate::browser::Browser::launch_pipe().await?;
-            let session = attach_pipe(&client).await?;
-            let page = Page::attach(session, "pipe", Some(client)).await?;
-            return Ok((page, Some(browser)));
+            let result = async {
+                let session = attach_pipe(&client).await?;
+                let page = Page::attach(session, "pipe", Some(client)).await?;
+                Ok(page)
+            }.await;
+            match result {
+                Ok(page) => return Ok((page, Some(browser))),
+                Err(e) => {
+                    let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+                    return Err(e);
+                }
+            }
         }
         #[cfg(not(unix))]
         {
@@ -183,10 +192,20 @@ async fn launch_browser(
         // Auto-launch: pick a free port.
         let browser = crate::browser::Browser::launch(0).await?;
         let base = browser.base();
-        let target = cdp::first_page_target(&base).await?;
-        let client = CdpClient::connect(target.ws_url()?).await?;
-        let page = Page::attach(CdpSession::root(client), &base, None).await?;
-        Ok((page, Some(browser)))
+        let result = async {
+            let target = cdp::first_page_target(&base).await?;
+            let client = CdpClient::connect(target.ws_url()?).await?;
+            let page = Page::attach(CdpSession::root(client), &base, None).await?;
+            Ok(page)
+        }.await;
+        match result {
+            Ok(page) => Ok((page, Some(browser))),
+            Err(e) => {
+                // Clean up the browser we just launched.
+                let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+                Err(e)
+            }
+        }
     } else {
         // Connect to an existing Chrome on the given port.
         let base = format!("{host}:{port}");
