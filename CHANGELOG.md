@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- CLI auto-daemon: the first CLI command now automatically starts a persistent daemon in the background. Subsequent commands connect to the same daemon, keeping one Chrome instance alive across all commands. No need to manually run `bladebro daemon` first. The agent just runs commands and they work efficiently. Use `--no-daemon` to force one-shot mode.
+
 ## [3.1.2] - 2026-08-09
 
 ### Fixed

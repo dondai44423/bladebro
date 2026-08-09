@@ -111,6 +111,33 @@ pub async fn dispatch(tool: &str, args: &Value, page: &mut Page) -> std::result:
     }
 }
 
+/// Auto-start the daemon as a detached background process.
+/// The first CLI command triggers this — the agent never needs to
+/// run `bladebro daemon` explicitly.
+#[cfg(unix)]
+fn auto_start_daemon() -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| BladeError::Other(format!("cannot find bladebro binary: {e}")))?;
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("nohup '{}' daemon </dev/null >/dev/null 2>/dev/null &", exe.display()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| BladeError::Other(format!("failed to start daemon: {e}")))?;
+    Ok(())
+}
+
+/// Ignore SIGHUP — the daemon must survive the parent CLI exiting.
+/// Called at daemon startup.
+#[cfg(unix)]
+fn ignore_sighup() {
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+    }
+}
+
 /// Check if the daemon is running by trying to connect to the socket.
 fn daemon_running() -> bool {
     let path = socket_path();
@@ -216,24 +243,53 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     }
 }
 
-/// Run a tool: connect to daemon if running, else launch Chrome one-shot.
+/// Run a tool: auto-start daemon if not running, connect to it.
+/// One-shot mode only with --no-daemon.
 async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool) -> Result<()> {
-    // Try daemon first (unless --no-daemon).
-    if !no_daemon && daemon_running() {
+    // Unless --no-daemon, ensure a daemon is running.
+    if !no_daemon {
         #[cfg(unix)]
         {
-            match send_to_daemon(tool, args) {
-                Ok(result) => {
-                    print_result(&result, json_mode);
-                    return Ok(());
+            // Try existing daemon first.
+            if daemon_running() {
+                match send_to_daemon(tool, args) {
+                    Ok(result) => {
+                        print_result(&result, json_mode);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!("[bladebro] daemon connection failed ({e})");
+                        let _ = std::fs::remove_file(socket_path());
+                    }
                 }
-                Err(e) => {
-                    // Daemon was running but crashed between check and send.
-                    // Fall back to one-shot instead of erroring.
-                    eprintln!("[bladebro] daemon connection failed ({e}), falling back to one-shot");
-                    // Clean up stale socket so daemon_running() returns false next time.
-                    let _ = std::fs::remove_file(socket_path());
+            }
+
+            // Auto-start daemon in the background.
+            auto_start_daemon()?;
+
+            // Wait for socket to appear (up to 10s).
+            let mut waited = 0;
+            while waited < 100 {
+                if daemon_running() {
+                    break;
                 }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                waited += 1;
+            }
+
+            if daemon_running() {
+                match send_to_daemon(tool, args) {
+                    Ok(result) => {
+                        print_result(&result, json_mode);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!("[bladebro] daemon failed after auto-start ({e}), falling back to one-shot");
+                        let _ = std::fs::remove_file(socket_path());
+                    }
+                }
+            } else {
+                eprintln!("[bladebro] daemon failed to start, falling back to one-shot");
             }
         }
     }
@@ -793,13 +849,14 @@ async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
+        // Only catch SIGTERM and SIGINT. NOT SIGHUP — SIGHUP is sent
+        // when the parent process exits, which would kill the daemon
+        // immediately after the first CLI command. Daemons ignore SIGHUP.
         let mut term = signal(SignalKind::terminate()).ok();
         let mut int = signal(SignalKind::interrupt()).ok();
-        let mut hup = signal(SignalKind::hangup()).ok();
         tokio::select! {
             _ = async { if let Some(s) = &mut term { s.recv().await } else { std::future::pending().await } } => {}
             _ = async { if let Some(s) = &mut int { s.recv().await } else { std::future::pending().await } } => {}
-            _ = async { if let Some(s) = &mut hup { s.recv().await } else { std::future::pending().await } } => {}
         }
     }
     #[cfg(not(unix))]
@@ -816,6 +873,10 @@ async fn wait_for_shutdown_signal() {
 pub async fn run_daemon() -> Result<()> {
     use tokio::net::UnixListener;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    // Ignore SIGHUP — the daemon must survive the parent CLI exiting.
+    #[cfg(unix)]
+    ignore_sighup();
 
     let path = socket_path();
     // Remove stale socket.
