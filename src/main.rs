@@ -109,6 +109,12 @@ fn run() -> Result<()> {
         "update" | "-u" | "doctor" | "-doc" | "rollback" | "--rollback" | "-v" | "--version"
     );
 
+    // CLI commands go through the new CLI module (own Chrome management).
+    let is_cli_cmd = matches!(
+        cmd.as_str(),
+        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help"
+    );
+
     // S1: the mcp daemon defaults to the zero-port pipe transport (Unix).
     // BLADE_TRANSPORT=ws forces the WebSocket transport; CLI one-shot
     // commands always use WS since they depend on HTTP target discovery.
@@ -126,12 +132,12 @@ fn run() -> Result<()> {
     // Pipe mode launches its own Chrome inside cmd_mcp_pipe.
     // Update hub commands skip Chrome entirely.
     let is_mcp = cmd == "mcp";
-    let browser = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp {
+    let browser = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp && !is_cli_cmd {
         Some(rt.block_on(bladebro::browser::Browser::launch(0))?)
     } else {
         None
     };
-    let base = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp {
+    let base = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp && !is_cli_cmd {
         browser.as_ref().unwrap().base()
     } else {
         format!("{host}:{port}")
@@ -141,32 +147,12 @@ fn run() -> Result<()> {
         "probe" => rt.block_on(cmd_probe(&base)),
         "targets" => rt.block_on(cmd_targets(&base)),
         "version" => rt.block_on(cmd_version(&base)),
-        "nav" => {
-            let url = positional
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "data:text/html,<h1>bladebro</h1>".to_string());
-            rt.block_on(cmd_nav(&base, &url))
-        }
-        "see" => {
-            // URL: first positional starting with http/data/file. Filter: first non-URL positional.
-            let url = positional.iter()
-                .find(|p| p.starts_with("http") || p.starts_with("data:") || p.starts_with("file:"))
-                .map(String::as_str);
-            let filter = positional.iter()
-                .find(|p| !p.starts_with("http") && !p.starts_with("data:") && !p.starts_with("file:"))
-                .map(String::as_str);
-            rt.block_on(cmd_see(&base, url, filter))
-        }
-        "act" => {
-            let sub = positional.first().cloned().unwrap_or_default();
-            let args = &positional[1..];
-            rt.block_on(cmd_act(&base, &sub, args))
-        }
-        "state" => {
-            let sub = positional.first().cloned().unwrap_or_default();
-            let args = &positional[1..];
-            rt.block_on(cmd_state(&base, &sub, args))
+        // CLI commands go through the new CLI module.
+        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help" => {
+            let cli_args: Vec<String> = std::iter::once(cmd.clone())
+                .chain(positional.iter().cloned())
+                .collect();
+            rt.block_on(bladebro::cli::run_cli(&cli_args))
         }
         // Update hub commands (no Chrome needed).
         "update" | "-u" => rt.block_on(bladebro::updater::run("update", &positional)),
@@ -265,6 +251,7 @@ async fn cmd_probe(base: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn cmd_nav(base: &str, url: &str) -> Result<()> {
     println!("→ navigating to {url}");
     let page = cdp::first_page_target(base).await?;
@@ -288,6 +275,7 @@ async fn cmd_nav(base: &str, url: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn cmd_see(base: &str, url: Option<&str>, filter: Option<&str>) -> Result<()> {
     use bladebro::page::Page;
     let target = cdp::first_page_target(base).await?;
@@ -317,6 +305,7 @@ async fn cmd_see(base: &str, url: Option<&str>, filter: Option<&str>) -> Result<
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn cmd_act(base: &str, sub: &str, args: &[String]) -> Result<()> {
     use bladebro::action::Action;
     use bladebro::page::Page;
@@ -417,6 +406,7 @@ async fn cmd_act(base: &str, sub: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn cmd_state(base: &str, sub: &str, args: &[String]) -> Result<()> {
     use bladebro::state::StateOp;
     use bladebro::page::Page;

@@ -753,7 +753,7 @@ fn handle_tools_list(id: Option<Value>, version: Option<&str>) -> Value {
     })
 }
 
-async fn handle_tools_call(
+pub async fn handle_tools_call(
     id: Option<Value>,
     params: &Value,
     page: &mut Page,
@@ -994,7 +994,7 @@ async fn resolve_text_target(
     Ok(id)
 }
 
-async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
+pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     let action_str = args.get("action").and_then(|a| a.as_str()).unwrap_or("");
     let ref_id = args.get("ref").and_then(|r| r.as_str()).unwrap_or("");
     let text = args.get("text").and_then(|t| t.as_str()).unwrap_or("");
@@ -1427,7 +1427,7 @@ async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     }
 }
 
-async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
+pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     let budget = args.get("budget").and_then(|b| b.as_u64()).unwrap_or(8000) as usize;
     let filter = args.get("filter").and_then(|f| f.as_str()).unwrap_or("");
     let want_content = args.get("content").and_then(|c| c.as_bool()).unwrap_or(false);
@@ -1584,7 +1584,7 @@ return JSON.stringify(allForms);
 /// V8: `see logs=console|network` — introspection for agent
 /// self-diagnosis. Errors/warnings first. Artifact-offloaded
 /// when the log is long.
-async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
+pub async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
     match kind {
         "console" => {
             let entries = page.console_log().await?;
@@ -1673,7 +1673,7 @@ async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
 /// Multiple top-level keys are allowed (multiple lists in one
 /// call). A field value of "" reads the container element
 /// itself. `@attr` reads an attribute; default is textContent.
-async fn handle_template_extract(
+pub async fn handle_template_extract(
     page: &mut Page,
     template: &Value,
     limit: usize,
@@ -1883,7 +1883,7 @@ async fn run_auto_extract(page: &Page, limit: usize) -> Result<serde_json::Value
     Ok(serde_json::from_str(json_str).unwrap_or_else(|_| serde_json::json!({"error": "parse failed", "items": []})))
 }
 
-async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String> {
+pub async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String> {
     let val = run_auto_extract(page, limit).await?;
     let json_str = serde_json::to_string(&val)?;
     if json_str.len() > 12000 {
@@ -1899,7 +1899,7 @@ async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String> {
 
 /// V22: collect — auto-extract + scroll + dedupe loop. ONE call collects
 /// an entire infinite-scroll feed into a single artifact.
-async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
+pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(100) as usize;
     let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
@@ -1955,7 +1955,7 @@ async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
     Ok(format!("collected {} items ({} bytes) → {path}\npreview: {preview}…", all_items.len(), json.len()))
 }
 
-async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
+pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
     let op_str = args.get("op").and_then(|o| o.as_str()).unwrap_or("");
     let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
@@ -2071,7 +2071,7 @@ async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
     page.state(op).await
 }
 
-async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
+pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
     let steps = args.get("steps").and_then(|s| s.as_array()).ok_or_else(|| {
         crate::error::BladeError::Other("run requires 'steps' array".into())
     })?;
@@ -2177,7 +2177,7 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
 /// element is resolved and exposed to the script as `el`.
 /// Result is JSON-stringified, capped at 4KB inline; bigger
 /// payloads go to an artifact file (V10).
-async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> {
+pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> {
     // Always wrap in IIFE to prevent variable leakage to global scope.
     // Without this, `const posts = [...]` in one eval call causes
     // "Identifier 'posts' has already been declared" in the next.
@@ -2308,7 +2308,7 @@ async fn format_eval_result(json_str: &str) -> Result<String> {
 /// → artifact file. Optional `path` writes to an explicit location instead.
 /// Options: landscape (default false), printBackground (default true),
 /// scale (default 1.0, clamped 0.1-2.0).
-async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
+pub async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
     let landscape = args.get("landscape").and_then(|v| v.as_bool()).unwrap_or(false);
     let print_bg = args.get("printBackground").and_then(|v| v.as_bool()).unwrap_or(true);
     let scale = args.get("scale").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.1, 2.0);
@@ -2352,7 +2352,7 @@ async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
 /// Downloads are routed to a temp dir (M17) and tracked by the download-watch
 /// task. `act action=download` after a click that triggers a download blocks
 /// until it completes (or `timeout` secs, default 60).
-async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
+pub async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
 
@@ -2707,7 +2707,7 @@ async fn execute_step(
 ///
 /// This is the `vision` tool (decision D5) — a rare fallback for canvas
 /// content, exotic layouts, or when the structural model fails.
-async fn handle_vision(
+pub async fn handle_vision(
     id: Option<Value>,
     args: &Value,
     page: &mut Page,

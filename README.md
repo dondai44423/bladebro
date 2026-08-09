@@ -85,6 +85,30 @@ That's it. The extension spawns the binary as a stdio MCP subprocess, discovers 
 
 Tool definitions come from the binary at startup, so they auto-adapt to any tool def changes with zero extension maintenance. Auto-updates via `pi update --extensions`.
 
+### CLI (first-class)
+
+Bladebro has a first-class CLI with the same power as the MCP server. Same 5 tools, same stealth, same page model. No MCP client needed.
+
+```bash
+# Start a persistent session (Chrome stays alive across commands)
+bladebro daemon
+
+# In another terminal (or script):
+bladebro nav https://news.ycombinator.com
+bladebro see content
+bladebro act click e5
+bladebro see model --json | jq .text
+bladebro stop
+```
+
+Or one-shot mode (launches Chrome per command):
+
+```bash
+bladebro see content https://example.com --no-daemon
+```
+
+The CLI calls the exact same handler functions as the MCP server. Any feature update auto-propagates to both surfaces.
+
 ### From source
 
 **Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.86+. Linux: Xvfb for headless servers (macOS/Windows run headful natively).

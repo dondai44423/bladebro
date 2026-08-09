@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- First-class CLI with the same power as the MCP server. All 5 tools (act, see, state, run, vision) available from the command line.
+- Daemon mode: `bladebro daemon` starts a persistent Chrome session via Unix socket. Subsequent commands connect to the daemon, keeping Chrome alive across commands. Same lifecycle as MCP (lazy launch, self-healing, idle timeout, reaper).
+- One-shot mode: if no daemon is running, each command launches Chrome, runs, and exits. `--no-daemon` flag forces one-shot.
+- `--json` flag for structured output optimized for AI agents. Human-readable by default.
+- Shared dispatch: CLI calls the exact same handler functions as the MCP server. Any feature update auto-propagates to both surfaces. Zero maintenance overhead.
+- Auto-detect: CLI auto-detects if a daemon is running and connects to it. Falls back to one-shot if not.
+- Self-healing: if Chrome crashes mid-session, the daemon relaunches it automatically. The CLI never sees "browser connection closed".
+
 ## [3.0.28] - 2026-08-09
 
 ### Added
