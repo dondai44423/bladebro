@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.28] - 2026-08-09
+
 ### Added
 - Linux ARM64 (aarch64) support. New `bladebro-linux-arm64` npm package, cross-compiled via cargo-zigbuild. Published to npm and GitHub releases with both new (`bladebro-linux-arm64`) and legacy (`bladebro-linux-aarch64`) naming.
 - Mali and Adreno GPU profiles for ARM systems. `BLADE_GPU=mali` and `BLADE_GPU=adreno` env var overrides.
