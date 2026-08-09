@@ -65,12 +65,13 @@ bladebro mcp
 
 That's it. No Rust, no compilation, no dependencies. The npm package ships a prebuilt binary for your platform:
 
-| Platform | Package | Size |
-|---|---|---|
-| Linux x86_64 | `bladebro-linux-x64` | 5.7 MB |
-| Windows x86_64 | `bladebro-windows-x64` | 5.2 MB |
-| macOS Intel | `bladebro-darwin-x64` | 5.2 MB |
-| macOS Apple Silicon | `bladebro-darwin-arm64` | 4.8 MB |
+| Platform | Package | Size | Status |
+|---|---|---|---|
+| Linux x86_64 | `bladebro-linux-x64` | 5.7 MB | Live-verified |
+| Linux ARM64 (aarch64) | `bladebro-linux-arm64` | 5.1 MB | Not live-verified |
+| Windows x86_64 | `bladebro-windows-x64` | 5.2 MB | Live-verified |
+| macOS Intel | `bladebro-darwin-x64` | 5.2 MB | CI-verified |
+| macOS Apple Silicon | `bladebro-darwin-arm64` | 4.8 MB | CI-verified |
 
 npm resolves the correct binary automatically via `os`/`cpu` fields. Users only download the binary for their platform. Zero postinstall scripts, zero warnings.
 
@@ -136,6 +137,7 @@ bladebro audit   # stealth verification
 | `BLADE_WEBGL` | `auto` | `spoof` / `real` / `auto` |
 | `BLADE_MEDIA` | `auto` | `patch` / `real` / `auto` |
 | `BLADE_PROXY` | none | Proxy URL |
+| `BLADE_GPU` | `auto` | `intel` / `amd` / `nvidia` / `mali` / `adreno` / `auto` (lspci detection) |
 | `BLADE_CONSENT` | `reject` | `accept` / `reject` / `off` — consent banner policy |
 
 ## 🎯 The 5 tools
@@ -415,6 +417,7 @@ The difference: Bladebro ships this stealth out of the box as an agent tool. No 
 | Datacenter IPs get flagged | Server/VPS IPs are flagged regardless of browser fingerprint. Use `BLADE_PROXY` with a residential proxy. |
 | Cross-origin iframes are invisible | SecurityError on `contentDocument`. Deliberate limitation; would need `Runtime.enable` (breaks stealth). |
 | macOS/Windows binaries cross-compiled | Built via cargo-zigbuild (zig linker) from Linux, not native-tested on real macOS/Windows machines. File an issue if something breaks. |
+| Linux ARM64 not live-verified | Cross-compiled via cargo-zigbuild. Compiles clean, should work on Graviton/Oracle/Pi. Needs community testing — file an issue if something breaks. |
 | `BLADE_NOISE=1` can *hurt* stealth | FingerprintJS ML detects noise injection as "browser tampering." Off by default. Only use if you know why. |
 
 ## 🧱 Honest limits

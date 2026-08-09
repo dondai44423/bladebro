@@ -362,7 +362,15 @@ fn detect_gpu() -> GpuProfile {
         match gpu.as_str() {
             "amd" => { eprintln!("[stealth] BLADE_GPU=amd — using AMD Radeon profile"); return amd_profile(); }
             "nvidia" => { eprintln!("[stealth] BLADE_GPU=nvidia — using NVIDIA GeForce profile"); return nvidia_profile(); }
-            _ => { eprintln!("[stealth] BLADE_GPU={gpu} — using Intel UHD 630 profile"); return intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)"); }
+            "mali" => { eprintln!("[stealth] BLADE_GPU=mali — using Mali-G78 profile"); return mali_profile(); }
+            "adreno" => { eprintln!("[stealth] BLADE_GPU=adreno — using Adreno 730 profile"); return adreno_profile(); }
+            _ => {
+                // Default override: match the native arch
+                #[cfg(target_arch = "aarch64")]
+                { eprintln!("[stealth] BLADE_GPU={gpu} — using Mali-G78 profile"); return mali_profile(); }
+                #[cfg(not(target_arch = "aarch64"))]
+                { eprintln!("[stealth] BLADE_GPU={gpu} — using Intel UHD 630 profile"); return intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)"); }
+            }
         }
     }
     #[cfg(target_os = "linux")]
@@ -372,8 +380,16 @@ fn detect_gpu() -> GpuProfile {
             return p;
         }
     }
+    // Architecture-aware fallback: Mali on ARM, Intel on x86
+    #[cfg(target_arch = "aarch64")]
+    eprintln!("[stealth] GPU detection failed — using Mali-G78 fallback (aarch64)");
+    #[cfg(not(target_arch = "aarch64"))]
     eprintln!("[stealth] GPU detection failed — using Intel UHD 630 fallback");
-    intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)")
+
+    #[cfg(target_arch = "aarch64")]
+    { mali_profile() }
+    #[cfg(not(target_arch = "aarch64"))]
+    { intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)") }
 }
 
 #[cfg(target_os = "linux")]
@@ -414,6 +430,14 @@ fn detect_gpu_lspci() -> Option<GpuProfile> {
         // NVIDIA
         if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("quadro") {
             return Some(nvidia_profile());
+        }
+        // ARM Mali (common on ARM SoCs with PCI)
+        if lower.contains("mali") || lower.contains("arm") && lower.contains("gpu") {
+            return Some(mali_profile());
+        }
+        // Qualcomm Adreno
+        if lower.contains("adreno") || lower.contains("qualcomm") {
+            return Some(adreno_profile());
         }
     }
     None
@@ -458,6 +482,37 @@ fn nvidia_profile() -> GpuProfile {
         max_viewport_dims: [32768, 32768],
         point_size_range: [1.0, 2048.0],
         line_width_range: [1.0, 10.0],
+    }
+}
+
+/// Mali GPU profile (common on ARM SoCs: Exynos, MediaTek Dimensity).
+/// Used as the default fallback on aarch64 when lspci is unavailable.
+fn mali_profile() -> GpuProfile {
+    GpuProfile {
+        gl_vendor: "Google Inc. (ARM)".into(),
+        gl_renderer: "ANGLE (ARM, Mali-G78, OpenGL ES 3.2)".into(),
+        max_texture_size: 8192,
+        max_renderbuffer_size: 8192,
+        max_cube_map_size: 8192,
+        max_vtx_tex_units: 16,
+        max_viewport_dims: [8192, 8192],
+        point_size_range: [1.0, 1024.0],
+        line_width_range: [1.0, 1024.0],
+    }
+}
+
+/// Adreno GPU profile (Qualcomm Snapdragon SoCs).
+fn adreno_profile() -> GpuProfile {
+    GpuProfile {
+        gl_vendor: "Google Inc. (Qualcomm)".into(),
+        gl_renderer: "ANGLE (Qualcomm, Adreno (TM) 730, OpenGL ES 3.2)".into(),
+        max_texture_size: 16384,
+        max_renderbuffer_size: 16384,
+        max_cube_map_size: 16384,
+        max_vtx_tex_units: 16,
+        max_viewport_dims: [16384, 16384],
+        point_size_range: [1.0, 1024.0],
+        line_width_range: [1.0, 1024.0],
     }
 }
 

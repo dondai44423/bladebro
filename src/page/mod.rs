@@ -175,11 +175,21 @@ impl Page {
         if need_override {
             let real_ua = ua_info.as_ref()
                 .and_then(|v| v.get("ua").and_then(|u| u.as_str()))
-                .unwrap_or("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36");
+                .unwrap_or({
+                    #[cfg(target_arch = "aarch64")]
+                    { "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36" }
+                    #[cfg(not(target_arch = "aarch64"))]
+                    { "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36" }
+                });
             let fixed_ua = real_ua.replace("HeadlessChrome", "Chrome");
             let real_platform = ua_info.as_ref()
                 .and_then(|v| v.get("plt").and_then(|p| p.as_str()))
-                .unwrap_or("Linux x86_64");
+                .unwrap_or({
+                    #[cfg(target_arch = "aarch64")]
+                    { "Linux aarch64" }
+                    #[cfg(not(target_arch = "aarch64"))]
+                    { "Linux x86_64" }
+                });
 
             // Parse Chrome version from the UA string (e.g. "Chrome/150.0.7871.128").
             let chrome_ver = fixed_ua.split("Chrome/").nth(1)

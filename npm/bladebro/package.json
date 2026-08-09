@@ -44,10 +44,11 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "bladebro-linux-x64": "3.0.26",
-    "bladebro-darwin-x64": "3.0.26",
-    "bladebro-darwin-arm64": "3.0.26",
-    "bladebro-windows-x64": "3.0.26"
+    "bladebro-linux-x64": "3.0.27",
+    "bladebro-linux-arm64": "3.0.27",
+    "bladebro-darwin-x64": "3.0.27",
+    "bladebro-darwin-arm64": "3.0.27",
+    "bladebro-windows-x64": "3.0.27"
   },
   "engines": {
     "node": ">=14"

@@ -90,6 +90,13 @@ else
     echo "  WARNING: cargo-zigbuild not found, skipping macOS arm64 build"
 fi
 
+# Linux arm64 (via cargo-zigbuild)
+if command -v cargo-zigbuild &>/dev/null; then
+    cargo zigbuild --release --target aarch64-unknown-linux-gnu 2>&1 | tail -1
+else
+    echo "  WARNING: cargo-zigbuild not found, skipping Linux arm64 build"
+fi
+
 # 6. Commit + tag.
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "release: v$VERSION"
@@ -138,6 +145,11 @@ if [[ -f target/aarch64-apple-darwin/release/bladebro ]]; then
     cp target/aarch64-apple-darwin/release/bladebro "$TMPDIR_RELEASE/bladebro-macos-aarch64"
 fi
 
+if [[ -f target/aarch64-unknown-linux-gnu/release/bladebro ]]; then
+    cp target/aarch64-unknown-linux-gnu/release/bladebro "$TMPDIR_RELEASE/bladebro-linux-arm64"
+    cp target/aarch64-unknown-linux-gnu/release/bladebro "$TMPDIR_RELEASE/bladebro-linux-aarch64"
+fi
+
 # Create release with all available binaries.
 ASSETS=()
 for f in "$TMPDIR_RELEASE"/bladebro-*; do
@@ -174,9 +186,9 @@ echo ""
 echo "=== RELEASED v$VERSION ==="
 echo "Binaries uploaded: ${#ASSETS[@]}"
 echo "  New naming (npm-consistent):"
-echo "    - bladebro-linux-x64, bladebro-windows-x64.exe, bladebro-darwin-x64, bladebro-darwin-arm64"
+echo "    - bladebro-linux-x64, bladebro-linux-arm64, bladebro-windows-x64.exe, bladebro-darwin-x64, bladebro-darwin-arm64"
 echo "  Legacy naming (old binaries pre-v3.0.3):"
-echo "    - bladebro-linux-x86_64, bladebro-windows-x86_64.exe, bladebro-macos-x86_64, bladebro-macos-aarch64"
+echo "    - bladebro-linux-x86_64, bladebro-linux-aarch64, bladebro-windows-x86_64.exe, bladebro-macos-x86_64, bladebro-macos-aarch64"
 echo ""
 echo "Verify: bladebro -v  (should show update available for older installs)"
 echo "Verify: bladebro -u  (should download and install the new version)"

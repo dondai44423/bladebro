@@ -15,7 +15,7 @@ fi
 echo "Publishing bladebro v$VERSION to npm..."
 
 # ── sync version into npm package.json files ────────────────────────
-for pkg in npm/bladebro npm/bladebro-linux-x64 npm/bladebro-windows-x64 npm/bladebro-darwin-x64 npm/bladebro-darwin-arm64; do
+for pkg in npm/bladebro npm/bladebro-linux-x64 npm/bladebro-linux-arm64 npm/bladebro-windows-x64 npm/bladebro-darwin-x64 npm/bladebro-darwin-arm64; do
   if [ -f "$pkg/package.json" ]; then
     python3 -c "
 import json
@@ -40,6 +40,15 @@ cargo build --release
 cp target/release/bladebro npm/bladebro-linux-x64/bladebro
 chmod +x npm/bladebro-linux-x64/bladebro
 
+# Linux arm64 (via cargo-zigbuild)
+if command -v cargo-zigbuild &>/dev/null; then
+  cargo zigbuild --release --target aarch64-unknown-linux-gnu
+  cp target/aarch64-unknown-linux-gnu/release/bladebro npm/bladebro-linux-arm64/bladebro
+  chmod +x npm/bladebro-linux-arm64/bladebro
+else
+  echo "WARNING: cargo-zigbuild not found. Skipping Linux arm64 build."
+fi
+
 # Windows x86_64 (via cargo-zigbuild + zig linker)
 if command -v cargo-zigbuild &>/dev/null; then
   cargo zigbuild --release --target x86_64-pc-windows-gnu
@@ -63,7 +72,7 @@ fi
 
 # ── publish platform packages ───────────────────────────────────────
 echo "Publishing platform packages..."
-for pkg in bladebro-linux-x64 bladebro-windows-x64 bladebro-darwin-x64 bladebro-darwin-arm64; do
+for pkg in bladebro-linux-x64 bladebro-linux-arm64 bladebro-windows-x64 bladebro-darwin-x64 bladebro-darwin-arm64; do
   if [ -f "npm/$pkg/package.json" ]; then
     echo "  Publishing $pkg@$VERSION..."
     (cd "npm/$pkg" && npm publish --access public 2>&1 | grep -E "Publishing|error|Tarball")
@@ -74,7 +83,7 @@ done
 echo "Waiting for npm registry propagation..."
 for i in $(seq 1 12); do
   ALL_OK=true
-  for pkg in bladebro-linux-x64 bladebro-windows-x64 bladebro-darwin-x64 bladebro-darwin-arm64; do
+  for pkg in bladebro-linux-x64 bladebro-linux-arm64 bladebro-windows-x64 bladebro-darwin-x64 bladebro-darwin-arm64; do
     if ! npm view "$pkg@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
       ALL_OK=false
     fi

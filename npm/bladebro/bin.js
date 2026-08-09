@@ -21,6 +21,7 @@ if (!pkgName) {
   process.stderr.write('bladebro: no prebuilt binary for ' + key + '\n');
   process.stderr.write('\nSupported platforms:\n');
   process.stderr.write('  linux-x64     Linux x86_64\n');
+  process.stderr.write('  linux-arm64   Linux ARM64 (aarch64)\n');
   process.stderr.write('  darwin-arm64  macOS Apple Silicon\n');
   process.stderr.write('  darwin-x64    macOS Intel\n');
   process.stderr.write('  win32-x64     Windows x86_64\n');

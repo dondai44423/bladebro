@@ -1,0 +1,16 @@
+{
+  "name": "bladebro-linux-arm64",
+  "version": "3.0.27",
+  "description": "Bladebro binary for Linux ARM64 (aarch64)",
+  "license": "Apache-2.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "bladebro",
+  "files": [
+    "bladebro"
+  ]
+}
