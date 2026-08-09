@@ -443,6 +443,7 @@ fn detect_gpu_lspci() -> Option<GpuProfile> {
     None
 }
 
+#[allow(dead_code)]
 fn intel_profile(mesa_name: &str) -> GpuProfile {
     GpuProfile {
         gl_vendor: "Google Inc. (Intel)".into(),
