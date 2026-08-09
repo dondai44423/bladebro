@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.2] - 2026-08-09
+
 ### Fixed
 - CLI one-shot mode: Chrome + Xvfb now always cleaned up on error paths. Previously, if any step between Browser::launch and browser.shutdown failed, the ? operator would early-return and Chrome would be orphaned.
 - CLI daemon: signal handling added (SIGTERM/SIGINT/SIGHUP). Previously, kill or Ctrl+C would kill the daemon but leave Chrome + Xvfb running.
