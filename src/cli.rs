@@ -22,6 +22,7 @@ use crate::page::Page;
 use crate::mcp::server;
 
 /// Unix socket path for the CLI daemon.
+#[cfg(unix)]
 fn socket_path() -> std::path::PathBuf {
     crate::platform::blade_dir().join("cli.sock")
 }
@@ -139,6 +140,7 @@ fn ignore_sighup() {
 }
 
 /// Check if the daemon is running by trying to connect to the socket.
+#[cfg(unix)]
 fn daemon_running() -> bool {
     let path = socket_path();
     if !path.exists() {
@@ -156,6 +158,7 @@ fn daemon_running() -> bool {
 }
 
 /// Send a tool call to the daemon over Unix socket.
+#[cfg(unix)]
 #[cfg(unix)]
 fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
     use std::io::{Read, Write};
