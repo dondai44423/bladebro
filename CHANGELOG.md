@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-08-09
+
+### Added
+- `bladebro help --json` returns structured tool definitions, CLI command mapping, and flags as JSON. This is the CLI equivalent of MCP `tools/list`. An AI agent calls it once to discover the full interface, then uses `--json` on every command for structured output.
+
 ## [3.1.0] - 2026-08-09
 
 ### Added
