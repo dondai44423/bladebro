@@ -104,6 +104,7 @@ Bladebro gives you the **same 5 tools, same stealth, same page model** through t
 |---|---|---|
 | **Best for** | AI agents (Claude, Cursor, pi, Cline) | Shell scripts, CI/CD, quick one-offs |
 | **How it works** | stdio JSON-RPC server | Direct command line |
+| **Agent discovery** | `tools/list` JSON-RPC call | `bladebro help --json` |
 | **Setup** | Add to MCP config | Just run `bladebro <command>` |
 | **Session** | One Chrome per agent session | Daemon (persistent) or one-shot |
 
@@ -132,6 +133,14 @@ pi install npm:bladebro
 ### Option 2: CLI (for shell scripts and direct use)
 
 The CLI has the **exact same power** as the MCP server. Same handlers, same stealth, same page model. Any feature update auto-propagates to both surfaces automatically.
+
+**How AI agents discover the CLI:** `bladebro help --json` returns the same structured tool definitions as MCP `tools/list`, plus a CLI command mapping. An agent calls it once to learn the full interface, then uses `--json` on every command for structured output. No guessing, no parsing help text.
+
+```bash
+# Agent discovery: same schemas as MCP tools/list
+bladebro help --json | jq '.tools[].name'
+# ["act", "see", "state", "run", "vision"]
+```
 
 **Daemon mode** (persistent Chrome, zero startup delay after first launch):
 

@@ -201,6 +201,14 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
             let args = json!({ "marks": marks });
             run_tool("vision", &args, json_mode, no_daemon).await
         }
+        "help" => {
+            if json_mode {
+                print_help_json();
+            } else {
+                print_cli_help();
+            }
+            Ok(())
+        }
         _ => {
             print_cli_help();
             Ok(())
@@ -979,6 +987,72 @@ pub async fn stop_daemon() -> Result<()> {
 }
 
 // ── Help ───────────────────────────────────────────────────────────────
+
+/// Output structured tool definitions + CLI command mapping as JSON.
+/// This is the CLI equivalent of MCP `tools/list`. An AI agent calls
+/// `bladebro help --json` once to discover the full interface, then uses
+/// `--json` on every command for structured output.
+fn print_help_json() {
+    let tools = crate::mcp::tools::tools_to_json();
+    let cli_commands = json!({
+        "nav": {
+            "tool": "act",
+            "args": {"action": "navigate", "url": "<url>"},
+            "description": "Navigate to a URL. Returns refs + content preview."
+        },
+        "see": {
+            "tool": "see",
+            "args": {"mode": "model|content|outline", "url": "<optional>", "extract": "auto|links|forms", "filter": "<role>", "find": "<text>", "budget": 8000},
+            "description": "Read the page without acting. model=interactive elements with refs, content=clean markdown, outline=headings only."
+        },
+        "act": {
+            "tool": "act",
+            "args": {"action": "click|type|fill|navigate|scroll|press|hover|select|clear|upload|download|wait|eval|back|forward|reload|collect|pdf", "ref": "e5", "label": "text", "text": "value", "url": "<url>", "key": "Enter", "dx": 0, "dy": 0},
+            "description": "Interact with the page. Returns verdict + delta. Use ref from see model, or label text."
+        },
+        "state": {
+            "tool": "state",
+            "args": {"op": "cookies|set-cookie|del-cookie|ls|ss|set-ls|set-ss|rm-ls|clear-ls|clear-ss|tabs|open-tab|close-tab|switch-tab|save|load", "name": "<key>", "value": "<val>", "url": "<url>"},
+            "description": "Manage cookies, storage, tabs, sessions."
+        },
+        "run": {
+            "tool": "run",
+            "args": {"steps": [{"action": "click", "ref": "e5"}]},
+            "description": "Batch actions with branching and loops."
+        },
+        "vision": {
+            "tool": "vision",
+            "args": {"marks": false},
+            "description": "Screenshot as PNG. marks=true overlays numbered ref badges."
+        },
+        "daemon": {
+            "tool": null,
+            "args": null,
+            "description": "Start persistent Chrome session. Subsequent commands connect via Unix socket."
+        },
+        "stop": {
+            "tool": null,
+            "args": null,
+            "description": "Stop the daemon."
+        },
+        "help": {
+            "tool": null,
+            "args": {"json": true},
+            "description": "Show this help. Use --json for structured tool definitions (same as MCP tools/list)."
+        }
+    });
+    let flags = json!({
+        "--json": "Structured JSON output {ok, text, image, is_error} for scripts and agents.",
+        "--no-daemon": "Force one-shot mode (launch Chrome per command).",
+        "--marks": "Overlay numbered ref badges on screenshot (vision only)."
+    });
+    let output = json!({
+        "tools": tools,
+        "cli_commands": cli_commands,
+        "flags": flags,
+    });
+    println!("{output}");
+}
 
 fn print_cli_help() {
     eprintln!(
