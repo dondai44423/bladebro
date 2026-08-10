@@ -234,8 +234,10 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         "help" => {
             if json_mode {
                 print_help_json();
-            } else {
+            } else if rest.is_empty() {
                 print_cli_help();
+            } else {
+                print_command_help(&rest[0]);
             }
             Ok(())
         }
@@ -624,13 +626,26 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
         }
         "fill" => {
             // fill <json-fields> [--submit <ref>]
+            // Accepts both flat object ({"e1":"John","e2":"Doe"})
+            // and array format ([{"ref":"e1","text":"John"}]).
+            // Flat object is converted to array for the MCP handler.
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
                     "--submit" => { i += 1; if let Some(v) = args.get(i) { j["submit"] = json!(v); } }
                     s if !s.starts_with("--") && j.get("fields").is_none() => {
-                        j["fields"] = serde_json::from_str(s)
+                        let parsed: Value = serde_json::from_str(s)
                             .map_err(|e| BladeError::Other(format!("invalid fields JSON: {e}")))?;
+                        j["fields"] = match parsed {
+                            Value::Array(_) => parsed,
+                            Value::Object(map) => {
+                                let arr: Vec<Value> = map.into_iter().map(|(k, v)| {
+                                    json!({"ref": k, "text": v})
+                                }).collect();
+                                Value::Array(arr)
+                            }
+                            _ => return Err(BladeError::Other("fields must be a JSON object or array".into())),
+                        };
                     }
                     _ => {}
                 }
@@ -762,7 +777,7 @@ fn parse_state_args(args: &[String]) -> Result<Value> {
             j["op"] = json!("cookies");
         }
         "set-cookie" => {
-            // set-cookie <name> <value> [--url <url>] [--domain <domain>]
+            // set-cookie <name> <value> [--url <url>] [--domain <d>] [--path <p>] [--secure] [--http-only] [--same-site <S>]
             j["op"] = json!("set-cookie");
             if let Some(v) = args.get(1) { j["name"] = json!(v); }
             if let Some(v) = args.get(2) { j["value"] = json!(v); }
@@ -771,6 +786,10 @@ fn parse_state_args(args: &[String]) -> Result<Value> {
                 match args[i].as_str() {
                     "--url" => { i += 1; if let Some(v) = args.get(i) { j["url"] = json!(v); } }
                     "--domain" => { i += 1; if let Some(v) = args.get(i) { j["domain"] = json!(v); } }
+                    "--path" => { i += 1; if let Some(v) = args.get(i) { j["path"] = json!(v); } }
+                    "--secure" => { j["secure"] = json!(true); }
+                    "--http-only" => { j["httpOnly"] = json!(true); }
+                    "--same-site" => { i += 1; if let Some(v) = args.get(i) { j["sameSite"] = json!(v); } }
                     _ => {}
                 }
                 i += 1;
@@ -1177,7 +1196,7 @@ fn print_help_json() {
         }
     });
     let flags = json!({
-        "--json": "Structured JSON output {ok, text, image, is_error} for scripts and agents.",
+        "--json": "Structured JSON output {{ok, text, image, is_error}} for scripts and agents.",
         "--no-daemon": "Force one-shot mode (launch Chrome per command).",
         "--marks": "Overlay numbered ref badges on screenshot (vision only)."
     });
@@ -1192,12 +1211,114 @@ fn print_help_json() {
 fn print_cli_help() {
     eprintln!(
         "bladebro — agentic browser driver\n\n\
-         USAGE:\n    bladebro <COMMAND> [OPTIONS] [--json] [--no-daemon]\n\n\
-         COMMANDS:\n    nav <url>              navigate to a URL\n    see [mode] [url]      read the page (model|content|outline|extract|links|forms)\n    act <action> [args]   interact (click|type|fill|navigate|scroll|press|hover|select|clear|...)\n    state <op> [args]      manage cookies, storage, tabs\n    run <json-steps>       batch actions\n    vision [--marks]       screenshot\n    daemon                 start persistent Chrome session\n    stop                   stop daemon\n\n\
-         MODES (see):\n    model                  interactive elements with refs (default)\n    content                clean markdown for reading\n    outline                heading hierarchy only\n    extract auto           auto-detect and extract structured data\n    links                  all links\n    forms                  all forms\n\n\
-         ACTIONS (act):\n    click <ref|label>      click an element\n    type <ref|label> <text>  type text into an element\n    fill <json-fields> [--submit <ref>]  fill a form\n    navigate <url>         navigate to a URL\n    scroll <dx> <dy>       scroll the page\n    press <key>            press a key (Enter, Tab, Escape, ...)\n    hover <ref|label>      hover an element\n    select <ref|label> <option>  select an option\n    clear <ref|label>      clear an input\n    upload <ref|label> <path>  upload a file\n    download <url> [--path <path>]  download a file\n    wait <condition> [--text <text>] [--timeout <secs>]  wait\n    eval <js>              evaluate JavaScript\n    back / forward / reload  navigation\n\n\
-         STATE OPS:\n    cookies                list cookies\n    set-cookie <name> <value>  set a cookie\n    del-cookie <name>     delete a cookie\n    ls / ss                list local/session storage\n    set-ls/set-ss <key> <val>  set storage\n    rm-ls <key>            remove from localStorage\n    clear-ls / clear-ss    clear storage\n    tabs                   list tabs\n    open-tab <url>         open a new tab\n    close-tab <id>         close a tab\n    switch-tab <id>        switch to a tab\n\n\
-         FLAGS:\n    --json                 structured JSON output (for AI agents)\n    --no-daemon            force one-shot mode (launch Chrome per command)\n    --marks (vision)       overlay numbered ref badges on screenshot\n\n\
-         EXAMPLES:\n    bladebro daemon                     # start persistent session\n    bladebro nav https://example.com      # navigate\n    bladebro see content                 # read page as markdown\n    bladebro see model                   # interactive elements\n    bladebro act click e5                # click element e5\n    bladebro act type e12 \"hello world\"  # type text\n    bladebro see --json                  # JSON output for agents\n    bladebro see extract auto            # auto-extract structured data"
+         USAGE:\n    bladebro <COMMAND> [OPTIONS] [--json] [--no-daemon]\n    bladebro help <COMMAND>   — detailed help for a command\n\n\
+         The first command auto-starts a persistent daemon (one Chrome instance\n\
+         for all subsequent commands). No need to run 'bladebro daemon' first.\n\
+         Use --no-daemon to force one-shot mode (new Chrome per command).\n\n\
+         COMMANDS:\n    nav <url>              navigate to a URL\n    see [mode] [url]      read the page without acting\n    act <action> [args]   interact with the page\n    state <op> [args]      manage cookies, storage, tabs\n    run <json-steps>       batch actions with branching/loops\n    vision [--marks]       screenshot\n    daemon                 start persistent Chrome session\n    stop                   stop daemon\n    help [command]         show help (use 'help act' for act details)\n\n\
+         QUICK START:\n    bladebro nav https://example.com      — navigate\n    bladebro see model                   — interactive elements with refs\n    bladebro see content                 — read page as markdown\n    bladebro act click e5                — click element e5\n    bladebro act type e12 \"hello\"        — type text into one element\n    bladebro act fill '{{\"e12\":\"John\",\"e15\":\"pass\"}}'  — fill multiple fields\n    bladebro see extract auto            — auto-extract structured data\n    bladebro state cookies               — list cookies\n    bladebro stop                        — clean up Chrome\n\n\
+         FLAGS:\n    --json                 structured JSON output {{ok, text, image, is_error}}\n    --no-daemon            force one-shot mode (new Chrome per command)\n    --marks (vision)       overlay numbered ref badges on screenshot\n\n\
+         Run 'bladebro help <command>' for detailed usage:\n    bladebro help act     — all actions with examples\n    bladebro help see     — reading modes and extraction\n    bladebro help state   — cookies, storage, tabs\n    bladebro help run     — batch actions with branching"
     );
 }
+
+/// Detailed per-command help.
+fn print_command_help(cmd: &str) {
+    match cmd {
+        "nav" | "navigate" => eprintln!(
+            "bladebro nav — navigate to a URL\n\n\
+             USAGE:\n    bladebro nav <url>\n\n\
+             The first command auto-starts a daemon. Returns page title,\n\
+             URL, and a content preview alongside interactive element refs.\n\n\
+             EXAMPLES:\n    bladebro nav https://example.com\n    bladebro nav https://example.com --json    — structured output"
+        ),
+        "see" => eprintln!(
+            "bladebro see — read the page without acting\n\n\
+             USAGE:\n    bladebro see [mode] [url] [options]\n\n\
+             MODES:\n    model (default)     interactive elements with refs (e1, e2, ...)\n    content             clean markdown for reading articles/docs\n    outline             heading hierarchy only (cheapest read)\n\n\
+             EXTRACTION:\n    extract auto        auto-detect and extract structured data (products, posts, repos)\n    extract links       all links on the page\n    extract forms       all forms with fields\n\n\
+             OPTIONS:\n    --filter <role>     filter elements by role (button, link, textbox, ...)\n    --find <text>       find elements by text — returns refs\n    --budget <N>        max chars in response (default 8000)\n    --limit <N>         max items for extract (default 50)\n    --logs console|network   read browser logs\n\n\
+             EXAMPLES:\n    bladebro see                            — interactive elements\n    bladebro see content                    — read as markdown\n    bladebro see outline                    — headings only\n    bladebro see extract auto               — structured data\n    bladebro see https://example.com content — navigate + read\n    bladebro see --filter button            — only buttons\n    bladebro see --find \"Submit\"            — find by text"
+        ),
+        "act" => eprintln!(
+            "bladebro act — interact with the page\n\n\
+             USAGE:\n    bladebro act <action> [args]\n\n\
+             ACTIONS:\n\n\
+             click <ref|label> [--role <role>] [--nth <N>]\n\
+                 Click an element. Use ref from 'see model' or label text.\n\
+                 Examples:\n    bladebro act click e5                  — click by ref\n    bladebro act click \"Submit\"            — click by text\n    bladebro act click \"Button\" --role button --nth 2  — 2nd button\n\n\
+             type <ref|label> <text>\n\
+                 Type text into ONE element. Clears first, then types.\n\
+                 Use for single inputs. For filling multiple fields at once,\n\
+                 use 'fill' instead.\n\
+                 Examples:\n    bladebro act type e12 \"hello world\"    — type by ref\n    bladebro act type \"Email\" \"user@test.com\" — type by label\n\n\
+             fill <json-fields> [--submit <ref>]\n\
+                 Fill MULTIPLE form fields in ONE call. Fields is a JSON\n\
+                 object mapping refs to values. Optionally submit after.\n\
+                 Faster than multiple type calls for forms.\n\
+                 Examples:\n    bladebro act fill '{{\"e3\":\"John\",\"e5\":\"Doe\"}}'\n    bladebro act fill '{{\"e3\":\"John\",\"e5\":\"Doe\"}}' --submit e8\n    bladebro act fill '{{\"e12\":\"user@test.com\",\"e15\":\"pass123\"}}' --submit e20\n\n\
+             navigate <url> [--block <classes>]\n\
+                 Go to a URL. Same as 'nav' command.\n\n\
+             scroll <dx> <dy>\n    bladebro act scroll 0 500     — scroll down 500px\n    bladebro act scroll 0 -200    — scroll up 200px\n\n\
+             press <key>\n    bladebro act press Enter     — press Enter key\n    bladebro act press Tab       — press Tab key\n    bladebro act press Escape    — press Escape key\n\n\
+             hover <ref|label>\n    bladebro act hover e5         — hover an element\n\n\
+             select <ref|label> <option>\n    bladebro act select e8 \"Large\"  — select option by text\n    bladebro act select e8 \"large\"  — select option by value\n\n\
+             clear <ref|label>\n    bladebro act clear e12        — clear an input\n\n\
+             upload <ref|label> <path>\n    bladebro act upload e5 /tmp/file.pdf  — upload a file\n\n\
+             download <url> [--path <path>]\n    bladebro act download https://example.com/file.pdf --path /tmp/\n\n\
+             wait <condition> [--text <text>] [--timeout <secs>]\n\
+                 Wait for a condition: element, title, url, text, settle, js.\n    bladebro act wait element --text \"Submit\"    — wait for element\n    bladebro act wait text --text \"Loaded\"       — wait for text\n    bladebro act wait url --text \"example.com\"   — wait for URL\n    bladebro act wait settle                       — wait for DOM quiet\n    bladebro act wait js \"document.title\"         — wait for JS truthy\n\n\
+             eval <js-expression>\n    bladebro act eval \"document.title\"           — evaluate JS\n    bladebro act eval \"JSON.stringify(data)\"     — return JSON\n\n\
+             back / forward / reload\n    bladebro act back\n    bladebro act forward\n    bladebro act reload\n\n\
+             collect <url> [--max <N>]\n\
+                 Navigate + infinite-scroll + auto-extract items.\n    bladebro act collect https://example.com/products --max 50"
+        ),
+        "state" => eprintln!(
+            "bladebro state — manage cookies, storage, tabs, sessions\n\n\
+             USAGE:\n    bladebro state <op> [args]\n\n\
+             COOKIES:\n    cookies [url]                         — list cookies (filtered by URL)\n    set-cookie <name> <value> [options]   — set a cookie\n    del-cookie <name>                     — delete a cookie\n\n\
+             set-cookie options:\n    --url <url>         scope to this URL\n    --domain <domain>   scope to this domain\n    --path <path>       cookie path (default /)\n    --secure            secure cookie (HTTPS only)\n    --http-only          httpOnly cookie (not accessible via JS)\n    --same-site <S>     Strict | Lax | None (default Lax)\n\n\
+             Examples:\n    bladebro state set-cookie token \"abc123\" --domain example.com\n    bladebro state set-cookie session \"xyz\" --secure --same-site Strict\n    bladebro state del-cookie token\n\n\
+             STORAGE:\n    ls                     — list localStorage\n    ss                     — list sessionStorage\n    set-ls <key> <value>   — set localStorage key\n    set-ss <key> <value>   — set sessionStorage key\n    rm-ls <key>            — remove localStorage key\n    clear-ls               — clear all localStorage\n    clear-ss               — clear all sessionStorage\n\n\
+             TABS:\n    tabs                   — list all open tabs (* = current)\n    open-tab <url>         — open a new tab (auto-switches to it)\n    close-tab <id>         — close a tab by target ID\n    switch-tab <id>        — switch to a tab by target ID\n\n\
+             SESSIONS:\n    save <name>            — save cookies + localStorage to ~/.blade/sessions/\n    load <name>            — load a saved session\n\n\
+             Examples:\n    bladebro state cookies\n    bladebro state set-cookie token \"abc\" --domain example.com --secure\n    bladebro state ls\n    bladebro state set-ls theme dark\n    bladebro state open-tab https://example.com\n    bladebro state save my-session"
+        ),
+        "run" => eprintln!(
+            "bladebro run — batch actions with branching and loops\n\n\
+             USAGE:\n    bladebro run '<json-steps>'\n\n\
+             Steps is a JSON array of action objects. Each step has an\n\
+             'action' field and supporting fields (ref, text, url, etc.).\n\
+             Supports if/else branching and while loops.\n\n\
+             Regular steps:\n    {{\"action\":\"click\",\"ref\":\"e5\"}}\n    {{\"action\":\"type\",\"ref\":\"e12\",\"text\":\"hello\"}}\n    {{\"action\":\"navigate\",\"url\":\"https://example.com\"}}\n    {{\"action\":\"wait\",\"condition\":\"settle\"}}\n\n\
+             Branching:\n    {{\"action\":\"if\",\"condition\":\"text\",\"text\":\"Welcome\",\"then\":[...],\"else\":[...]}}\n    {{\"action\":\"while\",\"condition\":\"text\",\"text\":\"Load More\",\"steps\":[...]}}\n\n\
+             Conditions: element (visible), title, url, text, settle, js.\n\n\
+             Example:\n    bladebro run '[{{\"action\":\"navigate\",\"url\":\"https://example.com\"}},{{\"action\":\"click\",\"ref\":\"e5\"}}]'\n    bladebro run '[{{\"action\":\"click\",\"text\":\"Login\"}},{{\"action\":\"wait\",\"condition\":\"settle\"}},{{\"action\":\"type\",\"label\":\"Email\",\"text\":\"user@test.com\"}}]'"
+        ),
+        "vision" => eprintln!(
+            "bladebro vision — screenshot as PNG\n\n\
+             USAGE:\n    bladebro vision [--marks]\n\n\
+             --marks    overlay numbered ref badges on visible elements\n\
+                       so you can click by ref after seeing the screenshot.\n\n\
+             The screenshot is saved to a temp file. Path is printed.\n\n\
+             Example:\n    bladebro vision\n    bladebro vision --marks"
+        ),
+        "daemon" => eprintln!(
+            "bladebro daemon — start persistent Chrome session\n\n\
+             The daemon auto-starts on the first command. You don't need\n\
+             to run this manually. It's here for advanced use.\n\n\
+             The daemon keeps one Chrome instance alive across all commands.\n\
+             Idle timeout: 10 minutes (BLADE_IDLE_TIMEOUT env to change).\n\
+             'bladebro stop' shuts it down and cleans up Chrome."
+        ),
+        "stop" => eprintln!(
+            "bladebro stop — stop the daemon and clean up Chrome\n\n\
+             Sends a stop command to the running daemon. Chrome + Xvfb are\n\
+             shut down, the socket is removed, and session profiles are cleaned."
+        ),
+        _ => {
+            eprintln!("Unknown command: {cmd}\n\nRun 'bladebro help' for the command list.");
+        }
+    }
+}
+

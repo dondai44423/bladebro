@@ -405,16 +405,36 @@ pub async fn wait_for_settle_with_network(
 /// Assumes `Runtime` is enabled (the [`Page`](super::Page) handle enables it on
 /// attach). Returns the raw capture; ref stabilization + diffing happen later.
 pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
+    // Use a shorter timeout than the default 30s — if the execution
+    // context is in transition (e.g. after a form-submit navigation to a
+    // JSON response page), Runtime.evaluate can hang. Return a "loading"
+    // capture on timeout instead of erroring after 30s.
     let res = cdp
-        .send(
+        .send_with_timeout(
             "Runtime.evaluate",
             Some(json!({
                 "expression": &*CAPTURE_SCRIPT,
                 "returnByValue": true,
                 "awaitPromise": false,
             })),
+            Duration::from_secs(10),
         )
-        .await?;
+        .await;
+
+    let res = match res {
+        Ok(v) => v,
+        Err(_) => {
+            // Execution context not ready (page in transition).
+            // Return a loading capture instead of erroring.
+            return Ok(PageCapture {
+                url: String::new(),
+                title: String::new(),
+                ready_state: "loading".into(),
+                muts: 0,
+                elements: Vec::new(),
+            });
+        }
+    };
 
     // Runtime.evaluate → { result: { type, value }, exceptionDetails? }
     if let Some(exc) = res.get("exceptionDetails") {

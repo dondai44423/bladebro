@@ -2060,7 +2060,11 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
                 let current = page.model().url().to_string();
                 if current.is_empty() || current == "about:blank" { None } else { Some(current) }
             },
-            domain: None, path: None, secure: None, http_only: None, same_site: None,
+            domain: args.get("domain").and_then(|d| d.as_str()).map(String::from),
+            path: args.get("path").and_then(|p| p.as_str()).map(String::from),
+            secure: args.get("secure").and_then(|s| s.as_bool()),
+            http_only: args.get("httpOnly").and_then(|h| h.as_bool()),
+            same_site: args.get("sameSite").and_then(|s| s.as_str()).map(String::from),
         },
         "del-cookie" => StateOp::DeleteCookies {
             name: name.into(),

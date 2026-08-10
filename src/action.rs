@@ -992,6 +992,11 @@ pub async fn perform_with_network(
                 match tokio::time::timeout(Duration::from_millis(200), early).await {
                     Ok(true) => dialog_fired = true,
                     Ok(false) => {
+                        // Small delay to let the new execution context
+                        // be created before we send Runtime.evaluate
+                        // commands. Without this, the evaluate can hang
+                        // on JSON/binary response pages (e.g. httpbin.org/post).
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
                     }
                     _ => {}

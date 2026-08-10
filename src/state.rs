@@ -164,16 +164,47 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             if let Some(h) = http_only {
                 params["httpOnly"] = json!(h);
             }
-            if let Some(ss) = same_site {
-                params["sameSite"] = json!(ss);
+            // Default sameSite to "Lax" — Chrome 80+ defaults to Lax,
+            // but some Chrome versions fail cookie sanitization when
+            // sameSite is omitted from the CDP call entirely.
+            let ss = same_site.as_deref().unwrap_or("Lax");
+            params["sameSite"] = json!(ss);
+
+            match cdp.send("Network.setCookie", Some(params)).await {
+                Ok(res) => {
+                    let ok = res.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
+                    if ok {
+                        return Ok(format!("✓ cookie set: {name}={}", truncate(value, 40)));
+                    }
+                    // CDP returned success=false — fall through to JS fallback.
+                }
+                Err(_) => {
+                    // CDP error — fall through to JS fallback.
+                }
             }
-            let res = cdp.send("Network.setCookie", Some(params)).await?;
-            let ok = res.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
-            Ok(if ok {
-                format!("✓ cookie set: {name}={}", truncate(value, 40))
-            } else {
-                format!("✗ cookie set failed: {name}")
-            })
+
+            // Fallback: set cookie via document.cookie in JavaScript.
+            // Works even when CDP Network.setCookie fails (Chrome version
+            // quirks, partitioned cookies, sanitizer edge cases).
+            let mut cookie_parts = vec![format!("{name}={value}")];
+            if let Some(d) = domain {
+                cookie_parts.push(format!("domain={d}"));
+            }
+            cookie_parts.push(format!("path={}", path.as_deref().unwrap_or("/")));
+            if matches!(secure, Some(true)) {
+                cookie_parts.push("secure".to_string());
+            }
+            // httpOnly can't be set via document.cookie — skip it.
+            cookie_parts.push(format!("samesite={}", same_site.as_deref().unwrap_or("Lax")));
+            let cookie_str = cookie_parts.join("; ");
+            let js = format!("document.cookie={:?}", cookie_str);
+            match cdp.send("Runtime.evaluate", Some(json!({
+                "expression": js,
+                "returnByValue": true,
+            }))).await {
+                Ok(_) => Ok(format!("✓ cookie set (via JS): {name}={}", truncate(value, 40))),
+                Err(e) => Ok(format!("✗ cookie set failed: {name} ({e})")),
+            }
         }
 
         StateOp::DeleteCookies { name, domain, url } => {

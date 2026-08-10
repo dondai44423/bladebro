@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.4] - 2026-08-10
+
+### Fixed
+- `state set-cookie` no longer fails with "Sanitizing cookie failed". Defaulted `sameSite` to `Lax` (some Chrome versions fail when omitted). Added `document.cookie` JS fallback when CDP `Network.setCookie` fails. All cookie attributes (`domain`, `path`, `secure`, `httpOnly`, `sameSite`) now passed through from MCP and CLI.
+- Click-that-navigates no longer times out on non-HTML response pages (e.g. form POST to JSON endpoint). `capture()` now uses a 10s timeout instead of 30s and returns a "loading" capture on timeout instead of erroring. Added 100ms delay after `Page.frameNavigated` to let the new execution context be created before sending `Runtime.evaluate` commands.
+- CLI `act fill` now accepts flat JSON object format (`{"e1":"John","e2":"Doe"}`) in addition to the array format (`[{"ref":"e1","text":"John"}]`). The flat object is automatically converted to the array format expected by the handler.
+
+### Changed
+- CLI help system rewritten with per-subcommand help: `bladebro help act`, `help see`, `help state`, `help run`, `help vision`, `help daemon`, `help stop`, `help nav`. Each shows detailed args, options, and examples.
+- `act type` vs `act fill` distinction clearly documented: `type` = type text into ONE element, `fill` = fill MULTIPLE form fields in ONE call.
+- `state set-cookie` CLI now supports `--path`, `--secure`, `--http-only`, `--same-site` flags.
+
 ## [3.1.3] - 2026-08-09
 
 ### Changed
