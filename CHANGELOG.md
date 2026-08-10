@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.1.4] - 2026-08-10
 
+## [3.1.4] - 2026-08-10
+
 ### Fixed
 - `state set-cookie` no longer fails with "Sanitizing cookie failed". Defaulted `sameSite` to `Lax` (some Chrome versions fail when omitted). Added `document.cookie` JS fallback when CDP `Network.setCookie` fails. All cookie attributes (`domain`, `path`, `secure`, `httpOnly`, `sameSite`) now passed through from MCP and CLI.
 - Click-that-navigates no longer times out on non-HTML response pages (e.g. form POST to JSON endpoint). `capture()` now uses a 10s timeout instead of 30s and returns a "loading" capture on timeout instead of erroring. Added 100ms delay after `Page.frameNavigated` to let the new execution context be created before sending `Runtime.evaluate` commands.
