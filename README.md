@@ -108,7 +108,7 @@ Bladebro gives you the **same 5 tools, same stealth, same page model** through t
 | **Setup** | Add to MCP config | Just run `bladebro <command>` |
 | **Session** | One Chrome per agent session | Daemon (persistent) or one-shot |
 
-### Option 1: MCP Server (for AI agents)
+### Option 1: MCP Server 
 
 Just tell your agent to add Bladebro to its MCP config. For Claude Desktop, Cursor, and most MCP clients, add this to your config file:
 
@@ -130,7 +130,7 @@ Just tell your agent to add Bladebro to its MCP config. For Claude Desktop, Curs
 pi install npm:bladebro
 ```
 
-### Option 2: CLI (for shell scripts and direct use)
+### Option 2: CLI 
 
 The CLI has the **exact same power** as the MCP server. Same handlers, same stealth, same page model. Any feature update auto-propagates to both surfaces automatically.
 
