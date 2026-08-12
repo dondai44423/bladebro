@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.2.0] - 2026-08-12
 
+## [3.2.0] - 2026-08-12
+
 ### Added
 - Context pruning: `act` responses progressively compress after turn 3 on the same page (full → 3K → 500 chars). 54% token reduction over a browsing session with zero capability loss. Counter resets on navigation, `see` calls, and errors. Toggle via `state compress on/off/status` or `BLADE_NO_COMPRESS=1` env var. On by default.
 
