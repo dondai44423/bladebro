@@ -555,15 +555,15 @@ The difference: Bladebro ships this stealth out of the box as an agent tool. No 
 
 ## 💖 Sponsors
 
-Bladebro is open source and free to use. If you want to support it, consider sponsoring development.
+Bladebro is open source and free to use. If you want to support development, consider sponsoring.
 
 | Tier | Price | What you get |
 |---|---|---|
-| 🥉 Bronze | $25/mo | Name + link in Sponsors section |
-| 🥈 Silver | $100/mo | Small logo + link in Sponsors section |
-| 🥇 Gold | $250/mo | Large logo + link, pinned at top |
+| 🥇 Gold | $50/mo | Large logo + link, pinned at top of Sponsors section |
 
 One-time sponsorships are also welcome at any amount.
+
+**Pricing will increase as the project grows.** Right now Bladebro is early (small but growing), so sponsorship is cheap. A Gold tier at $50/mo is high reward, near zero investment for any company that relies on browser automation. Lock in the current rate before it goes up.
 
 Email [bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com) to become a sponsor.
 
