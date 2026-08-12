@@ -188,8 +188,8 @@ impl BehavioralProfile {
             let _ = std::fs::remove_file(&p);
         }
         let bp = Self::generate();
-        let _ = std::fs::create_dir_all(knowledge_dir());
-        let _ = std::fs::write(&p, serde_json::to_string_pretty(&bp).unwrap_or_default());
+        let _ = crate::platform::secure_create_dir_all(&knowledge_dir());
+        let _ = crate::platform::secure_write_file(&p, serde_json::to_string_pretty(&bp).unwrap_or_default().as_bytes());
         eprintln!("[knowledge] generated behavioral profile");
         bp
     }
@@ -336,14 +336,14 @@ impl KnowledgeBase {
             return;
         }
         let dir = knowledge_dir().join("domains");
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = crate::platform::secure_create_dir_all(&dir);
 
         // Write dirty domains.
         for (domain, dk) in &self.domains {
             let path = dir.join(format!("{domain}.json"));
             let tmp = dir.join(format!("{domain}.json.tmp"));
             if let Ok(json) = serde_json::to_string_pretty(dk) {
-                if std::fs::write(&tmp, json).is_ok() {
+                if crate::platform::secure_write_file(&tmp, json.as_bytes()).is_ok() {
                     let _ = std::fs::rename(&tmp, &path);
                 }
             }
@@ -353,7 +353,7 @@ impl KnowledgeBase {
         let stats_path = knowledge_dir().join("stats.json");
         let stats_tmp = knowledge_dir().join("stats.json.tmp");
         if let Ok(json) = serde_json::to_string_pretty(&self.stats) {
-            if std::fs::write(&stats_tmp, json).is_ok() {
+            if crate::platform::secure_write_file(&stats_tmp, json.as_bytes()).is_ok() {
                 let _ = std::fs::rename(&stats_tmp, &stats_path);
             }
         }

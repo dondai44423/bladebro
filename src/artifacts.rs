@@ -26,7 +26,7 @@ const MAX_ARTIFACTS: usize = 300;
 /// Write `data` to an artifact file and return its absolute path.
 pub fn write_artifact(data: &str, ext: &str) -> Result<String> {
     let dir = artifact_dir();
-    std::fs::create_dir_all(&dir)
+    crate::platform::secure_create_dir_all(&dir)
         .map_err(|e| crate::error::BladeError::Other(format!("artifact dir: {e}")))?;
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
@@ -41,7 +41,7 @@ pub fn write_artifact(data: &str, ext: &str) -> Result<String> {
 /// Used for PDF output (Page.printToPDF bytes) and completed downloads.
 pub fn write_artifact_bytes(data: &[u8], ext: &str) -> Result<String> {
     let dir = artifact_dir();
-    std::fs::create_dir_all(&dir)
+    crate::platform::secure_create_dir_all(&dir)
         .map_err(|e| crate::error::BladeError::Other(format!("artifact dir: {e}")))?;
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();

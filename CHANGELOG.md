@@ -8,7 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.1.4] - 2026-08-10
+## [3.2.0] - 2026-08-12
+
+### Added
+- Context pruning: `act` responses progressively compress after turn 3 on the same page (full → 3K → 500 chars). 54% token reduction over a browsing session with zero capability loss. Counter resets on navigation, `see` calls, and errors. Toggle via `state compress on/off/status` or `BLADE_NO_COMPRESS=1` env var. On by default.
+
+### Fixed
+- Security: Unix daemon socket now explicitly set to 0600 permissions (was inheriting umask, which on misconfigured systems let any local user connect and control the browser).
+- Security: Session files, fingerprint, knowledge base, and backup directories now created with 0600/0700 permissions (were world-readable, exposing auth cookies and localStorage).
+- Security: PDF export path validation blocks writes to system directories (`/etc`, `/usr`, `/bin`, `/sbin`, `/boot`, `/dev`, `/proc`, `/sys`, `/root`, etc.) to prevent path traversal via prompt injection.
+- Security: Binary updater now verifies SHA256 hash when a checksum file is available alongside the release asset. Aborts on mismatch.
 
 ## [3.1.4] - 2026-08-10
 

@@ -1321,6 +1321,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
         }
         "navigate" => {
             let delta = page.navigate(url).await?;
+            page.reset_act_turn();
             let _rt = std::time::Instant::now();
             let verdict = if delta.navigated {
                 format!("outcome: navigated \u{2192} {}", page.model().url())
@@ -1399,6 +1400,12 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
 
     match result {
         Ok((delta, verdict)) => {
+            // Context pruning: increment act turn counter. Reset on navigation.
+            if delta.navigated {
+                page.reset_act_turn();
+            } else {
+                page.incr_act_turn();
+            }
             // M14: Check expect param against observed outcome.
             let expect_note = if !expect.is_empty() {
                 let observed = if delta.navigated { "navigation" }
@@ -1414,19 +1421,41 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             if slim {
                 return Ok(format!("{verdict}{expect_note}"));
             }
+            // Context pruning: progressively compress act responses.
+            // Turn 0-2: full response (current behavior, budget 8000)
+            // Turn 3-5: compressed (budget 3000, no content preview on nav)
+            // Turn 6+: ultra-compact (verdict + one-line page state only)
+            let turn = page.act_turn();
+            let compress = page.compress_enabled();
             if is_scroll {
-                Ok(format!("{verdict}{expect_note}\n{}", page.view(8000)))
+                if compress && turn >= 6 {
+                    Ok(format!("{verdict}{expect_note}\n{}", page.view(500)))
+                } else if compress && turn >= 3 {
+                    Ok(format!("{verdict}{expect_note}\n{}", page.view(3000)))
+                } else {
+                    Ok(format!("{verdict}{expect_note}\n{}", page.view(8000)))
+                }
             } else {
-                let view = page.delta_view(&delta, 8000);
-                if delta.navigated {
-                    let content = page.content(1500).await.unwrap_or_default();
-                    if !content.is_empty() {
-                        Ok(format!("{verdict}{expect_note}\n{view}\n--- content ---\n{content}"))
+                if compress && turn >= 6 && !delta.navigated {
+                    // Ultra-compact: verdict + minimal delta (changes only, tiny budget).
+                    let mini = page.delta_view(&delta, 500);
+                    Ok(format!("{verdict}{expect_note}\n{mini}"))
+                } else if compress && turn >= 3 && !delta.navigated {
+                    // Compressed: reduced delta budget, no content preview.
+                    let view = page.delta_view(&delta, 3000);
+                    Ok(format!("{verdict}{expect_note}\n{view}"))
+                } else {
+                    let view = page.delta_view(&delta, 8000);
+                    if delta.navigated {
+                        let content = page.content(1500).await.unwrap_or_default();
+                        if !content.is_empty() {
+                            Ok(format!("{verdict}{expect_note}\n{view}\n--- content ---\n{content}"))
+                        } else {
+                            Ok(format!("{verdict}{expect_note}\n{view}"))
+                        }
                     } else {
                         Ok(format!("{verdict}{expect_note}\n{view}"))
                     }
-                } else {
-                    Ok(format!("{verdict}{expect_note}\n{view}"))
                 }
             }
         }
@@ -1437,6 +1466,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
         // Other would kill transparent crash recovery.
         Err(BladeError::Closed) => Err(BladeError::Closed),
         Err(e) => {
+            page.reset_act_turn();
             let _ = page.recapture().await;
             let view = page.view(3000);
             Err(crate::error::BladeError::Other(format!(
@@ -1447,6 +1477,10 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
 }
 
 pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
+    // Context pruning: a `see` call means the agent is re-orienting.
+    // Reset the act counter so the next `act` gets a full response.
+    page.reset_act_turn();
+
     let budget = args.get("budget").and_then(|b| b.as_u64()).unwrap_or(8000) as usize;
     let filter = args.get("filter").and_then(|f| f.as_str()).unwrap_or("");
     let want_content = args.get("content").and_then(|c| c.as_bool()).unwrap_or(false);
@@ -1984,6 +2018,30 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
     // Tab lifecycle ops are handled HERE (not via state.rs) because
     // they re-attach the session — they need &mut Page.
     match op_str {
+        // Context pruning toggle.
+        "compress" => {
+            let mode = args.get("mode").and_then(|m| m.as_str())
+                .or_else(|| args.get("value").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            return match mode {
+                "on" => {
+                    page.set_compress_enabled(true);
+                    Ok("context pruning: on (act responses compress after turn 3)".into())
+                }
+                "off" => {
+                    page.set_compress_enabled(false);
+                    Ok("context pruning: off (all act responses are full)".into())
+                }
+                "status" | "" => {
+                    let status = if page.compress_enabled() { "on" } else { "off" };
+                    let turn = page.act_turn();
+                    Ok(format!("context pruning: {status} (current turn: {turn})"))
+                }
+                _ => Err(crate::error::BladeError::Other(
+                    "compress mode must be 'on', 'off', or 'status'".into()
+                ))
+            };
+        }
         "open-tab" => {
             // Create + auto-focus. Every agent that opens a tab
             // wants to act in it — a separate switch-tab call
@@ -2358,8 +2416,13 @@ pub async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
     let path = match args.get("path").and_then(|p| p.as_str()) {
         Some(p) if !p.is_empty() => {
             let pb = std::path::PathBuf::from(p);
+            // SECURITY: Block writes to system directories to prevent path
+            // traversal attacks via prompt injection.
+            if let Err(e) = crate::platform::validate_write_path(&pb) {
+                return Err(BladeError::Other(e));
+            }
             if let Some(parent) = pb.parent() {
-                std::fs::create_dir_all(parent)
+                crate::platform::secure_create_dir_all(parent)
                     .map_err(|e| BladeError::Other(format!("pdf dir: {e}")))?;
             }
             std::fs::write(&pb, &bytes)

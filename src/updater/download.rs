@@ -14,6 +14,67 @@ pub struct DownloadedBinary {
 /// Temp file prefix for download in progress.
 const TMP_NAME: &str = ".bladebro-update-tmp";
 
+/// SECURITY: Verify the SHA256 hash of a downloaded binary against a
+/// checksum file from the same release. If the checksum file doesn't
+/// exist (older releases), the verification is skipped with a warning.
+/// This prevents installing a MITM'd or compromised binary when checksums
+/// are available.
+async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str) -> Result<()> {
+    let checksum_url = format!("{asset_url}.sha256");
+    let client = reqwest::Client::builder()
+        .user_agent("bladebro-updater")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
+
+    let resp = match client.get(&checksum_url).send().await {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("  warn: no checksum file found, skipping SHA256 verification");
+            return Ok(());
+        }
+    };
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND || !resp.status().is_success() {
+        eprintln!("  warn: no checksum file found, skipping SHA256 verification");
+        return Ok(());
+    }
+
+    let checksum_text = resp
+        .text()
+        .await
+        .map_err(|e| BladeError::Other(format!("cannot read checksum: {e}")))?;
+
+    // Checksum file format: `<hash>  <filename>` or just `<hash>`
+    let expected_hash = checksum_text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+
+    if expected_hash.is_empty() || expected_hash.len() != 64 {
+        eprintln!("  warn: invalid checksum file, skipping SHA256 verification");
+        return Ok(());
+    }
+
+    // Compute SHA256 of the downloaded binary.
+    use sha2::{Sha256, Digest};
+    let data = std::fs::read(binary_path)
+        .map_err(|e| BladeError::Other(format!("cannot read binary for hash: {e}")))?;
+    let actual_hash: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+
+    if actual_hash != expected_hash {
+        return Err(BladeError::Other(format!(
+            "SHA256 mismatch! Expected {expected_hash}, got {actual_hash}.\n\
+             The downloaded binary may be corrupted or tampered with.\n\
+             Aborting update for safety."
+        )));
+    }
+
+    eprintln!("  ok: SHA256 verified ({actual_hash})");
+    Ok(())
+}
+
 /// Download the platform binary from a release.
 /// Retries up to 3 times with resume support.
 pub async fn download_binary(release: &version::Release) -> Result<DownloadedBinary> {
@@ -64,6 +125,8 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
         }
         match download_once(&asset.browser_download_url, &tmp, asset.size).await {
             Ok(size) => {
+                // SECURITY: Verify SHA256 if a checksum file is available.
+                verify_sha256(&tmp, &asset.browser_download_url).await?;
                 return Ok(DownloadedBinary {
                     path: tmp,
                     size,

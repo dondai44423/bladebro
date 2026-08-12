@@ -24,7 +24,7 @@ pub fn swap_binary(downloaded: &Path) -> Result<PathBuf> {
 
     // Backup the current binary.
     let backup_dir = crate::platform::blade_dir().join("backups");
-    std::fs::create_dir_all(&backup_dir)
+    crate::platform::secure_create_dir_all(&backup_dir)
         .map_err(|e| BladeError::Other(format!("cannot create backup dir: {e}")))?;
 
     let backup = backup_dir.join(format!("bladebro-v{}", super::CURRENT_VERSION));

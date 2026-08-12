@@ -30,6 +30,79 @@ pub fn blade_dir() -> PathBuf {
     home_dir().join(".blade")
 }
 
+/// Create a directory and set restrictive permissions (0700 on Unix).
+/// SECURITY: Session files, fingerprints, and backups contain sensitive
+/// data (cookies, auth tokens). Without explicit permissions, they get
+/// the process umask (often 755/644), making them world-readable.
+pub fn secure_create_dir_all(path: &std::path::Path) -> std::io::Result<()> {
+    let existed = path.exists();
+    std::fs::create_dir_all(path)?;
+    // Only set permissions on directories we actually created.
+    // Trying to chmod an existing dir we don't own (e.g. /tmp) fails.
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// Write a file with restrictive permissions (0600 on Unix).
+/// SECURITY: Session files contain cookies and localStorage — world-readable
+/// by default (644). This ensures only the owner can read them.
+pub fn secure_write_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, data)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Validate a file write path to prevent writing to system directories.
+/// SECURITY: Blocks path traversal attacks that could overwrite critical
+/// system files (e.g., /etc/cron.d, /usr/bin, /boot) via prompt injection.
+/// Returns Ok(()) if safe, Err(message) if blocked.
+pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
+    let canonical = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+
+    // Normalize the path (resolve . and .. without requiring the file to exist).
+    let mut normalized = std::path::PathBuf::new();
+    for component in canonical.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        let blocked_prefixes: &[&str] = &[
+            "/etc", "/usr", "/bin", "/sbin", "/boot", "/dev",
+            "/proc", "/sys", "/var/log", "/root", "/lib", "/lib64",
+            "/run", "/snap",
+        ];
+        let path_str = normalized.to_string_lossy();
+        for prefix in blocked_prefixes {
+            if path_str.starts_with(prefix) || path_str.starts_with(&format!("{prefix}/")) {
+                return Err(format!(
+                    "blocked: writing to system directory ({prefix}) is not allowed"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Is this process alive?
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]

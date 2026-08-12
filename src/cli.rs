@@ -842,9 +842,13 @@ fn parse_state_args(args: &[String]) -> Result<Value> {
             j["op"] = json!("load");
             if let Some(v) = args.get(1) { j["name"] = json!(v); }
         }
+        "compress" => {
+            j["op"] = json!("compress");
+            if let Some(v) = args.get(1) { j["mode"] = json!(v); }
+        }
         _ => {
             return Err(BladeError::Other(format!(
-                "unknown state op: {op}\navailable: cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, rm-ls, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, load"
+                "unknown state op: {op}\navailable: cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, rm-ls, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, load, compress"
             )));
         }
     }
@@ -903,11 +907,22 @@ pub async fn run_daemon() -> Result<()> {
     let path = socket_path();
     // Remove stale socket.
     let _ = std::fs::remove_file(&path);
-    // Create parent dir.
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    // Create parent dir with secure permissions.
+    if let Some(parent) = path.parent() {
+        let _ = crate::platform::secure_create_dir_all(parent);
+    }
 
     let listener = UnixListener::bind(&path)
         .map_err(|e| BladeError::Other(format!("failed to bind socket {}: {e}", path.display())))?;
+
+    // SECURITY: Restrict socket to owner-only. Without this, the socket
+    // inherits umask permissions (often 755), which on misconfigured systems
+    // (umask 000) lets any local user connect and control the browser.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
 
     eprintln!("[bladebro] daemon listening on {}", path.display());
 

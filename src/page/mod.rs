@@ -129,6 +129,13 @@ pub struct Page {
     /// methods are native (not patched by anti-bot scripts), and
     /// Error.stack traces don't contain main-world eval frames.
     isolated_ctx: Arc<std::sync::Mutex<Option<i64>>>,
+    /// Context pruning: how many `act` calls have happened on the current
+    /// page without a `see` call or navigation to reset it. Used to
+    /// progressively compress responses after turn 3.
+    act_count: std::sync::atomic::AtomicU32,
+    /// Context pruning: enabled by default, toggled via
+    /// `BLADE_NO_COMPRESS=1` env var or `state compress off`.
+    compress_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Page {
@@ -593,6 +600,10 @@ impl Page {
             knowledge: None,
             last_mouse,
             isolated_ctx: Arc::new(std::sync::Mutex::new(None)),
+            act_count: std::sync::atomic::AtomicU32::new(0),
+            compress_enabled: std::sync::atomic::AtomicBool::new(
+                std::env::var("BLADE_NO_COMPRESS").as_deref() != Ok("1")
+            ),
         })
     }
 
@@ -605,6 +616,33 @@ impl Page {
     /// Enables consent auto-apply, visit tracking, and cross-session learning.
     pub fn set_knowledge(&mut self, kb: crate::knowledge::SharedKnowledge) {
         self.knowledge = Some(kb);
+    }
+
+    // ---- Context pruning helpers ----
+
+    /// Current act turn count on this page (resets on navigation/see/error).
+    pub fn act_turn(&self) -> u32 {
+        self.act_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Increment the act turn counter (called after each non-navigate act).
+    pub fn incr_act_turn(&self) {
+        self.act_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Reset the act turn counter to 0 (called on navigation, see, or error).
+    pub fn reset_act_turn(&self) {
+        self.act_count.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Is context pruning enabled?
+    pub fn compress_enabled(&self) -> bool {
+        self.compress_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Toggle context pruning on/off at runtime.
+    pub fn set_compress_enabled(&self, enabled: bool) {
+        self.compress_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Shared last-mouse-position tracker for movementX/movementY calculation.

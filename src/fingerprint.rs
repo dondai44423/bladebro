@@ -35,9 +35,9 @@ pub fn load_or_create_seed() -> u32 {
 
     // Generate new seed and persist.
     let seed = generate_seed();
-    let _ = std::fs::create_dir_all(platform::blade_dir());
+    let _ = platform::secure_create_dir_all(&platform::blade_dir());
     let fingerprint = build_fingerprint(seed);
-    let _ = std::fs::write(&p, fingerprint.to_string());
+    let _ = platform::secure_write_file(&p, fingerprint.to_string().as_bytes());
     eprintln!("[stealth] generated new fingerprint seed: {seed}");
     seed
 }
