@@ -35,15 +35,20 @@ pub fn blade_dir() -> PathBuf {
 /// data (cookies, auth tokens). Without explicit permissions, they get
 /// the process umask (often 755/644), making them world-readable.
 pub fn secure_create_dir_all(path: &std::path::Path) -> std::io::Result<()> {
-    let existed = path.exists();
+    let created = !path.exists();
     std::fs::create_dir_all(path)?;
     // Only set permissions on directories we actually created.
     // Trying to chmod an existing dir we don't own (e.g. /tmp) fails.
     #[cfg(unix)]
-    if !existed {
+    {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        if created {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        }
     }
+    // Suppress unused variable warning on non-Unix platforms.
+    #[cfg(not(unix))]
+    let _ = created;
     Ok(())
 }
 
@@ -65,26 +70,31 @@ pub fn secure_write_file(path: &std::path::Path, data: &[u8]) -> std::io::Result
 /// system files (e.g., /etc/cron.d, /usr/bin, /boot) via prompt injection.
 /// Returns Ok(()) if safe, Err(message) if blocked.
 pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
-    let canonical = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().unwrap_or_default().join(path)
-    };
-
-    // Normalize the path (resolve . and .. without requiring the file to exist).
-    let mut normalized = std::path::PathBuf::new();
-    for component in canonical.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => normalized.push(other.as_os_str()),
-        }
+    // On non-Unix platforms, skip the check (Windows has its own path protections).
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        return Ok(());
     }
 
     #[cfg(unix)]
     {
+        let canonical = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        };
+
+        // Normalize the path (resolve . and .. without requiring the file to exist).
+        let mut normalized = std::path::PathBuf::new();
+        for component in canonical.components() {
+            match component {
+                std::path::Component::ParentDir => { normalized.pop(); }
+                std::path::Component::CurDir => {}
+                other => normalized.push(other.as_os_str()),
+            }
+        }
+
         let blocked_prefixes: &[&str] = &[
             "/etc", "/usr", "/bin", "/sbin", "/boot", "/dev",
             "/proc", "/sys", "/var/log", "/root", "/lib", "/lib64",
@@ -98,9 +108,8 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
                 ));
             }
         }
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Is this process alive?
