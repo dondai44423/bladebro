@@ -559,6 +559,8 @@ Bladebro is open source and free to use. If you want to support development, con
 
 | Tier | Price | What you get |
 |---|---|---|
+| 🥉 Bronze | $10/mo | Name + link in Sponsors section |
+| 🥈 Silver | $25/mo | Small logo + link in Sponsors section |
 | 🥇 Gold | $50/mo | Large logo + link, pinned at top of Sponsors section |
 
 One-time sponsorships are also welcome at any amount.
