@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security: Session files, fingerprint, knowledge base, and backup directories now created with 0600/0700 permissions (were world-readable, exposing auth cookies and localStorage).
 - Security: PDF export path validation blocks writes to system directories (`/etc`, `/usr`, `/bin`, `/sbin`, `/boot`, `/dev`, `/proc`, `/sys`, `/root`, etc.) to prevent path traversal via prompt injection.
 - Security: Binary updater now verifies SHA256 hash when a checksum file is available alongside the release asset. Aborts on mismatch.
+- Stealth: SharedWorker contexts now receive the WebGL GL spoof via a constructor wrapper on the main page. CDP does not emit `Target.attachedToTarget` for `shared_worker` targets, so the GL spoof is injected by intercepting the `SharedWorker` constructor and creating a blob URL containing the spoof code plus `importScripts(originalUrl)`. Fixes CreepJS `hasSwiftShader` and `hasBadWebGL` detection. Worker contexts also now patch `navigator.language` for locale consistency.
 
 ## [3.1.4] - 2026-08-10
 

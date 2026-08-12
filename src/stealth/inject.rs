@@ -558,7 +558,22 @@ if(typeof WebGL2RenderingContext!=='undefined'){{_mkGP(WebGL2RenderingContext.pr
 }
 
 /// Build GL spoof JS for Worker contexts (self-contained, no _lie).
-fn build_worker_gl_spoof(p: &GpuProfile) -> String {
+fn build_worker_gl_spoof(p: &GpuProfile, locale: Option<&str>) -> String {
+    let locale_patch = if let Some(l) = locale {
+        let base = l.split('-').next().unwrap_or(l);
+        format!(r#"
+try{{
+  if(typeof WorkerNavigator!=='undefined'){{
+    var _wl='{l}';var _wls=['{l}','{base}'];
+    Object.defineProperty(WorkerNavigator.prototype,'language',{{get:function(){{return _wl;}},configurable:true,enumerable:true}});
+    Object.defineProperty(WorkerNavigator.prototype,'languages',{{get:function(){{return _wls;}},configurable:true,enumerable:true}});
+  }}
+}}catch(e){{}}
+"#, l=l, base=base)
+    } else {
+        String::new()
+    };
+
     format!(
         r#"try{{
 var _fv='{vendor}',_fr='{renderer}';
@@ -581,7 +596,8 @@ function _mkGP(proto){{
 }}
 if(typeof WebGLRenderingContext!=='undefined')_mkGP(WebGLRenderingContext.prototype);
 if(typeof WebGL2RenderingContext!=='undefined')_mkGP(WebGL2RenderingContext.prototype);
-}}catch(e){{}}"#,
+}}catch(e){{}}
+{locale_patch}"#,
         vendor = p.gl_vendor,
         renderer = p.gl_renderer,
         mts = p.max_texture_size,
@@ -594,6 +610,7 @@ if(typeof WebGL2RenderingContext!=='undefined')_mkGP(WebGL2RenderingContext.prot
         psr1 = p.point_size_range[1],
         lwr0 = p.line_width_range[0],
         lwr1 = p.line_width_range[1],
+        locale_patch = locale_patch,
     )
 }
 
@@ -757,6 +774,12 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         let profile = get_gpu_profile();
         eprintln!("[stealth] registering WebGL spoof: {} (page + worker)", profile.gl_renderer);
         script.push_str(&build_gl_spoof(&profile));
+        // SharedWorker constructor wrapper (issue #8): CDP doesn't emit
+        // attachedToTarget for shared_worker targets, so we intercept the
+        // constructor on the main page and inject GL spoof via blob URL.
+        if let Some(sw) = sharedworker_wrapper(locale.as_deref()) {
+            script.push_str(&sw);
+        }
     }
     if patch_media {
         script.push_str(MEDIA_PATCH);
@@ -797,10 +820,59 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
 /// Worker GL spoof script — self-contained (no _lie dependency) for Worker
 /// contexts. Returns None when GL spoof is not active on the main page.
 /// D22: Injected via CDP Target.setAutoAttach into each worker target.
-pub fn worker_gl_spoof() -> Option<String> {
+/// Also patches navigator.language in worker contexts for locale consistency.
+pub fn worker_gl_spoof(locale: Option<&str>) -> Option<String> {
     if !GL_SPOOFED.load(Ordering::Relaxed) {
         return None;
     }
     let profile = get_gpu_profile();
-    Some(build_worker_gl_spoof(&profile))
+    Some(build_worker_gl_spoof(&profile, locale))
+}
+
+/// SharedWorker constructor wrapper for the main page injection.
+/// CDP doesn't emit Target.attachedToTarget for shared_worker targets,
+/// so we intercept the SharedWorker constructor and inject the GL spoof
+/// via a blob URL: <gl_spoof + locale patch + importScripts(original_url)>.
+/// Falls back to the original URL for cross-origin workers (importScripts throws).
+/// Returns None when GL spoof is not active.
+pub fn sharedworker_wrapper(locale: Option<&str>) -> Option<String> {
+    if !GL_SPOOFED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let profile = get_gpu_profile();
+    let worker_code = build_worker_gl_spoof(&profile, locale);
+    // Escape for embedding in a JS string literal.
+    let escaped: String = worker_code
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    Some(format!(
+        r#"
+// SharedWorker GL spoof — CDP doesn't emit attachedToTarget for shared_worker.
+try{{
+  var _swCode='{escaped}';
+  var _OrigSW=window.SharedWorker;
+  if(_OrigSW){{
+    var _SWProxy=function SharedWorker(url,options){{
+      try{{
+        var full=_swCode+'\nimportScripts('+JSON.stringify(url)+')';
+        var blob=new Blob([full],{{type:'application/javascript'}});
+        var blobUrl=URL.createObjectURL(blob);
+        var sw=new _OrigSW(blobUrl,options);
+        setTimeout(function(){{URL.revokeObjectURL(blobUrl);}},10000);
+        return sw;
+      }}catch(e){{
+        return new _OrigSW(url,options);
+      }}
+    }};
+    _SWProxy.prototype=_OrigSW.prototype;
+    Object.setPrototypeOf(_SWProxy,_OrigSW);
+    _lie(_SWProxy,'SharedWorker');
+    Object.defineProperty(window,'SharedWorker',{{value:_SWProxy,writable:true,configurable:true,enumerable:false}});
+  }}
+}}catch(e){{}}
+"#,
+        escaped = escaped
+    ))
 }

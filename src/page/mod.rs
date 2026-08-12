@@ -286,7 +286,7 @@ impl Page {
         // flag "masking detected". We use CDP Target.setAutoAttach to inject
         // invisibly — no JS-level Worker constructor patching (which broke
         // sites via blob URLs in the previous attempt).
-        let worker_gl = crate::stealth::worker_gl_spoof();
+        let worker_gl = crate::stealth::worker_gl_spoof(None);
         if let Some(ref script) = worker_gl {
             let _ = cdp.send("Target.setAutoAttach", Some(serde_json::json!({
                 "autoAttach": true,

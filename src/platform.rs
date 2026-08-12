@@ -72,10 +72,7 @@ pub fn secure_write_file(path: &std::path::Path, data: &[u8]) -> std::io::Result
 pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
     // On non-Unix platforms, skip the check (Windows has its own path protections).
     #[cfg(not(unix))]
-    {
-        let _ = path;
-        return Ok(());
-    }
+    { let _ = path; Ok(()) }
 
     #[cfg(unix)]
     {
