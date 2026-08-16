@@ -10,57 +10,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.9.0] - 2026-08-16
 
-### Added
-- `BLADE_NO_WARMING=1` env var to disable first-run profile warming. Default behavior unchanged.
-- `release.sh` now generates and uploads `.sha256` checksum files for every release binary.
+Major reliability upgrade. 26 files changed, 1037 insertions, 397 deletions.
 
-### Changed
-- Stealth: console capture marker changed from string property to Symbol-keyed (invisible to page scripts).
-- Stealth: mutation counter changed from string property to Symbol-keyed.
-- Stealth: getter naming fixed to remove `get ` prefix from Function.prototype.toString output.
-- Stealth: outerWidth/outerHeight now on Window.prototype, not the instance (own property was a descriptor-shape tell).
-- Stealth: visibilityState/hidden now on Document.prototype, not the document instance.
-- Stealth: permissions.query delegates to the real query, rewrites only the `denied` tell to `prompt`.
-- Stealth: speechSynthesis.getVoices patched on SpeechSynthesis.prototype, returns fresh arrays per call.
-- Stealth: WebRTC IP handling patch moved to proxy-only (was breaking legit WebRTC when no proxy is set).
-- Stealth: error stack normalization removed (was breaking `class X extends Error` subclasses).
-- Stealth: performance.timing polyfill removed (fabricated timeline was internally incoherent).
-- Stealth: cdc_ MutationObserver throttled (was calling getOwnPropertyNames on every mutation).
-- Stealth: workers get a pristine Function.prototype.toString for the GL spoof getParameter patch.
-- Stealth: WorkerNavigator.language patched in worker contexts when BLADE_LOCALE is set.
-- Stealth: OOPIF auto-attach now resumes ALL targets (was only resuming workers) and injects full stealth into OOPIF child sessions.
-- Stealth: mouse path realism improved (steps cap 40, time cap 650ms, log-normal delays).
-- Stealth: per-character typing with proper Shift handling, key press duration, and keyChar.
-- Reliability: dead tab recovery uses browser-level Target.createTarget (was sending through dead page session).
-- Reliability: self-heal after browser crash only retries idempotent reads. Non-idempotent actions return "outcome UNKNOWN".
-- Reliability: check_condition bails fast when browser dies (was spinning at 10Hz for full timeout).
-- Reliability: stale Xvfb display claims from SIGKILLed processes are now reaped.
-- Reliability: `bladebro version` no longer launches Chrome.
-- Reliability: unknown CLI commands exit non-zero without launching Chrome.
-- Reliability: refs assigned in document order (was hash-map order).
-- Reliability: switch_tab retry loop for WS mode.
-- Reliability: all Mutex::lock().unwrap() calls changed to poison-recovery pattern.
-- False-positive: consent banner detection requires visibility check, cookie/consent/gdpr text, skips mega-containers.
-- False-positive: block detection uses body-length gates. Only JS-challenge types get the 5s self-solve wait.
-- Token efficiency: vision screenshots >900KB offloaded to artifact files.
-- Protocol: JSON-RPC parse errors return -32700. Non-object requests get -32600. Unknown methods get -32601.
+### Added
+- `BLADE_NO_WARMING=1` env var to disable first-run profile warming.
+- `release.sh` generates `.sha256` checksums for every release binary.
+
+### Stealth
+- Console capture marker and mutation counter switched to Symbol-keyed properties (invisible to page scripts).
+- Getter naming fixed: `get ` prefix removed from `Function.prototype.toString` output.
+- `outerWidth`/`outerHeight` moved to `Window.prototype` (own property was a descriptor-shape tell).
+- `visibilityState`/`hidden` moved to `Document.prototype`.
+- `permissions.query` delegates to real query, only rewrites the `denied` tell to `prompt`.
+- `speechSynthesis.getVoices` patched on prototype, returns fresh arrays per call.
+- WebRTC IP handling moved to proxy-only (was breaking legit WebRTC when no proxy is set).
+- Error stack normalization removed (was breaking `class X extends Error` subclasses).
+- `performance.timing` polyfill removed (fabricated timeline was internally incoherent).
+- `cdc_` MutationObserver throttled (was calling `getOwnPropertyNames` on every mutation).
+- Workers get pristine `Function.prototype.toString` for the GL spoof patch.
+- `WorkerNavigator.language` patched in worker contexts when `BLADE_LOCALE` is set.
+- OOPIF auto-attach now resumes ALL targets and injects full stealth into child sessions.
+- Mouse path realism: 40-step cap, 650ms time cap, log-normal delays.
+- Per-character typing with proper Shift handling, key press duration, and keyChar.
+
+### Reliability
+- Dead tab recovery uses browser-level `Target.createTarget` (was sending through dead page session).
+- Self-heal after crash only retries idempotent reads. Non-idempotent actions return "outcome UNKNOWN".
+- `check_condition` bails fast on browser death (was spinning at 10Hz for full timeout).
+- Stale Xvfb display claims from SIGKILLed processes are now reaped.
+- `bladebro version` and unknown CLI commands no longer launch Chrome.
+- Refs assigned in document order (was hash-map order).
+- `switch_tab` retry loop for WS mode.
+- All `Mutex::lock().unwrap()` calls changed to poison-recovery pattern.
+- Accept-Language header kept in sync when locale changes.
+- Page struct constructed before last fallible capture step. Drop aborts background tasks on error.
+- UA metadata no longer hand-built with hardcoded GREASE brand.
+- Debug commands shut down Chrome+Xvfb after completion.
+
+### False-positive reduction
+- Consent banner detection requires visibility check + cookie/consent/gdpr text, skips mega-containers.
+- Block detection uses body-length gates. Only JS-challenge types get the 5s self-solve wait.
+
+### Token efficiency
+- Vision screenshots >900KB offloaded to artifact files.
+
+### Protocol
+- JSON-RPC parse errors return -32700. Non-object requests get -32600. Unknown methods get -32601.
+
+### Security
+- Self-updater fail-closed SHA256 verification for releases >= 3.3.0.
+- Updater temp file uses unpredictable name with O_EXCL creation.
+- Chrome launches with renderer sandbox ON, `--no-sandbox` is fallback only.
+- String truncation uses char-boundary-safe `truncate_utf8`.
+- `validate_write_path` blocks credential/persistence sinks on all platforms.
+- Downloads moved to `~/.blade/downloads` (0700). Screenshots moved to secure artifacts dir.
+- Daemon auto-start no longer uses `sh -c`.
+- Cookie JS fallback uses `serde_json::to_string`. Cookie values percent-encoded.
 
 ### Fixed
-- Security: Self-updater fail-closed SHA256 verification for releases >= 3.3.0.
-- Security: Updater temp file uses unpredictable name with O_EXCL creation.
-- Security: Chrome launches with renderer sandbox ON, `--no-sandbox` is fallback only.
-- Security: String truncation uses char-boundary-safe `truncate_utf8`.
-- Security: `validate_write_path` blocks credential/persistence sinks on all platforms.
-- Security: Downloads moved to `~/.blade/downloads` (0700). Screenshots moved to secure artifacts dir.
-- Security: Daemon auto-start no longer uses `sh -c`.
-- Security: Cookie JS fallback uses `serde_json::to_string`. Cookie values are percent-encoded.
-- macOS: Navigation no longer blocked by font download dialog. `--disable-remote-fonts` flag + CSS `@font-face` override. Fixes #9.
-- Stealth: zero fingerprint seed no longer degenerates the xorshift32 noise PRNG.
-- Reliability: Accept-Language header kept in sync when locale changes.
-- Reliability: Page struct constructed before last fallible capture step. Drop aborts background tasks on error.
-- Reliability: UA metadata no longer hand-built with hardcoded GREASE brand.
-- Reliability: debug commands shut down Chrome+Xvfb after completion.
-- CLI: `see https://example.com content` now works (URL parsed first, then mode).
+- macOS: Navigation no longer blocked by font download dialog (`--disable-remote-fonts` + CSS `@font-face` override). Fixes #9.
+- Zero fingerprint seed no longer degenerates the xorshift32 noise PRNG.
+- CLI: `see https://example.com content` parses URL first, then mode.
 - CLI: `act wait text="Dashboard"` accepts bare positional as condition text.
 - CLI: `eval` joins remaining args so unquoted multi-word expressions work.
 
