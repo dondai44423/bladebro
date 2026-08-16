@@ -87,7 +87,7 @@ fn run() -> Result<()> {
                 print_usage();
                 return Ok(());
             }
-            "-u" | "-doc" | "-v" | "--rollback" if cmd.is_none() => {
+            "-u" | "-doc" | "-v" | "--version" | "--rollback" if cmd.is_none() => {
                 cmd = Some(args[i].clone());
             }
             s if cmd.is_none() && !s.starts_with('-') => {
@@ -106,7 +106,7 @@ fn run() -> Result<()> {
     // Update hub commands don't need Chrome. Handle them before launch.
     let is_update_cmd = matches!(
         cmd.as_str(),
-        "update" | "-u" | "doctor" | "-doc" | "rollback" | "--rollback" | "-v" | "--version"
+        "update" | "-u" | "doctor" | "-doc" | "rollback" | "--rollback" | "-v" | "--version" | "version"
     );
 
     // CLI commands go through the new CLI module (own Chrome management).
@@ -114,6 +114,24 @@ fn run() -> Result<()> {
         cmd.as_str(),
         "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help"
     );
+
+    // Legacy debug commands that need a launched browser. They share the
+    // same guard discipline as the CLI: the browser is ALWAYS shut down,
+    // even on error — `exit_immediately` (below) skips destructors, so a
+    // browser left alive on the stack here would leak Chrome + Xvfb on
+    // every invocation (observed: `bladebro version` orphaned a full
+    // Chrome tree per call).
+    let is_debug_cmd = matches!(cmd.as_str(), "probe" | "targets" | "audit");
+
+    // Reject unknown commands BEFORE launching Chrome. Without this,
+    // `bladebro bogus` would launch a full Chrome+Xvfb tree just to print
+    // an error.
+    let is_known = is_update_cmd || is_cli_cmd || is_debug_cmd || cmd == "mcp";
+    if !is_known {
+        eprintln!("Unknown command: {cmd}\n");
+        print_usage();
+        std::process::exit(1);
+    }
 
     // S1: the mcp daemon defaults to the zero-port pipe transport (Unix).
     // BLADE_TRANSPORT=ws forces the WebSocket transport; CLI one-shot
@@ -132,7 +150,7 @@ fn run() -> Result<()> {
     // Pipe mode launches its own Chrome inside cmd_mcp_pipe.
     // Update hub commands skip Chrome entirely.
     let is_mcp = cmd == "mcp";
-    let browser = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp && !is_cli_cmd {
+    let mut browser = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp && !is_cli_cmd {
         Some(rt.block_on(bladebro::browser::Browser::launch(0))?)
     } else {
         None
@@ -144,9 +162,15 @@ fn run() -> Result<()> {
     };
 
     let result = match cmd.as_str() {
-        "probe" => rt.block_on(cmd_probe(&base)),
-        "targets" => rt.block_on(cmd_targets(&base)),
-        "version" => rt.block_on(cmd_version(&base)),
+        "probe" => rt.block_on(with_browser_guard(&mut browser, || cmd_probe(&base))),
+        "targets" => rt.block_on(with_browser_guard(&mut browser, || cmd_targets(&base))),
+        // `version` prints the TOOL version — no Chrome launch needed.
+        // (It used to spawn a full Chrome + Xvfb just to read /json/version,
+        // then exit without dropping it: one orphaned browser per call.)
+        "version" => {
+            println!("bladebro {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         // CLI commands go through the new CLI module.
         "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help" => {
             let cli_args: Vec<String> = std::iter::once(cmd.clone())
@@ -161,10 +185,13 @@ fn run() -> Result<()> {
         "-v" | "--version" => rt.block_on(bladebro::updater::run("version", &positional)),
         "mcp" if use_pipe => rt.block_on(cmd_mcp_pipe()),
         "mcp" => rt.block_on(cmd_mcp(&host, port)),
-        "audit" => rt.block_on(cmd_audit(&base)),
+        "audit" => rt.block_on(with_browser_guard(&mut browser, || cmd_audit(&base))),
         _ => {
+            // Unknown command: NEVER launch a browser (it used to!), and
+            // exit non-zero so scripts can detect the failure.
+            eprintln!("Unknown command: {cmd}\n");
             print_usage();
-            Ok(())
+            return Err(bladebro::BladeError::Other(format!("unknown command: {cmd}")));
         }
     };
     // Exit HERE, before `rt` drops: the MCP server reads
@@ -181,17 +208,23 @@ fn run() -> Result<()> {
     }
 }
 
-async fn cmd_version(base: &str) -> Result<()> {
-    let v = cdp::version(base).await?;
-    println!("Browser:     {}", v.browser);
-    println!("Protocol:    {}", v.protocol_version);
-    if let Some(ua) = v.user_agent {
-        println!("User-Agent:  {ua}");
+/// Run a legacy debug command (probe/targets/audit) and ALWAYS shut the
+/// browser down afterward — including on error. `exit_immediately` skips
+/// destructors, so without this guard every debug command orphans its
+/// Chrome + Xvfb tree.
+async fn with_browser_guard<F, Fut>(
+    browser: &mut Option<bladebro::browser::Browser>,
+    run: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let result = run().await;
+    if let Some(b) = browser.take() {
+        let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
     }
-    if let Some(ws) = v.web_socket_debugger_url {
-        println!("Browser WS:  {ws}");
-    }
-    Ok(())
+    result
 }
 
 async fn cmd_targets(base: &str) -> Result<()> {

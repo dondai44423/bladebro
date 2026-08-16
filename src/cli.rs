@@ -276,8 +276,12 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => {
-            print_cli_help();
-            Ok(())
+            // Unknown command: fail loudly with a non-zero exit code.
+            // (It used to print help and exit 0 — scripts could not
+            // detect the typo, and via main.rs it even launched a
+            // whole Chrome first.)
+            eprintln!("Unknown command: {cmd}\nRun 'bladebro help' for the command list.");
+            Err(BladeError::Other(format!("unknown command: {cmd}")))
         }
     }
 }
@@ -382,19 +386,20 @@ fn print_result(result: &ToolResult, json_mode: bool) {
         // that path turned every vision call into an arbitrary-file
         // overwrite.
         match base64_decode(img) {
-            Ok(data) => match crate::artifacts::write_artifact_bytes(&data, "png") {
+            Some(data) => match crate::artifacts::write_artifact_bytes(&data, "png") {
                 Ok(path) => println!("{}\nsaved: {}", result.text, path),
                 Err(_) => println!("{}", result.text),
             },
-            Err(_) => println!("{}", result.text),
+            None => println!("{}", result.text),
         }
     } else {
         println!("{}", result.text);
     }
 }
 
-/// Decode base64 to bytes.
-fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
+/// Decode base64 to bytes. Public: shared with the MCP vision handler
+/// (large-screenshot offloading).
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     
     // Minimal base64 decoder — avoids adding a dependency.
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -406,7 +411,7 @@ fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
 
     let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'\n' && b != b'\r' && b != b' ').collect();
     if bytes.len() % 4 != 0 {
-        return Err(());
+        return None;
     }
     let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
     for chunk in bytes.chunks(4) {
@@ -423,7 +428,7 @@ fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
             out.push(n as u8);
         }
     }
-    Ok(out)
+    Some(out)
 }
 
 /// Warm the profile on first run (same as MCP server).
@@ -496,11 +501,18 @@ fn parse_see_args(args: &[String]) -> Value {
                 i += 1;
                 if let Some(v) = args.get(i) { template = v.clone(); }
             }
-            s if s.starts_with("http") || s.starts_with("data:") || s.starts_with("file:") => {
+            // URLs first so `see https://x.com content` works (mode after
+            // url used to be silently dropped — the help documented an
+            // example that didn't work).
+            s if s.starts_with("http://") || s.starts_with("https://")
+                || s.starts_with("data:") || s.starts_with("file:") => {
                 if url.is_empty() { url = s.to_string(); }
             }
             s if s.starts_with("--") => {}
-            s if mode.is_empty() && url.is_empty() => {
+            s if s == "model" || s == "content" || s == "outline" => {
+                if mode.is_empty() { mode = s.to_string(); }
+            }
+            s if mode.is_empty() => {
                 mode = s.to_string();
             }
             s if url.is_empty() => {
@@ -724,6 +736,8 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
         }
         "wait" => {
             // wait <condition> [--text <text>] [--timeout <secs>]
+            // A bare second positional is the text: `act wait js "document.title"`
+            // used to silently drop the expression (documented example, broken).
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -732,15 +746,19 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
                     s if !s.starts_with("--") && j.get("condition").is_none() => {
                         j["condition"] = json!(s);
                     }
+                    s if !s.starts_with("--") && j.get("text").is_none() => {
+                        j["text"] = json!(s);
+                    }
                     _ => {}
                 }
                 i += 1;
             }
         }
         "eval" => {
-            // eval <js-expression>
-            if let Some(v) = args.get(1) {
-                j["js"] = json!(v);
+            // eval <js-expression> — join remaining args so unquoted
+            // multi-word expressions aren't silently truncated.
+            if args.len() > 1 {
+                j["js"] = json!(args[1..].join(" "));
             }
         }
         "collect" => {

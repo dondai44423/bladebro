@@ -54,8 +54,13 @@ impl Rng {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// Uniform integer in [lo, hi].
+    /// Uniform integer in [lo, hi]. Never panics: an inverted range
+    /// (lo > hi, e.g. from a user-edited behavior.json with
+    /// overshoot_min > overshoot_max) returns `lo`.
     pub fn range(&mut self, lo: i64, hi: i64) -> i64 {
+        if hi <= lo {
+            return lo;
+        }
         lo + (self.next_u64() % (hi - lo + 1) as u64) as i64
     }
 }
@@ -133,11 +138,15 @@ pub fn mouse_path(start: (f64, f64), target: (f64, f64), rng: &mut Rng) -> Vec<P
         start.1 + dy * 0.7 + perp_y * cp2_offset,
     );
 
-    // Number of steps: proportional to distance, min 5, max 25.
-    let steps = (dist / 15.0).round().clamp(5.0, 25.0) as usize;
+    // Number of steps: proportional to distance, min 5, max 40.
+    // v3.9 (M8): the old 25-step cap gave a 1200px traverse ~48px jumps
+    // (~4000px/s peak) — a superhuman flick in the velocity curve.
+    let steps = (dist / 15.0).round().clamp(5.0, 40.0) as usize;
 
-    // Total movement time: 80-250ms, proportional to distance.
-    let total_ms = (dist * 0.5 + 80.0).clamp(80.0, 300.0);
+    // Total movement time: 80ms floor, distance-scaled, 650ms ceiling.
+    // A 1200px flick at ~620ms (~2000px/s peak) matches fast human
+    // mouse work; the old 300ms cap forced superhuman speeds.
+    let total_ms = (dist * 0.45 + 80.0).clamp(80.0, 650.0);
     let step_ms = total_ms / steps as f64;
 
     let mut path = Vec::with_capacity(steps + 4);
@@ -176,13 +185,13 @@ pub fn mouse_path(start: (f64, f64), target: (f64, f64), rng: &mut Rng) -> Vec<P
     path.push(PathPoint {
         x: over_x,
         y: over_y,
-        delay: Duration::from_millis(rng.range(20, 50) as u64),
+        delay: log_normal(rng, 32.0, 0.35),
     });
     // Correct back to the actual click point.
     path.push(PathPoint {
         x: click_x,
         y: click_y,
-        delay: Duration::from_millis(rng.range(30, 80) as u64),
+        delay: log_normal(rng, 50.0, 0.35),
     });
 
     // Small pause before clicking — humans hesitate briefly.

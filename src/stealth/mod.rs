@@ -19,4 +19,4 @@ pub mod inject;
 pub use biometrics::{mouse_path, typing_cadence, action_gap, click_target, Rng};
 pub use hum::spawn_hum;
 pub use inject::STEALTH_SCRIPT_TEMPLATE;
-pub use inject::{ScriptId, apply as apply_stealth, worker_gl_spoof};
+pub use inject::{ScriptId, apply as apply_stealth, worker_gl_spoof, full_script, has_full_script};

@@ -101,6 +101,10 @@ pub struct Page {
     is_busy: Arc<AtomicBool>,
     /// S4: idle-hum background task. Aborted on Drop.
     hum_task: Option<tokio::task::JoinHandle<()>>,
+    /// Worker/OOPIF auto-attach handler (D22 + v3.9): injects the GL spoof
+    /// into worker sessions, the full stealth script into out-of-process
+    /// iframes, and resumes every attached target. Aborted on Drop.
+    worker_task: Option<tokio::task::JoinHandle<()>>,
     /// Active stealth-injection registration — swapped (not stacked) when a
     /// per-domain profile changes the locale (S11 coherence).
     stealth_script_id: Option<crate::stealth::ScriptId>,
@@ -153,6 +157,8 @@ impl Page {
     /// `browser_client` is the browser-level connection in pipe mode (S1) —
     /// used for tab listing since pipe mode has no HTTP debug endpoint.
     pub async fn attach(cdp: CdpSession, base: &str, browser_client: Option<CdpClient>) -> Result<Self> {
+        #[allow(unused_assignments)]
+        let mut worker_task: Option<tokio::task::JoinHandle<()>> = None;
         cdp.enable("Page").await?;
         // DO NOT enable Runtime — DataDome's detection leverages the fact that
         // `Runtime.enable` changes console buffering behavior, making
@@ -198,43 +204,16 @@ impl Page {
                     { "Linux x86_64" }
                 });
 
-            // Parse Chrome version from the UA string (e.g. "Chrome/150.0.7871.128").
-            let chrome_ver = fixed_ua.split("Chrome/").nth(1)
-                .and_then(|s| s.split_whitespace().next())
-                .unwrap_or("150.0.0.0");
-            let major = chrome_ver.split('.').next().unwrap_or("150");
-
-            // Derive userAgentMetadata platform fields from navigator.platform.
-            let (meta_platform, arch, bitness) = if real_platform.contains("Mac") {
-                ("macOS", "x86", "64")
-            } else if real_platform.contains("Win") {
-                ("Windows", "x86", "64")
-            } else if real_platform.contains("aarch64") || real_platform.contains("arm") {
-                ("Linux", "arm", "64")
-            } else {
-                ("Linux", "x86", "64")
-            };
-
+            // Override ONLY userAgent + platform. The previous version also
+            // sent a hand-built userAgentMetadata with a hardcoded GREASE
+            // brand ("Not:A-Brand"/99) that matched no real Chrome build —
+            // the real Sec-CH-UA headers would never equal it. Chrome keeps
+            // generating coherent metadata (brands, GREASE, full versions)
+            // from its true version, which matches the fixed UA string
+            // (only "HeadlessChrome" → "Chrome" differs).
             if let Err(e) = cdp.send("Network.setUserAgentOverride", Some(serde_json::json!({
                 "userAgent": fixed_ua,
                 "platform": real_platform,
-                "userAgentMetadata": {
-                    "brands": [
-                        {"brand": "Chromium", "version": major},
-                        {"brand": "Google Chrome", "version": major},
-                        {"brand": "Not:A-Brand", "version": "99"}
-                    ],
-                    "fullVersionList": [
-                        {"brand": "Chromium", "version": chrome_ver},
-                        {"brand": "Google Chrome", "version": chrome_ver}
-                    ],
-                    "platform": meta_platform,
-                    "platformVersion": "",
-                    "architecture": arch,
-                    "model": "",
-                    "mobile": false,
-                    "bitness": bitness
-                }
             }))).await {
                 eprintln!["[bladebro] WARNING: UA override failed: {e}"];
             }
@@ -281,21 +260,35 @@ impl Page {
 
         // D22: Worker GL spoof — inject the GL spoof into Worker contexts too.
         // The main page GL spoof (via Page.addScriptToEvaluateOnNewDocument)
-        // does NOT reach Worker contexts. Without this, Pixelscan/CreepJS
+        // does NOT reach Worker contexts. Without this, Pixelscan/Creepjs
         // compare page GL (spoofed Intel) vs worker GL (real SwiftShader) and
         // flag "masking detected". We use CDP Target.setAutoAttach to inject
         // invisibly — no JS-level Worker constructor patching (which broke
         // sites via blob URLs in the previous attempt).
-        let worker_gl = crate::stealth::worker_gl_spoof(None);
-        if let Some(ref script) = worker_gl {
+        //
+        // v3.9 CRITICAL fixes here:
+        // - EVERY auto-attached target is resumed (Runtime.runIfWaitingForDebugger).
+        //   The old handler only resumed workers — cross-origin iframe (OOPIF)
+        //   targets were attached with waitForDebuggerOnStart and then paused
+        //   FOREVER: every embedded reCAPTCHA/Stripe/YouTube iframe froze.
+        // - OOPIF child sessions get the FULL stealth script (they are
+        //   separate targets; Page.addScriptToEvaluateOnNewDocument on the
+        //   main session never reaches them).
+        // - The task handle is stored on Page and aborted on Drop — it used
+        //   to leak per switch_tab, with stale handlers racing the new one.
+        // - broadcast Lagged is RECOVERABLE (continue), not fatal — a burst
+        //   used to kill the handler, freezing every later worker.
+        let worker_gl = crate::stealth::worker_gl_spoof(active_locale.as_deref());
+        if worker_gl.is_some() || crate::stealth::has_full_script() {
             let _ = cdp.send("Target.setAutoAttach", Some(serde_json::json!({
                 "autoAttach": true,
                 "flatten": true,
                 "waitForDebuggerOnStart": true
             }))).await;
             let client = cdp.client().clone();
-            let worker_script = script.clone();
-            tokio::spawn(async move {
+            let worker_script = worker_gl.clone();
+            let full_script = crate::stealth::full_script();
+            worker_task = Some(tokio::spawn(async move {
                 let sub = client.subscribe();
                 let mut rx = sub;
                 loop {
@@ -306,26 +299,48 @@ impl Page {
                                 .and_then(|t| t.get("type"))
                                 .and_then(|t| t.as_str())
                                 .unwrap_or("");
-                            if target_type == "worker" || target_type == "service_worker" {
-                                let session_id = event.params
-                                    .get("sessionId")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("");
-                                if !session_id.is_empty() {
-                                    let worker_session = CdpSession::child(client.clone(), session_id);
-                                    let _ = worker_session.send("Runtime.evaluate", Some(serde_json::json!({
-                                        "expression": worker_script,
-                                        "returnByValue": true,
-                                    }))).await;
-                                    let _ = worker_session.send("Runtime.runIfWaitingForDebugger", None).await;
-                                }
+                            let session_id = event.params
+                                .get("sessionId")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("");
+                            if session_id.is_empty() {
+                                continue;
                             }
+                            let worker_session = CdpSession::child(client.clone(), session_id);
+                            match target_type {
+                                "worker" | "service_worker" | "shared_worker" => {
+                                    if let Some(ref script) = worker_script {
+                                        let _ = worker_session.send("Runtime.evaluate", Some(serde_json::json!({
+                                            "expression": script,
+                                            "returnByValue": true,
+                                        }))).await;
+                                    }
+                                }
+                                "iframe" | "oopif" => {
+                                    // Full stealth into out-of-process frames:
+                                    // document_start semantics via evaluate
+                                    // before resume, so the frame's scripts
+                                    // run against the patched environment.
+                                    if let Some(ref script) = full_script {
+                                        let _ = worker_session.send("Runtime.evaluate", Some(serde_json::json!({
+                                            "expression": script,
+                                            "returnByValue": true,
+                                        }))).await;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            // ALWAYS resume — an unresumed target stays frozen.
+                            let _ = worker_session.send("Runtime.runIfWaitingForDebugger", None).await;
                         }
                         Ok(_) => {}
+                        // Lagged: we skipped events but the connection is
+                        // alive. Continue — never leave future targets paused.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(_) => break,
                     }
                 }
-            });
+            }));
         }
 
         // M17: Set download behavior so downloads don't hang the browser.
@@ -541,7 +556,7 @@ impl Page {
             }
         });
 
-        let mut lpm = LivePageModel::new();
+        let lpm = LivePageModel::new();
         // M4+M6: Check for consent banners and block pages after initial load.
         let consent = dismiss_consent(&cdp).await.unwrap_or(None);
         let blocked = detect_block(&cdp).await.unwrap_or(None);
@@ -558,8 +573,6 @@ impl Page {
                 }
             }
         }
-        let cap = capture(&cdp).await?;
-        lpm.ingest(cap);
 
         // S4+S5: shared action state for pacing + idle hum.
         let last_action_epoch = Arc::new(AtomicU64::new(0));
@@ -582,7 +595,11 @@ impl Page {
             cdp.subscribe(),
         ));
 
-        Ok(Self {
+        // Construct the Page BEFORE the last fallible step (capture):
+        // on error the returned Err drops `page`, whose Drop aborts all
+        // background tasks. The old `capture(...)?` leaked all five
+        // spawned tasks on failure.
+        let mut page = Self {
             cdp,
             browser_client,
             lpm,
@@ -596,6 +613,7 @@ impl Page {
             last_action_epoch,
             is_busy,
             hum_task: Some(hum_task),
+            worker_task,
             stealth_script_id,
             active_locale,
             intercept,
@@ -609,7 +627,11 @@ impl Page {
             compress_enabled: std::sync::atomic::AtomicBool::new(
                 std::env::var("BLADE_NO_COMPRESS").as_deref() != Ok("1")
             ),
-        })
+        };
+
+        let cap = capture(&page.cdp).await?;
+        page.lpm.ingest(cap);
+        Ok(page)
     }
 
     /// The download tracker (V19). Newest download last.
@@ -664,7 +686,7 @@ impl Page {
     pub async fn eval_isolated(&self, expr: &str) -> Result<Value> {
         // Try to get or create the isolated world context.
         let ctx_id = {
-            let guard = self.isolated_ctx.lock().unwrap();
+            let guard = self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner());
             *guard
         };
 
@@ -681,7 +703,7 @@ impl Page {
                 Ok(v) => return Ok(v),
                 Err(_) => {
                     // Context is stale (navigation) — clear and recreate.
-                    *self.isolated_ctx.lock().unwrap() = None;
+                    *self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 }
             }
         }
@@ -697,7 +719,7 @@ impl Page {
             "grantUniveralAccess": true,
         }))).await {
             if let Some(id) = v.get("executionContextId").and_then(|i| i.as_i64()) {
-                *self.isolated_ctx.lock().unwrap() = Some(id);
+                *self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
                 return self.cdp.send("Runtime.callFunctionOn", Some(json!({
                     "executionContextId": id,
                     "functionDeclaration": format!("function() {{ return ({expr}); }}"),
@@ -717,7 +739,7 @@ impl Page {
 
     /// Reset the isolated world context (call on navigation).
     pub fn reset_isolated(&self) {
-        *self.isolated_ctx.lock().unwrap() = None;
+        *self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// List the browser's page targets — over the pipe's browser-level
@@ -761,6 +783,38 @@ impl Page {
         self.list_page_targets().await
     }
 
+    /// Create a new tab (browser-level Target.createTarget) and return its
+    /// target id. Uses the browser-level pipe client in pipe mode; in WS
+    /// mode connects to the browser's own debugger WebSocket (discovered
+    /// via /json/version) — Target.createTarget belongs to the browser
+    /// target, and the page session may be dead exactly when we need this
+    /// (dead-tab recovery).
+    pub async fn open_tab_target(&self, url: &str) -> Result<String> {
+        if let Some(bc) = &self.browser_client {
+            let res = bc
+                .send("Target.createTarget", Some(json!({ "url": url })))
+                .await?;
+            return res
+                .get("targetId")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .ok_or_else(|| BladeError::Other("no targetId from Target.createTarget".into()));
+        }
+        // WS mode: browser-level connection on demand.
+        let ver = crate::cdp::version(&self.base).await?;
+        let ws = ver
+            .web_socket_debugger_url
+            .ok_or_else(|| BladeError::Other("browser has no webSocketDebuggerUrl".into()))?;
+        let client = CdpClient::connect(&ws).await?;
+        let res = client
+            .send("Target.createTarget", Some(json!({ "url": url })))
+            .await?;
+        res.get("targetId")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| BladeError::Other("no targetId from Target.createTarget".into()))
+    }
+
     /// Switch the session to a different tab (target id from
     /// `state tabs`). The whole page state is rebuilt against the
     /// new tab: domains re-enabled, stealth re-injected, fresh
@@ -786,11 +840,18 @@ impl Page {
             CdpSession::child(client.clone(), sid)
         } else {
             // WS mode: connect to the target's own WebSocket URL.
-            let targets = list_page_targets(&self.base).await?;
-            let t = targets
-                .iter()
-                .find(|t| t.id == target_id)
-                .ok_or_else(|| BladeError::Other(format!("tab not found: {target_id}")))?;
+            // Retry briefly: a just-created target can lag in HTTP
+            // discovery ("tab not found" on a fresh open-tab was a race).
+            let mut t = None;
+            for _ in 0..5 {
+                let targets = list_page_targets(&self.base).await?;
+                t = targets.into_iter().find(|t| t.id == target_id);
+                if t.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let t = t.ok_or_else(|| BladeError::Other(format!("tab not found: {target_id}")))?;
             let client = CdpClient::connect(t.ws_url()?).await?;
             CdpSession::root(client)
         };
@@ -1169,10 +1230,12 @@ impl Page {
     }
 
     /// V8: read the console log captured by the injection hook.
-    /// Returns raw JSON (array of {l, m, t}).
+    /// Returns raw JSON (array of {l, m, t}). The ring buffer lives under
+    /// the same Symbol.for('q') slot the injection script defines — a
+    /// string-keyed window property was a page-readable detection marker.
     pub async fn console_log(&self) -> Result<serde_json::Value> {
         let res = self.cdp.send("Runtime.evaluate", Some(serde_json::json!({
-            "expression": "window.__uxa||[]",
+            "expression": "window[Symbol.for('q')]||[]",
             "returnByValue": true,
         }))).await?;
         Ok(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(serde_json::json!([])))
@@ -1245,33 +1308,36 @@ impl Page {
         // Wait up to 5s polling for either a URL change OR the block
         // disappearing (some challenges solve in-place without redirect).
         // If either happens, the challenge was solved — do NOT report a block.
-        let blocked = if blocked.is_some() {
-            let pre_url = eval_location_href(&self.cdp).await;
-            let mut solved = false;
-            for _ in 0..10 {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let post_url = eval_location_href(&self.cdp).await;
-                if post_url != pre_url && !post_url.is_empty() {
-                    solved = true;
-                    break;
+        // Only JS-challenge types can self-solve; rate-limit/akamai/recaptcha
+        // walls never do (waiting there only added 5s latency to a final verdict).
+        let blocked = match blocked.as_deref() {
+            Some("cloudflare") | Some("datadome") | Some("perimeterx") => {
+                let pre_url = eval_location_href(&self.cdp).await;
+                let mut solved = false;
+                for _ in 0..10 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let post_url = eval_location_href(&self.cdp).await;
+                    if post_url != pre_url && !post_url.is_empty() {
+                        solved = true;
+                        break;
+                    }
+                    // Also check if the block disappeared without a URL change
+                    // (some challenges solve in-place, replacing page content).
+                    if detect_block(&self.cdp).await.unwrap_or(None).is_none() {
+                        solved = true;
+                        break;
+                    }
                 }
-                // Also check if the block disappeared without a URL change
-                // (some challenges solve in-place, replacing page content).
-                if detect_block(&self.cdp).await.unwrap_or(None).is_none() {
-                    solved = true;
-                    break;
+                if solved {
+                    wait_for_settle_with_network(
+                        &self.cdp, Duration::from_secs(3), Some(&self.in_flight),
+                    ).await?;
+                    None // clear block — was a JS challenge, not a real block
+                } else {
+                    blocked
                 }
             }
-            if solved {
-                wait_for_settle_with_network(
-                    &self.cdp, Duration::from_secs(3), Some(&self.in_flight),
-                ).await?;
-                None // clear block — was a JS challenge, not a real block
-            } else {
-                blocked
-            }
-        } else {
-            blocked
+            other => other.map(String::from),
         };
         // Learn from successful consent dismissal (only specific selectors, not "generic").
         if let Some(ref result) = consent {
@@ -1341,6 +1407,14 @@ impl Page {
                     .cdp
                     .send("Emulation.setLocaleOverride", Some(serde_json::json!({ "locale": locale })))
                     .await;
+                // Keep Accept-Language in sync — it was set once at attach;
+                // a swapped locale with a stale header is a cross-layer
+                // mismatch fingerprint.
+                let base = locale.split('-').next().unwrap_or(locale);
+                let _ = self.cdp.send("Network.setExtraHTTPHeaders",
+                    Some(serde_json::json!({
+                        "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
+                    }))).await;
                 eprintln!("[bladebro] domain profile {domain}: locale={locale}");
             }
 
@@ -1429,6 +1503,9 @@ impl Drop for Page {
             handle.abort();
         }
         if let Some(handle) = self.hum_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.worker_task.take() {
             handle.abort();
         }
         if let Some(handle) = self.intercept_task.take() {

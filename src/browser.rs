@@ -247,6 +247,14 @@ impl Browser {
         #[cfg(target_os = "linux")]
         let xvfb = VirtualDisplay::start().ok();
         #[cfg(target_os = "linux")]
+        if xvfb.is_none() {
+            // Stealth downgrade: headless=new carries real detection
+            // surface. Never fail silently — the operator should know.
+            eprintln!(
+                "[bladebro] WARNING: Xvfb unavailable — falling back to headless mode (reduced stealth). Install xvfb for headful-on-virtual-display."
+            );
+        }
+        #[cfg(target_os = "linux")]
         let headful = xvfb.is_some();
 
         #[cfg(not(target_os = "linux"))]
@@ -480,6 +488,12 @@ impl Browser {
 
         #[cfg(target_os = "linux")]
         let xvfb = VirtualDisplay::start().ok();
+        #[cfg(target_os = "linux")]
+        if xvfb.is_none() {
+            eprintln!(
+                "[bladebro] WARNING: Xvfb unavailable — falling back to headless mode (reduced stealth). Install xvfb for headful-on-virtual-display."
+            );
+        }
         #[cfg(target_os = "linux")]
         let headful = xvfb.is_some();
 

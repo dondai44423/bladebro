@@ -431,6 +431,23 @@ fn reap_xvfb() {
         kill_xvfb_on_display(n);
         eprintln!("[bladebro] reaped stale Xvfb display :{n}");
     }
+    // Stale display CLAIMS: /tmp/.blade-x<n>-claim holds the claiming
+    // bladebro's pid. A SIGKILLed bladebro never releases its claim, so
+    // that display number would be lost forever (until /tmp is wiped).
+    // Free every claim whose owner is dead.
+    for n in 99..200 {
+        let claim = format!("/tmp/.blade-x{n}-claim");
+        let pid: u32 = match std::fs::read_to_string(&claim) {
+            Ok(c) => match c.trim().parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
+        if !platform::process_alive(pid) {
+            let _ = std::fs::remove_file(&claim);
+        }
+    }
 }
 
 /// Parent pid of a process (0/1 = orphaned or init).

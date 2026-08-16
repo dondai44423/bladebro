@@ -146,7 +146,11 @@ result.live.insert(el.sig.clone(), ref_id.to_string());
     }
 
     // Pass 3: mint fresh refs for remaining unclaimed elements.
-    for i in fresh {
+    // v3.9: iterate in DOCUMENT ORDER (fresh_vec, filtered by what pass 2
+    // claimed) — iterating the HashSet directly assigned ref numbers in
+    // hash order, so a first capture could number elements e5, e2, e9, e1…
+    // instead of e1, e2, e3 down the page. Deterministic and readable.
+    for &i in fresh_vec.iter().filter(|i| fresh.contains(i)) {
         let el = &next[i];
         let mut id = format!("e{}", *next_ref);
         while used_prev.contains(&id) {

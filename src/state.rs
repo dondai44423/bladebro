@@ -10,6 +10,21 @@ use serde_json::{json, Value};
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
 
+/// Percent-encode a cookie value for the `document.cookie` JS fallback.
+/// Raw values containing `;`, `=`, `,`, or whitespace are silently
+/// truncated or reshaped by the cookie parser. RFC 3986 unreserved set.
+fn js_percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// What the agent wants to do with page/browser state.
 #[derive(Debug, Clone)]
 pub enum StateOp {
@@ -170,6 +185,8 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             let ss = same_site.as_deref().unwrap_or("Lax");
             params["sameSite"] = json!(ss);
 
+            #[allow(clippy::needless_late_init)]
+            let cdp_err;
             match cdp.send("Network.setCookie", Some(params)).await {
                 Ok(res) => {
                     let ok = res.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -177,16 +194,22 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                         return Ok(format!("✓ cookie set: {name}={}", truncate(value, 40)));
                     }
                     // CDP returned success=false — fall through to JS fallback.
+                    cdp_err = "CDP success=false".into();
                 }
-                Err(_) => {
-                    // CDP error — fall through to JS fallback.
+                Err(e) => {
+                    // CDP error — fall through to JS fallback (reason kept
+                    // for the failure message; the old code discarded it).
+                    cdp_err = e.to_string();
                 }
             }
 
             // Fallback: set cookie via document.cookie in JavaScript.
             // Works even when CDP Network.setCookie fails (Chrome version
             // quirks, partitioned cookies, sanitizer edge cases).
-            let mut cookie_parts = vec![format!("{name}={value}")];
+            // The value is percent-encoded: a raw value containing ';', '=',
+            // ',', or whitespace used to be silently truncated or reshaped
+            // by the cookie parser.
+            let mut cookie_parts = vec![format!("{name}={}", js_percent_encode(value))];
             if let Some(d) = domain {
                 cookie_parts.push(format!("domain={d}"));
             }
@@ -208,7 +231,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 "returnByValue": true,
             }))).await {
                 Ok(_) => Ok(format!("✓ cookie set (via JS): {name}={}", truncate(value, 40))),
-                Err(e) => Ok(format!("✗ cookie set failed: {name} ({e})")),
+                Err(e) => Ok(format!("✗ cookie set failed: {name} (CDP: {cdp_err}, JS: {e})")),
             }
         }
 

@@ -274,7 +274,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "}}catch(e){}}"
         + "}"
         + "cap(d,[],0,0);"
-        + "const __m=window.__blade_muts||0;window.__blade_muts=0;"
+        + "const __mc=window[Symbol.for('m')];const __m=__mc?__mc.n:0;if(__mc)__mc.n=0;"
         + "return{url:location.href,title:d.title||'',readyState:d.readyState,muts:__m,elements:out};"
         + "})()"
 });
@@ -488,6 +488,18 @@ fn is_internal_page(url: &str) -> bool {
 
 /// M4: Detect and dismiss consent/cookie banners. Policy: reject (default),
 /// accept, or off (via BLADE_CONSENT env). Returns the framework name if dismissed.
+///
+/// v3.9 false-positive hardening: the old generic pass queried
+/// `[role=dialog],[role=banner],[class*=cookie],...` — `[role=banner]` is
+/// the site HEADER, so any header containing the word "privacy" (a Privacy
+/// Policy nav link — extremely common) plus any header button matching
+/// /necessary|essential/ ("Essential Books"!) got CLICKED. Now:
+///   - candidates must have cookie/consent/gdpr/cmp-flavored class/id, or
+///     be a [role=dialog]
+///   - candidates must be VISIBLE (zero-size / display:none banners are
+///     stale DOM, not a live wall)
+///   - text must match cookie/consent/GDPR vocabulary ("privacy" alone is
+///     too weak — it's a footer/header staple)
 pub async fn dismiss_consent(cdp: &CdpSession) -> Result<Option<String>> {
     let policy = std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
     if policy == "off" {
@@ -500,9 +512,18 @@ pub async fn dismiss_consent(cdp: &CdpSession) -> Result<Option<String>> {
         + reject_js
         + ";const rs=['#onetrust-reject-all-handler','#CybotCookiebotDialogBodyButtonDecline','#didomi-notice-disagree-button','.qc-cmp2-summary-buttons button[mode=secondary]','#truste-consent-reject'];"
         + "const as=['#onetrust-accept-btn-handler','#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll','#didomi-notice-agree-button','.qc-cmp2-summary-buttons button[mode=primary]','#truste-consent-button'];"
-        + "const sels=reject?rs:as;for(const sel of sels){const btn=document.querySelector(sel);if(btn){btn.click();return sel;}}"
-        + "const dialogs=document.querySelectorAll('[role=dialog],[role=banner],[class*=cookie],[class*=consent],[id*=cookie],[id*=consent]');"
-        + "for(const d of dialogs){const text=(d.textContent||'').toLowerCase();if(text.includes('cookie')||text.includes('consent')||text.includes('privacy')){const buttons=[...d.querySelectorAll('button,a')];const pattern=reject?/reject|decline|refuse|deny|necessary|essential/i:/accept|agree|allow|consent/i;const btn=buttons.find(b=>pattern.test(b.textContent||''));if(btn){btn.click();return 'generic';}}}"
+        + "const sels=reject?rs:as;for(const sel of sels){const btn=document.querySelector(sel);if(btn&&btn.offsetWidth+btn.offsetHeight>0){btn.click();return sel;}}"
+        // Generic pass — see the doc comment for why each filter exists.
+        + "const dialogs=document.querySelectorAll('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');"
+        + "for(const d of dialogs){"
+        + "if(d.offsetWidth+d.offsetHeight===0)continue;"
+        + "const text=(d.textContent||'').toLowerCase();"
+        + "if(!(/cookie|consent|gdpr/.test(text)))continue;"
+        + "const buttons=[...d.querySelectorAll('button,a')];"
+        + "if(buttons.length>12)continue;" // real consent walls are compact; a matching mega-container is site chrome
+        + "const pattern=reject?/reject|decline|refuse|deny|necessary|essential/i:/accept|agree|allow|consent/i;"
+        + "const btn=buttons.find(b=>pattern.test(b.textContent||'')&&b.offsetWidth+b.offsetHeight>0);"
+        + "if(btn){btn.click();return 'generic';}}"
         + "return null;})()";
 
     let res = cdp
@@ -616,8 +637,40 @@ pub fn remediation_ladder(block_type: &str) -> Vec<String> {
     }
 }
 
+/// v3.9: block heuristics are gated to avoid false "blocked:" verdicts on
+/// perfectly good pages. The old rules matched bare substrings anywhere in
+/// the first 2000 chars of body text:
+///
+/// - any docs page mentioning "rate limit" → blocked:rate-limit
+/// - any site embedding a Turnstile widget (login/signup forms do this
+///   LEGITIMATELY) → blocked:cloudflare
+/// - any page mentioning "datadome" (tech blogs!) → blocked:datadome
+///
+/// Real block/challenge pages are SMALL (a title, a spinner, a form) — the
+/// body-length gate is the strongest discriminator between "the page is a
+/// wall" and "the page discusses walls".
 pub async fn detect_block(cdp: &CdpSession) -> Result<Option<String>> {
-    let expression = r#"(()=>{const d=document;if(!d)return null;const t=(d.title||'').toLowerCase();const body=(d.body?d.body.textContent||'':'').toLowerCase().slice(0,2000);const q=s=>!!d.querySelector(s);if(t.includes('just a moment')||q('#challenge-form')||q('cf-turnstile')||q('script[src*=challenge-platform]'))return 'cloudflare';if(q('iframe[src*=captcha-delivery]')||body.includes('datadome'))return 'datadome';if(q('#px-captcha')||q('script[src*=px-captcha]'))return 'perimeterx';if((q('.g-recaptcha')||q('iframe[src*=recaptcha]'))&&(t.includes('prove')||t.includes('humanity')||t.includes('robot')||body.includes('prove your humanity')||body.includes('are you human')))return 'recaptcha';if(body.includes('access denied')&&(body.includes('reference')||body.includes('akamai')))return 'akamai';if(body.includes('too many requests')||body.includes('rate limit'))return 'rate-limit';return null;})()"#;
+    let expression = r#"(()=>{const d=document;if(!d)return null;const t=(d.title||'').toLowerCase();const raw=(d.body?d.body.innerText||d.body.textContent||'':'');const body=raw.toLowerCase();const bl=body.length;const q=s=>!!d.querySelector(s);
+// Cloudflare interstitial: the title is the strongest signal. A bare
+// turnstile/challenge-platform SCRIPT is NOT — sites embed Turnstile
+// widgets in ordinary forms. Only call it a block when the title matches
+// or the classic challenge form is present or (widget present AND the
+// page is nearly empty — a real interstitial).
+if(t.includes('just a moment'))return 'cloudflare';
+if(q('#challenge-form'))return 'cloudflare';
+if(q('cf-turnstile')||q('script[src*=challenge-platform]')){if(bl<800)return 'cloudflare';return null;}
+if(q('iframe[src*=captcha-delivery]')&&bl<1200)return 'datadome';
+if(bl<1200&&body.includes('datadome')&&q('iframe'))return 'datadome';
+if((q('#px-captcha')||q('script[src*=px-captcha]'))&&bl<1500)return 'perimeterx';
+// reCAPTCHA wall: needs BOTH the widget AND the "prove you're human"
+// phrasing on a SMALL page (a contact page with a recaptcha + an FAQ
+// mentioning robots is a normal page).
+if((q('.g-recaptcha')||q('iframe[src*=recaptcha]'))&&(t.includes('prove')||t.includes('humanity')||t.includes('robot')||body.includes('prove your humanity')||body.includes('are you human'))&&bl<1500)return 'recaptcha';
+if(bl<1000&&body.includes('access denied')&&(body.includes('reference')||body.includes('akamai')))return 'akamai';
+// Rate limit: API docs routinely contain the phrase "rate limit" in long
+// bodies. A real 429 wall is tiny.
+if(bl<800&&(body.includes('too many requests')||body.includes('rate limit')))return 'rate-limit';
+return null;})()"#;
 
     let res = cdp
         .send(

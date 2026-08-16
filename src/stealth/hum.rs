@@ -102,7 +102,7 @@ async fn hum_loop(
         let new_y = (my + jy).clamp(20.0, ymax);
         // movementX/movementY deltas — PerimeterX/HUMAN tracks these.
         let (dmx, dmy) = {
-            let lm = last_mouse.lock().unwrap();
+            let lm = last_mouse.lock().unwrap_or_else(|e| e.into_inner());
             lm.map(|(lx, ly)| (
                 (new_x - lx).round() as i64,
                 (new_y - ly).round() as i64,
@@ -120,7 +120,7 @@ async fn hum_loop(
                 })),
             )
             .await;
-        *last_mouse.lock().unwrap() = Some((new_x, new_y));
+        *last_mouse.lock().unwrap_or_else(|e| e.into_inner()) = Some((new_x, new_y));
         mx = new_x;
         my = new_y;
 

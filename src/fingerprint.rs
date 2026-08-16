@@ -126,7 +126,9 @@ fn generate_seed() -> u32 {
         if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
             let mut buf = [0u8; 4];
             if f.read_exact(&mut buf).is_ok() {
-                return u32::from_le_bytes(buf);
+                // | 1: a zero seed degenerates the xorshift32 noise PRNG
+                // (all-zero constants) — never allow it.
+                return u32::from_le_bytes(buf) | 1;
             }
         }
     }
@@ -136,7 +138,7 @@ fn generate_seed() -> u32 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    ((now ^ (pid as u64 * 0x9e3779b97f4a7c15)) & 0xffffffff) as u32
+    (((now ^ (pid as u64 * 0x9e3779b97f4a7c15)) & 0xffffffff) as u32) | 1
 }
 
 #[cfg(test)]

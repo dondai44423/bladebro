@@ -118,14 +118,10 @@ impl CdpClient {
                             // CDP is text; tolerate binary as UTF-8.
                             String::from_utf8_lossy(&b).into_owned()
                         }
-                        Ok(Message::Ping(p)) => {
-                            // tungstenite auto-pongs, but be defensive.
-                            let _ = events_tx
-                                .send(CdpEvent {
-                                    method: "__ping".into(),
-                                    params: Value::Null,
-                                    session_id: Some(String::from_utf8_lossy(&p).into_owned()),
-                                });
+                        Ok(Message::Ping(_)) => {
+                            // tungstenite auto-pongs at the protocol layer.
+                            // The old re-emission as a "__ping" CdpEvent was
+                            // non-CDP noise on the bus for every subscriber.
                             continue;
                         }
                         Ok(Message::Close(_)) | Err(_) => break,
@@ -200,6 +196,11 @@ impl CdpClient {
                     match reader.read_until(0u8, &mut buf).await {
                         Ok(0) => break, // EOF — Chrome exited.
                         Ok(_) => {
+                            // Cap: a garbage stream without NUL delimiters
+                            // would otherwise grow `buf` unboundedly.
+                            if buf.len() > 64 * 1024 * 1024 {
+                                break;
+                            }
                             if buf.last() == Some(&0u8) {
                                 buf.pop();
                             }

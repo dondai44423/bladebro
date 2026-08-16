@@ -357,12 +357,41 @@ async fn serve(
                 let msg: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(e) => {
+                        // JSON-RPC 2.0 §5.1: a parse error gets a -32700
+                        // response with id null. The old silent-drop left a
+                        // client whose request was truncated mid-write
+                        // waiting for a response forever.
                         eprintln!("[bladebro] invalid JSON: {e}");
+                        let resp = json!({
+                            "jsonrpc": "2.0",
+                            "id": null,
+                            "error": { "code": -32700, "message": format!("Parse error: {e}") }
+                        });
+                        let resp_str = serde_json::to_string(&resp)?;
+                        writeln!(out, "{resp_str}")?;
+                        out.flush()?;
                         continue;
                     }
                 };
 
+                // §5.1: non-object requests (arrays, strings, numbers) get
+                // -32600 Invalid Request — not "method not found".
+                if !msg.is_object() || !msg.get("method").map(|m| m.is_string()).unwrap_or(false) {
+                    let resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": if msg.is_object() { msg.get("id").cloned() } else { None },
+                        "error": { "code": -32600, "message": "Invalid Request: expected an object with a string 'method'" }
+                    });
+                    let resp_str = serde_json::to_string(&resp)?;
+                    writeln!(out, "{resp_str}")?;
+                    out.flush()?;
+                    continue;
+                }
+
                 let id = msg.get("id").cloned();
+                // §4.4: notifications (no id) never get a response.
+                // Captured before `id` is consumed by the handlers.
+                let is_notification = id.is_none();
                 let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
                 let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
@@ -434,10 +463,15 @@ async fn serve(
                                     }
                                     // First-run warming: seed cache/cookies/HSTS
                                     // by visiting a few top sites. Only runs once.
+                                    // The note explains WHY the first tool call
+                                    // took ~10s before the agent's request ran.
                                     if crate::session_profile::SessionProfile::claim_warming() {
                                         if let Some(ref mut p) = page {
                                             warm_profile(p).await;
                                         }
+                                        relaunch_note = Some(
+                                            "note: first run — the profile was warmed (google.com, github.com, wikipedia.org visited to seed cookies/HSTS/history) before this call.".into()
+                                        );
                                     }
                                 }
                                 Err(e) => {
@@ -479,7 +513,22 @@ async fn serve(
                         let resp = match res {
                             Ok(Ok(v)) => v,
                             Ok(Err(BladeError::Closed)) => {
-                                // Self-heal: relaunch and retry once.
+                                // Self-heal: relaunch, then retry — but ONLY
+                                // idempotent reads. Blindly re-running a
+                                // click/type/submit after a crash can
+                                // double-fire the action (double purchase,
+                                // duplicate message): the first dispatch may
+                                // have landed before the connection died.
+                                let retry_safe = {
+                                    let tn = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                    tn == "see"
+                                        || (tn == "state" && matches!(
+                                            params.get("arguments")
+                                                .and_then(|a| a.get("op"))
+                                                .and_then(|o| o.as_str()),
+                                            Some("cookies") | Some("ls") | Some("ss") | Some("tabs")
+                                        ))
+                                };
                                 eprintln!("[bladebro] browser closed during tool call, reconnecting...");
                                 if let Some(b) = browser.take() {
                                     shutdown_browser(b).await;
@@ -499,25 +548,37 @@ async fn serve(
                                                 let _ = p.set_block_classes(bc).await;
                                             }
                                         }
-                                        relaunch_note = Some(
-                                            "note: Chrome crashed and was restarted — page state reset to about:blank. Navigate to continue.".into()
-                                        );
-                                        let id_retry2 = id_retry.clone();
-                                        let p = page.as_mut().unwrap();
-                                        match handle_tools_call(id_retry2, &params, p).await {
-                                            Ok(v) => v,
-                                            Err(e) => {
-                                                eprintln!("[bladebro] retry after reconnect failed: {e}");
-                                                json!({
-                                                    "jsonrpc": "2.0",
-                                                    "id": id_retry,
-                                                    "result": {
-                                                        "content": [{ "type": "text", "text":
-                                                            format!("\u{2717} Browser connection lost. Bladebro reconnected but the retry failed: {e}. Try the tool call again.") }],
-                                                        "isError": true,
-                                                    }
-                                                })
+                                        if retry_safe {
+                                            relaunch_note = Some(
+                                                "note: Chrome crashed and was restarted — page state reset to about:blank. Navigate to continue.".into()
+                                            );
+                                            let id_retry2 = id_retry.clone();
+                                            let p = page.as_mut().unwrap();
+                                            match handle_tools_call(id_retry2, &params, p).await {
+                                                Ok(v) => v,
+                                                Err(e) => {
+                                                    eprintln!("[bladebro] retry after reconnect failed: {e}");
+                                                    json!({
+                                                        "jsonrpc": "2.0",
+                                                        "id": id_retry,
+                                                        "result": {
+                                                            "content": [{ "type": "text", "text":
+                                                                format!("\u{2717} Browser connection lost. Bladebro reconnected but the retry failed: {e}. Try the tool call again.") }],
+                                                            "isError": true,
+                                                        }
+                                                    })
+                                                }
                                             }
+                                        } else {
+                                            json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id_retry,
+                                                "result": {
+                                                    "content": [{ "type": "text", "text":
+                                                        "\u{2717} Browser connection was lost mid-action. Chrome has been restarted (page reset to about:blank). The action's outcome is UNKNOWN — it may have taken effect before the crash. Re-issue the action (and verify the result) rather than assuming it failed.".to_string() }],
+                                                    "isError": true,
+                                                }
+                                            })
                                         }
                                     }
                                     Err(e) => {
@@ -633,6 +694,12 @@ async fn serve(
                 };
 
                 if let Some(resp) = response {
+                    // §4.4: notifications (no id) NEVER get a response —
+                    // the old code replied with id:null, which strict
+                    // clients treat as a broken peer.
+                    if is_notification {
+                        continue;
+                    }
                     let resp_str = serde_json::to_string(&resp)?;
                     writeln!(out, "{resp_str}")?;
                     out.flush()?;
@@ -692,16 +759,14 @@ async fn serve(
 }
 
 /// Recover when the attached tab was closed externally:
-/// create a fresh tab and switch the session to it. The
-/// retry then acts on a live page instead of erroring
-/// "Target closed" forever.
+/// create a fresh tab (browser-level — the page session may be dead,
+/// which is exactly why we're here) and switch the session to it. The
+/// retry then acts on a live page instead of erroring "Target closed"
+/// forever. v3.9: this used to send Target.createTarget THROUGH the dead
+/// page session, which cannot work — recovery was advertised but broken.
 async fn recover_dead_tab(page: &mut Page) -> Result<()> {
-    let res = page.cdp_ref()
-        .send("Target.createTarget", Some(json!({ "url": "about:blank" })))
-        .await?;
-    let new_id = res.get("targetId").and_then(|v| v.as_str())
-        .ok_or_else(|| BladeError::Other("no targetId on tab recovery".into()))?;
-    page.switch_tab(new_id).await
+    let new_id = page.open_tab_target("about:blank").await?;
+    page.switch_tab(&new_id).await
 }
 
 fn handle_initialize(id: Option<Value>, params: &Value) -> Value {
@@ -826,8 +891,29 @@ pub async fn handle_tools_call(
         // and retry the tool call). The agent never sees this error.
         Err(BladeError::Closed) => Err(BladeError::Closed),
         Err(e) => {
-            // Also drain dialogs on error.
+            // Dead-tab errors propagate as-is so serve()'s tab-recovery
+            // branch can run. The old code converted EVERY error to an
+            // isError text response, which made that branch unreachable
+            // dead code — a closed tab errored forever instead of healing.
+            let msg = e.to_string();
+            let tab_died = msg.contains("Target closed")
+                || msg.contains("No target with given id")
+                || msg.contains("Session closed")
+                || msg.contains("Target.detachedFromTarget");
+            if tab_died {
+                return Err(e);
+            }
             let mut text = format!("\u{2717} error: {e}");
+            // Page-state contract: every error carries enough state for
+            // the agent to recover without a separate see call. Handlers
+            // that already embedded a state section (handle_act's action
+            // path) are not doubled up.
+            if !text.contains("--- current page state ---") {
+                let view = page.view(1200);
+                if !view.trim().is_empty() {
+                    text.push_str(&format!("\n--- current page state ---\n{view}"));
+                }
+            }
             let dialogs = page.drain_dialogs();
             if !dialogs.is_empty() {
                 text.push_str("\n\n\u{26a0} dialogs auto-dismissed:\n");
@@ -838,7 +924,7 @@ pub async fn handle_tools_call(
             }
             let ambient = page.drain_ambient();
             for a in &ambient {
-                text.push_str(&format!("\n\u{26a0} {}\n", a));
+                text.push_str(&format!("\u{26a0} {}\n", a));
             }
             Ok(json!({
                 "jsonrpc": "2.0",
@@ -2045,13 +2131,10 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
         "open-tab" => {
             // Create + auto-focus. Every agent that opens a tab
             // wants to act in it — a separate switch-tab call
-            // would be pure waste.
-            let res = page.cdp_ref()
-                .send("Target.createTarget", Some(json!({ "url": url })))
-                .await?;
-            let new_id = res.get("targetId").and_then(|v| v.as_str())
-                .ok_or_else(|| crate::error::BladeError::Other("no targetId".into()))?;
-            page.switch_tab(new_id).await?;
+            // would be pure waste. Browser-level create (works in
+            // both transports; the page session is not always valid).
+            let new_id = page.open_tab_target(url).await?;
+            page.switch_tab(&new_id).await?;
             let view = page.view(1500);
             return Ok(format!("\u{2713} opened + switched to tab {new_id}\n{view}"));
         }
@@ -2077,7 +2160,9 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
                         first.id
                     ));
                 }
-                return Ok(format!("\u{2713} closed tab {target_id} (was the last tab)"));
+                return Ok(format!(
+                    "\u{2713} closed tab {target_id} (was the last tab — Chrome exited; the next command relaunches it with a fresh page)"
+                ));
             }
             return Ok(format!("\u{2713} closed tab {target_id}"));
         }
@@ -2884,6 +2969,27 @@ pub async fn handle_vision(
                         "isError": true,
                     }
                 }));
+            }
+            // H2: multi-MB screenshots (tall pages, 4K full-page) inline
+            // through the single stdout writer backpressure the whole
+            // server (stdin unread, signals unhandled, idle timer frozen)
+            // on a slow client. Offload big ones to a PNG artifact and
+            // return the path; vision-capable agents read the file.
+            if data.len() > 900_000 {
+                if let Some(bytes) = crate::cli::base64_decode(data) {
+                    if let Ok(path) = crate::artifacts::write_artifact_bytes(&bytes, "png") {
+                        return Ok(json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{ "type": "text", "text": format!(
+                                    "screenshot{note} ({} KB — too large to inline, saved to {path})",
+                                    bytes.len() / 1024
+                                ) }]
+                            }
+                        }));
+                    }
+                }
             }
             Ok(json!({
                 "jsonrpc": "2.0",

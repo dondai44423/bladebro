@@ -360,6 +360,9 @@ pub async fn check_condition(
                         })),
                     )
                     .await;
+                if matches!(res, Err(BladeError::Closed)) {
+                    return false; // browser died — bail instead of spinning the full timeout
+                }
                 let title = res
                     .ok()
                     .and_then(|r| {
@@ -395,6 +398,9 @@ pub async fn check_condition(
                         })),
                     )
                     .await;
+                if matches!(res, Err(BladeError::Closed)) {
+                    return false;
+                }
                 let found = res
                     .ok()
                     .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_bool()))
@@ -420,6 +426,9 @@ pub async fn check_condition(
                         })),
                     )
                     .await;
+                if matches!(res, Err(BladeError::Closed)) {
+                    return false;
+                }
                 let url = res
                     .ok()
                     .and_then(|r| {
@@ -454,6 +463,9 @@ pub async fn check_condition(
                         })),
                     )
                     .await;
+                if matches!(res, Err(BladeError::Closed)) {
+                    return false;
+                }
                 let found = res
                     .ok()
                     .and_then(|r| {
@@ -484,6 +496,9 @@ pub async fn check_condition(
                         })),
                     )
                     .await;
+                if matches!(res, Err(BladeError::Closed)) {
+                    return false;
+                }
                 let truthy = res
                     .ok()
                     .and_then(|r| {
@@ -639,7 +654,7 @@ async fn dispatch_mouse_move(
     // Random start point — offset from the target by 100-300px.
     // If we have a last position, start from there instead (continuity).
     let start = {
-        let lm = last_mouse.lock().unwrap();
+        let lm = last_mouse.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((lx, ly)) = *lm {
             (lx, ly)
         } else {
@@ -660,7 +675,7 @@ async fn dispatch_mouse_move(
     let to = Duration::from_secs(5);
     for pt in &path {
         let (mx, my) = {
-            let lm = last_mouse.lock().unwrap();
+            let lm = last_mouse.lock().unwrap_or_else(|e| e.into_inner());
             lm.map(|(lx, ly)| (
                 (pt.x - lx).round() as i64,
                 (pt.y - ly).round() as i64,
@@ -676,7 +691,7 @@ async fn dispatch_mouse_move(
             to,
         )
         .await?;
-        *last_mouse.lock().unwrap() = Some((pt.x, pt.y));
+        *last_mouse.lock().unwrap_or_else(|e| e.into_inner()) = Some((pt.x, pt.y));
         tokio::time::sleep(pt.delay).await;
     }
 
@@ -706,7 +721,7 @@ async fn dispatch_mouse_click(
         let tx = cx + jx;
         let ty = cy + jy;
         let (mx, my) = {
-            let lm = last_mouse.lock().unwrap();
+            let lm = last_mouse.lock().unwrap_or_else(|e| e.into_inner());
             lm.map(|(lx, ly)| (
                 (tx - lx).round() as i64,
                 (ty - ly).round() as i64,
@@ -722,7 +737,7 @@ async fn dispatch_mouse_click(
             to,
         )
         .await?;
-        *last_mouse.lock().unwrap() = Some((tx, ty));
+        *last_mouse.lock().unwrap_or_else(|e| e.into_inner()) = Some((tx, ty));
         tokio::time::sleep(Duration::from_millis(rng.range(15, 45) as u64)).await;
     }
     // Press + release at the final position.
@@ -751,7 +766,46 @@ async fn dispatch_mouse_click(
 
 /// Dispatch a key press (keyDown + keyUp) via `Input.dispatchKeyEvent`.
 async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
+    // Printable single character: full char event (code + VK + text).
+    // `act press key="a"` used to dispatch key:"a" code:"Unidentified"
+    // vk:0 — a synthetic-looking no-op no page would act on.
+    if key.chars().count() == 1 {
+        let ch = key.chars().next().unwrap();
+        let (code, vk, shift) = char_to_key_code(ch);
+        let modifiers: u8 = if shift { 8 } else { 0 };
+        if shift {
+            cdp.send("Input.dispatchKeyEvent", Some(json!({
+                "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
+                "windowsVirtualKeyCode": 16, "modifiers": 8,
+            }))).await?;
+        }
+        cdp.send("Input.dispatchKeyEvent", Some(json!({
+            "type": "keyDown", "key": key, "code": code,
+            "windowsVirtualKeyCode": vk, "text": key, "modifiers": modifiers,
+            "keyChar": key,
+        }))).await?;
+        // Key press duration: 40-110ms — real humans hold before releasing.
+        let mut rng = crate::stealth::Rng::new();
+        tokio::time::sleep(Duration::from_millis(40 + rng.range(0, 70) as u64)).await;
+        cdp.send("Input.dispatchKeyEvent", Some(json!({
+            "type": "keyUp", "key": key, "code": code,
+            "windowsVirtualKeyCode": vk, "modifiers": modifiers,
+        }))).await?;
+        if shift {
+            cdp.send("Input.dispatchKeyEvent", Some(json!({
+                "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+                "windowsVirtualKeyCode": 16, "modifiers": 0,
+            }))).await?;
+        }
+        return Ok(());
+    }
+
     let (code, vk) = key_code(key);
+    if code == "Unidentified" {
+        return Err(BladeError::Other(format!(
+            "unsupported key: '{key}'. Supported: single characters, Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space (or ' ')"
+        )));
+    }
     // The `text` field is critical for keys that produce text — without it,
     // the browser fires keydown but doesn't process the default action
     // (e.g. Enter won't submit forms, Space won't scroll/click).
@@ -805,47 +859,110 @@ fn key_code(key: &str) -> (&'static str, u32) {
     }
 }
 
-/// Map a printable character to (code, windowsVirtualKeyCode) for CDP key events.
-/// These are needed for realistic `Input.dispatchKeyEvent` — without proper
-/// `code` and `windowsVirtualKeyCode` fields, some sites ignore the key event
-/// or anti-bot systems flag it as synthetic.
-fn char_to_key_code(ch: char) -> (String, u32) {
-    let code = match ch {
-        'a'..='z' => format!("Key{}", ch.to_ascii_uppercase()),
-        'A'..='Z' => format!("Key{}", ch),
-        '0'..='9' => format!("Digit{}", ch),
-        ' ' => "Space".to_string(),
-        '.' => "Period".to_string(),
-        ',' => "Comma".to_string(),
-        '-' => "Minus".to_string(),
-        '=' => "Equal".to_string(),
-        '/' => "Slash".to_string(),
-        '\\' => "Backslash".to_string(),
-        ';' => "Semicolon".to_string(),
-        '\'' => "Quote".to_string(),
-        '`' => "Backquote".to_string(),
-        '[' => "BracketLeft".to_string(),
-        ']' => "BracketRight".to_string(),
-        _ => "Unidentified".to_string(),
+/// Type text with per-character key events and human cadence.
+/// Returns false when a dispatch fails (caller falls back to insertText).
+///
+/// v3.9 realism (M6): the inter-key cadence sleep happens BETWEEN keyDown
+/// and keyUp — the key is HELD for the interval, as real fingers do (the
+/// old code slept after keyUp: hold time was a constant ~1-5ms). Uppercase
+/// and shifted symbols get a real Shift keyDown/up with modifiers:8.
+/// Non-ASCII chars dispatch with VK 229 (IME), matching real IME input.
+async fn type_per_char(cdp: &CdpSession, text: &str) -> bool {
+    let mut rng = crate::stealth::Rng::new();
+    let cadence = crate::stealth::typing_cadence(text, &mut rng);
+    for (i, ch) in text.chars().enumerate() {
+        let ch_str = ch.to_string();
+        let (code, vk, shift) = char_to_key_code(ch);
+        let modifiers: u8 = if shift { 8 } else { 0 };
+        if shift && cdp.send("Input.dispatchKeyEvent", Some(json!({
+            "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
+            "windowsVirtualKeyCode": 16, "modifiers": 8,
+        }))).await.is_err() {
+            return false;
+        }
+        let mut down = json!({
+            "type": "keyDown",
+            "key": ch_str,
+            "code": code,
+            "windowsVirtualKeyCode": vk,
+            "modifiers": modifiers,
+        });
+        // `text` produces the char + keypress; non-ASCII uses IME VK 229
+        // without text (the input event comes from the IME commit path).
+        if ch.is_ascii() {
+            down["text"] = json!(ch_str);
+        }
+        if cdp.send("Input.dispatchKeyEvent", Some(down)).await.is_err() {
+            return false;
+        }
+        // HOLD the key for the inter-key interval.
+        if i < cadence.len() {
+            tokio::time::sleep(cadence[i]).await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if cdp.send("Input.dispatchKeyEvent", Some(json!({
+            "type": "keyUp",
+            "key": ch_str,
+            "code": code,
+            "windowsVirtualKeyCode": vk,
+            "modifiers": modifiers,
+        }))).await.is_err() {
+            return false;
+        }
+        if shift && cdp.send("Input.dispatchKeyEvent", Some(json!({
+            "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+            "windowsVirtualKeyCode": 16, "modifiers": 0,
+        }))).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Map a printable character to (code, windowsVirtualKeyCode, needsShift)
+/// for CDP key events. Shifted symbols resolve to their BASE key + Shift
+/// ('!' → Digit1 + Shift), exactly as a real keyboard reports them; the
+/// old map gave symbols code:"Unidentified" and vk:<unicode codepoint> —
+/// a synthetic signature no real keyboard produces. Non-ASCII returns
+/// VK 229 (IME composition), matching real IME input.
+fn char_to_key_code(ch: char) -> (String, u32, bool) {
+    if !ch.is_ascii() {
+        return ("Unidentified".to_string(), 229, false);
+    }
+    let shift = ch.is_uppercase() || "!@#$%^&*()_+{}|:\"<>?~".contains(ch);
+    let base = ch.to_ascii_lowercase();
+    let (code, vk): (String, u32) = match base {
+        'a'..='z' => {
+            let up = base.to_ascii_uppercase();
+            (format!("Key{up}"), up as u32)
+        }
+        '0'..='9' => (format!("Digit{base}"), base as u32),
+        ' ' => ("Space".to_string(), 32),
+        '.' | '>' => ("Period".to_string(), 190),
+        ',' | '<' => ("Comma".to_string(), 188),
+        '-' | '_' => ("Minus".to_string(), 189),
+        '=' | '+' => ("Equal".to_string(), 187),
+        '/' | '?' => ("Slash".to_string(), 191),
+        '\\' | '|' => ("Backslash".to_string(), 220),
+        ';' | ':' => ("Semicolon".to_string(), 186),
+        '\'' | '"' => ("Quote".to_string(), 222),
+        '`' | '~' => ("Backquote".to_string(), 192),
+        '[' | '{' => ("BracketLeft".to_string(), 219),
+        ']' | '}' => ("BracketRight".to_string(), 221),
+        '!' => ("Digit1".to_string(), 49),
+        '@' => ("Digit2".to_string(), 50),
+        '#' => ("Digit3".to_string(), 51),
+        '$' => ("Digit4".to_string(), 52),
+        '%' => ("Digit5".to_string(), 53),
+        '^' => ("Digit6".to_string(), 54),
+        '&' => ("Digit7".to_string(), 55),
+        '*' => ("Digit8".to_string(), 56),
+        '(' => ("Digit9".to_string(), 57),
+        ')' => ("Digit0".to_string(), 48),
+        _ => ("Unidentified".to_string(), 0),
     };
-    let vk = match ch {
-        'a'..='z' | 'A'..='Z' => ch.to_ascii_uppercase() as u32,
-        '0'..='9' => ch as u32,
-        ' ' => 32,
-        '.' => 190,
-        ',' => 188,
-        '-' => 189,
-        '=' => 187,
-        '/' => 191,
-        '\\' => 220,
-        ';' => 186,
-        '\'' => 222,
-        '`' => 192,
-        '[' => 219,
-        ']' => 221,
-        _ => ch as u32,
-    };
-    (code, vk)
+    (code, vk, shift)
 }
 
 /// Perform an action against the page, then recapture and return the delta.
@@ -871,7 +988,12 @@ pub async fn perform(
 /// actionable-element delta cannot see. Reset happens inside the capture
 /// script after it reads the count. No attributes: class/animation churn
 /// would flood the counter on animated pages.
-pub const MUT_WATCH: &str = "if(!window.__blade_mo){window.__blade_muts=0;window.__blade_mo=new MutationObserver(function(l){window.__blade_muts+=l.length;});window.__blade_mo.observe(document.documentElement,{childList:true,subtree:true,characterData:true});}window.__blade_muts=0;";
+///
+/// v3.9: state lives under Symbol-keyed window slots (invisible to
+/// Object.keys / for-in / `'name' in window` probes). The old
+/// `window.__blade_muts` / `__blade_mo` string properties named the tool
+/// outright on every page after the first action — a one-line detection.
+pub const MUT_WATCH: &str = "(function(){var K=Symbol.for('m'),O=Symbol.for('n');var c=window[K];if(!c){c={n:0};try{window[K]=c;}catch(e){return;}if(!window[O]){try{var mo=new MutationObserver(function(l){c.n+=l.length;});window[O]=mo;mo.observe(document.documentElement||document,{childList:true,subtree:true,characterData:true});}catch(e){}}}c.n=0;})();";
 
 /// Eagerly-subscribed event waiter. `cdp.wait_for` subscribes LAZILY
 /// on first poll — events fired between creation and poll (a
@@ -943,6 +1065,12 @@ pub async fn perform_with_network(
             let mut via = "";
             let mut delta = PageDelta::default();
             let mut dialog_fired = false;
+            // M8: dispatch-level failures (transport) are counted separately
+            // from "clicked but no effect" — if EVERY strategy failed at the
+            // transport level, reporting "element may be disabled" sends the
+            // agent debugging the page when the driver was the problem.
+            let mut dispatch_errors = 0usize;
+            let mut last_dispatch_err: Option<BladeError> = None;
 
             for &strategy in strategies {
                 tried.push(strategy);
@@ -960,7 +1088,9 @@ pub async fn perform_with_network(
                         if let Some(box_) = found.box_ {
                             let cx = box_[0] + box_[2] / 2.0;
                             let cy = box_[1] + box_[3] / 2.0;
-                            if dispatch_mouse_click(cdp, cx, cy, last_mouse).await.is_err() {
+                            if let Err(e) = dispatch_mouse_click(cdp, cx, cy, last_mouse).await {
+                                dispatch_errors += 1;
+                                last_dispatch_err = Some(e);
                                 continue;
                             }
                         } else {
@@ -968,14 +1098,21 @@ pub async fn perform_with_network(
                         }
                     }
                     "js" => {
-                        if find_by_sig(cdp, sig, frame, "click", None).await.map(|f| f.ok).unwrap_or(false) {
-                        } else {
-                            continue;
+                        match find_by_sig(cdp, sig, frame, "click", None).await {
+                            Ok(f) if f.ok => {}
+                            Ok(_) => continue,
+                            Err(e) => {
+                                dispatch_errors += 1;
+                                last_dispatch_err = Some(e);
+                                continue;
+                            }
                         }
                     }
                     "enter" => {
                         let _ = find_by_sig(cdp, sig, frame, "focus", None).await;
-                        if dispatch_key(cdp, "Enter").await.is_err() {
+                        if let Err(e) = dispatch_key(cdp, "Enter").await {
+                            dispatch_errors += 1;
+                            last_dispatch_err = Some(e);
                             continue;
                         }
                     }
@@ -1012,6 +1149,13 @@ pub async fn perform_with_network(
                 }
             }
 
+            // All strategies errored at the DISPATCH level: the driver
+            // failed, not the page — surface the transport error.
+            if dispatch_errors == tried.len() && !tried.is_empty() {
+                if let Some(e) = last_dispatch_err {
+                    return Err(e);
+                }
+            }
             let mut verdict = compute_verdict(action, &delta, lpm, Some((via, &tried)));
             if dialog_fired && !delta.navigated && delta.is_empty() && !delta.content_changed {
                 verdict = format!(
@@ -1032,55 +1176,47 @@ pub async fn perform_with_network(
                     el.raw.role
                 )));
             }
+            // Hard cap: a multi-MB text into the per-char path would hang
+            // the daemon for hours; even insertText serializes MBs of JSON
+            // through CDP for no agent benefit.
+            const MAX_TYPE_CHARS: usize = 100_000;
+            if text.chars().count() > MAX_TYPE_CHARS {
+                return Err(BladeError::Other(format!(
+                    "text too long ({} chars, max {MAX_TYPE_CHARS}) — split the input or use a file upload",
+                    text.chars().count()
+                )));
+            }
             // Focus + clear + get box in one eval — maintains focus state
             // across the prepare→typing transition (fixes Enter-after-type).
             let found = find_by_sig(cdp, sig, frame, "prepare", None).await?;
             if !found.ok {
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
             }
-            // Fast typing: use Input.insertText for bulk text entry (one CDP call
-            // for the entire string), then verify. This is what Chrome's IME input
-            // path uses — real humans trigger it via autocomplete, swipe typing,
-            // and paste-from-keyboard. Not a bot signal.
-            //
-            // Fall back to per-character key events if insertText fails (some
-            // inputs reject it — e.g. contenteditable with custom handlers).
-            let inserted = cdp.send("Input.insertText", Some(json!({
-                "text": text,
-            }))).await.is_ok();
-
-            if !inserted {
-                // Per-character key events fallback.
-                let mut rng = crate::stealth::Rng::new();
-                let cadence = crate::stealth::typing_cadence(text, &mut rng);
-                for (i, ch) in text.chars().enumerate() {
-                    let ch_str = ch.to_string();
-                    let (code, vk) = char_to_key_code(ch);
-                    cdp.send(
-                        "Input.dispatchKeyEvent",
-                        Some(json!({
-                            "type": "keyDown",
-                            "key": ch_str,
-                            "text": ch_str,
-                            "code": code,
-                            "windowsVirtualKeyCode": vk,
-                        })),
-                    )
-                    .await?;
-                    cdp.send(
-                        "Input.dispatchKeyEvent",
-                        Some(json!({
-                            "type": "keyUp",
-                            "key": ch_str,
-                            "code": code,
-                            "windowsVirtualKeyCode": vk,
-                        })),
-                    )
-                    .await?;
-                    if i < cadence.len() {
-                        tokio::time::sleep(cadence[i]).await;
-                    }
-                }
+            // v3.9 typing strategy (C3): SHORT text (≤120 chars — the
+            // usernames, passwords, search queries behavioral collectors
+            // actually watch) is typed with per-character key events and
+            // the full log-normal cadence: keydown/keyup pairs, Shift
+            // wrapping, hold-time between down and up. The old single
+            // Input.insertText produced ZERO keystroke events — the
+            // flagship biometrics were dead code in the common path.
+            // LONG text uses insertText (one CDP call, reads as a
+            // paste/IME commit — human-plausible and fast).
+            const PER_CHAR_MAX: usize = 120;
+            let char_count = text.chars().count();
+            let mut typed = false;
+            if char_count <= PER_CHAR_MAX {
+                typed = type_per_char(cdp, text).await;
+            }
+            if !typed {
+                typed = cdp.send("Input.insertText", Some(json!({
+                    "text": text,
+                }))).await.is_ok();
+            }
+            if !typed {
+                // Both CDP input paths failed (transport or rejected) —
+                // fall back to per-char once more; the verification below
+                // is the authority on whether anything landed.
+                let _ = type_per_char(cdp, text).await;
             }
             // Verify the value was actually set. Some inputs reject CDP
             // key events (framework-controlled, certain focus states).
