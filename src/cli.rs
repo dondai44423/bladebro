@@ -115,17 +115,50 @@ pub async fn dispatch(tool: &str, args: &Value, page: &mut Page) -> std::result:
 /// Auto-start the daemon as a detached background process.
 /// The first CLI command triggers this — the agent never needs to
 /// run `bladebro daemon` explicitly.
+///
+/// SECURITY: spawns the binary DIRECTLY (no `sh -c`). The old shell path
+/// interpolated the exe path into single quotes — an install path
+/// containing a quote broke out of the quoting.
 #[cfg(unix)]
 fn auto_start_daemon() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| BladeError::Other(format!("cannot find bladebro binary: {e}")))?;
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("nohup '{}' daemon </dev/null >/dev/null 2>/dev/null &", exe.display()))
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        // Detach into a new session so the daemon survives the parent
+        // CLI exiting (what nohup used to do).
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd.spawn()
+        .map_err(|e| BladeError::Other(format!("failed to start daemon: {e}")))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn auto_start_daemon() -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| BladeError::Other(format!("cannot find bladebro binary: {e}")))?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("daemon")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: survive parent exit.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    cmd.spawn()
         .map_err(|e| BladeError::Other(format!("failed to start daemon: {e}")))?;
     Ok(())
 }
@@ -342,16 +375,17 @@ fn print_result(result: &ToolResult, json_mode: bool) {
         });
         println!("{v}");
     } else if let Some(ref img) = result.image {
-        // Vision: save screenshot to temp file, print path.
-        let path = std::env::temp_dir().join(format!("bladebro-screenshot-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
-        if let Ok(data) = base64_decode(img) {
-            if std::fs::write(&path, data).is_ok() {
-                println!("{}\nsaved: {}", result.text, path.display());
-            } else {
-                println!("{}", result.text);
-            }
-        } else {
-            println!("{}", result.text);
+        // Vision: save the screenshot into the private artifacts dir
+        // (0700, rotating). SECURITY: it used to go to a predictable
+        // /tmp/bladebro-screenshot-<millis>.png — a symlink pre-placed at
+        // that path turned every vision call into an arbitrary-file
+        // overwrite.
+        match base64_decode(img) {
+            Ok(data) => match crate::artifacts::write_artifact_bytes(&data, "png") {
+                Ok(path) => println!("{}\nsaved: {}", result.text, path),
+                Err(_) => println!("{}", result.text),
+            },
+            Err(_) => println!("{}", result.text),
         }
     } else {
         println!("{}", result.text);

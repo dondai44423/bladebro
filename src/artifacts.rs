@@ -31,7 +31,7 @@ pub fn write_artifact(data: &str, ext: &str) -> Result<String> {
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let path = dir.join(format!("blade-{pid}-{seq:04}.{ext}"));
-    std::fs::write(&path, data)
+    crate::platform::secure_write_file(&path, data.as_bytes())
         .map_err(|e| crate::error::BladeError::Other(format!("artifact write: {e}")))?;
     rotate_artifacts(&dir);
     Ok(path.display().to_string())
@@ -46,7 +46,7 @@ pub fn write_artifact_bytes(data: &[u8], ext: &str) -> Result<String> {
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let path = dir.join(format!("blade-{pid}-{seq:04}.{ext}"));
-    std::fs::write(&path, data)
+    crate::platform::secure_write_file(&path, data)
         .map_err(|e| crate::error::BladeError::Other(format!("artifact write: {e}")))?;
     rotate_artifacts(&dir);
     Ok(path.display().to_string())

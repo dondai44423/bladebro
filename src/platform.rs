@@ -34,21 +34,34 @@ pub fn blade_dir() -> PathBuf {
 /// SECURITY: Session files, fingerprints, and backups contain sensitive
 /// data (cookies, auth tokens). Without explicit permissions, they get
 /// the process umask (often 755/644), making them world-readable.
+/// Every component this call CREATES is chmodded 0700 — ancestors that
+/// already exist (e.g. $HOME) are never touched.
 pub fn secure_create_dir_all(path: &std::path::Path) -> std::io::Result<()> {
-    let created = !path.exists();
+    if path.exists() {
+        return Ok(());
+    }
+    // Deepest existing ancestor — creation (and chmodding) starts below it.
+    let mut first_missing = path.to_path_buf();
+    while !first_missing.exists() {
+        match first_missing.parent() {
+            Some(p) if p != first_missing => first_missing = p.to_path_buf(),
+            _ => break,
+        }
+    }
     std::fs::create_dir_all(path)?;
-    // Only set permissions on directories we actually created.
-    // Trying to chmod an existing dir we don't own (e.g. /tmp) fails.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if created {
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        if let Ok(tail) = path.strip_prefix(first_missing.as_path()) {
+            let mut cur = first_missing;
+            for comp in tail.components() {
+                cur.push(comp.as_os_str());
+                let _ = std::fs::set_permissions(&cur, std::fs::Permissions::from_mode(0o700));
+            }
         }
     }
-    // Suppress unused variable warning on non-Unix platforms.
     #[cfg(not(unix))]
-    let _ = created;
+    let _ = path;
     Ok(())
 }
 
@@ -67,37 +80,37 @@ pub fn secure_write_file(path: &std::path::Path, data: &[u8]) -> std::io::Result
 
 /// Validate a file write path to prevent writing to system directories.
 /// SECURITY: Blocks path traversal attacks that could overwrite critical
-/// system files (e.g., /etc/cron.d, /usr/bin, /boot) via prompt injection.
+/// system files (e.g., /etc/cron.d, /usr/bin, /boot) via prompt injection,
+/// plus credential stores and shell-startup files in the user's home
+/// (~/.ssh, ~/.gnupg, ~/.bashrc, ...) — the classic persistence/exfiltration
+/// sinks a prompt-injected page would target.
 /// Returns Ok(()) if safe, Err(message) if blocked.
 pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
-    // On non-Unix platforms, skip the check (Windows has its own path protections).
-    #[cfg(not(unix))]
-    { let _ = path; Ok(()) }
+    let canonical = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+
+    // Normalize the path (resolve . and .. without requiring the file to exist).
+    let mut normalized = std::path::PathBuf::new();
+    for component in canonical.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let path_str = normalized.to_string_lossy().replace('\\', "/");
+    let lower = path_str.to_lowercase();
 
     #[cfg(unix)]
     {
-        let canonical = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
-        };
-
-        // Normalize the path (resolve . and .. without requiring the file to exist).
-        let mut normalized = std::path::PathBuf::new();
-        for component in canonical.components() {
-            match component {
-                std::path::Component::ParentDir => { normalized.pop(); }
-                std::path::Component::CurDir => {}
-                other => normalized.push(other.as_os_str()),
-            }
-        }
-
         let blocked_prefixes: &[&str] = &[
             "/etc", "/usr", "/bin", "/sbin", "/boot", "/dev",
             "/proc", "/sys", "/var/log", "/root", "/lib", "/lib64",
             "/run", "/snap",
         ];
-        let path_str = normalized.to_string_lossy();
         for prefix in blocked_prefixes {
             if path_str.starts_with(prefix) || path_str.starts_with(&format!("{prefix}/")) {
                 return Err(format!(
@@ -105,8 +118,105 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
                 ));
             }
         }
-        Ok(())
     }
+
+    #[cfg(windows)]
+    {
+        let blocked_win: &[&str] = &[
+            "c:/windows", "c:/program files", "c:/program files (x86)",
+            "c:/programdata/microsoft/windows/start menu",
+        ];
+        for prefix in blocked_win {
+            if lower.starts_with(prefix) {
+                return Err(format!(
+                    "blocked: writing to system directory ({prefix}) is not allowed"
+                ));
+            }
+        }
+        // Autostart persistence: the per-user Startup folder.
+        if lower.contains("/microsoft/windows/start menu/programs/startup") {
+            return Err(
+                "blocked: writing to the Windows Startup folder is not allowed".into(),
+            );
+        }
+    }
+
+    // Credential/config sinks that exist anywhere in the path (any home).
+    // A prompt-injected page convincing the agent to write here gains
+    // persistence (rc files) or steals credentials (.ssh/.aws/.gnupg).
+    const BLOCKED_COMPONENTS: &[&str] = &[
+        ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config",
+        ".gnome",
+    ];
+    for comp in normalized.components().filter_map(|c| c.as_os_str().to_str()) {
+        let cl = comp.to_lowercase();
+        if BLOCKED_COMPONENTS.contains(&cl.as_str())
+            || cl == "authorized_keys"
+            || cl == "known_hosts"
+            || cl == "id_rsa"
+            || cl.starts_with("id_rsa.")
+            || cl.starts_with("id_ed25519")
+            || cl.starts_with("id_ecdsa")
+        {
+            return Err(format!(
+                "blocked: writing to credential/config location ({comp}) is not allowed"
+            ));
+        }
+    }
+    // systemd user-unit persistence spans multiple components.
+    if lower.contains("/.local/share/systemd/") {
+        return Err(
+            "blocked: writing to systemd user units is not allowed".into(),
+        );
+    }
+
+    // Shell startup files directly in the home directory (~/.bashrc etc.).
+    let file_name = normalized
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    const RC_FILES: &[&str] = &[
+        ".bashrc", ".bash_profile", ".bash_logout", ".bash_aliases",
+        ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin",
+        ".kshrc", ".cshrc", ".gitconfig", ".tmux.conf", ".xinitrc",
+        ".xsession", ".xprofile", ".crontab", ".vimrc", ".exrc",
+        ".curlrc", ".wgetrc", ".netrc", ".env",
+    ];
+    let in_home = std::env::var("HOME")
+        .map(|h| {
+            let h = h.replace('\\', "/");
+            path_str == h || path_str.starts_with(&format!("{h}/"))
+        })
+        .unwrap_or(false)
+        || std::env::var("USERPROFILE")
+            .map(|h| {
+                let h = h.replace('\\', "/");
+                path_str == h || path_str.starts_with(&format!("{h}/"))
+            })
+            .unwrap_or(false);
+    if in_home && RC_FILES.contains(&file_name.as_str()) {
+        return Err(format!(
+            "blocked: writing to shell/config startup file ({file_name}) is not allowed"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Char-safe string truncation. Byte slicing (`&s[..n]`) panics when `n`
+/// lands inside a multi-byte UTF-8 char — and these strings are often
+/// page-controlled (URLs, exception messages), so a malicious page could
+/// crash the daemon. Returns the longest prefix of at most `n` bytes that
+/// ends on a char boundary.
+pub fn truncate_utf8(s: &str, n: usize) -> &str {
+    if n >= s.len() {
+        return s;
+    }
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Is this process alive?

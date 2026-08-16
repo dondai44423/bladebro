@@ -8,7 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.2.0] - 2026-08-12
+## [3.3.0] - 2026-08-16
+
+### Added
+- `BLADE_NO_WARMING=1` env var to disable first-run profile warming (visits to google.com, github.com, wikipedia.org). Default behavior unchanged.
+- `release.sh` now generates and uploads `.sha256` checksum files for every release binary. Self-updater (v3.3.0+) fail-closes when a release ships no checksum.
+
+### Fixed
+- Security: Self-updater integrity verification is now fail-closed. For releases >= 3.3.0, a missing or malformed checksum file aborts the update instead of silently skipping verification. Previously, the updater executed downloaded binaries with zero integrity verification in every real deployment.
+- Security: Updater temp file now uses an unpredictable name with O_EXCL creation, preventing symlink-based arbitrary file overwrite. The old fixed name (`.bladebro-update-tmp`) was vulnerable to pre-placed symlinks.
+- Security: Chrome now launches with the renderer sandbox ON. `--no-sandbox` was previously unconditional, exposing the user's session to any renderer exploit on hostile pages. Falls back to `--no-sandbox` automatically when sandboxed startup fails (root, restricted containers).
+- Security: String truncation in URL/error/popup handling now uses char-boundary-safe `truncate_utf8` instead of byte slicing. Malicious pages with multi-byte UTF-8 at the right offset could crash the daemon (remote DoS).
+- Security: `validate_write_path` now blocks credential and persistence sinks (`.ssh`, `.gnupg`, `.aws`, `.bashrc`, `.zshrc`, shell startup files, systemd user units, Windows Startup folder) on all platforms, not just Unix system directories.
+- Security: Downloads moved from shared `/tmp/bladebro-downloads` (0755) to `~/.blade/downloads` (0700). Screenshots moved from predictable `/tmp/bladebro-screenshot-*` to the secure artifacts directory. Chrome profile directories now have all components chmodded to 0700.
+- Security: Daemon auto-start no longer spawns through `sh -c`, eliminating shell injection from install paths containing single quotes.
+- Security: Cookie JS fallback now uses `serde_json::to_string` instead of Rust `{:?}` debug formatting, which is not valid JS string escaping.
 
 ## [3.2.0] - 2026-08-12
 

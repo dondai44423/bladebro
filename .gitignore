@@ -1,6 +1,7 @@
 # Private working docs — never tracked
 status.md
 project.md
+SECURITY-AUDIT-*.md
 
 # Local build / dev artifacts
 target/
@@ -16,3 +17,4 @@ npm/bladebro-linux-x64/bladebro
 npm/bladebro-windows-x64/bladebro.exe
 npm/bladebro-darwin-x64/bladebro
 npm/bladebro-darwin-arm64/bladebro
+npm/bladebro-linux-arm64/bladebro

@@ -1,6 +1,6 @@
 [package]
 name = "bladebro"
-version = "3.2.0"
+version = "3.3.0"
 edition = "2021"
 rust-version = "1.86"
 license = "Apache-2.0"
@@ -36,8 +36,11 @@ url = "2"
 # Decode Page.printToPDF output (base64) into PDF bytes for the artifact file.
 # Compile-time only, no transitive deps.
 base64 = "0.23"
-# SHA256 verification of downloaded update binaries.
-# SECURITY: prevents installing a MITM'd or compromised binary.
+# SHA256 verification of downloaded update binaries against the release's
+# checksum file. SECURITY: fail-closed for releases >= 3.3.0 — a missing or
+# mismatched checksum aborts the update (catches MITM/corruption/wrong
+# asset; full account compromise requires release signing, see the audit
+# report's recommendation).
 sha2 = "0.10"
 
 [profile.release]

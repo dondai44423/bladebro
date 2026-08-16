@@ -11,15 +11,48 @@ pub struct DownloadedBinary {
     pub asset_name: String,
 }
 
-/// Temp file prefix for download in progress.
-const TMP_NAME: &str = ".bladebro-update-tmp";
+/// Temp file prefix for download in progress. The full name carries the
+/// pid + nanos so it is unpredictable: a fixed name in a shared install
+/// dir (e.g. group-writable /usr/local/bin) let a local attacker pre-place
+/// a symlink and have the "downloaded binary" written over an arbitrary
+/// victim file — which the updater then EXECUTES during verification.
+const TMP_PREFIX: &str = ".bladebro-update";
+
+/// The first release tag whose assets MUST ship .sha256 checksums.
+/// Targets at or above this version fail the update when no checksum can
+/// be verified (fail-closed). Older tags predate checksum uploads, so they
+/// keep the warn-and-skip behavior — otherwise `--force` downgrades to
+/// them would become impossible.
+const FIRST_CHECKSUMMED_TAG: &str = "3.3.0";
+
+/// Is checksum verification mandatory for this target tag?
+pub fn checksum_required(tag: &str) -> bool {
+    super::version::compare_versions(tag, FIRST_CHECKSUMMED_TAG)
+        != std::cmp::Ordering::Less
+}
+
+/// Parse a checksum file body: `<hash>  <filename>` or just `<hash>`.
+/// Returns None when the body doesn't look like a valid SHA256 hex digest.
+pub fn parse_checksum(text: &str) -> Option<String> {
+    let hash = text.split_whitespace().next()?.to_lowercase();
+    if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(hash)
+    } else {
+        None
+    }
+}
 
 /// SECURITY: Verify the SHA256 hash of a downloaded binary against a
-/// checksum file from the same release. If the checksum file doesn't
-/// exist (older releases), the verification is skipped with a warning.
-/// This prevents installing a MITM'd or compromised binary when checksums
-/// are available.
-async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str) -> Result<()> {
+/// checksum file from the same release.
+///
+/// Fail-closed policy: for release tags >= FIRST_CHECKSUMMED_TAG a missing,
+/// unreachable, or malformed checksum file ABORTS the update. The old
+/// warn-and-skip behavior turned the advertised "SHA256 verification"
+/// into a no-op whenever an attacker (or an ordinary release without
+/// checksum assets — none were uploaded before this fix) simply omitted
+/// the .sha256 file, and the downloaded binary was then executed by
+/// `verify_binary_runs` regardless.
+async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str) -> Result<()> {
     let checksum_url = format!("{asset_url}.sha256");
     let client = reqwest::Client::builder()
         .user_agent("bladebro-updater")
@@ -27,35 +60,56 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str) -> Result
         .build()
         .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
 
+    let required = checksum_required(tag);
+    let fetch_failed = |why: &str| -> BladeError {
+        BladeError::Other(format!(
+            "cannot verify update integrity: {why}.\n\
+             Release {tag} must ship a .sha256 checksum next to every binary.\n\
+             The download was NOT installed. Update via npm instead:\n\
+             npm install -g bladebro"
+        ))
+    };
+
     let resp = match client.get(&checksum_url).send().await {
         Ok(r) => r,
+        Err(e) if required => return Err(fetch_failed(&format!(
+            "checksum file unreachable ({e})"
+        ))),
         Err(_) => {
-            eprintln!("  warn: no checksum file found, skipping SHA256 verification");
+            eprintln!("  warn: no checksum file found, skipping SHA256 verification (legacy release)");
             return Ok(());
         }
     };
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND || !resp.status().is_success() {
-        eprintln!("  warn: no checksum file found, skipping SHA256 verification");
+        if required {
+            return Err(fetch_failed(&format!(
+                "no checksum file at {} (HTTP {})",
+                checksum_url,
+                resp.status()
+            )));
+        }
+        eprintln!("  warn: no checksum file found, skipping SHA256 verification (legacy release)");
         return Ok(());
     }
 
     let checksum_text = resp
         .text()
         .await
-        .map_err(|e| BladeError::Other(format!("cannot read checksum: {e}")))?;
+        .map_err(|e| if required {
+            fetch_failed(&format!("cannot read checksum: {e}"))
+        } else {
+            BladeError::Other(format!("cannot read checksum: {e}"))
+        })?;
 
-    // Checksum file format: `<hash>  <filename>` or just `<hash>`
-    let expected_hash = checksum_text
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-
-    if expected_hash.is_empty() || expected_hash.len() != 64 {
-        eprintln!("  warn: invalid checksum file, skipping SHA256 verification");
-        return Ok(());
-    }
+    let expected_hash = match parse_checksum(&checksum_text) {
+        Some(h) => h,
+        None if required => return Err(fetch_failed("malformed checksum file")),
+        None => {
+            eprintln!("  warn: invalid checksum file, skipping SHA256 verification (legacy release)");
+            return Ok(());
+        }
+    };
 
     // Compute SHA256 of the downloaded binary.
     use sha2::{Sha256, Digest};
@@ -98,16 +152,27 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
     let current = std::env::current_exe()
         .map_err(|e| BladeError::Other(format!("cannot find current exe: {e}")))?;
     let dir = current.parent().unwrap_or(std::path::Path::new("."));
-    let tmp = dir.join(TMP_NAME);
+    // Unique, unpredictable temp name + O_EXCL create: a predictable
+    // fixed name allowed a local attacker to pre-place a symlink at the
+    // temp path and have the downloaded binary written through it.
+    let tmp = create_secure_tmp(dir)?;
 
-    // Clean up any leftover temp from a previous failed attempt.
-    if tmp.exists() {
-        let _ = std::fs::remove_file(&tmp);
+    // Clean up any leftover temps from OUR previous failed attempts
+    // (same pid prefix only — never touch other processes' files).
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let prefix = format!("{TMP_PREFIX}-{}-", std::process::id());
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) && name.ends_with(".tmp") && e.path() != tmp {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
     }
 
     // Pre-flight: check available disk space if we know the asset size.
     if asset.size > 0 {
         if let Err(e) = check_disk_space(dir, asset.size) {
+            let _ = std::fs::remove_file(&tmp);
             return Err(BladeError::Other(format!(
                 "insufficient disk space for download (~{} MB needed): {e}\n\
                  Free space in {} and try again.",
@@ -125,8 +190,13 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
         }
         match download_once(&asset.browser_download_url, &tmp, asset.size).await {
             Ok(size) => {
-                // SECURITY: Verify SHA256 if a checksum file is available.
-                verify_sha256(&tmp, &asset.browser_download_url).await?;
+                // SECURITY: Verify SHA256 before the binary is ever
+                // executed or installed. Fail-closed for releases >=
+                // FIRST_CHECKSUMMED_TAG; abort + clean up on failure.
+                if let Err(e) = verify_sha256(&tmp, &asset.browser_download_url, release.tag()).await {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
                 return Ok(DownloadedBinary {
                     path: tmp,
                     size,
@@ -141,9 +211,63 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
             }
         }
     }
+    let _ = std::fs::remove_file(&tmp);
     Err(BladeError::Other(format!(
         "download failed after 3 attempts: {last_err}"
     )))
+}
+
+/// Create the download temp file: unique unpredictable name + O_EXCL, so a
+/// pre-placed symlink or file at a guessable path makes creation FAIL
+/// instead of being written through. Mode 0600 until verification promotes
+/// the binary to 0755.
+pub fn create_secure_tmp(dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // Retry on the (astronomically unlikely) name collision.
+    for _ in 0..5 {
+        let tmp = dir.join(format!(
+            "{TMP_PREFIX}-{}-{nanos}-{}.tmp",
+            std::process::id(),
+            rand_suffix()
+        ));
+        match std::fs::OpenOptions::new().create_new(true).write(true).open(&tmp) {
+            Ok(_) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &tmp,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                return Ok(tmp);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(BladeError::Other(format!("cannot create temp file: {e}")));
+            }
+        }
+    }
+    Err(BladeError::Other("cannot create temp file: name collisions".into()))
+}
+
+/// Cheap per-process randomness for temp-name uniqueness (no extra deps):
+/// address entropy + a monotonic counter, XOR-folded.
+fn rand_suffix() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    (std::process::id() as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ t.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ n.wrapping_mul(0x1656_67B1_9E37_79F9)
 }
 
 /// Download a URL to a file, with resume support.

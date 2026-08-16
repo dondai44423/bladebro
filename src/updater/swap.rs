@@ -90,10 +90,22 @@ fn check_writable(current: &Path) -> Result<()> {
         .parent()
         .unwrap_or(std::path::Path::new("."));
 
-    // Try creating a temp file in the same directory.
-    let test_file = parent.join(".bladebro-write-test");
-    match std::fs::write(&test_file, b"test") {
+    // Try creating a temp file in the same directory. Random suffix +
+    // O_EXCL: a fixed name let a local attacker pre-place a symlink and
+    // turn this probe into an arbitrary-file overwrite.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let test_file = parent.join(format!(".bladebro-write-test-{}-{nanos}", std::process::id()));
+    match std::fs::OpenOptions::new().create_new(true).write(true).open(&test_file) {
         Ok(_) => {
+            let _ = std::fs::remove_file(&test_file);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Should not happen with a unique name; treat as writable-dir
+            // evidence and move on.
             let _ = std::fs::remove_file(&test_file);
             Ok(())
         }

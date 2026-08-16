@@ -649,8 +649,9 @@ pub fn short_url(u: &str) -> String {
         .or_else(|| u.strip_prefix("http://"))
         .unwrap_or(u);
     // Truncate long URLs (e.g. Google search URLs are 500+ chars).
+    // Char-safe: byte slicing panics mid multi-byte char (crash-by-URL).
     if s.len() > 80 {
-        format!("{}…", &s[..77])
+        format!("{}\u{2026}", crate::platform::truncate_utf8(s, 77))
     } else {
         s.to_string()
     }

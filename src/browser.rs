@@ -18,8 +18,11 @@ use crate::error::{BladeError, Result};
 use crate::platform;
 
 /// Flags applied to every Chrome launch (both headless and headful).
+/// SECURITY: the Chrome renderer sandbox stays ON. `--no-sandbox` used to
+/// be unconditional — any renderer exploit on a hostile page escaped straight
+/// into the user's account. The flag is now added only as an automatic
+/// fallback when sandboxed startup fails (root, restrictive containers).
 const STEALTH_FLAGS: &[&str] = &[
-    "--no-sandbox",
     "--disable-extensions",
     "--no-first-run",
     "--disable-blink-features=AutomationControlled",
@@ -193,32 +196,43 @@ impl Browser {
     /// Linux: Xvfb headful if available, headless fallback.
     /// macOS/Windows: headful natively (native window server).
     ///
-    /// Retries once with a fresh port if Chrome dies at startup
-    /// (port-steal race between the pick and Chrome's bind).
+    /// SECURITY: the Chrome sandbox is kept ON. If Chrome dies at startup
+    /// (root, unprivileged-user-namespace containers), we retry once with
+    /// `--no-sandbox` — availability preserved, sandbox used whenever the
+    /// environment allows it.
     pub async fn launch(port: u16) -> Result<Self> {
         let auto = port == 0;
         let mut last_err = None;
-        for attempt in 0..2 {
+        // Attempt sequence: sandboxed first; then --no-sandbox (sandbox
+        // unavailable: root, restricted container); then one more fresh-port
+        // retry with --no-sandbox (port-steal race). Only fast startup
+        // exits are retried — endpoint timeouts abort immediately (same
+        // policy as before; avoids tripling a 20s wait).
+        let attempts: [(u8, bool); 3] = [(0, false), (1, true), (2, true)];
+        for (attempt, no_sandbox) in attempts {
             let p = if auto { free_port() } else { port };
-            match Self::launch_inner(p).await {
+            match Self::launch_inner(p, no_sandbox).await {
                 Ok(b) => return Ok(b),
                 Err(e) => {
-                    let msg = e.to_string();
-                    let retryable = auto
-                        && attempt == 0
-                        && msg.contains("exited during startup");
+                    let startup_exit = e.to_string().contains("exited during startup");
                     last_err = Some(e);
-                    if !retryable {
+                    if !auto || !startup_exit {
                         break;
                     }
-                    eprintln!("[bladebro] Chrome died at startup (port race?), retrying on a fresh port");
+                    if attempt == 0 {
+                        eprintln!(
+                            "[bladebro] sandboxed Chrome died at startup (root or restricted container?) — retrying with --no-sandbox"
+                        );
+                    } else if attempt == 1 {
+                        eprintln!("[bladebro] Chrome died at startup (port race?), retrying on a fresh port");
+                    }
                 }
             }
         }
         Err(last_err.unwrap_or_else(|| BladeError::Other("launch failed".into())))
     }
 
-    async fn launch_inner(port: u16) -> Result<Self> {
+    async fn launch_inner(port: u16, no_sandbox: bool) -> Result<Self> {
         let chrome_path = find_chrome()?;
         let profile = crate::session_profile::SessionProfile::create()?;
         let user_data_dir = profile.dir().to_path_buf();
@@ -233,6 +247,9 @@ impl Browser {
         let headful = true; // macOS/Windows have native window servers
 
         let mut args: Vec<String> = STEALTH_FLAGS.iter().map(|s| s.to_string()).collect();
+        if no_sandbox {
+            args.push("--no-sandbox".into());
+        }
         if !headful {
             args.extend(HEADLESS_FLAGS.iter().map(|s| s.to_string()));
         }
@@ -420,6 +437,32 @@ impl Browser {
     /// connected browser-level CDP client.
     #[cfg(unix)]
     pub async fn launch_pipe() -> Result<(Self, crate::cdp::CdpClient)> {
+        // Sandbox-first, --no-sandbox fallback (same policy as launch()).
+        let mut last_err = None;
+        for (attempt, no_sandbox) in [(0u8, false), (1u8, true), (2u8, true)] {
+            match Self::launch_pipe_inner(no_sandbox).await {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    let startup_exit = e.to_string().contains("exited during startup");
+                    last_err = Some(e);
+                    if !startup_exit {
+                        break;
+                    }
+                    if attempt == 0 {
+                        eprintln!(
+                            "[bladebro] sandboxed Chrome died at startup (root or restricted container?) — retrying with --no-sandbox"
+                        );
+                    } else if attempt == 1 {
+                        eprintln!("[bladebro] Chrome died at startup, retrying");
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| BladeError::Other("pipe launch failed".into())))
+    }
+
+    #[cfg(unix)]
+    async fn launch_pipe_inner(no_sandbox: bool) -> Result<(Self, crate::cdp::CdpClient)> {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
         use tokio::net::unix::pipe;
@@ -438,6 +481,9 @@ impl Browser {
         let headful = true; // macOS/Windows have native window servers
 
         let mut args: Vec<String> = STEALTH_FLAGS.iter().map(|s| s.to_string()).collect();
+        if no_sandbox {
+            args.push("--no-sandbox".into());
+        }
         if !headful {
             args.extend(HEADLESS_FLAGS.iter().map(|s| s.to_string()));
         }

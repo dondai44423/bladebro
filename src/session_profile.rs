@@ -93,11 +93,16 @@ impl SessionProfile {
         } else if seasoned {
             session_dir()
         } else {
-            // BLADE_FRESH=1: ephemeral temp dir.
+            // BLADE_FRESH=1: ephemeral temp dir. 0700 — it holds a full
+            // Chrome profile (cookies, storage); a predictable
+            // world-readable /tmp/bladebro-chrome-<pid> leaked it to
+            // every local user.
             std::env::temp_dir().join(format!("bladebro-chrome-{}", std::process::id()))
         };
 
-        std::fs::create_dir_all(&dir)
+        // SECURITY: 0700 — the profile contains cookies and localStorage.
+        // Plain create_dir_all gave umask perms (755 on default setups).
+        crate::platform::secure_create_dir_all(&dir)
             .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
 
         if seasoned {
@@ -169,7 +174,12 @@ impl SessionProfile {
     /// this process should warm the profile (first run ever, or previous
     /// warming failed and the marker was released). Also re-warms if the
     /// template profile is empty/missing (e.g. manually deleted).
+    /// BLADE_NO_WARMING=1 disables warming entirely (privacy: no default
+    /// visits to google.com/github.com/wikipedia.org).
     pub fn claim_warming() -> bool {
+        if std::env::var("BLADE_NO_WARMING").map(|v| v == "1").unwrap_or(false) {
+            return false;
+        }
         let marker = platform::blade_dir().join(".warmed");
         // If the template profile is empty or missing, warming is needed
         // regardless of the marker (the profile was deleted/reset).
@@ -475,9 +485,9 @@ fn kill_xvfb_on_display(display: u16) {
 /// Copy a Chrome profile tree, skipping locked/runtime files.
 /// Shallow-but-recursive: Chrome's profile nests (Default/,
 /// Local Storage/, etc.) — a full recursive copy with per-file
-/// error tolerance.
+/// error tolerance. Dirs are created 0700 (cookie-bearing data).
 fn copy_profile(src: &Path, dst: &Path) {
-    let _ = std::fs::create_dir_all(dst);
+    let _ = crate::platform::secure_create_dir_all(dst);
     copy_dir_filtered(src, dst, 0);
 }
 
@@ -504,7 +514,7 @@ fn copy_dir_filtered(src: &Path, dst: &Path, depth: usize) {
             Err(_) => continue,
         };
         if ft.is_dir() {
-            let _ = std::fs::create_dir_all(&d);
+            let _ = crate::platform::secure_create_dir_all(&d);
             copy_dir_filtered(&s, &d, depth + 1);
         } else if ft.is_file() {
             // Skip sockets/fifos implicitly (not files). Copy

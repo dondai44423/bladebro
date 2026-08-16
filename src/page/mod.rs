@@ -329,8 +329,13 @@ impl Page {
         }
 
         // M17: Set download behavior so downloads don't hang the browser.
-        let download_dir = std::env::temp_dir().join("bladebro-downloads");
-        std::fs::create_dir_all(&download_dir).ok();
+        // SECURITY: ~/.blade/downloads (0700) instead of a shared predictable
+        // /tmp dir — downloads can contain private documents, and a shared
+        // /tmp/bladebro-downloads leaked them across local users (and was a
+        // symlink pre-placement target). The absolute path is returned to
+        // the agent in the download result, so nothing depends on /tmp.
+        let download_dir = crate::platform::blade_dir().join("downloads");
+        let _ = crate::platform::secure_create_dir_all(&download_dir);
         let _ = cdp.send("Page.setDownloadBehavior", Some(serde_json::json!({
             "behavior": "allow",
             "downloadPath": download_dir.display().to_string(),

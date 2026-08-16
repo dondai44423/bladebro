@@ -197,7 +197,12 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             // httpOnly can't be set via document.cookie — skip it.
             cookie_parts.push(format!("samesite={}", same_site.as_deref().unwrap_or("Lax")));
             let cookie_str = cookie_parts.join("; ");
-            let js = format!("document.cookie={:?}", cookie_str);
+            // JSON-escape into a JS string literal. Rust's `{:?}` Debug
+            // escaping is NOT JS escaping — edge-case characters produced
+            // invalid JS (or changed semantics).
+            let cookie_js = serde_json::to_string(&cookie_str)
+                .map_err(|e| BladeError::Other(format!("cookie encode: {e}")))?;
+            let js = format!("document.cookie={cookie_js}");
             match cdp.send("Runtime.evaluate", Some(json!({
                 "expression": js,
                 "returnByValue": true,

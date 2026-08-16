@@ -85,7 +85,9 @@ fn update_config(path: &std::path::Path, old: &Value, seed: u32) {
     } else if let Some(l) = old.get("locale") {
         updated["locale"] = l.clone();
     }
-    let _ = std::fs::write(path, updated.to_string());
+    // SECURITY: 0600 like the initial write — this file can carry the
+    // BLADE_PROXY URL, which may embed proxy credentials.
+    let _ = platform::secure_write_file(path, updated.to_string().as_bytes());
 }
 
 fn check_config_consistency(old: &Value) {

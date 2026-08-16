@@ -1,6 +1,6 @@
 {
   "name": "bladebro-darwin-x64",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Bladebro binary for macOS Intel",
   "license": "Apache-2.0",
   "os": [

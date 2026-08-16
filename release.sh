@@ -167,6 +167,15 @@ gh release create "v$VERSION" \
     --generate-notes 2>/dev/null \
 || gh release create "v$VERSION" --title "v$VERSION" --latest --notes "Release v$VERSION"
 
+# Generate .sha256 checksums for every binary. SECURITY: the self-updater
+# (v3.3.0+) fail-closes when a release ships no checksum — releases without
+# these files cannot be installed via `bladebro -u`.
+for f in "$TMPDIR_RELEASE"/bladebro-*; do
+    [[ -f "$f" ]] || continue
+    [[ "$f" == *.sha256 ]] && continue
+    (cd "$TMPDIR_RELEASE" && sha256sum "$(basename "$f")" > "$(basename "$f").sha256")
+done
+
 # Upload assets one at a time for reliability.
 for f in "$TMPDIR_RELEASE"/bladebro-*; do
     [[ -f "$f" ]] || continue

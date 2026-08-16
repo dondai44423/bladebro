@@ -320,7 +320,9 @@ fn clip(s: &str, n: usize) -> String {
 fn shorten_url(u: &str) -> String {
     let s = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or(u);
     if s.len() > 80 {
-        format!("{}\u{2026}", &s[..77])
+        // Char-safe: page URLs can contain raw multi-byte UTF-8 and byte
+        // slicing panics mid-char (crash-by-URL).
+        format!("{}\u{2026}", crate::platform::truncate_utf8(s, 77))
     } else {
         s.to_string()
     }

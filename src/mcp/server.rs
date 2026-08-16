@@ -1687,7 +1687,7 @@ pub async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
                     e.error.clone().unwrap_or_else(|| "ERR".into())
                 };
                 let short_url = if e.url.len() > 90 {
-                    format!("{}…", &e.url[..87])
+                    format!("{}\u{2026}", crate::platform::truncate_utf8(&e.url, 87))
                 } else {
                     e.url.clone()
                 };
@@ -1778,7 +1778,7 @@ pub async fn handle_template_extract(
             .and_then(|e| e.get("description"))
             .and_then(|d| d.as_str())
             .unwrap_or("template extraction failed");
-        return Err(BladeError::Other(format!("extract failed: {}", &msg[..msg.len().min(200)])));
+        return Err(BladeError::Other(format!("extract failed: {}", crate::platform::truncate_utf8(msg, 200))));
     }
 
     let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(json!({}));
@@ -1930,7 +1930,7 @@ async fn run_auto_extract(page: &Page, limit: usize) -> Result<serde_json::Value
             .and_then(|e| e.get("description"))
             .and_then(|d| d.as_str())
             .unwrap_or("auto-extract eval failed");
-        return Err(BladeError::Other(format!("auto-extract: {}", &msg[..msg.len().min(200)])));
+        return Err(BladeError::Other(format!("auto-extract: {}", crate::platform::truncate_utf8(msg, 200))));
     }
     let json_str = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("{}");
     Ok(serde_json::from_str(json_str).unwrap_or_else(|_| serde_json::json!({"error": "parse failed", "items": []})))
@@ -2314,7 +2314,7 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
             .and_then(|d| d.as_str())
             .or_else(|| exc.get("text").and_then(|t| t.as_str()))
             .unwrap_or("JS evaluation failed");
-        return Err(BladeError::Other(format!("eval failed: {}", &msg[..msg.len().min(200)])));
+        return Err(BladeError::Other(format!("eval failed: {}", crate::platform::truncate_utf8(msg, 200))));
     }
 
     let value = res.get("result").and_then(|r| r.get("value")).cloned();
@@ -2352,7 +2352,7 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
                             let id = t.get("targetId").and_then(|v| v.as_str()).unwrap_or("");
                             let url = t.get("url").and_then(|v| v.as_str()).unwrap_or("");
                             if !url.is_empty() && url != "about:blank" {
-                                Some(format!("{} → {}", id, &url[..url.len().min(60)]))
+                                Some(format!("{} → {}", id, crate::platform::truncate_utf8(url, 60)))
                             } else {
                                 None
                             }
@@ -2425,7 +2425,8 @@ pub async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
                 crate::platform::secure_create_dir_all(parent)
                     .map_err(|e| BladeError::Other(format!("pdf dir: {e}")))?;
             }
-            std::fs::write(&pb, &bytes)
+            // 0600 — consistent with every other bladebro-written file.
+            crate::platform::secure_write_file(&pb, &bytes)
                 .map_err(|e| BladeError::Other(format!("pdf write: {e}")))?;
             pb.display().to_string()
         }
@@ -2845,7 +2846,7 @@ pub async fn handle_vision(
                 .and_then(|e| e.get("description"))
                 .and_then(|d| d.as_str())
                 .unwrap_or("overlay failed");
-            note = format!(" (marks overlay error: {})", &msg[..msg.len().min(120)]);
+            note = format!(" (marks overlay error: {})", crate::platform::truncate_utf8(msg, 120));
         } else {
             let marked = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_i64()).unwrap_or(0);
             note = format!(" ({marked} elements marked; badge refs match the structural model)");
