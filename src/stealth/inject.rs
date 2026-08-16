@@ -324,6 +324,23 @@ function _uxp(l,a){try{var p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.pus
 window.addEventListener('error',function(e){_uxp('exception',[String(e.message||'')+' @'+String(e.filename||'')+':'+String(e.lineno||'')]);});
 window.addEventListener('unhandledrejection',function(e){_uxp('unhandledrejection',[String(e.reason)]);});
 try{Object.defineProperty(window,'__uxa',{get:function(){return _uxa;},configurable:false,enumerable:false});}catch(e){window.__uxa=_uxa;}
+
+// Issue #9: macOS shows a system dialog "Chrome Helper needs to download
+// the font 'Osaka'/'STHeiti'" when on-demand CJK fonts are referenced in
+// page CSS but not installed. We inject a stylesheet that defines
+// @font-face aliases mapping these font names to system fonts that are
+// always available. This intercepts the font request before it reaches
+// macOS's CoreText download system. --disable-remote-fonts (launch flag)
+// handles the web-font side; this handles the CSS font-family side.
+// Note: addScriptToEvaluateOnNewDocument runs before HTML parsing, so
+// documentElement/head may be null. Create the element now, append when
+// the DOM is ready.
+try{
+var _fs=document.createElement('style');
+_fs.textContent="@font-face{font-family:'Osaka';src:local('Helvetica'),local('Arial'),local('sans-serif');}@font-face{font-family:'STHeiti';src:local('Helvetica'),local('Arial'),local('sans-serif');}@font-face{font-family:'STHeiti Light';src:local('Helvetica'),local('Arial'),local('sans-serif');}@font-face{font-family:'Hiragino Sans';src:local('Helvetica'),local('Arial'),local('sans-serif');}@font-face{font-family:'Hiragino Mincho ProN';src:local('Times New Roman'),local('serif');}";
+if(document.documentElement){(document.head||document.documentElement).appendChild(_fs);}
+else{document.addEventListener('DOMContentLoaded',function(){try{(document.head||document.documentElement).appendChild(_fs);}catch(e){}});}
+}catch(e){}
 }catch(e){}
 
 "#;

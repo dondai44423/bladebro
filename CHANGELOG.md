@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security: Downloads moved from shared `/tmp/bladebro-downloads` (0755) to `~/.blade/downloads` (0700). Screenshots moved from predictable `/tmp/bladebro-screenshot-*` to the secure artifacts directory. Chrome profile directories now have all components chmodded to 0700.
 - Security: Daemon auto-start no longer spawns through `sh -c`, eliminating shell injection from install paths containing single quotes.
 - Security: Cookie JS fallback now uses `serde_json::to_string` instead of Rust `{:?}` debug formatting, which is not valid JS string escaping.
+- macOS: Navigation no longer blocked by "Chrome Helper needs to download the font" system dialog. Chrome now launches with `--disable-remote-fonts` to prevent requesting on-demand CJK fonts (Osaka, STHeiti) from macOS. A CSS `@font-face` override maps these fonts to always-available alternatives (Helvetica/Arial) as a second layer of defense. Fixes #9.
 
 ## [3.2.0] - 2026-08-12
 

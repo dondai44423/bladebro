@@ -145,6 +145,7 @@ fn auto_start_daemon() -> Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn auto_start_daemon() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| BladeError::Other(format!("cannot find bladebro binary: {e}")))?;

@@ -38,6 +38,12 @@ const STEALTH_FLAGS: &[&str] = &[
     // S17: force WebRTC to only use proxied UDP — prevents ICE candidate
     // leaks of the real IP when a proxy is active. No effect without proxy.
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    // Issue #9: macOS shows a system dialog "Chrome Helper needs to download
+    // the font 'Osaka'/'STHeiti'" when on-demand CJK fonts are requested by
+    // page CSS but not installed. --disable-remote-fonts prevents Chrome from
+    // requesting non-local fonts, using fallbacks instead. Also applies to
+    // worker contexts per Chromium docs.
+    "--disable-remote-fonts",
 ];
 
 /// Additional flags for headless mode only.
