@@ -31,13 +31,9 @@ Bladebro is an **agentic browser driver** built from the agent's perspective. In
 
 ### Demo
 
-<div align="center">
-  <a href="https://files.catbox.moe/44hv2w.mp4">
-    <img src="Assets/video/demo-poster-player.png" width="720" alt="Bladebro demo video — click to play" style="border: 2px solid #1a1a2e; border-radius: 8px;" />
-  </a>
-</div>
+<img src="Assets/video/demo.gif" width="720" alt="Bladebro demo" />
 
-<div align="center"><sub>Bladebro drives Amazon, Reddit, Wikipedia, fills a form, and manages tabs. Click to play.</sub></div>
+<div align="center"><sub>Bladebro drives Amazon, Reddit, Wikipedia, fills a form, and manages tabs. Full video: <a href="https://github.com/dondai44423/bladebro/releases/download/v3.9.0/Demo.mp4">MP4 download</a></sub></div>
 
 Built in **Rust**. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent. Native on Linux, macOS, and Windows.
 
