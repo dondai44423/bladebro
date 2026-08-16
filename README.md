@@ -29,13 +29,15 @@ npm install -g bladebro && bladebro mcp
 
 Bladebro is an **agentic browser driver** built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results: the agent sees what *changed*, not the whole world, every single time.
 
-<p align="center">
-  <a href="https://files.catbox.moe/44hv2w.mp4">
-    <img src="Assets/video/demo-poster.png" width="720" alt="Bladebro demo video — click to play" />
-  </a>
-</p>
+### Demo
 
-<p align="center"><sub>Bladebro drives Amazon, Reddit, Wikipedia, fills a form, and manages tabs — all through 5 tools. Click to play.</sub></p>
+<div align="center">
+  <a href="https://files.catbox.moe/44hv2w.mp4">
+    <img src="Assets/video/demo-poster-player.png" width="720" alt="Bladebro demo video — click to play" style="border: 2px solid #1a1a2e; border-radius: 8px;" />
+  </a>
+</div>
+
+<div align="center"><sub>Bladebro drives Amazon, Reddit, Wikipedia, fills a form, and manages tabs. Click to play.</sub></div>
 
 Built in **Rust**. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent. Native on Linux, macOS, and Windows.
 
@@ -52,7 +54,7 @@ Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and 
 | **Infinite-scroll collect** | Scroll + dedupe loop for feeds. ONE call, ONE artifact, zero duplicates. | 80 items verified |
 | **6-layer stealth** | Protocol, environment, behavior, coherence, residue, seasoning. All on by default. | incolumitas 8/8 |
 | **Delta-first tokens** | Every action returns what changed, not the whole page. 5x cheaper than competitors. | ~1,900-token tool defs |
-| **Context pruning** | Act responses compress after turn 3 on the same page. 54% fewer tokens over a session, zero capability loss. On by default. | Live-verified
+| **Context pruning** | Act responses compress after turn 3 on the same page. 54% fewer tokens over a session, zero capability loss. On by default. | Live-verified |
 | **Self-healing refs** | Stale refs re-resolve automatically. Agent never sees "element not found" after navigation. | 26/26 sites |
 
 ## 🚀 Install
@@ -232,6 +234,7 @@ bladebro audit   # stealth verification
 | `BLADE_GPU` | `auto` | `intel` / `amd` / `nvidia` / `mali` / `adreno` / `auto` (lspci detection) |
 | `BLADE_CONSENT` | `reject` | `accept` / `reject` / `off` — consent banner policy |
 | `BLADE_NO_COMPRESS` | unset | `1` = disable context pruning (all act responses are full) |
+| `BLADE_NO_WARMING` | unset | `1` = skip first-run profile warming (no visits to google.com/github.com/wikipedia.org) |
 
 ## 🎯 The 5 tools
 
@@ -456,7 +459,7 @@ Six layers. All on by default. No config needed.
 | 36-vector local suite | 36/36 pass |
 | bot.sannysoft.com | ALL PASS |
 | incolumitas.com | 8/8 automated tests PASS (webdriver=false, no UA leak, no override/overflow) |
-| CreepJS | headless: 33% (one sub-test; core indicators clean) |
+| CreepJS | headless: 6%, stealth: 20% (hasSwiftShader=false, hasBadWebGL=undefined) |
 | PerimeterX/HUMAN (Zillow, Fiverr) | Full page load, no block |
 | Boot self-check | 4/4 OK |
 
@@ -518,7 +521,7 @@ Both tested headed, same machine, same network, no proxy. 8 detection sites.
 | Detection site | Camoufox | Bladebro |
 |---|---|---|
 | Sannysoft | 1 fail (Chrome obj, expected for Firefox) | All pass |
-| CreepJS | Fingerprint computed | chromium 0%, headless 0% |
+| CreepJS | Fingerprint computed | headless: 6%, stealth: 20% |
 | BotD | Pass | Pass |
 | Pixelscan | Bot check pass, masking detected | Bot check pass, masking detected |
 | FingerprintJS | Pass | Pass |
@@ -551,7 +554,7 @@ The difference: Bladebro ships this stealth out of the box as an agent tool. No 
 | Run browser extensions | CDP does not support extension loading. Would break the stealth profile. |
 | Access cross-origin iframe content | SecurityError. Would need `Runtime.enable` which defuses the stealth protocol layer. |
 | Record video of the session | CDP does not expose frame buffers. Use screenshots (`vision`) instead. |
-| Run on ARM Linux | No cross-compile target for aarch64 Linux yet. x86_64 Linux, x86_64/arm64 macOS, x86_64 Windows are supported. |
+| Run Firefox/Gecko browsers | CDP is Chromium-only. Firefox needs a different protocol (Marionette). |
 
 ## 💖 Sponsors
 
