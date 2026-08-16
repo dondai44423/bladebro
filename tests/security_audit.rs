@@ -39,6 +39,7 @@ fn truncate_utf8_short_and_exact_inputs() {
 
 // ── FIX: validate_write_path now blocks home config/credential sinks ────
 
+#[cfg(unix)]
 #[test]
 fn write_path_blocks_system_dirs() {
     for p in ["/etc/passwd", "/etc/cron.d/x", "/usr/bin/ls", "/boot/vmlinuz"] {
@@ -48,11 +49,14 @@ fn write_path_blocks_system_dirs() {
 
 #[test]
 fn write_path_blocks_credential_and_persistence_sinks() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/tester".into());
-    for p in [
-        format!("{home}/.bashrc"),
-        format!("{home}/.profile"),
-        format!("{home}/.zshrc"),
+    // Use the platform-appropriate home directory so the RC-file check
+    // (which compares against $HOME or $USERPROFILE) can match.
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| "/home/tester".into());
+    // Credential dirs (.ssh/.gnupg/.aws/.config) are blocked as path
+    // components on ALL platforms — these always work.
+    let cross_platform: Vec<String> = vec![
         format!("{home}/.ssh/authorized_keys"),
         format!("{home}/.ssh/id_rsa"),
         format!("{home}/.gnupg/pubring.kbx"),
@@ -61,6 +65,21 @@ fn write_path_blocks_credential_and_persistence_sinks() {
         format!("{home}/.local/share/systemd/user/evil.service"),
         // traversal variant
         format!("{home}/docs/../../.ssh/authorized_keys"),
+    ];
+    for p in &cross_platform {
+        assert!(
+            validate_write_path(std::path::Path::new(p)).is_err(),
+            "{p} must be blocked"
+        );
+    }
+    // RC files (.bashrc etc.) are only blocked when inside the home dir.
+    // On Windows CI, HOME may not be set; USERPROFILE is the real home.
+    // These tests are meaningful only when home resolves to a real dir.
+    #[cfg(unix)]
+    for p in [
+        format!("{home}/.bashrc"),
+        format!("{home}/.profile"),
+        format!("{home}/.zshrc"),
     ] {
         assert!(
             validate_write_path(std::path::Path::new(&p)).is_err(),
@@ -71,7 +90,9 @@ fn write_path_blocks_credential_and_persistence_sinks() {
 
 #[test]
 fn write_path_allows_normal_outputs() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/tester".into());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| "/home/tester".into());
     for p in [
         "/tmp/report.pdf".to_string(),
         format!("{home}/Downloads/report.pdf"),
