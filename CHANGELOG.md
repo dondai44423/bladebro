@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.1] - 2026-08-24
+
+### Stealth
+- **WebGL/WebGL2 no longer null on GPU-less (Xvfb) sessions.** Chrome 129+ refuses software WebGL unless both `--enable-unsafe-swiftshader` AND `--ignore-gpu-blocklist` are set (the GPU blocklist alone was holding `getContext` back). Both are now added in headful Linux mode. The GL spoof then masks the real software renderer (llvmpipe) to the machine's actual GPU string. Verified live: `webgl` and `webgl2` now report `ANGLE (Intel, Mesa Intel(R) Graphics (ADL-P GT2), OpenGL ES 3.2)` with `hasExt=true`, in both the main frame and workers.
+- **outerWidth diff is non-zero again.** Chrome 129+ exposes `outerWidth`/`innerWidth` as OWN configurable accessors on the window instance, so a `Window.prototype` override was shadowed and never read — `outerWidth` collapsed to `innerWidth` (0 diff, a bot tell). The own accessor is now redefined instead (only when the diff is ≤ 0, so real-desktop values stay native — coherence over noise).
+- **Getter `toString` format fixed.** Real V8 accessors stringify as `function get name() { [native code] }` (with `get `). The native-lie mask emitted `function name()` (without it) — a toString-format comparison against any native accessor flagged the tamper. `_defGet`-created accessors are now masked with `function get …`.
+- Worker WebGL spoof re-verified: worker `OffscreenCanvas.getContext('webgl')` reports the spoofed Intel renderer, not llvmpipe (CreepJS `hasBadWebGL` surface).
+
+### Added
+- `BLADE_CHROME_FLAGS` env var appends raw Chromium flags to the launch (power-user escape hatch for GL/WebGL backend diagnosis).
+
+### Fixed
+- `see model` truncation summary is deterministic again. The `…(N more: X link, Y button)` line iterated a HashMap (randomized per process), so it changed between calls. Roles are now sorted by count (desc) then alphabetically. Documented the grammar in the `see` tool description and README.
+
 ## [3.9.0] - 2026-08-16
 
 Major reliability upgrade. 26 files changed, 1037 insertions, 397 deletions.

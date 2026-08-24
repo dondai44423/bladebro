@@ -76,21 +76,22 @@ var cn=R()&1,an=R(),cn2=R()&1;
 
 // --- S9: native-lie registry. One patched toString masks every override. ---
 var _lies=[];
-function _lie(fn,name){_lies.push([fn,name]);}
+function _lie(fn,name,isGetter){_lies.push([fn,name,!!isGetter]);}
 var _ots=Function.prototype.toString;
 var _nts=function toString(){
-  for(var i=0;i<_lies.length;i++){if(this===_lies[i][0])return'function '+_lies[i][1]+'() { [native code] }';}
+  for(var i=0;i<_lies.length;i++){if(this===_lies[i][0])return _lies[i][2]?('function get '+_lies[i][1]+'() { [native code] }'):('function '+_lies[i][1]+'() { [native code] }');}
   return _ots.apply(this,arguments);
 };
 _lie(_nts,'toString');
 Function.prototype.toString=_nts;
 // Masked helpers: WebIDL attributes/methods are enumerable:true on prototypes;
 // interface objects (constructors) on window are enumerable:false.
-// NOTE on getter naming: real V8 native accessors stringify WITHOUT a
-// "get " prefix — Object.getOwnPropertyDescriptor(Window.prototype,'outerWidth')
-// .get.toString() === 'function outerWidth() { [native code] }'. Masking
-// getters as 'get outerWidth' was itself a detectable toString-format tell.
-function _defGet(obj,name,fn){try{Object.defineProperty(obj,name,{get:fn,configurable:true,enumerable:true});_lie(fn,name);}catch(e){}}
+// Getter naming: real V8 accessors stringify WITH a "get " prefix —
+// Object.getOwnPropertyDescriptor(Screen.prototype,'width').get.toString()
+// === 'function get width() { [native code] }'. Accessors created here MUST
+// be masked with isGetter=true or their toString drops the "get " and a
+// toString-format comparison against a native accessor flags the tamper.
+function _defGet(obj,name,fn){try{Object.defineProperty(obj,name,{get:fn,configurable:true,enumerable:true});_lie(fn,name,true);}catch(e){}}
 function _defFn(obj,name,fn){try{Object.defineProperty(obj,name,{value:fn,writable:true,configurable:true,enumerable:true});_lie(fn,name);}catch(e){}}
 function _defCtor(name,fn){try{Object.defineProperty(window,name,{value:fn,writable:true,configurable:true,enumerable:false});_lie(fn,name);}catch(e){}}
 
@@ -98,15 +99,32 @@ function _defCtor(name,fn){try{Object.defineProperty(window,name,{value:fn,writa
 var p=Object.getOwnPropertyNames(document).concat(Object.getOwnPropertyNames(window));
 for(var i=0;i<p.length;i++){if(p[i].indexOf('cdc_')===0){try{delete document[p[i]];delete window[p[i]];}catch(e){}}}
 
-// Window outer dims (Xvfb has no WM, so outer===inner without this).
-// Defined on Window.prototype — real Chrome exposes these as accessors
-// on the prototype; an OWN accessor on the window instance makes
-// Object.getOwnPropertyDescriptor(window,'outerWidth') non-undefined,
-// which no real Chrome ever is.
+// Window outer dims. Xvfb has no window manager, so the native outerWidth
+// collapses to innerWidth (a 0 diff is a bot tell: real desktops reserve
+// side chrome). Modern Chrome (129+) exposes outerWidth/innerWidth as OWN
+// configurable accessors on the window INSTANCE — a Window.prototype
+// override is shadowed and never read. Override the own accessor in place
+// (keeps the native descriptor shape: own, configurable, enumerable, get
+// with "get " toString format). Fall back to the prototype only on older
+// Chrome where the own slot isn't redefinable. outerHeight is left native:
+// its natural diff (title/tab bar, here ~143px) is realistic.
 try{
-var _wp=(typeof Window!=='undefined'&&Window.prototype)?Window.prototype:Object.getPrototypeOf(window);
-_defGet(_wp,'outerWidth',function outerWidth(){return window.innerWidth+16;});
-_defGet(_wp,'outerHeight',function outerHeight(){return window.innerHeight+88;});
+var _w0=window.outerWidth,_i0=window.innerWidth;
+// Xvfb has no window manager, so native outerWidth collapses to innerWidth
+// (a 0 diff is a bot tell: real desktops reserve side chrome). Modern
+// Chrome (129+) exposes outerWidth/innerWidth as OWN configurable accessors
+// on the window INSTANCE — a Window.prototype override is shadowed and
+// never read. Only correct the tell: when the diff is already positive
+// (real WM), the natural value is coherent and must be left native
+// (coherence over noise, D14). Override the OWN accessor in place (keeps
+// the native descriptor shape), falling back to the prototype only on
+// Chrome where the own slot isn't redefinable. outerHeight stays native.
+if(_w0-_i0<=0){
+var _wfn=function outerWidth(){return window.innerWidth+16;};
+var _ow=Object.getOwnPropertyDescriptor(window,'outerWidth');
+if(_ow&&_ow.configurable){try{Object.defineProperty(window,'outerWidth',{get:_wfn,configurable:true,enumerable:true});_lie(_wfn,'outerWidth',true);}catch(e){}}
+else{var _wp=(typeof Window!=='undefined'&&Window.prototype)?Window.prototype:Object.getPrototypeOf(window);_defGet(_wp,'outerWidth',_wfn);}
+}
 }catch(e){}
 
 // Screen geometry on Screen.prototype (real location, not the instance).

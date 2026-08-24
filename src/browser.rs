@@ -269,11 +269,17 @@ impl Browser {
         }
         // On Xvfb there is no GPU: Chrome 139+ refuses software
         // WebGL unless this flag is set (contexts return null).
-        // The stealth GL spoof masks the SwiftShader strings, so
+        // --ignore-gpu-blocklist additionally unblocks WebGL when the
+        // software/virtual renderer lands on the GPU blocklist (a real
+        // Xvfb failure mode: ANGLE or Mesa GL displays "WebGL{1,2}
+        // blocklisted" and getContext returns null). Together these
+        // guarantee a software context on GPU-less displays; the
+        // stealth GL spoof masks the SwiftShader/llvmpipe strings, so
         // pages see a coherent hardware identity either way.
         #[cfg(target_os = "linux")]
         if headful {
             args.push("--enable-unsafe-swiftshader".into());
+            args.push("--ignore-gpu-blocklist".into());
         }
         args.push(format!("--remote-debugging-port={port}"));
         args.push(format!("--user-data-dir={}", user_data_dir.display()));
@@ -289,6 +295,17 @@ impl Browser {
         // Set a realistic window size for headful mode.
         if headful {
             args.push("--window-size=1920,1080".into());
+        }
+
+        // Power-user escape hatch: append raw Chrome flags. Useful for
+        // diagnosing GL/WebGL backend issues on odd displays and for
+        // users who need a specific Chromium switch. Whitespace-split.
+        if let Ok(extra) = std::env::var("BLADE_CHROME_FLAGS") {
+            for f in extra.split_whitespace() {
+                if !f.is_empty() {
+                    args.push(f.to_string());
+                }
+            }
         }
 
         #[cfg(target_os = "linux")]

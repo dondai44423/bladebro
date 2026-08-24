@@ -294,6 +294,8 @@ Navigate and act already return page state. Use `see` for:
 | `see logs="network"` | Requests with status, failures first |
 | `see scope=e5` | One element's subtree text |
 
+**Truncation.** When the model output exceeds the element budget, it ends with a summary line: `…(N more: X link, Y button)`. Roles are ordered by count (descending), then alphabetically — deterministic, so the same page always truncates the same way. The full set stays available via `see filter=`.
+
 **Auto-extract (`extract=auto`)** — deterministic structural list extraction. For every element with 3+ children, groups by structural signature, scores by content value. Extracts title, URL, image, price, date, description. **Site-aware**: shopping sites get rating/reviews/availability, Reddit gets score/comments/author, GitHub gets stars/forks/labels. Verified on HN, Lobste.rs, Wikipedia, DuckDuckGo, StackOverflow, Reddit, GitHub, MDN, Amazon.
 
 **Collect (`act collect`)** — native scroll+dedupe loop for infinite feeds. Auto-extract, dedupe by URL/title, scroll, repeat until max or no new items. ONE call, ONE artifact. Verified: 80 items from infinite-scroll test page, 0 duplicates.

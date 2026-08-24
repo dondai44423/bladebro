@@ -368,12 +368,12 @@ impl LivePageModel {
             let line = format_element(el);
             if out.len() + line.len() > budget {
                 let remaining = &self.elements[idx..];
-                let mut role_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-                for r in remaining {
-                    *role_counts.entry(r.raw.role.as_str()).or_insert(0) += 1;
-                }
-                let summary: Vec<String> = role_counts.iter().map(|(r, c)| format!("{} {}", c, r)).collect();
-                out.push_str(&format!("…({} more: {})\n", remaining.len(), summary.join(", ")));
+                // Deterministic summary: roles ordered by count (desc) then
+                // alphabetically. HashMap iter() order is randomized per
+                // process — an arbitrary order made the truncation line
+                // change between calls (nondeterministic agent input).
+                let summary = role_summary(remaining.iter().map(|r| r.raw.role.as_str()));
+                out.push_str(&format!("…({} more: {})\n", remaining.len(), summary));
                 break;
             }
             out.push_str(&line);
@@ -656,3 +656,39 @@ pub fn short_url(u: &str) -> String {
         s.to_string()
     }
 }
+
+/// Role-count summary for a truncation tail, e.g. `3 link, 1 button`.
+/// Order is deterministic: count descending, then role alphabetically.
+/// HashMap iteration order is randomized per process, so the summary MUST
+/// not be built by raw map iteration (nondeterministic agent input).
+fn role_summary<'a>(roles: impl Iterator<Item = &'a str>) -> String {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for r in roles {
+        *counts.entry(r).or_insert(0) += 1;
+    }
+    let mut v: Vec<(&str, usize)> = counts.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    v.iter().map(|(r, c)| format!("{} {}", c, r)).collect::<Vec<_>>().join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_summary_is_deterministic_and_sorted() {
+        // Count descending, then alphabetical for ties.
+        let roles = ["link", "button", "link", "link", "textbox", "button"];
+        assert_eq!(role_summary(roles.iter().copied()), "3 link, 2 button, 1 textbox");
+        // Same multiset, different input order — identical output.
+        let roles2 = ["button", "link", "textbox", "button", "link", "link"];
+        assert_eq!(role_summary(roles2.iter().copied()), "3 link, 2 button, 1 textbox");
+    }
+
+    #[test]
+    fn role_summary_handles_single_role() {
+        assert_eq!(role_summary(std::iter::once("link")), "1 link");
+        assert_eq!(role_summary(std::iter::empty::<&str>()), "");
+    }
+}
+
