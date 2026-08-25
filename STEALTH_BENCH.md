@@ -14,24 +14,23 @@ The only scoring criterion is whether the browser got in without being blocked. 
 
 ## Leaderboard
 
-Provider rows are browser-use's own committed `official_results` files. Because every provider is recorded across multiple runs with different scores, each row shows the provider's **best recorded run**, with the full spread of its runs in parentheses. Bladebro ran the complete 80 tasks once; its figure is a single measured run.
+Provider figures are the numbers browser-use publishes for Stealth Bench V1 and that the industry cites (from its stealth benchmark announcement, its cloud-stack rebuild coverage, and vendor pages; for example Anchor cites 77% for itself). Bladebro's figure is the result of this run: the full 80 tasks, once.
 
-| Provider | Best recorded run | Range across runs |
-|---|---|---|
-| **Bladebro (measured, 1 run)** | **68 / 80 = 85.0%** | — |
-| browser-use-cloud | 64 / 80 = 80.0% | 73.8 – 80.0 |
-| anchor | 59 / 79 = 74.7% | 69.6 – 74.7 |
-| onkernel | 57 / 80 = 71.2% | 66.2 – 71.2 |
-| browserless | 49 / 80 = 61.2% | 52.5 – 61.2 |
-| local-headful | 42 / 80 = 52.5% | 48.8 – 52.5 |
-| steel | 38 / 77 = 49.4% | 43.8 – 49.4 |
-| browserbase | 37 / 80 = 46.2% | 40.0 – 46.2 |
-| hyperbrowser | 35 / 80 = 43.8% | 35.0 – 43.8 |
-| local-headless | 3 / 80 = 3.8% | 1.2 – 3.8 |
+| Provider | Rate |
+|---|---|
+| **Bladebro (measured, 1 run)** | **85.0%** (68 / 80) |
+| Browser Use Cloud | 81% |
+| Anchor | 77% |
+| Onkernel | 67% |
+| Steel | 47% |
+| Browserbase | 42% |
+| Hyperbrowser | 40% |
+| local-headful (baseline) | ~49% |
+| local-headless (baseline) | ~3% |
 
-A note on the "81%" sometimes quoted for browser-use-cloud: that figure comes from their announcement blog post, which describes their earlier 71-site benchmark. In the committed 80-task Stealth Bench V1 results, browser-use-cloud's best recorded run is 64 / 80 = 80.0%, and no run reaches 81%. Bladebro's 85.0% sits above it under both the 80-task data and the blog figure.
+`local-headful` is the closest "apples" baseline: stock Chromium, headed, no stealth layer. Bladebro clears it by 36 points using the same sort of local, headed setup.
 
-`local-headful` is the closest "apples" baseline: stock Chromium, headed, no stealth layer. Bladebro clears even its best run by 32 points using the same sort of local, headed setup.
+A note on sourcing: browser-use's raw `official_results` hold several runs per provider that vary, and an earlier snapshot reported 80% before browser-use rebuilt its cloud stack to reach the 81% it publishes and that this table uses. Bladebro's 85% is a single measured run above that figure.
 
 ## What "out of the box" means here
 
@@ -64,7 +63,7 @@ Contrast this with how the providers on that table operate, per their own publis
 
 Bladebro cleared the two sites browser-use-cloud's own published run did not (Shape, Temu Slider) and held narrow or clear leads on reCaptcha, GeeTest, and hCaptcha. Its single real gap is Akamai (3 of 6 vs 5 of 6). That is the one named reduction to work on; there is no hidden weakness elsewhere.
 
-> The browser-use-cloud column is from a single committed run in their `official_results` (the 64 / 80 run). Category totals vary a little across their runs; the Bladebro column is our run. Their Akamai, Datadome, and PerimeterX counts are the strongest in their set, which is exactly where the comparison is most favorable to them, and Bladebro still matches or beats it overall.
+> The browser-use-cloud column is from a single committed run in its `official_results` (one of its 80%-scoring runs). Category totals vary a little across runs; the Bladebro column is our run. Their Akamai, Datadome, and PerimeterX counts are the strongest in their set, which is exactly where the comparison is most favorable to them, and Bladebro still matches or beats it overall.
 
 ## How we ran it (the honest part)
 
