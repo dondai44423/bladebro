@@ -32,7 +32,7 @@ Bladebro is an **agentic browser driver** built from the agent's perspective. In
 
 ### 🏆 Stealth Bench V1: 85% (68 / 80)
 
-Bladebro was run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benchmark) — 80 real, anti-bot-protected production sites across 11 vendors. It walked through **68 of 80 (85%)**, above every row on the published leaderboard (browser-use-cloud 80%, anchor 74%, local-headful 49%).
+Bladebro was run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benchmark): 80 real, anti-bot-protected production sites across 11 vendors. It walked through **68 of 80 (85%)**, above every row on the published leaderboard (browser-use-cloud 80%, anchor 74%, local-headful 49%).
 
 - **Out of the box**: one IP, no proxy, no captcha solver, no fingerprint rotation, no cloud. Stock Chromium with Bladebro's stealth layer on by default.
 - **Honest run**: real navigation of the real 80 sites; an opencode agent (open model) acted as the browsing agent because we had no paid access to browser-use's cloud agent, and the deviations are disclosed in full. The benchmark isolates browser stealth from agent ability, and the defensive layer being measured is Bladebro's own.
