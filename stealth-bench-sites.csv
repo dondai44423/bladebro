@@ -1,0 +1,81 @@
+task_id,vendor,site,outcome,detail
+1,Cloudflare,https://indeed.com,passed,clean
+2,Cloudflare,https://copilot.microsoft.com,passed,clean
+3,Cloudflare,https://gamestop.com,passed,clean
+4,Cloudflare,https://perplexity.ai,passed,clean
+5,Cloudflare,https://chatgpt.com,passed,clean
+6,Cloudflare,https://stockx.com,passed,clean
+7,Cloudflare,https://doordash.com,passed,clean
+8,Cloudflare,https://producthunt.com,passed,clean
+9,Cloudflare,https://sciencedirect.com,passed,clean
+10,Cloudflare,https://genius.com,passed,clean
+11,Cloudflare,https://nestle.com,passed,clean
+12,Cloudflare,https://stackexchange.com,passed,clean
+13,Cloudflare,https://redbubble.com,passed,clean
+14,Cloudflare,https://glassdoor.com,passed,clean
+15,Cloudflare,https://mckinsey.com,passed,clean
+16,Cloudflare,https://shein.com,passed,clean
+17,Cloudflare,https://x.com,passed,clean
+18,Cloudflare,https://zoro.com,passed,clean
+19,Cloudflare,https://canva.com,passed,clean
+20,Cloudflare,https://science.org,passed,clean
+21,Cloudflare,https://pexels.com,passed,clean
+22,Cloudflare,https://columbia.edu,passed,clean
+23,reCaptcha,https://reddit.com,passed,clean
+24,reCaptcha,https://sephora.com,passed,clean
+25,reCaptcha,https://mercari.com,passed,clean
+26,reCaptcha,https://williams-sonoma.com,passed,clean
+27,reCaptcha,https://paramountplus.com,passed,clean
+28,reCaptcha,https://qatarairways.com,passed,clean
+29,PerimeterX,https://walmart.com,passed,clean
+30,PerimeterX,https://wayfair.com,passed,clean
+31,PerimeterX,https://zoominfo.com,passed,clean
+32,PerimeterX,https://zillow.com,passed,clean
+33,PerimeterX,https://bloomberg.com,passed,clean
+34,PerimeterX,https://pacsun.com,passed,clean
+35,PerimeterX,https://priceline.com,passed,clean
+36,PerimeterX,https://belk.com,passed,reached challenge
+37,PerimeterX,https://anntaylor.com,passed,clean
+38,PerimeterX,https://yeti.com,passed,clean
+39,PerimeterX,https://ralphlauren.com,blocked,reached challenge
+40,PerimeterX,https://fiverr.com,passed,clean
+41,PerimeterX,https://bathandbodyworks.com,blocked,reached challenge
+42,PerimeterX,https://anthropologie.com,passed,clean
+43,PerimeterX,https://ashleyfurniture.com,blocked,reached challenge
+44,PerimeterX,https://seatgeek.com,passed,clean
+45,PerimeterX,https://kohls.com,passed,clean
+46,PerimeterX,https://samsclub.com,passed,clean
+47,Datadome,https://immobiliare.it,blocked,reached challenge
+48,Datadome,https://idealista.com,passed,clean
+49,Datadome,https://yelp.com,blocked,reached challenge
+50,Datadome,https://etsy.com,passed,clean
+51,Datadome,https://alltrails.com,passed,clean
+52,Datadome,https://wsj.com,passed,clean
+53,Datadome,https://wellfound.com,passed,clean
+54,Datadome,https://leboncoin.fr,blocked,reached challenge
+55,Datadome,https://expedia.com,passed,clean
+56,Datadome,https://tripadvisor.com,passed,clean
+57,Datadome,https://g2.com,passed,reached challenge
+58,Datadome,https://forbes.com,passed,clean
+59,Datadome,https://hermes.com,passed,clean
+60,hCaptcha,https://oura.com,passed,clean
+61,hCaptcha,https://boots.com,passed,clean
+62,hCaptcha,https://davidjones.com,blocked,reached challenge
+63,GeeTest,https://fotocasa.es,passed,clean
+64,GeeTest,https://smythstoys.com,blocked,reached challenge
+65,GeeTest,https://lianjia.com,passed,clean
+66,GeeTest,https://prologis.com,passed,clean
+67,Akamai,https://hm.com,passed,clean
+68,Akamai,https://ray-ban.com,blocked,reached challenge
+69,Akamai,https://adidas.com,blocked,reached challenge
+70,Akamai,https://newbalance.com,passed,clean
+71,Akamai,https://homedepot.com,blocked,reached challenge
+72,Akamai,https://macys.com,passed,clean
+73,Shape,https://nordstrom.com,passed,clean
+74,Kasada,https://crocs.com,passed,clean
+75,Temu Slider,https://temu.com,passed,clean
+76,Custom Antibot,https://lululemon.com,blocked,reached challenge
+77,Custom Antibot,https://ediblearrangements.com,passed,clean
+78,Custom Antibot,https://game.co.uk,passed,clean
+79,Custom Antibot,https://douyin.com,passed,clean
+80,Custom Antibot,https://deviantart.com,passed,clean

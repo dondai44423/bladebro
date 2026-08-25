@@ -15,19 +15,30 @@ One MCP server · one persistent page model · zero Node.js · one binary · Lin
 [![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI&style=flat-square)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/npm/dw/bladebro?color=7c5cfc&label=downloads&style=flat-square)](https://www.npmjs.com/package/bladebro)
 [![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?color=ff9f43&style=flat-square)](https://github.com/dondai44423/bladebro)
+[![Stealth Bench V1](https://img.shields.io/badge/Stealth_Bench_V1-85%25__68%2F80-00d4aa?style=flat-square)](STEALTH_BENCH.md)
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
 ```bash
 npm install -g bladebro && bladebro mcp
 ```
 
-[Install](#-install) · [The 5 tools](#-the-5-tools) · [Architecture](#-architecture) · [Re-render immunity](#-re-render-immunity) · [Self-improvement](#-self-improvement) · [Stealth](#-stealth-system) · [Comparison](#-comparison) · [Gotchas](#-gotchas) · [Limits](#-honest-limits)
+[Install](#-install) · [Stealth Bench V1](#-stealth-bench-v1) · [The 5 tools](#-the-5-tools) · [Architecture](#-architecture) · [Re-render immunity](#-re-render-immunity) · [Self-improvement](#-self-improvement) · [Stealth](#-stealth-system) · [Comparison](#-comparison) · [Gotchas](#-gotchas) · [Limits](#-honest-limits)
 
 </div>
 
 ---
 
 Bladebro is an **agentic browser driver** built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results: the agent sees what *changed*, not the whole world, every single time.
+
+### 🏆 Stealth Bench V1: 85% (68 / 80)
+
+Bladebro was run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benchmark) — 80 real, anti-bot-protected production sites across 11 vendors. It walked through **68 of 80 (85%)**, above every row on the published leaderboard (browser-use-cloud 80%, anchor 74%, local-headful 49%).
+
+- **Out of the box**: one IP, no proxy, no captcha solver, no fingerprint rotation, no cloud. Stock Chromium with Bladebro's stealth layer on by default.
+- **Honest run**: real navigation of the real 80 sites; an opencode agent (open model) acted as the browsing agent because we had no paid access to browser-use's cloud agent, and the deviations are disclosed in full. The benchmark isolates browser stealth from agent ability, and the defensive layer being measured is Bladebro's own.
+- **Per-vendor**: perfect on Cloudflare (22/22) and reCaptcha (6/6); cleared the two sites browser-use-cloud's own results did not (Shape, Temu). Single named gap: Akamai (3/6).
+
+**[Full report and methodology →](STEALTH_BENCH.md)** · **[All 80 per-site results (CSV)](stealth-bench-sites.csv)**
 
 ### Demo
 
