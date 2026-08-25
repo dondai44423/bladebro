@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.2] - 2026-08-25
+
+### Fixed
+
+- **Clicks on container-targeted controls now leaf-forward to a real control.**
+  When a click is resolved to an element whose geometric center is empty (a
+  nav row, a `role="button"` wrapper, a disclosure trigger), the cursor no
+  longer falls on dead space and returns `no-effect`. The click path now
+  hit-tests the center and, if it does not land on a native control, finds the
+  nearest exposed native control inside the matched element (button, link,
+  input, select, textarea) and clicks there instead. Fixes the YouTube
+  account-menu button that could silently miss (#15).
+- **No-effect click diagnostics now name the resolved target.** The verdict
+  reads `no-effect (tried: mouse, js, enter on button [Account menu] ...)`, so
+  a wrong-target or avenue problem is distinguishable from a page that
+  rejected a well-aimed click. The auto-escalation strategy list (mouse, js,
+  enter) is surfaced in the same message.
+
 ## [3.9.1] - 2026-08-24
 
 ### Stealth
