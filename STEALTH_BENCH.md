@@ -8,6 +8,8 @@ This page states only what we can back up. Every number below is either from our
 
 [Stealth Bench V1](https://github.com/browser-use/benchmark) is browser-use's open benchmark for anti-bot evasion. It contains 80 real, production-protected websites across 11 vendors (Cloudflare, PerimeterX, Datadome, reCaptcha, Akamai, hCaptcha, GeeTest, Kasada, Shape, Temu, and custom anti-bot). Each task is: visit the site, interact enough to look like a normal visit, and do not get blocked by a captcha, antibot, or page-loading security check.
 
+A note on the count: browser-use's README caption says "71 tasks", but that is a stale line from their original announcement post. Their own shipped data is 80: decrypt their `Stealth_Bench_V1.enc` and you get 80 tasks, and every one of their committed `official_results` files records `tasks_completed: 80`. This report uses 80 throughout.
+
 The only scoring criterion is whether the browser got in without being blocked. Task completion details do not count. browser-use's own words, from their announcement post: "agent intelligence and browser stealth are orthogonal. You need to measure them separately." The benchmark isolates the browser, not the agent.
 
 ## Leaderboard
