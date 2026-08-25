@@ -103,6 +103,12 @@ struct FoundElement {
     /// False when something (e.g. autocomplete overlay) covers it.
     #[serde(default, rename = "isTopmost")]
     is_topmost: Option<bool>,
+    /// Short accessible description (role "name") of the resolved click
+    /// target. When leaf-targeting redirects a container-center click to
+    /// the nearest exposed native control, this names the control actually
+    /// clicked, so `no-effect` verdicts expose the real target.
+    #[serde(default, rename = "hit_tgt")]
+    hit_tgt: Option<String>,
     /// Text content of the element (for "read" mode).
     #[serde(default)]
     text: Option<String>,
@@ -220,7 +226,7 @@ fn compute_verdict(
     action: &Action,
     delta: &PageDelta,
     lpm: &LivePageModel,
-    click_via: Option<(&str, &[&str])>,
+    click_via: Option<(&str, &[&str], &str)>,
 ) -> String {
     let dom_changed = !delta.added.is_empty() || !delta.removed.is_empty() || !delta.changed.is_empty();
     match action {
@@ -236,7 +242,7 @@ fn compute_verdict(
             }
         }
         Action::Click { .. } => {
-            let (via, tried) = click_via.unwrap_or(("", &[][..]));
+            let (via, tried, tgt_meta) = click_via.unwrap_or(("", &[][..], ""));
             if delta.navigated {
                 format!("outcome: navigated \u{2192} {} via {}", shorten_url(&delta.url), via)
             } else if dom_changed {
@@ -245,8 +251,13 @@ fn compute_verdict(
                 // Mutation watcher saw DOM effects on non-actionable
                 // content — text swaps, counters, live regions.
                 format!("outcome: dom-changed (content) via {}", via)
+            } else if tgt_meta.is_empty() {
+                no_effect_verdict(tried, "")
             } else {
-                format!("outcome: no-effect (tried: {} \u{2014} element may be disabled, hidden, or hover-gated)", tried.join(", "))
+                // The resolved click target is named so consumers can tell a
+                // wrong-target / avenue problem from a page that rejected a
+                // well-aimed click.
+                no_effect_verdict(tried, tgt_meta)
             }
         }
         Action::Type { ref_id, text } => {
@@ -258,7 +269,7 @@ fn compute_verdict(
                 format!("outcome: typed \u{2192} value=\"{}\"", clip(text, 40))
             } else if !actual.is_empty() {
                 format!(
-                    "outcome: typed \"{}\" \u{2192} value=\"{}\" (incomplete \u{2014} framework may mask input)",
+                    "outcome: typed \"{}\" \u{2192} value=\"{}\" (incomplete - framework may mask input)",
                     clip(text, 40), clip(actual, 40)
                 )
             } else {
@@ -536,6 +547,30 @@ pub async fn check_condition(
     }
 }
 
+/// Box-mode leaf-targeting: a text-resolved match is often a container (nav,
+/// row, role=button wrapper) whose geometric center is empty. If the center
+/// point does not land on a native control, find the nearest exposed native
+/// control inside the match and click there instead. CL3 fix: the YouTube
+/// account-menu / nav-wrapper no-effect bug (#15).
+const LEAF_TARGET_JS: &str = concat!(
+    "var _lClick=_lbx(n);var _lht=(n.getAttribute&&(n.getAttribute('aria-label')||n.getAttribute('title')))||'';var _lhr=(n.getAttribute&&n.getAttribute('role'))||n.tagName.toLowerCase();",
+    "var _ltopN=doc.elementFromPoint(cx,cy);var _lNative=_lnb(_ltopN);",
+    "if(!_lNative){var _lbest=null,_lbd=Infinity,_lcands=[];try{_lcands=n.querySelectorAll('button,a[href],input:not([type=hidden]),select,textarea');}catch(e){}",
+    "for(var _lk=0;_lk<_lcands.length;_lk++){var _lc=_lcands[_lk];var _lrc=_lc.getBoundingClientRect();if(_lrc.width<2||_lrc.height<2)continue;var _lbn=n.getBoundingClientRect();if(!(_lrc.left<=_lbn.right&&_lrc.right>=_lbn.left))continue;var _lccx=_lrc.x+_lrc.width/2,_lccy=_lrc.y+_lrc.height/2;var _ltc=doc.elementFromPoint(_lccx,_lccy);if(!(_ltc===_lc||(_lc.contains&&_lc.contains(_ltc))))continue;var _ldd=Math.hypot(_lccx-cx,_lccy-cy);if(_ldd<_lbd){_lbd=_ldd;_lbest=_lc;}}",
+    "if(_lbest){_lClick=_lbx(_lbest);_lht=(_lbest.getAttribute&&(_lbest.getAttribute('aria-label')||_lbest.textContent||_lbest.getAttribute('title')))||'';_lhr=(_lbest.getAttribute&&_lbest.getAttribute('role'))||_lbest.tagName.toLowerCase();}}",
+);
+
+/// Build the verdict string for a no-effect click that names the resolved
+/// click target, so consumers can tell a wrong-target/avenue problem from a
+/// page that rejected a well-aimed click. (CL3, #15.)
+fn no_effect_verdict(tried: &[&str], target_meta: &str) -> String {
+    if target_meta.is_empty() {
+        format!("outcome: no-effect (tried: {} - element may be disabled, hidden, or hover-gated)", tried.join(", "))
+    } else {
+        format!("outcome: no-effect (tried: {} on {} - page did not respond)", tried.join(", "), target_meta)
+    }
+}
+
 /// Inject the find-by-sig script: re-locates the element by its signature in
 /// the live DOM and either returns its box (mode "box") or performs an in-page
 /// action (mode "focus", "clear", "select").
@@ -582,7 +617,12 @@ async fn find_by_sig(
         + "const top=doc.elementFromPoint(cx,cy);"
         + "const isTopmost=top===n||n.contains(top);"
         + "var tgt=n;if(n.getAttribute&&n.getAttribute('role')==='combobox'&&n.tagName!=='SELECT'){var ii=n.querySelector('textarea,input:not([type=hidden])');if(ii)tgt=ii;}"
-        + "if(mode==='box'){if(!isTopmost){n.scrollIntoView({block:'center'});const r2=n.getBoundingClientRect();const cx2=r2.x+r2.width/2;const cy2=r2.y+r2.height/2;const top2=doc.elementFromPoint(cx2,cy2);return{ok:true,box:[Math.round(r2.x+ox)||0,Math.round(r2.y+oy)||0,Math.round(r2.width)||0,Math.round(r2.height)||0],tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:top2===n||n.contains(top2)};}return{ok:true,box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:isTopmost};}"
+        + "if(mode==='box'){"
+        + "function _lnb(e){return !!(e&&e.tagName&&(e.tagName==='BUTTON'||e.tagName==='A'||e.tagName==='SELECT'||e.tagName==='TEXTAREA'||(e.tagName==='INPUT'&&e.type!=='hidden'))&&(e.tagName!=='A'||!!e.href));}"
+        + "function _lbx(e){var _lr=e.getBoundingClientRect();return [Math.round(_lr.x+ox)||0,Math.round(_lr.y+oy)||0,Math.round(_lr.width)||0,Math.round(_lr.height)||0];}"
+        + LEAF_TARGET_JS
+        + "var _lcbx=_lClick[0]+_lClick[2]/2,_lcby=_lClick[1]+_lClick[3]/2;var _lfc=doc.elementFromPoint(_lcbx-ox,_lcby-oy);"
+        + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:(_lfc===n||(n.contains?n.contains(_lfc):false)),hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']')};}"
         + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled};}"
         + "if(mode==='focus'){tgt.focus();return{ok:true};}"
         + "if(mode==='clear'){if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}return{ok:true};}"
@@ -1156,7 +1196,18 @@ pub async fn perform_with_network(
                     return Err(e);
                 }
             }
-            let mut verdict = compute_verdict(action, &delta, lpm, Some((via, &tried)));
+            // Expose the resolved click target so no-effect verdicts can
+            // distinguish a bad selector from a page that rejected a well-
+            // aimed click (issue #15).
+            let mut tgt_meta = found.hit_tgt.as_deref().unwrap_or("").to_string();
+            if !tgt_meta.is_empty() {
+                tgt_meta.push_str(&format!(
+                    " (topmost={},disabled={})",
+                    found.is_topmost.unwrap_or(false),
+                    found.disabled.unwrap_or(false)
+                ));
+            }
+            let mut verdict = compute_verdict(action, &delta, lpm, Some((via, &tried, &tgt_meta)));
             if dialog_fired && !delta.navigated && delta.is_empty() && !delta.content_changed {
                 verdict = format!(
                     "outcome: dialog opened via {via} (auto-dismissed — see ambient)"
@@ -1476,3 +1527,48 @@ pub async fn perform_with_network(
     Ok((delta, verdict))
 }
 
+
+#[cfg(test)]
+mod action_tests {
+    // Regression tests for the CL3 / #15 click fix: leaf-targeting of
+    // container-matched controls and the no-effect diagnostic that names the
+    // resolved target. These lock the message format (which consumers parse)
+    // and the em-dash-free guarantee (public-facing strings use hyphens).
+
+    #[test]
+    fn no_effect_verdict_names_target_without_em_dashes() {
+        let msg = super::no_effect_verdict(
+            &["mouse", "js", "enter"],
+            "button [Account menu] (topmost=true,disabled=false)",
+        );
+        assert_eq!(
+            msg,
+            "outcome: no-effect (tried: mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - page did not respond)"
+        );
+        assert!(!msg.contains('\u{2014}'), "no em-dash in public verdict");
+    }
+
+    #[test]
+    fn no_effect_verdict_falls_back_when_target_unknown() {
+        let msg = super::no_effect_verdict(&["mouse"], "");
+        assert!(
+            msg.ends_with("- element may be disabled, hidden, or hover-gated)"),
+            "unexpected fallback: {msg}"
+        );
+        assert!(!msg.contains('\u{2014}'), "no em-dash in fallback verdict");
+    }
+
+    // Guards the leaf-targeting JS fragment: the box-mode resolver must stay
+    // wired into the injected script, or container-matched clicks silently
+    // regress to the no-effect they were built to fix.
+    #[test]
+    fn leaf_target_fragment_is_present_and_em_dash_free() {
+        let js = super::LEAF_TARGET_JS;
+        assert!(js.contains("elementFromPoint"), "leaf-target uses hit-testing");
+        assert!(js.contains("querySelectorAll('button,a[href]"), "leaf-target finds native controls");
+        assert!(js.contains("_lbest"), "leaf-target selects nearest candidate");
+        assert!(js.contains("_lClick"), "leaf-target rewrites the click box");
+        assert!(js.contains("_lhr"), "leaf-target rewrites the target label");
+        assert!(!js.contains('\u{2014}'), "no em-dash in injected JS");
+    }
+}
