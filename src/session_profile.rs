@@ -635,6 +635,7 @@ mod tests {
 
     #[test]
     fn stale_lock_with_dead_owner_is_broken_and_acquired() {
+        let _ = std::fs::create_dir_all(platform::blade_dir());
         let lock = platform::blade_dir().join(".template.lock.test-dead");
         let _ = std::fs::remove_file(&lock);
         // A dead pid must never wedge sync: acquiring should break the lock.
@@ -648,6 +649,7 @@ mod tests {
 
     #[test]
     fn stale_lock_with_live_owner_is_not_stale() {
+        let _ = std::fs::create_dir_all(platform::blade_dir());
         let lock = platform::blade_dir().join(".template.lock.test-live");
         let _ = std::fs::remove_file(&lock);
         let me = std::process::id();
