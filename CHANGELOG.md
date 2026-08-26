@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.3] - 2026-08-26
+
+### Fixed
+
+- **Logins now actually persist across sessions and reboots.** Cookies are
+  the thing that keeps you logged in (GitHub, Facebook, etc.), and Chrome
+  only flushes them to `Default/Cookies` on its own schedule — a copy of the
+  on-disk profile taken while Chrome runs catches a torn, half-committed
+  SQLite, so you came back logged out (empty cookie DB, or cookies with
+  empty values). Bladebro now snapshots the live, authoritative cookie store
+  via CDP (`Network.getCookies`) into `~/.blade/logins.json` on a schedule
+  and at shutdown, and re-injects it (`Network.setCookies`) at launch. This
+  survives clean shutdowns, SIGKILL, and power loss on every platform, and
+  works even when the whole profile is gone.
+- **Removed the corrupting hot profile copy.** The 60s periodic sync copied
+  the entire live profile every minute (hundreds of MB of disk churn per
+  session) while Chrome held un-flushed DBs open — the exact source of the
+  torn cookie stores. It is replaced by the small, atomic login snapshot; the
+  full profile copy now only runs at clean shutdown, after Chrome has fully
+  exited, and is atomic (old template moved aside before the new one is
+  renamed in, restored on failure).
+- **Stale sync-back lock no longer wedges persistence.** A `.template.lock`
+  left by a crashed process used to block every future copy (silent data
+  loss). The lock now records its owner pid + timestamp and is broken when
+  the owner is dead or stale. Half-finished `.profile.sync` / `.profile.old`
+  temp copies are reaped at launch.
+- **Login restore handles IP / localhost origins.** CDP `setCookies` silently
+  drops cookies targeted by bare-IP `domain`; those are now sent as a `url`
+  so localhost and IP-based flows persist too.
+- **Windows login loss on exit fixed.** Windows `shutdown_child` uses
+  TerminateProcess (no graceful Chrome flush), so logins were always lost on
+  exit. Persisting via the CDP snapshot *before* the kill closes that gap.
+
+### Added
+- `~/.blade/logins.json` (0600, atomic write): the cross-platform login
+  sidecar that survives everything.
+
 ## [3.9.2] - 2026-08-25
 
 ### Fixed
