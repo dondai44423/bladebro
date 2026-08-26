@@ -465,7 +465,7 @@ Six layers. All on by default. No config needed.
 | **Behavior** | Bezier mouse paths with overshoot+correction, `movementX`/`movementY` deltas on every event, micro-tremors before clicks, non-zero key press duration, log-normal typing cadence, idle hum, smooth scroll. **Persistent behavioral fingerprint** — same personality every session. |
 | **Coherence** | Per-domain stealth memory (timezone + locale), geo-consistent identity, WebRTC fail-closed, stable canvas/audio (no noise by default) |
 | **Residue** | cdc_ property removal, native toString integrity, MutationObserver for late artifacts |
-| **Seasoning** | Persistent browser profile (localStorage survives restarts), storage quota, font audit, window.chrome object |
+| **Seasoning** | Persistent browser profile (localStorage survives restarts) + a CDP login snapshot that survives clean shutdowns, SIGKILL, and power loss, storage quota, font audit, window.chrome object |
 
 **Verified against real detection sites:**
 

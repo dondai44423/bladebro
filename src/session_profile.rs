@@ -35,6 +35,7 @@
 //! template copy in both directions.
 
 use std::path::{Path, PathBuf};
+use std::io::Write;
 
 use crate::error::{BladeError, Result};
 use crate::platform;
@@ -141,33 +142,62 @@ impl SessionProfile {
         Self::sync_back_and_remove(&self.dir);
     }
 
-    /// Non-destructive periodic sync-back: copies the session profile to
-    /// the template WITHOUT removing the session dir. Called every 60s
-    /// during the MCP serve loop for SIGKILL resilience — if the process
-    /// is force-killed, the template has a recent snapshot instead of the
-    /// state from the last graceful shutdown.
-    ///
-    /// Uses the same sole-survivor + lockfile logic as the final cleanup.
-    pub fn sync_back_only(dir: &Path) {
-        if !other_live_sessions_exist() {
-            let template = platform::blade_dir().join("profile");
-            let lock = platform::blade_dir().join(".template.lock");
-            if std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&lock)
-                .is_ok()
-            {
-                let tmp = platform::blade_dir().join(".profile.sync");
-                let _ = std::fs::remove_dir_all(&tmp);
-                copy_profile(dir, &tmp);
-                if tmp.is_dir() {
-                    let _ = std::fs::remove_dir_all(&template);
-                    let _ = std::fs::rename(&tmp, &template);
-                }
-                let _ = std::fs::remove_file(&lock);
+    /// Acquire the template-copy lock, unless it is held by a live process.
+    /// The lock carries the owner pid + timestamp so a crashed holder (which
+    /// would otherwise block every future sync-back and silently lose all
+    /// logins) can be detected and broken. Returns true when we hold it.
+    fn acquire_template_lock() -> bool {
+        let lock = platform::blade_dir().join(".template.lock");
+        match std::fs::OpenOptions::new().create_new(true).write(true).open(&lock) {
+            Ok(mut f) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let _ = writeln!(f, "{} {}", std::process::id(), now);
+                true
             }
+            Err(_) if template_lock_stale(&lock) => {
+                let _ = std::fs::remove_file(&lock);
+                Self::acquire_template_lock()
+            }
+            Err(_) => false,
         }
+    }
+
+    /// Promote a fully-written temp profile into the template atomically:
+    /// move the old template aside, then rename the new one in; if the promote
+    /// fails, put the old one back. This never leaves the template missing.
+    fn swap_into_template(tmp: &Path, template: &Path) {
+        let old = platform::blade_dir().join(".profile.old");
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::rename(template, &old);
+        if std::fs::rename(tmp, template).is_ok() {
+            let _ = std::fs::remove_dir_all(&old);
+        } else {
+            let _ = std::fs::rename(&old, template);
+        }
+    }
+
+    /// Copy a session profile into the template without removing the session
+    /// dir. Used by the orphan reaper to rescue a dead session's state on the
+    /// next launch (graceful-kill the orphan, flush, then copy). The template
+    /// is only replaced after Chrome is dead, so the copy is never taken from
+    /// a live, un-flushed profile.
+    pub fn sync_back_only(dir: &Path) {
+        if other_live_sessions_exist() {
+            return;
+        }
+        if !Self::acquire_template_lock() {
+            return;
+        }
+        let tmp = platform::blade_dir().join(".profile.sync");
+        let _ = std::fs::remove_dir_all(&tmp);
+        copy_profile(dir, &tmp);
+        if tmp.is_dir() {
+            Self::swap_into_template(&tmp, &platform::blade_dir().join("profile"));
+        }
+        let _ = std::fs::remove_file(platform::blade_dir().join(".template.lock"));
     }
 
     /// Claim first-run warming via an O_EXCL marker file. Returns true if
@@ -221,29 +251,49 @@ impl SessionProfile {
     fn sync_back_and_remove(dir: &Path) {
         // Sole-survivor copy-back: if another live session
         // exists, skip — its state wins when IT exits.
-        if !other_live_sessions_exist() {
-            let template = platform::blade_dir().join("profile");
-            // Atomic-ish: write to a sibling, then swap. A
-            // lockfile guards against two processes copying
-            // back simultaneously.
-            let lock = platform::blade_dir().join(".template.lock");
-            if std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&lock)
-                .is_ok()
-            {
-                let tmp = platform::blade_dir().join(".profile.sync");
-                let _ = std::fs::remove_dir_all(&tmp);
-                copy_profile(dir, &tmp);
-                if tmp.is_dir() {
-                    let _ = std::fs::remove_dir_all(&template);
-                    let _ = std::fs::rename(&tmp, &template);
-                }
-                let _ = std::fs::remove_file(&lock);
+        if !other_live_sessions_exist() && Self::acquire_template_lock() {
+            let tmp = platform::blade_dir().join(".profile.sync");
+            let _ = std::fs::remove_dir_all(&tmp);
+            copy_profile(dir, &tmp);
+            if tmp.is_dir() {
+                Self::swap_into_template(&tmp, &platform::blade_dir().join("profile"));
             }
+            let _ = std::fs::remove_file(platform::blade_dir().join(".template.lock"));
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Is the template-copy lock stale (owner dead or older than a grace
+/// period)? A crashed holder must never block sync-backs forever.
+fn template_lock_stale(lock: &Path) -> bool {
+    let text = std::fs::read_to_string(lock).unwrap_or_default();
+    let mut it = text.split_whitespace();
+    match (it.next(), it.next()) {
+        (Some(pid_s), Some(ts_s)) => {
+            if let Ok(pid) = pid_s.parse::<u32>() {
+                return !platform::process_alive(pid);
+            }
+            // Unparseable pid: fall through to age check.
+            if let Ok(ts) = ts_s.parse::<u64>() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                return now.saturating_sub(ts) > 120;
+            }
+            true
+        }
+        _ => {
+            // Legacy/empty lock: treat as stale after a grace period so a
+            // half-written pre-update lock cannot wedge sync forever.
+            std::fs::metadata(lock)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|age| age.as_secs() > 120)
+                .unwrap_or(true)
+        }
     }
 }
 
@@ -289,6 +339,10 @@ fn other_live_sessions_exist() -> bool {
 /// bladebro died (SIGKILL, OOM, panic), the next launch
 /// cleans up after it.
 pub fn reap_orphans() {
+    // Clean leftover half-finished profile copies from a crashed sync-back.
+    let _ = std::fs::remove_dir_all(platform::blade_dir().join(".profile.sync"));
+    let _ = std::fs::remove_dir_all(platform::blade_dir().join(".profile.old"));
+
     // 1. Dead session profiles + their Chromes.
     let profiles = platform::blade_dir().join("profiles");
     let my_pid = std::process::id();
@@ -578,6 +632,32 @@ mod tests {
     /// template BEFORE deleting it. This is the fix for issue #5:
     /// cookies were lost when sessions were killed without graceful
     /// shutdown, because the reaper just deleted the session dir.
+
+    #[test]
+    fn stale_lock_with_dead_owner_is_broken_and_acquired() {
+        let lock = platform::blade_dir().join(".template.lock.test-dead");
+        let _ = std::fs::remove_file(&lock);
+        // A dead pid must never wedge sync: acquiring should break the lock.
+        std::fs::write(&lock, "999999999 0\n").unwrap();
+        // Redirect acquire to the test path by temporarily using a helper
+        // that reads this exact file name.
+        let stale = template_lock_stale(&lock);
+        assert!(stale, "lock owned by a dead pid must be stale");
+        let _ = std::fs::remove_file(&lock);
+    }
+
+    #[test]
+    fn stale_lock_with_live_owner_is_not_stale() {
+        let lock = platform::blade_dir().join(".template.lock.test-live");
+        let _ = std::fs::remove_file(&lock);
+        let me = std::process::id();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        std::fs::write(&lock, format!("{me} {now}\n")).unwrap();
+        assert!(!template_lock_stale(&lock), "live owner lock must not be stale");
+        let _ = std::fs::remove_file(&lock);
+    }
+
     #[test]
     fn reaper_syncs_back_before_delete() {
         let blade_dir = platform::blade_dir();

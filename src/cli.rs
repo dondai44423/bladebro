@@ -352,6 +352,9 @@ async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool) ->
             None,
         ).await?;
 
+        // Re-inject saved logins before anything navigates.
+        let _ = crate::logins::restore(page.cdp_ref()).await;
+
         // Warm profile on first run.
         if crate::session_profile::SessionProfile::claim_warming() {
             warm_profile(&mut page).await;
@@ -1128,25 +1131,31 @@ pub async fn run_daemon() -> Result<()> {
                 if idle_secs > 0 && browser.is_some() && last_activity.elapsed().as_secs() > idle_secs {
                     eprintln!("[bladebro] idle timeout ({idle_secs}s), shutting down Chrome");
                     if let Some(b) = browser.take() {
+                        if let Some(ref p) = page {
+                            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                        }
                         let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
                     }
                     page = None;
                 }
-                // Periodic profile sync (same as MCP server).
+                // Periodic login snapshot (same as MCP server). Persist the
+                // authoritative live cookie store, never a hot profile copy.
                 if browser.is_some() && last_sync.elapsed() > sync_interval {
                     last_sync = std::time::Instant::now();
-                    if let Some(ref b) = browser {
-                        let dir = b.profile_dir().to_path_buf();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            crate::session_profile::SessionProfile::sync_back_only(&dir);
-                        }).await;
+                    if let Some(ref p) = page {
+                        if !p.cdp_ref().is_closed() {
+                            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                        }
                     }
                 }
             }
         }
     }
 
-    // Cleanup.
+    // Cleanup: persist live logins, then kill Chrome gracefully.
+    if let Some(ref p) = page {
+        let _ = crate::logins::snapshot(p.cdp_ref()).await;
+    }
     if let Some(b) = browser {
         let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
     }
@@ -1178,7 +1187,11 @@ async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
     }.await;
 
     match result {
-        Ok(page) => Ok((page, Some(browser))),
+        Ok(page) => {
+            // Re-inject saved logins before anything navigates.
+            let _ = crate::logins::restore(page.cdp_ref()).await;
+            Ok((page, Some(browser)))
+        }
         Err(e) => {
             // Clean up the browser we just launched.
             let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;

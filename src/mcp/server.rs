@@ -172,7 +172,11 @@ async fn launch_browser(
                 Ok(page)
             }.await;
             match result {
-                Ok(page) => return Ok((page, Some(browser))),
+                Ok(page) => {
+                    // Re-inject saved logins before anything navigates.
+                    let _ = crate::logins::restore(page.cdp_ref()).await;
+                    return Ok((page, Some(browser)));
+                }
                 Err(e) => {
                     let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
                     return Err(e);
@@ -199,7 +203,11 @@ async fn launch_browser(
             Ok(page)
         }.await;
         match result {
-            Ok(page) => Ok((page, Some(browser))),
+            Ok(page) => {
+                // Re-inject saved logins before anything navigates.
+                let _ = crate::logins::restore(page.cdp_ref()).await;
+                Ok((page, Some(browser)))
+            }
             Err(e) => {
                 // Clean up the browser we just launched.
                 let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
@@ -212,6 +220,8 @@ async fn launch_browser(
         let target = cdp::first_page_target(&base).await?;
         let client = CdpClient::connect(target.ws_url()?).await?;
         let page = Page::attach(CdpSession::root(client), &base, None).await?;
+        // Re-inject saved logins before anything navigates.
+        let _ = crate::logins::restore(page.cdp_ref()).await;
         Ok((page, None))
     }
 }
@@ -706,14 +716,15 @@ async fn serve(
                 }
             }
             _ = idle_check.tick() => {
-                // Periodic sync-back for SIGKILL resilience.
+                // Periodic login snapshot for crash/power-loss resilience.
+                // We persist the authoritative live cookie store (CDP), never
+                // a hot copy of the on-disk profile: copying a live Chrome
+                // profile tears its SQLite and you come back logged out.
                 if browser.is_some() && last_sync.elapsed() >= sync_interval {
-                    if let Some(ref b) = browser {
-                        let dir = b.profile_dir().to_path_buf();
-                        // Offload to blocking thread: profile copy is I/O-heavy.
-                        let _ = tokio::task::spawn_blocking(move || {
-                            crate::session_profile::SessionProfile::sync_back_only(&dir);
-                        }).await;
+                    if let Some(ref p) = page {
+                        if !p.cdp_ref().is_closed() {
+                            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                        }
                     }
                     // Sync knowledge base to disk (prune + write).
                     {
@@ -736,6 +747,11 @@ async fn serve(
                         idle_secs
                     );
                     if let Some(b) = browser.take() {
+                        // Persist live logins before killing Chrome so nothing
+                        // is lost between the last periodic snapshot and exit.
+                        if let Some(ref p) = page {
+                            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                        }
                         shutdown_browser(b).await;
                     }
                     page = None;
@@ -744,9 +760,13 @@ async fn serve(
         }
     }
 
-    // Clean up on exit: kill Chrome gracefully (flushes the
-    // session profile back to the template), abort page tasks.
+    // Clean up on exit: persist live logins, then kill Chrome gracefully
+    // (flushes the session profile back to the template), abort page tasks.
     if let Some(b) = browser.take() {
+        // Persist live logins before killing Chrome.
+        if let Some(ref p) = page {
+            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+        }
         shutdown_browser(b).await;
     }
     drop(page);
