@@ -228,6 +228,10 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let json_mode = args.iter().any(|a| a == "--json");
     let no_daemon = args.iter().any(|a| a == "--no-daemon");
+    // --host / --port override the browser endpoint: drive an already-running
+    // Chrome instead of the local daemon / a freshly launched one. main.rs
+    // parses these globally and (since issue #16's fix) re-injects them here.
+    let (args, external) = extract_endpoint(args);
     let args: Vec<String> = args.iter()
         .filter(|a| a != &"--json" && a != &"--no-daemon")
         .cloned()
@@ -242,28 +246,28 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         "nav" => {
             let url = rest.first().cloned().unwrap_or_default();
             let args = json!({ "action": "navigate", "url": url });
-            run_tool("act", &args, json_mode, no_daemon).await
+            run_tool("act", &args, json_mode, no_daemon, external.clone()).await
         }
         "see" => {
             let parsed = parse_see_args(rest);
-            run_tool("see", &parsed, json_mode, no_daemon).await
+            run_tool("see", &parsed, json_mode, no_daemon, external.clone()).await
         }
         "act" => {
             let parsed = parse_act_args(rest)?;
-            run_tool("act", &parsed, json_mode, no_daemon).await
+            run_tool("act", &parsed, json_mode, no_daemon, external.clone()).await
         }
         "state" => {
             let parsed = parse_state_args(rest)?;
-            run_tool("state", &parsed, json_mode, no_daemon).await
+            run_tool("state", &parsed, json_mode, no_daemon, external.clone()).await
         }
         "run" => {
             let parsed = parse_run_args(rest)?;
-            run_tool("run", &parsed, json_mode, no_daemon).await
+            run_tool("run", &parsed, json_mode, no_daemon, external.clone()).await
         }
         "vision" => {
             let marks = rest.iter().any(|a| a == "--marks");
             let args = json!({ "marks": marks });
-            run_tool("vision", &args, json_mode, no_daemon).await
+            run_tool("vision", &args, json_mode, no_daemon, external.clone()).await
         }
         "help" => {
             if json_mode {
@@ -288,7 +292,12 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
 
 /// Run a tool: auto-start daemon if not running, connect to it.
 /// One-shot mode only with --no-daemon.
-async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool) -> Result<()> {
+async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool, external: Option<String>) -> Result<()> {
+    // Explicit --host/--port: drive that already-running browser directly.
+    // Skip the local daemon entirely (never launch or own Chrome here).
+    if let Some(base) = external {
+        return run_connected(tool, args, json_mode, &base, true).await;
+    }
     // Unless --no-daemon, ensure a daemon is running.
     if !no_daemon {
         #[cfg(unix)]
@@ -342,16 +351,32 @@ async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool) ->
     let browser = crate::browser::Browser::launch(0).await?;
     let base = browser.base();
 
-    // All operations after launch are in a block so we can ensure cleanup.
-    let result = async {
-        let target = crate::cdp::first_page_target(&base).await?;
-        let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
-        let mut page = Page::attach(
-            crate::cdp::CdpSession::root(client),
-            &base,
-            None,
-        ).await?;
+    let result = run_connected(tool, args, json_mode, &base, false).await;
 
+    // ALWAYS shut down Chrome, even if the above failed.
+    // Without this, any error between launch and shutdown orphans Chrome + Xvfb.
+    let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+
+    result
+}
+
+/// Attach to a page at `base`, run one tool call, print the result.
+///
+/// `external=true` drives a browser Bladebro does not own (an already-running
+/// Chrome reached via `--host`/`--port`): it must NOT re-inject saved logins,
+/// warm the profile (no surprise navigation away from the user's tab), or shut
+/// Chrome down. `external=false` owns the browser, so it restores logins,
+/// warms on first run, and the caller owns shutdown.
+async fn run_connected(tool: &str, args: &Value, json_mode: bool, base: &str, external: bool) -> Result<()> {
+    let target = crate::cdp::first_page_target(base).await?;
+    let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
+    let mut page = Page::attach(
+        crate::cdp::CdpSession::root(client),
+        base,
+        None,
+    ).await?;
+
+    if !external {
         // Re-inject saved logins before anything navigates.
         let _ = crate::logins::restore(page.cdp_ref()).await;
 
@@ -359,17 +384,11 @@ async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool) ->
         if crate::session_profile::SessionProfile::claim_warming() {
             warm_profile(&mut page).await;
         }
+    }
 
-        let result = dispatch(tool, args, &mut page).await?;
-        print_result(&result, json_mode);
-        Ok(())
-    }.await;
-
-    // ALWAYS shut down Chrome, even if the above failed.
-    // Without this, any error between launch and shutdown orphans Chrome + Xvfb.
-    let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
-
-    result
+    let result = dispatch(tool, args, &mut page).await?;
+    print_result(&result, json_mode);
+    Ok(())
 }
 
 /// Print result in human or JSON format.
@@ -460,6 +479,44 @@ async fn warm_profile(page: &mut Page) {
 }
 
 // ── Arg Parsers ────────────────────────────────────────────────────────
+
+/// Extract `--host`/`--port` into an external endpoint (`host:port`),
+/// removing them from the arg list. Returns `None` when no `--port` is given
+/// (fall back to the daemon / a freshly launched Chrome).
+///
+/// This is issue #16's fix: these flags were parsed by main.rs but never
+/// forwarded to the CLI, so `state --port 9222` silently ignored the port.
+/// Position-independent — works regardless of whether the flags precede or
+/// follow the command.
+fn extract_endpoint(args: &[String]) -> (Vec<String>, Option<String>) {
+    let mut host = String::from("127.0.0.1");
+    let mut port: Option<u16> = None;
+    let mut cleaned: Vec<String> = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--host" => {
+                if let Some(v) = args.get(i + 1) {
+                    host = v.clone();
+                }
+                i += 2;
+                continue;
+            }
+            "--port" => {
+                if let Some(v) = args.get(i + 1) {
+                    port = v.parse().ok();
+                }
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        cleaned.push(args[i].clone());
+        i += 1;
+    }
+    let external = port.map(|p| format!("{host}:{p}"));
+    (cleaned, external)
+}
 
 /// Parse `see` args: [mode] [url] [--filter <role>] [--extract <type>] [--find <text>] [--json]
 fn parse_see_args(args: &[String]) -> Value {
@@ -1279,7 +1336,9 @@ fn print_help_json() {
     let flags = json!({
         "--json": "Structured JSON output {{ok, text, image, is_error}} for scripts and agents.",
         "--no-daemon": "Force one-shot mode (launch Chrome per command).",
-        "--marks": "Overlay numbered ref badges on screenshot (vision only)."
+        "--marks": "Overlay numbered ref badges on screenshot (vision only).",
+        "--host <h>": "Browser debug host (default 127.0.0.1).",
+        "--port <p>": "Connect to an already-running Chrome on this debug port instead of launching one (or the daemon)."
     });
     let output = json!({
         "tools": tools,
@@ -1298,7 +1357,7 @@ fn print_cli_help() {
          Use --no-daemon to force one-shot mode (new Chrome per command).\n\n\
          COMMANDS:\n    nav <url>              navigate to a URL\n    see [mode] [url]      read the page without acting\n    act <action> [args]   interact with the page\n    state <op> [args]      manage cookies, storage, tabs\n    run <json-steps>       batch actions with branching/loops\n    vision [--marks]       screenshot\n    daemon                 start persistent Chrome session\n    stop                   stop daemon\n    help [command]         show help (use 'help act' for act details)\n\n\
          QUICK START:\n    bladebro nav https://example.com      — navigate\n    bladebro see model                   — interactive elements with refs\n    bladebro see content                 — read page as markdown\n    bladebro act click e5                — click element e5\n    bladebro act type e12 \"hello\"        — type text into one element\n    bladebro act fill '{{\"e12\":\"John\",\"e15\":\"pass\"}}'  — fill multiple fields\n    bladebro see extract auto            — auto-extract structured data\n    bladebro state cookies               — list cookies\n    bladebro stop                        — clean up Chrome\n\n\
-         FLAGS:\n    --json                 structured JSON output {{ok, text, image, is_error}}\n    --no-daemon            force one-shot mode (new Chrome per command)\n    --marks (vision)       overlay numbered ref badges on screenshot\n\n\
+         FLAGS:\n    --json                 structured JSON output {{ok, text, image, is_error}}\n    --no-daemon            force one-shot mode (new Chrome per command)\n    --marks (vision)       overlay numbered ref badges on screenshot\n    --host <h>             browser debug host (default 127.0.0.1)\n    --port <p>             connect to an already-running Chrome on this port\n                           instead of launching one / the daemon\n\n\
          Run 'bladebro help <command>' for detailed usage:\n    bladebro help act     — all actions with examples\n    bladebro help see     — reading modes and extraction\n    bladebro help state   — cookies, storage, tabs\n    bladebro help run     — batch actions with branching"
     );
 }
@@ -1400,6 +1459,50 @@ fn print_command_help(cmd: &str) {
         _ => {
             eprintln!("Unknown command: {cmd}\n\nRun 'bladebro help' for the command list.");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_endpoint;
+
+    #[test]
+    fn port_maps_to_default_host_endpoint() {
+        let (cleaned, external) = extract_endpoint(&[
+            "state".into(), "tabs".into(), "--port".into(), "9223".into(),
+        ]);
+        assert_eq!(cleaned, vec!["state".to_string(), "tabs".to_string()]);
+        assert_eq!(external.as_deref(), Some("127.0.0.1:9223"));
+    }
+
+    #[test]
+    fn explicit_host_combines_with_port() {
+        let (cleaned, external) = extract_endpoint(&[
+            "--host".into(), "192.168.1.50".into(),
+            "see".into(), "content".into(), "--port".into(), "9222".into(),
+        ]);
+        assert_eq!(cleaned, vec!["see".to_string(), "content".to_string()]);
+        assert_eq!(external.as_deref(), Some("192.168.1.50:9222"));
+    }
+
+    #[test]
+    fn no_port_means_no_external_endpoint() {
+        let (cleaned, external) = extract_endpoint(&[
+            "state".into(), "cookies".into(), "--host".into(), "127.0.0.1".into(),
+        ]);
+        assert_eq!(cleaned, vec!["state".to_string(), "cookies".to_string()]);
+        assert!(external.is_none(), "host alone must not pin an endpoint");
+    }
+
+    #[test]
+    fn flags_before_command_still_parse() {
+        // Position-independent: main.rs may forward the endpoint after the
+        // command, but a caller can also put it first.
+        let (cleaned, external) = extract_endpoint(&[
+            "--port".into(), "9333".into(), "vision".into(), "--marks".into(),
+        ]);
+        assert_eq!(cleaned, vec!["vision".to_string(), "--marks".to_string()]);
+        assert_eq!(external.as_deref(), Some("127.0.0.1:9333"));
     }
 }
 

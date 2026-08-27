@@ -66,6 +66,11 @@ fn run() -> Result<()> {
     // port=0 means auto-launch Chrome (find binary, pick free port, manage lifecycle).
     let mut host = String::from("127.0.0.1");
     let mut port: u16 = 0;
+    // Track whether --host/--port were EXPLICITLY given, so CLI commands can
+    // be told to connect to an already-running Chrome (issue #16: the parsed
+    // endpoint was dropped before it reached the CLI module).
+    let mut host_given = false;
+    let mut port_given = false;
     let mut cmd: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
     let mut i = 0;
@@ -76,12 +81,14 @@ fn run() -> Result<()> {
                 if let Some(v) = args.get(i) {
                     host = v.clone();
                 }
+                host_given = true;
             }
             "--port" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     port = v.parse().unwrap_or(0);
                 }
+                port_given = true;
             }
             "-h" | "--help" => {
                 print_usage();
@@ -173,9 +180,21 @@ fn run() -> Result<()> {
         }
         // CLI commands go through the new CLI module.
         "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help" => {
-            let cli_args: Vec<String> = std::iter::once(cmd.clone())
+            let mut cli_args: Vec<String> = std::iter::once(cmd.clone())
                 .chain(positional.iter().cloned())
                 .collect();
+            // Forward explicit --host/--port so CLI tool commands (state,
+            // see, act, run, nav, vision) connect to that already-running
+            // Chrome instead of the daemon / a freshly launched instance.
+            // Without this, `state --port 9222` silently ignored the port.
+            if host_given {
+                cli_args.push("--host".to_string());
+                cli_args.push(host.clone());
+            }
+            if port_given {
+                cli_args.push("--port".to_string());
+                cli_args.push(port.to_string());
+            }
             rt.block_on(bladebro::cli::run_cli(&cli_args))
         }
         // Update hub commands (no Chrome needed).

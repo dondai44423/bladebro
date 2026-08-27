@@ -224,6 +224,8 @@ bladebro act click e5 --json | jq .is_error
 | `--json` | Structured JSON output `{ok, text, image, is_error}` for scripts and agents |
 | `--no-daemon` | Force one-shot mode (launch Chrome per command) |
 | `--marks` | Overlay numbered ref badges on screenshot (vision only) |
+| `--host <h>` | Browser debug host (default `127.0.0.1`) |
+| `--port <p>` | Drive an already-running Chrome on this debug port instead of launching one / the daemon. Applies to every tool command (`state`, `see`, `act`, …). Never owns or warms the external browser |
 
 ### Diagnostics
 
