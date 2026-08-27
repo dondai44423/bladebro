@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.5] - 2026-08-27
+
+### Fixed (proactive hardening — bugs that would surface later)
+
+- **A SIGKILL mid sync-swap no longer wipes the whole template.** The swap
+  moves `profile` aside to `.profile.old` before renaming the new copy in; if
+  killed between those renames, `.profile.old` is the ONLY surviving copy.
+  The reaper used to delete it first thing — annihilating all seasoning
+  (history/settings) on exactly the power-loss path persistence protects.
+  It now resurrects `.profile.old` when `profile` is missing, and only drops
+  it when the template is safe.
+- **`__Host-`/`__Secure-` prefix cookies now restore.** Chrome rejects a
+  prefixed cookie that carries a `domain` attribute; Bladebro was sending
+  one, so logins on security-hardened sites (banks, GitHub's hardened
+  sessions) silently never came back. They are now reconstructed from `url`.
+- **`--no-daemon` one-shot runs persist logins on exit.** The login snapshot
+  at shutdown was daemon/MCP-only, so `state set-cookie` or a scripted login
+  in `--no-daemon` mode never survived into the next run. The one-shot owned
+  path now snapshots before teardown (never for an external browser).
+- **Session cookies (expires = -1) survive a restore.** Sending the literal
+  `-1` made Chrome create an already-expired cookie that was dropped on the
+  spot; the `expires` field is now omitted for session cookies, so a session
+  login actually comes back.
+- **A read-only session no longer erases saved logins.** A fresh session
+  that ends before navigating captures an empty `getCookies` (injected logins
+  only appear once their origin loads); the end-of-session snapshot used to
+  overwrite the good sidecar with `[]`, erasing next-run logins. An empty
+  snapshot now keeps the last good one.
+- **Restore failures are visible.** `Network.setCookies` per-cookie
+  rejections are counted and warned on, instead of a silent partial login
+  loss.
+
+### Changed
+- Login snapshot guard factored out and unit-tested; reaper swap-restore
+  logic made hermetic and tested against a temp dir (the old test raced with
+  the parallel reaper test on the shared `~/.blade`).
+
 ## [3.9.4] - 2026-08-27
 
 ### Fixed
