@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.4] - 2026-08-27
+
+### Fixed
+
+- **`--host`/`--port` now work for every CLI tool command** (#16). `state`,
+  `see`, `act`, `run`, `nav`, and `vision` connect to an already-running
+  Chrome at the requested endpoint instead of silently ignoring the port and
+  talking to the daemon / a freshly launched instance. The flags are parsed
+  globally by `main.rs` and forwarded into the CLI module, which extracts them
+  position-independently. Driving an external browser never starts or owns a
+  Chrome (no daemon, no launch, no shutdown), and skips login injection and
+  profile warming so a personal browser is never disturbed.
+
+### Added
+- `--host <h>` / `--port <p>` documented on the CLI help and `--json` help.
+- Regression tests: 4 unit tests for `--host`/`--port` parsing, plus one
+  integration test that spins up two distinct mock CDP endpoints and proves
+  discovery targets the exact requested port.
+
 ## [3.9.3] - 2026-08-26
 
 ### Fixed
