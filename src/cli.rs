@@ -387,6 +387,15 @@ async fn run_connected(tool: &str, args: &Value, json_mode: bool, base: &str, ex
     }
 
     let result = dispatch(tool, args, &mut page).await?;
+
+    // Persist live logins before tearing down, including in the one-shot
+    // --no-daemon path (this used to be daemon/MCP-only, so `state set-cookie`
+    // in a one-shot run never survived into the next one). Never for an
+    // external browser we don't own.
+    if !external {
+        let _ = crate::logins::snapshot(page.cdp_ref()).await;
+    }
+
     print_result(&result, json_mode);
     Ok(())
 }

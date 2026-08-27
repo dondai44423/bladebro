@@ -338,10 +338,33 @@ fn other_live_sessions_exist() -> bool {
 /// Runs on every Chrome launch. Self-healing: no matter how
 /// bladebro died (SIGKILL, OOM, panic), the next launch
 /// cleans up after it.
+/// Restore a template that a crashed sync-swap left displaced, and clean any
+/// swap staging leftovers. Called by [`reap_orphans`] on every launch.
+///
+/// `swap_into_template` moves the live `profile` aside to `.profile.old`
+/// BEFORE renaming the new copy in. If that swap is SIGKILLed between the two
+/// renames, `profile` is missing and `.profile.old` is the ONLY surviving copy
+/// of the whole profile. Deleting it (as reap_orphans used to) loses all
+/// seasoning on exactly the power-loss path the sidecar protects against.
+/// Returns true when a displaced template was resurrected.
+fn restore_interrupted_swap(blade_dir: &Path) -> bool {
+    let old = blade_dir.join(".profile.old");
+    let template = blade_dir.join("profile");
+    if old.is_dir() && !template.exists() {
+        let _ = std::fs::rename(&old, &template);
+        eprintln!("[bladebro] restored template from .profile.old (sync swap was interrupted)");
+        return true;
+    }
+    // Normal (template present) or leftover staging: drop it.
+    let _ = std::fs::remove_dir_all(&old);
+    false
+}
+
 pub fn reap_orphans() {
-    // Clean leftover half-finished profile copies from a crashed sync-back.
-    let _ = std::fs::remove_dir_all(platform::blade_dir().join(".profile.sync"));
-    let _ = std::fs::remove_dir_all(platform::blade_dir().join(".profile.old"));
+    let blade_dir = platform::blade_dir();
+    // `.profile.sync` is just the staging copy, safe to drop.
+    let _ = std::fs::remove_dir_all(blade_dir.join(".profile.sync"));
+    restore_interrupted_swap(&blade_dir);
 
     // 1. Dead session profiles + their Chromes.
     let profiles = platform::blade_dir().join("profiles");
@@ -662,8 +685,7 @@ mod tests {
 
     #[test]
     fn reaper_syncs_back_before_delete() {
-        let blade_dir = platform::blade_dir();
-        let profiles_dir = blade_dir.join("profiles");
+        let blade_dir = platform::blade_dir();        let profiles_dir = blade_dir.join("profiles");
         let template_dir = blade_dir.join("profile");
 
         // Clean ALL stale session dirs + locks so they don't interfere.
@@ -721,5 +743,43 @@ mod tests {
             let _ = std::fs::rename(&tmp, &template_dir);
         }
         let _ = std::fs::remove_dir_all(&template_backup);
+    }
+
+    /// The reaper must not delete the template when a sync-swap was SIGKILLed
+    /// mid-way (profile moved to .profile.old but the new copy not yet in).
+    /// .profile.old is then the ONLY surviving profile; delete = data loss.
+    #[test]
+    fn reaper_restores_template_displaced_by_interrupted_swap() {
+        // Hermetic: run against a temp blade dir, not the shared ~/.blade that
+        // other reaper tests mutate in parallel.
+        let blade_dir = std::env::temp_dir().join("bladebro-test-swap");
+        let _ = std::fs::remove_dir_all(&blade_dir);
+
+        // Simulate the crash state: template was moved aside, new copy never
+        // renamed in. `profile` is missing; `.profile.old` holds the profile.
+        std::fs::create_dir_all(blade_dir.join(".profile.old").join("Default")).unwrap();
+        std::fs::write(blade_dir.join(".profile.old").join("Default/Cookies"), b"displaced-cookie").unwrap();
+
+        // The displaced profile must be resurrected, not deleted.
+        assert!(restore_interrupted_swap(&blade_dir), "swap-restore should trigger");
+        assert_eq!(
+            std::fs::read(blade_dir.join("profile/Default/Cookies")).unwrap(),
+            b"displaced-cookie"
+        );
+        assert!(!blade_dir.join(".profile.old").exists(), ".profile.old consumed by restore");
+
+        // When the template is already present, .profile.old is just staging
+        // and must be dropped without disturbing `profile`.
+        std::fs::write(blade_dir.join("profile/Default/Cookies"), b"live").unwrap();
+        std::fs::create_dir_all(blade_dir.join(".profile.old")).unwrap();
+        assert!(!restore_interrupted_swap(&blade_dir), "no restore when profile present");
+        assert_eq!(
+            std::fs::read(blade_dir.join("profile/Default/Cookies")).unwrap(),
+            b"live",
+            "present template must be left untouched"
+        );
+        assert!(!blade_dir.join(".profile.old").exists(), "stale .profile.old cleaned");
+
+        let _ = std::fs::remove_dir_all(&blade_dir);
     }
 }

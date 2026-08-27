@@ -63,10 +63,14 @@ fn is_ip_or_localhost(host: &str) -> bool {
 }
 
 /// CDP CookieParam targeting: real registrable domains use `domain` (keeps
-/// domain-cookie semantics); IP/localhost hosts must use `url` or Chrome
-/// silently drops the cookie.
+/// domain-cookie semantics, and becomes active once that origin is loaded);
+/// IP/localhost hosts and `__Host-`/`__Secure-` prefixed cookies must use
+/// `url`, or Chrome silently drops the cookie.
 fn cookie_target(c: &SavedCookie) -> Value {
-    if is_ip_or_localhost(&c.domain) {
+    // Prefixed secure cookies are rejected entirely when they carry a user
+    // `domain` attribute; they must be reconstructed from a matching `url`.
+    let prefixed = c.name.starts_with("__Host-") || c.name.starts_with("__Secure-");
+    if is_ip_or_localhost(&c.domain) || prefixed {
         let host = c.domain.trim_start_matches('.');
         let scheme = if c.secure { "https" } else { "http" };
         json!({ "url": format!("{scheme}://{host}{path}", path = c.path) })
@@ -77,6 +81,14 @@ fn cookie_target(c: &SavedCookie) -> Value {
 
 fn logins_path() -> PathBuf {
     platform::blade_dir().join("logins.json")
+}
+
+/// Should a snapshot write proceed given an empty new cookie set and the
+/// existing sidecar bytes? Keeps the last good snapshot when a session ended
+/// before any origin context formed (CDP-injected logins are only visible to
+/// getCookies once the origin loads); never erases saved logins needlessly.
+fn keep_last_good_snapshot(existing: &[u8]) -> bool {
+    !existing.is_empty()
 }
 
 /// Snapshot the live cookie store to the sidecar (atomically, 0600).
@@ -117,6 +129,21 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
         });
     }
     let bytes = serde_json::to_vec(&out)?;
+    // Never let an EMPTY snapshot destroy saved logins. A fresh session that
+    // ends before navigating anywhere (restore injected logins, but they only
+    // become visible to getCookies once their origin is loaded) would capture
+    // `[]` here and overwrite the good sidecar — erasing next-run logins on
+    // exactly the sessions that were booting up. Only write when there is
+    // something meaningful to record, or nothing was saved yet.
+    if out.is_empty() {
+        if let Ok(existing) = std::fs::read(logins_path()) {
+            // Keep the last good snapshot when captured at a session that
+            // never navigated (see the comment on snapshot).
+            if keep_last_good_snapshot(&existing) {
+                return Ok(()); // keep the last good snapshot
+            }
+        }
+    }
     atomic_write(&logins_path(), &bytes)?;
     Ok(())
 }
@@ -136,13 +163,18 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
     // rejected on some Chrome builds unless the domain is live.
     let _ = cdp.enable("Network").await;
     // Chrome caps cookies set in one call; chunk at 150.
-    let mut errors = 0usize;
+    // Track per-cookie rejections (setCookies reports each in `data`) so a
+    // silently partial restore is VISIBLE instead of the user just being
+    // quietly logged out with no signal.
+    let mut rejected = 0usize;
+    let total = list.len();
     for chunk in list.chunks(150) {
         let cookies: Vec<Value> = chunk.iter().map(|c| {
-            // Apply url or domain per-cookie (IP/localhost need url).
+            // Apply url or domain per-cookie (IP/localhost and __Host-/__Secure-
+            // prefixed cookies need url).
             let target = cookie_target(c);
             let mut spec = json!({
-                "name": c.name,
+                "name": c.name.clone(),
                 "value": c.value,
                 "path": c.path,
                 "secure": c.secure,
@@ -151,8 +183,18 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
                 // cookies with a null sameSite in the CDP call (same rule
                 // state.rs uses for single set-cookie).
                 "sameSite": c.same_site.clone().unwrap_or_else(|| "Lax".to_string()),
-                "expires": c.expires,
             });
+            // Session cookies are reported back with expires = -1. Sending
+            // that literal value makes Chrome create an ALREADY-EXPIRED
+            // cookie (base::Time::FromDoubleT(-1) is 1969) that is dropped on
+            // the spot — so a session login never survives a restore, and a
+            // later snapshot then overwrites the good sidecar with nothing.
+            // The CDP rule: omit `expires` for a session cookie.
+            if let Some(exp) = c.expires {
+                if exp >= 0.0 {
+                    spec["expires"] = json!(exp);
+                }
+            }
             if let Some(map) = target.as_object() {
                 if let Some(u) = map.get("url") {
                     spec["url"] = u.clone();
@@ -164,14 +206,31 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
             spec
         }).collect();
         match cdp.send("Network.setCookies", Some(json!({ "cookies": cookies }))).await {
-            Ok(_) => {}
-            Err(e) => {
-                errors += 1;
-                if errors <= 3 {
-                    eprintln!("[bladebro] logins restore ({} of {}): {e}", errors, list.len());
+            Ok(res) => {
+                // Chrome 150+ returns success in `data` per cookie; count the
+                // rejected ones so a partial restore is visible. (Some builds
+                // drop cookies whose origin has no loaded page yet — warning
+                // here, rather than silently losing the login.)
+                if let Some(data) = res.get("data").and_then(|d| d.as_array()) {
+                    for item in data {
+                        if !item.get("success").and_then(|s| s.as_bool()).unwrap_or(true) {
+                            rejected += 1;
+                        }
+                    }
                 }
             }
+            Err(e) => {
+                rejected += chunk.len();
+                eprintln!("[bladebro] logins restore call failed ({} cookies): {e}", chunk.len());
+            }
         }
+    }
+    if rejected > 0 {
+        let pct = (rejected as f64 / total as f64) * 100.0;
+        eprintln!(
+            "[bladebro] WARN: {rejected}/{total} saved cookies were not restored ({pct:.0}%). \
+             Some logins may be lost. Re-run `bladebro state cookies` to inspect."
+        );
     }
     Ok(())
 }
@@ -226,5 +285,57 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].value, "a b;c=d");
         assert!(back[0].http_only);
+    }
+
+    #[test]
+    fn prefix_cookies_use_url_targeting() {
+        // __Host-/__Secure- cookies are rejected if they carry a `domain`;
+        // they must be reconstructed from a matching url (fix for silently
+        // lost logins on security-hardened sites).
+        let host = SavedCookie {
+            name: "__Host-sid".into(), value: "x".into(),
+            domain: "example.com".into(), path: "/".into(),
+            secure: true, http_only: true, same_site: None, expires: None,
+        };
+        let t = cookie_target(&host);
+        assert_eq!(t["url"].as_str(), Some("https://example.com/"), "__Host- needs url");
+        assert!(t.get("domain").is_none(), "__Host- must not carry a domain");
+
+        // __Secure- also url-targets (scheme follows the secure flag).
+        let sec = SavedCookie {
+            name: "__Secure-tok".into(), value: "x".into(),
+            domain: ".example.com".into(), path: "/".into(),
+            secure: false, http_only: false, same_site: None, expires: None,
+        };
+        let t2 = cookie_target(&sec);
+        assert_eq!(t2["url"].as_str(), Some("http://example.com/"), "__Secure- goes via url");
+
+        // Plain cookies keep domain semantics (host-only vs domain preserved).
+        let norm = SavedCookie {
+            name: "sid".into(), value: "x".into(),
+            domain: ".example.com".into(), path: "/".into(),
+            secure: false, http_only: false, same_site: None, expires: None,
+        };
+        let t3 = cookie_target(&norm);
+        assert_eq!(t3["domain"].as_str(), Some(".example.com"));
+        assert!(t3.get("url").is_none());
+
+        // IP hosts keep url targeting too.
+        let ip = SavedCookie {
+            name: "ipc".into(), value: "x".into(),
+            domain: "127.0.0.1".into(), path: "/".into(),
+            secure: false, http_only: false, same_site: None, expires: None,
+        };
+        assert_eq!(cookie_target(&ip)["url"].as_str(), Some("http://127.0.0.1/"));
+    }
+
+    #[test]
+    fn empty_snapshot_keeps_last_good_logins() {
+        // A session that ended before any origin formed (fresh restore at
+        // about:blank) must not erase the saved logins with an empty write.
+        assert!(keep_last_good_snapshot(b"[{\"name\":\"sid\"}]"), "cookies present -> keep");
+        assert!(keep_last_good_snapshot(b"[]"), "saved empty is still a known state, never lose it");
+        // Nothing saved yet: an empty write is fine (nothing to protect).
+        assert!(!keep_last_good_snapshot(b""), "no prior state -> allow write");
     }
 }
