@@ -65,18 +65,8 @@ pub async fn run() -> Result<()> {
     // 8. Stale locks
     checks.push(check_stale_locks());
 
-    // 9. Network connectivity (skippable: BLADE_NO_UPDATE_CHECK=1 for
-    // offline/airgapped machines where GitHub is unreachable).
-    if std::env::var("BLADE_NO_UPDATE_CHECK").as_deref() == Ok("1") {
-        checks.push(Check {
-            name: "GitHub connectivity",
-            status: Status::Pass,
-            detail: "skipped (BLADE_NO_UPDATE_CHECK=1)".into(),
-            fix: None,
-        });
-    } else {
-        checks.push(check_network().await);
-    }
+    // 9. Network connectivity
+    checks.push(check_network().await);
 
     // 10. Binary integrity + install method
     checks.push(check_binary());
@@ -84,17 +74,8 @@ pub async fn run() -> Result<()> {
     // 11. Disk space
     checks.push(check_disk_space());
 
-    // 12. Version vs latest (skipped with BLADE_NO_UPDATE_CHECK as well).
-    if std::env::var("BLADE_NO_UPDATE_CHECK").as_deref() == Ok("1") {
-        checks.push(Check {
-            name: "Version",
-            status: Status::Pass,
-            detail: "update check skipped".into(),
-            fix: None,
-        });
-    } else {
-        checks.push(check_version().await);
-    }
+    // 12. Version vs latest
+    checks.push(check_version().await);
 
     // Print results.
     let mut passes = 0;

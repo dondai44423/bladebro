@@ -23,8 +23,7 @@ fn doctor_with(envs: &[(&str, &str)], home: Option<&str>) -> String {
         .env_remove("BLADE_HOME")
         .env_remove("XDG_STATE_HOME")
         .env("HOME", home.unwrap_or(tmp_home.to_str().unwrap()))
-        .env("BLADE_PROFILE_DIR", tmp_home.join("p").to_str().unwrap())
-        .env("BLADE_NO_UPDATE_CHECK", "1");
+        .env("BLADE_PROFILE_DIR", tmp_home.join("p").to_str().unwrap());
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -75,8 +74,7 @@ fn missing_local_dir_falls_back_to_legacy() {
         .env_remove("BLADE_HOME")
         .env_remove("XDG_STATE_HOME")
         .env("HOME", bare.to_str().unwrap())
-        .env("BLADE_PROFILE_DIR", bare.join("p").to_str().unwrap())
-        .env("BLADE_NO_UPDATE_CHECK", "1");
+        .env("BLADE_PROFILE_DIR", bare.join("p").to_str().unwrap());
     let out = cmd.output().expect("doctor must run");
     let _ = std::fs::remove_dir_all(&bare);
     let stdout = String::from_utf8_lossy(&out.stdout);
