@@ -16,6 +16,8 @@ One MCP server · one persistent page model · zero Node.js · one binary · Lin
 [![Downloads](https://img.shields.io/npm/dw/bladebro?color=7c5cfc&label=downloads&style=flat-square)](https://www.npmjs.com/package/bladebro)
 [![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?color=ff9f43&style=flat-square)](https://github.com/dondai44423/bladebro)
 [![Stealth Bench V1](https://img.shields.io/badge/Stealth_Bench_V1-85%25__68%2F80-00d4aa?style=flat-square)](STEALTH_BENCH.md)
+
+---
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
 ```bash
