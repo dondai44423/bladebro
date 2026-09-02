@@ -890,11 +890,25 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
         }
     }
 
-    // If a URL is in the remaining args and action isn't navigate, set it for pre-navigation.
-    for a in args.iter().skip(1) {
-        if !a.starts_with("--") && j.get("url").is_none() && action != "navigate" {
-            j["url"] = json!(a);
-            break;
+    // If a URL-shaped token appears in the remaining args and action isn't
+    // navigate, set it for pre-navigation. Only for actions whose positional
+    // IS a URL; textual actions (type/fill/click/eval...) already consumed
+    // their positionals and must never get pre-navigated (el.href contains
+    // a dot and would be misread as a URL).
+    let textual = matches!(
+        action,
+        "type" | "fill" | "click" | "hover" | "eval" | "wait" | "press" | "read" | "clear" | "select"
+    );
+    if !textual {
+        for a in args.iter().skip(1) {
+            let a = a.as_str();
+            let looks_url = !a.starts_with("--")
+                && !a.contains(' ')
+                && (a.contains("//") || a.contains('.') && !a.contains('('));
+            if j.get("url").is_none() && action != "navigate" && looks_url {
+                j["url"] = json!(a);
+                break;
+            }
         }
     }
 

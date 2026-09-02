@@ -56,19 +56,25 @@ pub async fn run() -> Result<()> {
     // 5. Profile directory
     checks.push(check_profile_dir());
 
-    // 6. Stale locks
+    // 6. Login sidecar (the logins that survive reboots/SIGKILL)
+    checks.push(check_login_sidecar());
+
+    // 7. Session/profiles hygiene (orphans, disk usage)
+    checks.push(check_profile_hygiene());
+
+    // 8. Stale locks
     checks.push(check_stale_locks());
 
-    // 7. Network connectivity
+    // 9. Network connectivity
     checks.push(check_network().await);
 
-    // 8. Binary integrity + install method
+    // 10. Binary integrity + install method
     checks.push(check_binary());
 
-    // 9. Disk space
+    // 11. Disk space
     checks.push(check_disk_space());
 
-    // 10. Version vs latest
+    // 12. Version vs latest
     checks.push(check_version().await);
 
     // Print results.
@@ -326,6 +332,120 @@ fn check_profile_dir() -> Check {
             fix: Some(format!("Fix permissions: chmod 700 {}", dir.display())),
         },
     }
+}
+
+fn check_login_sidecar() -> Check {
+    let path = crate::platform::blade_dir().join("logins.json");
+    if !path.exists() {
+        return Check {
+            name: "Login persistence",
+            status: Status::Pass,
+            detail: "no saved logins yet (created on first login)".into(),
+            fix: None,
+        };
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                return Check {
+                    name: "Login persistence",
+                    status: Status::Warn,
+                    detail: format!("{} has non-private permissions", path.display()),
+                    fix: Some(format!("Fix: chmod 600 {}", path.display())),
+                };
+            }
+        }
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(v) => {
+                let n = v.as_array().map(|a| a.len()).unwrap_or(0);
+                Check {
+                    name: "Login persistence",
+                    status: Status::Pass,
+                    detail: format!("{n} cookie(s) saved for next session"),
+                    fix: None,
+                }
+            }
+            Err(_) => Check {
+                name: "Login persistence",
+                status: Status::Warn,
+                detail: format!("{} is unreadable JSON", path.display()),
+                fix: Some("It will be rebuilt on next clean snapshot".into()),
+            },
+        },
+        Err(e) => Check {
+            name: "Login persistence",
+            status: Status::Warn,
+            detail: format!("cannot read {}: {e}", path.display()),
+            fix: None,
+        },
+    }
+}
+
+fn check_profile_hygiene() -> Check {
+    let dir = crate::platform::blade_dir();
+    // Count per-process profile dirs: every `sess-*` dir whose owning pid is
+    // dead. The reaper clears these on next launch; doctor reports them so
+    // disk isn't silently eaten between runs.
+    let mut orphans = Vec::new();
+    let mut total_orphan_bytes: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(dir.join("profiles")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let pid = name
+                .strip_prefix("sess-")
+                .or_else(|| name.strip_prefix("pid-"))
+                .and_then(|p| p.split('-').next())
+                .and_then(|p| p.parse::<u32>().ok());
+            let dead = pid.map(|p| !crate::platform::process_alive(p)).unwrap_or(true);
+            if dead {
+                // size (best effort, bounded)
+                let mut size: u64 = 0;
+                if let Ok(it) = fs_items(&path) {
+                    for f in it {
+                        size += f.len();
+                        if size > 200_000_000 { break; }
+                    }
+                }
+                total_orphan_bytes += size;
+                orphans.push(format!("{name} ({:.0}MB)", size as f64 / 1_048_576.0));
+            }
+        }
+    }
+    if orphans.is_empty() {
+        return Check {
+            name: "Profile hygiene",
+            status: Status::Pass,
+            detail: "no orphaned session dirs".into(),
+            fix: None,
+        };
+    }
+    let mb = total_orphan_bytes as f64 / 1_048_576.0;
+    Check {
+        name: "Profile hygiene",
+        status: Status::Warn,
+        detail: format!("{} orphaned profile dir{} ({mb:.0}MB); auto-reaped on next launch", orphans.len(), if orphans.len() == 1 { "" } else { "s" }),
+        fix: Some("Next launch cleans them automatically".into()),
+    }
+}
+
+/// Walk a dir shallowly collecting file sizes (no symlink following).
+fn fs_items(dir: &std::path::Path) -> std::io::Result<Vec<std::fs::Metadata>> {
+    let mut out = Vec::new();
+    if let Ok(e) = std::fs::read_dir(dir) {
+        for f in e.flatten() {
+            if let Ok(m) = f.metadata() {
+                if m.is_file() {
+                    out.push(m);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn check_stale_locks() -> Check {

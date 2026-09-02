@@ -2265,7 +2265,11 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
     let mut observations = Vec::new();
     for (i, step) in steps.iter().enumerate() {
         let step_num = i + 1; // 1-based for human-readable error messages
-        execute_step(page, step, &step_num.to_string(), &mut observations).await?;
+        execute_step(page, step, &step_num.to_string(), &mut observations)
+            .await
+            .map_err(|e| crate::error::BladeError::Other(format!(
+                "step {step_num} failed: {e}"
+            )))?;
     }
     Ok(observations.join("\n"))
 }

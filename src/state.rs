@@ -336,13 +336,20 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 }
             
             cdp.enable("Network").await?;
-            let res = cdp.send("Network.getCookies", Some(json!({}))).await?;
-            let cookies = res.get("cookies").cloned().unwrap_or(json!([]));
             let origin_res = cdp.send("Runtime.evaluate", Some(json!({
                 "expression": "location.origin",
                 "returnByValue": true,
             }))).await?;
             let origin = origin_res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+            // Error pages (chrome-error://) and untouched about:blank report
+            // a literal "null" origin.
+            if origin.is_empty() || origin == "null" {
+                return Err(BladeError::Other(
+                    "cannot save a session without an open page: navigate to a site first so cookies and storage have an origin".into(),
+                ));
+            }
+            let res = cdp.send("Network.getCookies", Some(json!({}))).await?;
+            let cookies = res.get("cookies").cloned().unwrap_or(json!([]));
             // Full-fidelity dump: NOT via get_storage (that truncates values
             // to 60 chars for display — saving from it corrupts tokens) and
             // not via text lines (values may contain '=' or newlines).
