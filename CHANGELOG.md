@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.9.6] - 2026-09-02
 
-
 ### Fixed
 - **`act eval` got console-grade semantics.** IIFEs like `(function(){return 42})()`
   returned `undefined` (a `contains("return")` heuristic silently discarded the
