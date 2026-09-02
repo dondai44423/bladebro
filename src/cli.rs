@@ -37,10 +37,11 @@ pub struct ToolResult {
 /// Dispatch a tool call to the same handlers the MCP server uses.
 /// This is the shared core — any handler update auto-propagates to CLI.
 pub async fn dispatch(tool: &str, args: &Value, page: &mut Page) -> std::result::Result<ToolResult, BladeError> {
-    // For see with URL: navigate first, then read.
+    // For see with URL: navigate first, then read. Any non-flag token is a
+    // URL; the shared navigate adds the missing scheme.
     if tool == "see" {
         if let Some(url) = args.get("url").and_then(|u| u.as_str()) {
-            if !url.is_empty() && (url.starts_with("http") || url.starts_with("data:") || url.starts_with("file:")) {
+            if !url.is_empty() && !url.starts_with("--") {
                 page.navigate(url).await?;
             }
         }
@@ -727,12 +728,14 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
             }
         }
         "navigate" => {
-            // navigate <url> [--block <classes>]
+            // navigate <url> [--block <classes>] — any non-flag token is the
+            // URL (bare domains like example.com or localhost:3000 are made
+            // absolute by the shared navigate path, which adds the scheme).
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
                     "--block" => { i += 1; if let Some(v) = args.get(i) { j["block"] = json!(v); } }
-                    s if s.starts_with("http") || s.starts_with("data:") || s.starts_with("file:") => {
+                    s if !s.starts_with("--") => {
                         j["url"] = json!(s);
                     }
                     _ => {}
@@ -790,12 +793,12 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
             }
         }
         "download" => {
-            // download <url> [--path <path>]
+            // download <url> [--path <path>] — any non-flag token is the URL.
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
                     "--path" => { i += 1; if let Some(v) = args.get(i) { j["path"] = json!(v); } }
-                    s if s.starts_with("http") => {
+                    s if !s.starts_with("--") => {
                         j["url"] = json!(s);
                     }
                     _ => {}
@@ -851,7 +854,7 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
             while i < args.len() {
                 match args[i].as_str() {
                     "--max" => { i += 1; if let Some(v) = args.get(i) { j["max"] = serde_json::from_str(v).unwrap_or(json!(100)); } }
-                    s if s.starts_with("http") => {
+                    s if !s.starts_with("--") => {
                         j["url"] = json!(s);
                     }
                     _ => {}
@@ -889,7 +892,7 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
 
     // If a URL is in the remaining args and action isn't navigate, set it for pre-navigation.
     for a in args.iter().skip(1) {
-        if a.starts_with("http") && !a.starts_with("--") && j.get("url").is_none() && action != "navigate" {
+        if !a.starts_with("--") && j.get("url").is_none() && action != "navigate" {
             j["url"] = json!(a);
             break;
         }

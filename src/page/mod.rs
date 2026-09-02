@@ -1282,8 +1282,9 @@ impl Page {
         let wait = self
             .cdp
             .wait_for("Page.frameNavigated", Duration::from_secs(10));
+        let target = with_scheme(url);
         self.cdp
-            .send("Page.navigate", Some(serde_json::json!({ "url": url })))
+            .send("Page.navigate", Some(serde_json::json!({ "url": target })))
             .await?;
         _t("sent");
         let _ = tokio::time::timeout(Duration::from_secs(10), wait).await;
@@ -1472,6 +1473,42 @@ fn extract_domain(url: &str) -> String {
         .to_string()
 }
 
+/// Add a scheme to user-supplied URLs so bare hosts work everywhere
+/// (`example.com`, `localhost:3000`). Local/private hosts and IPs default to
+/// http:// (dev servers rarely have certs), public hosts to https://.
+/// URLs that already carry a scheme (http/https/about/file/data/blob/...) are
+/// left untouched.
+fn with_scheme(url: &str) -> String {
+    let u = url.trim();
+    if u.is_empty()
+        || u.contains("://")
+        || u.starts_with("about:")
+        || u.starts_with("file:")
+        || u.starts_with("data:")
+        || u.starts_with("blob:")
+        || u.starts_with("javascript:")
+    {
+        return u.to_string();
+    }
+    let host = u.split('/').next().unwrap_or(u);
+    // localhost, loopback/private IPs, or an explicit port (dev-server
+    // signal) default to http://; public hosts to https://.
+    let is_local = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| match ip {
+                std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+                std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
+            })
+            .unwrap_or(false)
+        || host.contains(':');
+    if is_local {
+        format!("http://{u}")
+    } else {
+        format!("https://{u}")
+    }
+}
+
 /// Normalize a URL for comparison: strip scheme, fragment, trailing slash.
 fn normalize_url(url: &str) -> String {
     let (s, https) = url
@@ -1514,5 +1551,31 @@ impl Drop for Page {
         if let Some(handle) = self.download_task.take() {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_scheme;
+
+    #[test]
+    fn with_scheme_handles_all_forms() {
+        // Bare public hosts get https.
+        assert_eq!(with_scheme("example.com"), "https://example.com");
+        assert_eq!(with_scheme("example.com/path?q=1"), "https://example.com/path?q=1");
+        // Local/private targets get http (dev servers rarely have certs).
+        assert_eq!(with_scheme("localhost:3000"), "http://localhost:3000");
+        assert_eq!(with_scheme("localhost"), "http://localhost");
+        assert_eq!(with_scheme("127.0.0.1:8080"), "http://127.0.0.1:8080");
+        assert_eq!(with_scheme("192.168.1.5"), "http://192.168.1.5");
+        // Explicit ports imply a dev server: http.
+        assert_eq!(with_scheme("myserver.test:8443"), "http://myserver.test:8443");
+        // Existing schemes untouched.
+        assert_eq!(with_scheme("https://x.com"), "https://x.com");
+        assert_eq!(with_scheme("http://x.com"), "http://x.com");
+        assert_eq!(with_scheme("file:///tmp/x.html"), "file:///tmp/x.html");
+        assert_eq!(with_scheme("about:blank"), "about:blank");
+        assert_eq!(with_scheme("data:text/html,hi"), "data:text/html,hi");
+        assert_eq!(with_scheme("blob:https://x/abcd"), "blob:https://x/abcd");
     }
 }
