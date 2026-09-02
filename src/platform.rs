@@ -415,6 +415,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn xdg_state_home_is_second() {
         let home = std::path::Path::new("/home/u");
@@ -426,6 +427,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_state_default_for_fresh_installs() {
         let home = std::path::Path::new("/home/u");
@@ -465,6 +467,24 @@ mod tests {
         assert_eq!(
             resolve_blade_dir(home, &env_of(&env), true, true),
             std::path::PathBuf::from("/home/u/.blade")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_keeps_legacy_dir_unless_blade_home() {
+        let home = std::path::Path::new("C:\\Users\\u");
+        let env = HashMap::new();
+        // XDG flags must not move the data dir on Windows.
+        assert_eq!(
+            resolve_blade_dir(home, &env_of(&env), false, true),
+            std::path::PathBuf::from("C:\\Users\\u\\.blade")
+        );
+        let mut over = HashMap::new();
+        over.insert("BLADE_HOME", "D:\\blade");
+        assert_eq!(
+            resolve_blade_dir(home, &env_of(&over), false, true),
+            std::path::PathBuf::from("D:\\blade")
         );
     }
 }
