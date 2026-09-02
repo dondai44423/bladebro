@@ -237,8 +237,10 @@ bladebro audit   # stealth verification
 
 | Env Var | Default | What it does |
 |---|---|---|
+| `BLADE_HOME` | auto | Data root override (highest priority): knowledge, logins, fingerprint live here |
+| `XDG_STATE_HOME` | auto (XDG spec) | Data root = `$XDG_STATE_HOME/blade` when set |
 | `CHROME_PATH` | auto | Path to Chrome/Chromium binary |
-| `BLADE_PROFILE_DIR` | `~/.blade/profile` | Persistent browser profile |
+| `BLADE_PROFILE_DIR` | `<data root>/profile` | Persistent browser profile |
 | `BLADE_FRESH` | unset | `1` = ephemeral profile (no persistence) |
 | `BLADE_LOCALE` | `en-US` | BCP-47 locale (e.g. `en-GB`, `ne-NP`) |
 | `BLADE_TZ` | auto (IP geo) | Timezone (e.g. `Europe/London`, `Asia/Kathmandu`) |
@@ -250,6 +252,8 @@ bladebro audit   # stealth verification
 | `BLADE_CONSENT` | `reject` | `accept` / `reject` / `off` — consent banner policy |
 | `BLADE_NO_COMPRESS` | unset | `1` = disable context pruning (all act responses are full) |
 | `BLADE_NO_WARMING` | unset | `1` = skip first-run profile warming (no visits to google.com/github.com/wikipedia.org) |
+
+Data root resolution order (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME/.local/state/blade` (when that tree exists or is creatable) → `$HOME/.blade`. Migration-safe: an existing install with state in `~/.blade` keeps using it; nothing is ever split across two directories. Windows keeps `%USERPROFILE%\.blade` (plus `BLADE_HOME`). `bladebro doctor` prints the resolved data root.
 
 ## 🎯 The 5 tools
 

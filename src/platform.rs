@@ -25,9 +25,78 @@ pub fn home_dir() -> PathBuf {
     }
 }
 
-/// The Bladebro data directory (`~/.blade` on Unix, `%USERPROFILE%\.blade` on Windows).
+/// The Bladebro data directory. Resolution order:
+/// 1. `BLADE_HOME` (explicit override, highest priority).
+/// 2. Unix: `$XDG_STATE_HOME/blade` when `XDG_STATE_HOME` is set.
+/// 3. Unix: `$HOME/.local/state/blade` when that parent exists or can be
+///    created (a `.local` dir already present is enough).
+/// 4. Unix: `$HOME/.blade` (legacy default; kept for minimal setups).
+///    Windows: `%USERPROFILE%\.blade`.
+///
+/// Migration-free upgrade: when a DEFAULT resolution (cases 2-4, not an
+/// explicit `BLADE_HOME`) lands somewhere other than the legacy dir while
+/// `~/.blade` already holds Bladebro state, the legacy dir wins. An
+/// upgraded install must never silently split its state in two.
 pub fn blade_dir() -> PathBuf {
-    home_dir().join(".blade")
+    let home = home_dir();
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let legacy = home.join(".blade");
+    resolve_blade_dir(&home, &env, dir_has_state(&legacy), local_state_creatable(&home))
+}
+
+/// Can `$HOME/.local/state/blade` be created? True when the parent exists
+/// or `.local` does (so `state`/`blade` only need a mkdir under it).
+fn local_state_creatable(home: &std::path::Path) -> bool {
+    home.join(".local").join("state").exists() || home.join(".local").exists()
+}
+
+/// Pure resolution core (tested directly; no env mutation or FS checks in
+/// tests — the two FS facts are injected as flags).
+fn resolve_blade_dir(
+    home: &std::path::Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    legacy_has_state: bool,
+    local_state_creatable: bool,
+) -> PathBuf {
+    // 1. Explicit override wins unconditionally.
+    if let Some(v) = env("BLADE_HOME").filter(|v| !v.trim().is_empty()) {
+        return PathBuf::from(v);
+    }
+    let legacy = home.join(".blade");
+    #[cfg(windows)]
+    {
+        return legacy;
+    }
+    #[cfg(not(windows))]
+    {
+        // 2. XDG_STATE_HOME, then 3. HOME/.local/state (existing or creatable).
+        let mut resolved = None;
+        if let Some(xdg) = env("XDG_STATE_HOME").filter(|v| !v.trim().is_empty()) {
+            resolved = Some(PathBuf::from(xdg).join("blade"));
+        } else if local_state_creatable {
+            resolved = Some(home.join(".local").join("state").join("blade"));
+        }
+        let resolved = resolved.unwrap_or_else(|| legacy.clone());
+        // Migration-free fallback: an existing install keeps its legacy dir.
+        if resolved != legacy && legacy_has_state {
+            return legacy;
+        }
+        resolved
+    }
+}
+
+/// Does `~/.blade` hold Bladebro state? (Any known artifact, not just a
+/// directory that happens to exist.)
+fn dir_has_state(legacy: &std::path::Path) -> bool {
+    if !legacy.is_dir() {
+        return false;
+    }
+    const MARKS: &[&str] = &[
+        ".fingerprint.json", "logins.json", "knowledge", ".warmed",
+        "profile", "profiles", "sessions", "artifacts", "downloads",
+        "cli.sock",
+    ];
+    MARKS.iter().any(|m| legacy.join(m).exists())
 }
 
 /// Create a directory and set restrictive permissions (0700 on Unix).
@@ -319,5 +388,81 @@ pub fn shutdown_child(child: &mut Child) {
         // Windows: no graceful signal. TerminateProcess is the only option.
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn env_of<'a>(map: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k: &str| map.get(k).map(|v| v.to_string())
+    }
+
+    #[test]
+    fn blade_home_wins_unconditionally() {
+        let home = std::path::Path::new("/home/u");
+        let mut env = HashMap::new();
+        env.insert("BLADE_HOME", "/custom/blade");
+        env.insert("XDG_STATE_HOME", "/xdg");
+        // Even with legacy state present, an explicit override must win.
+        assert_eq!(
+            resolve_blade_dir(home, &env_of(&env), true, true),
+            std::path::PathBuf::from("/custom/blade")
+        );
+    }
+
+    #[test]
+    fn xdg_state_home_is_second() {
+        let home = std::path::Path::new("/home/u");
+        let mut env = HashMap::new();
+        env.insert("XDG_STATE_HOME", "/xdg/state");
+        assert_eq!(
+            resolve_blade_dir(home, &env_of(&env), false, false),
+            std::path::PathBuf::from("/xdg/state/blade")
+        );
+    }
+
+    #[test]
+    fn local_state_default_for_fresh_installs() {
+        let home = std::path::Path::new("/home/u");
+        let empty: HashMap<&str, &str> = HashMap::new();
+        // A modern home (.local/state creatable) gets the XDG-style default.
+        assert_eq!(
+            resolve_blade_dir(home, &env_of(&empty), false, true),
+            std::path::PathBuf::from("/home/u/.local/state/blade")
+        );
+    }
+
+    #[test]
+    fn legacy_dir_with_state_wins_over_new_default() {
+        let home = std::path::Path::new("/home/u");
+        let empty: HashMap<&str, &str> = HashMap::new();
+        // An existing ~/.blade install must not be silently split: the
+        // migration-free fallback keeps the legacy dir.
+        assert_eq!(
+            resolve_blade_dir(home, &env_of(&empty), true, true),
+            std::path::PathBuf::from("/home/u/.blade")
+        );
+    }
+
+    #[test]
+    fn minimal_home_falls_back_to_legacy_and_ignores_empty_env() {
+        let home = std::path::Path::new("/home/u");
+        let mut env = HashMap::new();
+        // Empty overrides count as unset.
+        env.insert("BLADE_HOME", "");
+        env.insert("XDG_STATE_HOME", "");
+        // No .local anywhere: fall all the way back to the legacy default.
+        assert_eq!(
+            resolve_blade_dir(home, &env_of(&env), false, false),
+            std::path::PathBuf::from("/home/u/.blade")
+        );
+        // And with legacy state present it stays put either way.
+        assert_eq!(
+            resolve_blade_dir(home, &env_of(&env), true, true),
+            std::path::PathBuf::from("/home/u/.blade")
+        );
     }
 }

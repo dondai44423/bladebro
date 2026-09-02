@@ -38,7 +38,10 @@ pub async fn run() -> Result<()> {
     // 1. Operating system
     checks.push(check_os());
 
-    // 2. Chrome/Chromium
+    // 2. Data directory (where state resolves: BLADE_HOME/XDG/legacy)
+    checks.push(check_data_dir());
+
+    // 3. Chrome/Chromium
     checks.push(check_chrome());
 
     // 3. Chrome version (if found)
@@ -115,7 +118,7 @@ pub async fn run() -> Result<()> {
             if warns == 1 { "" } else { "s" }
         );
         println!();
-        ui::hint("Fix the failures above, then run bladebro -doc again.");
+        ui::hint("Fix the failures above, then run bladebro doctor again.");
     }
 
     Ok(())
@@ -142,6 +145,36 @@ fn check_os() -> Check {
         name: "Operating system",
         status: Status::Pass,
         detail: format!("{os} ({arch})"),
+        fix: None,
+    }
+}
+
+fn check_data_dir() -> Check {
+    let dir = crate::platform::blade_dir();
+    let home = crate::platform::home_dir().join(".blade");
+    let reason = if std::env::var("BLADE_HOME").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        "BLADE_HOME"
+    } else if std::env::var("XDG_STATE_HOME").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        if dir == home { "existing install kept on legacy dir" } else { "XDG_STATE_HOME" }
+    } else if dir == home {
+        // Legacy dir selected: either nothing state-worthy exists yet or the
+        // migration-free fallback kept an existing install put.
+        if home.join("profile").exists()
+            || home.join("logins.json").exists()
+            || home.join("knowledge").exists()
+            || home.join(".fingerprint.json").exists()
+        {
+            "existing install kept on legacy dir"
+        } else {
+            "legacy default (no .local/state)"
+        }
+    } else {
+        "XDG default"
+    };
+    Check {
+        name: "Data directory",
+        status: Status::Pass,
+        detail: format!("{} ({reason}; override with BLADE_HOME)", dir.display()),
         fix: None,
     }
 }
@@ -261,7 +294,11 @@ fn check_xvfb() -> Check {
 }
 
 fn check_profile_dir() -> Check {
-    let dir = crate::platform::blade_dir().join("profile");
+    // Honor BLADE_PROFILE_DIR: the effective profile root, not just the
+    // template inside the data dir.
+    let dir = std::env::var("BLADE_PROFILE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| crate::platform::blade_dir().join("profile"));
     if !dir.exists() {
         return Check {
             name: "Profile directory",
@@ -286,16 +323,15 @@ fn check_profile_dir() -> Check {
             name: "Profile directory",
             status: Status::Fail,
             detail: format!("{} (not writable: {e})", dir.display()),
-            fix: Some(format!(
-                "Fix permissions: chmod 700 {}",
-                crate::platform::blade_dir().display()
-            )),
+            fix: Some(format!("Fix permissions: chmod 700 {}", dir.display())),
         },
     }
 }
 
 fn check_stale_locks() -> Check {
-    let dir = crate::platform::blade_dir().join("profile");
+    let dir = std::env::var("BLADE_PROFILE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| crate::platform::blade_dir().join("profile"));
     let lock = dir.join("SingletonLock");
     if !lock.exists() {
         return Check {

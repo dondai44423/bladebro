@@ -764,12 +764,10 @@ mod tests {
 
     #[test]
     fn knowledge_base_roundtrip() {
-        let tmp = std::env::temp_dir().join(format!("bladebro-kb-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("BLADE_HOME", tmp.to_str().unwrap());
-
-        // load_shared uses platform::blade_dir() which respects BLADE_HOME... actually
-        // it might not. Let's test the core logic instead.
+        // NOTE: this test intentionally does NOT touch BLADE_HOME. Env vars
+        // are process-global and mutations race with parallel tests reading
+        // platform::blade_dir(); the BLADE_HOME resolution is covered by
+        // platform::tests (pure resolver) instead.
         let mut kb = KnowledgeBase::default();
         kb.learn_consent("example.com", "#onetrust-reject-all-handler", "onetrust");
         kb.learn_block_config("example.com", "images,fonts");
@@ -782,9 +780,6 @@ mod tests {
         assert_eq!(dk.block_config.as_deref(), Some("images,fonts"));
         assert_eq!(dk.timing.as_ref().unwrap().settle_ms, 800);
         assert_eq!(dk.visit_count, 1);
-
-        std::env::remove_var("BLADE_HOME");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
