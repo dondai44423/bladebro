@@ -824,10 +824,25 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
             }
         }
         "eval" => {
-            // eval <js-expression> — join remaining args so unquoted
-            // multi-word expressions aren't silently truncated.
-            if args.len() > 1 {
-                j["js"] = json!(args[1..].join(" "));
+            // eval <js-expression> [--ref eN] — join remaining args so
+            // unquoted multi-word expressions aren't truncated; --ref binds
+            // the matching element as `el` in the expression scope.
+            let mut js_parts: Vec<String> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--ref" => {
+                        i += 1;
+                        if let Some(v) = args.get(i) {
+                            j["ref"] = json!(v);
+                        }
+                    }
+                    s => js_parts.push(s.to_string()),
+                }
+                i += 1;
+            }
+            if !js_parts.is_empty() {
+                j["js"] = json!(js_parts.join(" "));
             }
         }
         "collect" => {
