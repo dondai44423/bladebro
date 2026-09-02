@@ -65,7 +65,9 @@ fn resolve_blade_dir(
     let legacy = home.join(".blade");
     #[cfg(windows)]
     {
-        return legacy;
+        // Windows has no XDG fallbacks; the flags exist for the Unix path.
+        let _ = (legacy_has_state, local_state_creatable);
+        legacy
     }
     #[cfg(not(windows))]
     {
