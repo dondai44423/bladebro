@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Fixed
+- **`act eval` got console-grade semantics.** IIFEs like `(function(){return 42})()`
+  returned `undefined` (a `contains("return")` heuristic silently discarded the
+  result) and multi-statement scripts were SyntaxErrors. Now: expression
+  wrapper first (CSP-safe, no eval), direct-eval wrapper on parse-time
+  SyntaxError — `var x=5; x+7` returns 12, const/arrow/throw all work, and
+  side-effectful code never double-runs. window.open returns no longer blow
+  up returnByValue; the new popup tab is reported. CLI: `act eval <js> --ref eN`
+  now works (the ref was glued into the JS before).
+- **Bare URLs navigate everywhere.** `nav example.com`, `act navigate
+  localhost:3000`, `see content wikipedia.org` used to fail with "Cannot
+  navigate to invalid URL" (CLI silently dropped non-http tokens, CDP needs
+  absolute URLs). The shared navigate now adds the scheme: localhost/
+  loopback/private IPs and explicit ports default to http://, public hosts to
+  https://, existing schemes untouched.
+- **Pre-nav heuristic no longer hijacks text args.** The URL positional
+  fallthrough misread `act eval el.href` as a navigation to https://el.href.
+  Textual actions (type/fill/click/eval/wait/...) are excluded from URL
+  pre-navigation, and `see extract auto` no longer navigates to "auto".
+- **Sessions guarded on missing origin.** `state save` on an error page
+  captured origin null and stored nothing; it now refuses with an actionable
+  hint. Session round-trip (cookie + localStorage) verified live.
+- **Run/batch step errors name the step.** `step 3 failed: ...` (1-based)
+  followed by the current page state, instead of a bare error.
+
+### Added
+- **XDG + BLADE_HOME data root (issue #20).** The data directory resolves
+  BLADE_HOME → $XDG_STATE_HOME/blade → $HOME/.local/state/blade →
+  $HOME/.blade. Migration-safe: an existing ~/.blade install keeps using it;
+  state is never split across two dirs. Windows keeps %USERPROFILE%\.blade.
+- **Doctor: 13 checks.** New: data-directory resolution (with the reason),
+  login-persistence sidecar health (cookie count + file permissions),
+  profile hygiene (orphaned session dirs + size, auto-reaped). The profile
+  checks now honor BLADE_PROFILE_DIR.
+
 ## [3.9.5] - 2026-08-27
 
 ### Fixed (proactive hardening — bugs that would surface later)
