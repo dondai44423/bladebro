@@ -585,6 +585,11 @@ fn parse_see_args(args: &[String]) -> Value {
             s if mode.is_empty() => {
                 mode = s.to_string();
             }
+            s if mode == "extract"
+                && matches!(s, "auto" | "links" | "forms" | "json") => {
+                // extract type token, NOT a URL: `see extract auto` must not
+                // navigate to "auto".
+            }
             s if url.is_empty() => {
                 url = s.to_string();
             }
