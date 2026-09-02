@@ -42,12 +42,23 @@ if ! grep -q "^## \[Unreleased\]" CHANGELOG.md; then
     exit 1
 fi
 python3 - "$VERSION" "$TODAY" << 'PYEOF'
-import re, sys
+import sys
 version, today = sys.argv[1], sys.argv[2]
 with open("CHANGELOG.md") as f:
     text = f.read()
+# RENAME the [Unreleased] heading in place so its content follows the
+# new version heading. (The old insert-a-heading-above approach left a
+# duplicate [Unreleased] holding all the content, tethering releases to
+# a phantom section that eventually produced two [Unreleased] blocks.)
 new = text.replace(
     "## [Unreleased]",
+    f"## [{version}] - {today}",
+    1,
+)
+assert new != text, "[Unreleased] heading not found"
+# Fresh empty [Unreleased] on top for the next dev cycle (convention).
+new = new.replace(
+    f"## [{version}] - {today}",
     f"## [Unreleased]\n\n## [{version}] - {today}",
     1,
 )
