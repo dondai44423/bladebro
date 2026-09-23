@@ -85,11 +85,11 @@ That's it. No Rust, no compilation, no dependencies. The npm package ships a pre
 
 | Platform | Package | Size | Status |
 |---|---|---|---|
-| Linux x86_64 | `bladebro-linux-x64` | 5.7 MB | Live-verified |
-| Linux ARM64 (aarch64) | `bladebro-linux-arm64` | 5.1 MB | Not live-verified |
-| Windows x86_64 | `bladebro-windows-x64` | 5.2 MB | Live-verified |
-| macOS Intel | `bladebro-darwin-x64` | 5.2 MB | CI-verified |
-| macOS Apple Silicon | `bladebro-darwin-arm64` | 4.8 MB | CI-verified |
+| Linux x86_64 | `bladebro-linux-x64` | 6.1 MB | Live-verified |
+| Linux ARM64 (aarch64) | `bladebro-linux-arm64` | 5.3 MB | Not live-verified |
+| Windows x86_64 | `bladebro-windows-x64` | 5.7 MB | Live-verified |
+| macOS Intel | `bladebro-darwin-x64` | 5.7 MB | CI-verified |
+| macOS Apple Silicon | `bladebro-darwin-arm64` | 5.2 MB | CI-verified |
 
 npm resolves the correct binary automatically via `os`/`cpu` fields. Users only download the binary for their platform. Zero postinstall scripts, zero warnings.
 
@@ -319,7 +319,7 @@ Navigate and act already return page state. Use `see` for:
 
 **Collect (`act collect`)** — native scroll+dedupe loop for infinite feeds. Auto-extract, dedupe by URL/title, scroll, repeat until max or no new items. ONE call, ONE artifact. Verified: 80 items from infinite-scroll test page, 0 duplicates.
 
-**Big data goes to files.** Extracts over ~6KB are written to `~/.blade/artifacts/` and the response gives you the path + preview. Read the file.
+**Big data goes to files.** Extracts over ~6KB are written to `artifacts/` under your data root and the response gives you the path + preview. Read the file.
 
 ### `state` — cookies, storage, tabs, sessions, blocking
 
@@ -423,7 +423,7 @@ Or via environment variable: `BLADE_NO_COMPRESS=1` disables at startup.
 
 **Learns from every session. Compounds with use. Never degrades.**
 
-Two subsystems, both persisted in `~/.blade/knowledge/`, both surviving machine restarts:
+Two subsystems, both persisted in `knowledge/` under your data root, both surviving machine restarts:
 
 ### Domain knowledge base
 
@@ -510,7 +510,7 @@ Run `bladebro audit` to verify your own setup.
 | Runtime | None (static binary) | Node.js daemon | Node.js | Node.js |
 | Process model | Long-lived daemon (stateful) | Long-lived daemon | Stateless | Stateless |
 | Page model | Persistent, ref-stable, diff-first | Accessibility tree snapshot | None | None |
-| Binary size | 5.7 MB | ~50 MB (node + deps) | ~50 MB (node + deps) | ~50 MB (node + deps) |
+| Binary size | 6.1 MB | ~50 MB (node + deps) | ~50 MB (node + deps) | ~50 MB (node + deps) |
 | Install | `npm install -g bladebro` | npm + agent-browser install | npm + playwright install | npm |
 | Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 

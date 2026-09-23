@@ -161,7 +161,9 @@ async function run() {
         postMessage({ ua: navigator.userAgent, gl });
       };`;
       const w = new Worker(URL.createObjectURL(new Blob([code], { type: "application/javascript" })));
-      const to = setTimeout(() => resolve({ ua: "timeout", gl: null }), 4000);
+      // 10s window: cold caches / a busy machine could starve a worker's
+      // startup and produce a false `worker-ua: timeout` FAIL (4s was tight).
+      const to = setTimeout(() => resolve({ ua: "timeout", gl: null }), 10000);
       w.onmessage = (ev) => { clearTimeout(to); w.terminate(); resolve(ev.data); };
       w.postMessage(0);
     });

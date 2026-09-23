@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page. A failed pick is also no longer misclassified as a missing element —
   that triggered a pointless DOM-drift heal-retry which dropped the list and
   churned the ref.
+- **`bladebro audit`'s worker check no longer false-FAILs on a busy machine.**
+  The vector suite allowed a blob worker 4s to reply; under cold-start load a
+  worker could starve past that and report a spurious
+  `FAIL worker-ua: timeout` (35/36 instead of the real 36/36). The window is
+  now 10s — a genuinely blocked worker still fails, just with an honest
+  window.
 
 ### Added
 - **JS syntax guard for the injected capture script.** A `node --check` test
