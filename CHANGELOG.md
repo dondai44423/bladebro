@@ -43,6 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FAIL worker-ua: timeout` (35/36 instead of the real 36/36). The window is
   now 10s — a genuinely blocked worker still fails, just with an honest
   window.
+- **`extract=auto` list detection could crown a script bundle as "the list".**
+  On a hydrating Reddit feed an invisible container won with raw JS source
+  (`SML.load([...])`) as the item title. Quality gates now require list items
+  to be visible (rendered text, a link, or an image), scoring uses visible
+  text only, and ad-post wrappers are skipped — when nothing qualifies the
+  result is an honest empty list instead of garbage. A bounded settle+retry
+  absorbs hydration races (only while the page is still loading; quiet pages
+  pay nothing).
+- **GitHub selectors refreshed for the current UI.** Stars/forks now come
+  from the counter elements (`#repo-stars-counter-star`,
+  `#repo-network-counter`) — the old `a[href$="/stargazers"]` link no longer
+  exists; topics read `a[href^="/topics/"]`; issue rows read
+  `a[data-testid="issue-pr-title-link"]`, label links and octicon state;
+  repo descriptions fall back to `og:description` (repo-slug suffix
+  stripped).
 
 ### Added
 - **JS syntax guard for the injected capture script.** A `node --check` test
@@ -108,23 +123,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     nav, 3× click+read, exit — is ~3.2s in ONE call). The `wait` action
     keeps full time-based semantics (verified: an unreachable condition
     still consumes its whole budget).
-
-### Fixed
-- **`extract=auto` list detection could crown a script bundle as "the list".**
-  On a hydrating Reddit feed an invisible container won with raw JS source
-  (`SML.load([...])`) as the item title. Quality gates now require list items
-  to be visible (rendered text, a link, or an image), scoring uses visible
-  text only, and ad-post wrappers are skipped — when nothing qualifies the
-  result is an honest empty list instead of garbage. A bounded settle+retry
-  absorbs hydration races (only while the page is still loading; quiet pages
-  pay nothing).
-- **GitHub selectors refreshed for the current UI.** Stars/forks now come
-  from the counter elements (`#repo-stars-counter-star`,
-  `#repo-network-counter`) — the old `a[href$="/stargazers"]` link no longer
-  exists; topics read `a[href^="/topics/"]`; issue rows read
-  `a[data-testid="issue-pr-title-link"]`, label links and octicon state;
-  repo descriptions fall back to `og:description` (repo-slug suffix
-  stripped).
 
 ## [3.9.6] - 2026-09-02
 
