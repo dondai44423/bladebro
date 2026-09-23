@@ -3,6 +3,8 @@
 # One command does everything: version bump, build all platforms,
 # test, clippy, tag, push, GitHub release with ALL 4 binaries,
 # and publish to npm.
+# Resource-capped: re-execs under half the CPUs at low priority + sccache,
+# so the machine stays usable while it runs (see status.md workflow).
 #
 # Usage: ./release.sh <version>     e.g. ./release.sh 3.0.4
 #
@@ -12,6 +14,9 @@
 
 set -euo pipefail
 
+# Absolute self-path for the resource-cap re-exec (works from any cwd).
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
     echo "usage: ./release.sh <version>  (e.g. 3.0.4)" >&2
@@ -19,6 +24,31 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 cd "$(dirname "$0")"
+
+# ── Resource cap ──────────────────────────────────────────────────────
+# Re-exec under half the CPUs at low priority so the machine stays usable
+# (browser/editor keep their share). Children inherit the cap; the guard
+# prevents a re-exec loop.
+if [[ -z "${BLADE_RELEASE_CAPPED:-}" ]]; then
+    export BLADE_RELEASE_CAPPED=1
+    cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+    half=$(( cpus / 2 )); if (( half < 2 )); then half=2; fi
+    cap=()
+    if command -v nice   >/dev/null 2>&1; then cap+=(nice -n 10); fi
+    if command -v ionice >/dev/null 2>&1; then cap+=(ionice -c2 -n6); fi
+    if command -v taskset >/dev/null 2>&1; then cap+=(taskset -c "0-$((half - 1))"); fi
+    if (( ${#cap[@]} > 0 )); then
+        exec "${cap[@]}" "$SELF" "$@"
+    fi
+fi
+
+# ── Parallelism + compiler cache ──────────────────────────────────────
+# The local (gitignored) .cargo/config.toml sets the same; these exports
+# keep the script self-sufficient on a fresh checkout.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
+if command -v sccache >/dev/null 2>&1; then
+    export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+fi
 
 echo "=== bladebro release v$VERSION ==="
 
@@ -199,7 +229,9 @@ done
 if [[ -f scripts/publish-npm.sh ]]; then
     echo ""
     echo "=== Publishing to npm ==="
-    bash scripts/publish-npm.sh
+    # --no-build: step [6/9] just built every binary; the script only copies
+    # + verifies them now (the duplicate 5-target rebuild is gone).
+    bash scripts/publish-npm.sh --no-build
 fi
 
 echo ""

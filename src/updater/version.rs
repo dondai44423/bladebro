@@ -421,21 +421,9 @@ mod tests {
 
     #[test]
     fn find_asset_fuzzy_match() {
-        // Simulate a release with a differently-named asset.
-        let release = Release {
-            tag_name: "v3.0.3".into(),
-            assets: vec![Asset {
-                name: "bladebro_linux_amd64_v3".into(), // non-standard naming
-                browser_download_url: "https://example.com".into(),
-                size: 5_600_000,
-            }],
-            body: None,
-            draft: false,
-            prerelease: false,
-        };
-        // On Linux x86_64, "linux" matches but "amd64" doesn't match "x64" or "x86_64".
-        // This should NOT match (amd64 is not in our keyword list).
-        // Fix the test: use a name that contains our keywords.
+        // A non-standard name like "bladebro_linux_amd64_v3" would NOT match:
+        // "linux" matches, but "amd64" is not in our keyword list.
+        // Use a name that contains our keywords.
         let release2 = Release {
             tag_name: "v3.0.3".into(),
             assets: vec![Asset {

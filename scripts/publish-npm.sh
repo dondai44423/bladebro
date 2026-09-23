@@ -1,10 +1,31 @@
 #!/usr/bin/env bash
 # ── publish-npm.sh: Build binary, publish platform + main packages ─────
 # Run from project root:  ./scripts/publish-npm.sh
+#   --no-build   skip building; copy the binaries release.sh just built
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SELF="$SCRIPT_DIR/$(basename "$0")"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
+
+# ── resource cap: same policy as release.sh (skip when already capped) ─
+if [[ -z "${BLADE_RELEASE_CAPPED:-}" ]]; then
+    export BLADE_RELEASE_CAPPED=1
+    cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+    half=$(( cpus / 2 )); if (( half < 2 )); then half=2; fi
+    cap=()
+    if command -v nice   >/dev/null 2>&1; then cap+=(nice -n 10); fi
+    if command -v ionice >/dev/null 2>&1; then cap+=(ionice -c2 -n6); fi
+    if command -v taskset >/dev/null 2>&1; then cap+=(taskset -c "0-$((half - 1))"); fi
+    if (( ${#cap[@]} > 0 )); then
+        exec "${cap[@]}" "$SELF" "$@"
+    fi
+fi
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
+if command -v sccache >/dev/null 2>&1; then
+    export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+fi
 
 # ── version sync: Cargo.toml is the single source of truth ───────────
 VERSION=$(grep '^version' Cargo.toml | head -1 | awk -F'"' '{print $2}')
@@ -32,43 +53,43 @@ open(p, 'a').write('\n')
   fi
 done
 
-# ── build all platform binaries ─────────────────────────────────────
-echo "Building binaries..."
+# ── binaries: build (unless --no-build), then copy into the packages ──
+# release.sh calls this script with --no-build right after it built all
+# five binaries itself, so the duplicate second build pass is gone.
+SKIP_BUILD=0
+if [[ "${1:-}" == "--no-build" ]]; then SKIP_BUILD=1; fi
 
-# Linux x86_64 (native)
-cargo build --release
-cp target/release/bladebro npm/bladebro-linux-x64/bladebro
-chmod +x npm/bladebro-linux-x64/bladebro
-
-# Linux arm64 (via cargo-zigbuild)
-if command -v cargo-zigbuild &>/dev/null; then
-  cargo zigbuild --release --target aarch64-unknown-linux-gnu
-  cp target/aarch64-unknown-linux-gnu/release/bladebro npm/bladebro-linux-arm64/bladebro
-  chmod +x npm/bladebro-linux-arm64/bladebro
+if [[ "$SKIP_BUILD" == "0" ]]; then
+  echo "Building binaries (native + 4 cross targets)..."
+  cargo build --release
+  if command -v cargo-zigbuild >/dev/null 2>&1; then
+    cargo zigbuild --release --target aarch64-unknown-linux-gnu
+    cargo zigbuild --release --target x86_64-pc-windows-gnu
+    cargo zigbuild --release --target x86_64-apple-darwin
+    cargo zigbuild --release --target aarch64-apple-darwin
+  else
+    echo "WARNING: cargo-zigbuild not found — cross binaries will not be rebuilt."
+  fi
 else
-  echo "WARNING: cargo-zigbuild not found. Skipping Linux arm64 build."
+  echo "Using the binaries from the current release build (--no-build)."
 fi
 
-# Windows x86_64 (via cargo-zigbuild + zig linker)
-if command -v cargo-zigbuild &>/dev/null; then
-  cargo zigbuild --release --target x86_64-pc-windows-gnu
-  cp target/x86_64-pc-windows-gnu/release/bladebro.exe npm/bladebro-windows-x64/bladebro.exe
-else
-  echo "WARNING: cargo-zigbuild not found. Skipping Windows build."
-fi
+# Copy every binary into its package. All five platforms are mandatory —
+# a missing binary is a hard error, never a partial publish.
+copy_bin() {
+  if [[ ! -f "$1" ]]; then
+    echo "ERROR: missing $1 — build all platforms first (cargo zigbuild must be installed)" >&2
+    exit 1
+  fi
+  cp "$1" "$2"
+  chmod +x "$2" 2>/dev/null || true
+}
+copy_bin target/release/bladebro npm/bladebro-linux-x64/bladebro
 
-# macOS x86_64 + arm64 (via cargo-zigbuild + zig)
-if command -v cargo-zigbuild &>/dev/null; then
-  cargo zigbuild --release --target x86_64-apple-darwin
-  cp target/x86_64-apple-darwin/release/bladebro npm/bladebro-darwin-x64/bladebro
-  chmod +x npm/bladebro-darwin-x64/bladebro
-
-  cargo zigbuild --release --target aarch64-apple-darwin
-  cp target/aarch64-apple-darwin/release/bladebro npm/bladebro-darwin-arm64/bladebro
-  chmod +x npm/bladebro-darwin-arm64/bladebro
-else
-  echo "WARNING: cargo-zigbuild not found. Skipping macOS builds."
-fi
+copy_bin target/aarch64-unknown-linux-gnu/release/bladebro npm/bladebro-linux-arm64/bladebro
+copy_bin target/x86_64-pc-windows-gnu/release/bladebro.exe npm/bladebro-windows-x64/bladebro.exe
+copy_bin target/x86_64-apple-darwin/release/bladebro npm/bladebro-darwin-x64/bladebro
+copy_bin target/aarch64-apple-darwin/release/bladebro npm/bladebro-darwin-arm64/bladebro
 
 # ── publish platform packages ───────────────────────────────────────
 echo "Publishing platform packages..."
