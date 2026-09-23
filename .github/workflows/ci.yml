@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    # Docs-only pushes don't need CI — see status.md §0/§4 CI discipline.
+    paths-ignore: &docs-ignore
+      - "**.md"
+      - "Assets/**"
+      - "LICENSE"
+      - "stealth-bench-sites.csv"
+      - ".gitignore"
   pull_request:
     branches: [main]
+    paths-ignore: *docs-ignore
 
 env:
   CARGO_TERM_COLOR: always
