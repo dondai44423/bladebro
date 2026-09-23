@@ -4,12 +4,10 @@
 //! against a live browser. The real product surface is the MCP server (added
 //! later); the CLI stays as a direct-use / debugging path.
 
-use std::process::ExitCode;
-
 use bladebro::cdp;
 use bladebro::Result;
 
-fn main() -> ExitCode {
+fn main() {
     // Initialize structured logging; respect RUST_LOG.
     // In MCP mode, default to warn only — info logs leak to the agent's
     // TUI via stderr. RUST_LOG still overrides if explicitly set.
@@ -26,10 +24,11 @@ fn main() -> ExitCode {
         .init();
 
     let code = match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => 0,
         Err(e) => {
+            let code = if matches!(e, bladebro::BladeError::Usage(_)) { 2 } else { 1 };
             eprintln!("bladebro: {e}");
-            ExitCode::FAILURE
+            code
         }
     };
     // See exit_immediately: a parked stdin read hangs
@@ -52,11 +51,8 @@ fn main() -> ExitCode {
 /// killed, profile synced, session dir removed) — the only
 /// remaining state is in-memory. Skipping the runtime drop
 /// is safe.
-fn exit_immediately(code: ExitCode) -> ! {
-    std::process::exit(match code {
-        ExitCode::SUCCESS => 0,
-        _ => 1,
-    });
+fn exit_immediately(code: i32) -> ! {
+    std::process::exit(code);
 }
 
 fn run() -> Result<()> {
@@ -91,7 +87,7 @@ fn run() -> Result<()> {
                 port_given = true;
             }
             "-h" | "--help" => {
-                print_usage();
+                print!("{}", bladebro::cli::help_text());
                 return Ok(());
             }
             "-u" | "-doc" | "-v" | "--version" | "--rollback" if cmd.is_none() => {
@@ -135,9 +131,8 @@ fn run() -> Result<()> {
     // an error.
     let is_known = is_update_cmd || is_cli_cmd || is_debug_cmd || cmd == "mcp";
     if !is_known {
-        eprintln!("Unknown command: {cmd}\n");
-        print_usage();
-        std::process::exit(1);
+        eprintln!("Unknown command: {cmd}\nRun 'bladebro help' for the command list.");
+        std::process::exit(2);
     }
 
     // S1: the mcp daemon defaults to the zero-port pipe transport (Unix).
@@ -207,10 +202,8 @@ fn run() -> Result<()> {
         "audit" => rt.block_on(with_browser_guard(&mut browser, || cmd_audit(&base))),
         _ => {
             // Unknown command: NEVER launch a browser (it used to!), and
-            // exit non-zero so scripts can detect the failure.
-            eprintln!("Unknown command: {cmd}\n");
-            print_usage();
-            return Err(bladebro::BladeError::Other(format!("unknown command: {cmd}")));
+            // exit 2 as a usage error (see the exit-code contract in cli.rs).
+            Err(bladebro::BladeError::Usage(format!("unknown command: {cmd}")))
         }
     };
     // Exit HERE, before `rt` drops: the MCP server reads
@@ -219,10 +212,11 @@ fn run() -> Result<()> {
     // Runtime::drop waits for it forever. All teardown is
     // complete at this point; skip the runtime drop.
     match result {
-        Ok(()) => exit_immediately(ExitCode::SUCCESS),
+        Ok(()) => exit_immediately(0),
         Err(e) => {
+            let code = if matches!(e, bladebro::BladeError::Usage(_)) { 2 } else { 1 };
             eprintln!("bladebro: {e}");
-            exit_immediately(ExitCode::FAILURE);
+            exit_immediately(code);
         }
     }
 }
@@ -626,13 +620,3 @@ async fn cmd_audit(base: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_usage() {
-    eprintln!(
-        "bladebro — agentic browser driver for AI\n\n\
-         USAGE:\n    bladebro <COMMAND> [OPTIONS]\n\n\
-         COMMANDS:\n    probe      connect to a browser, enable core domains, round-trip a command\n    targets    list CDP targets\n    version    print /json/version\n    nav <url>  navigate the first page tab and wait for frameNavigated\n    see [url]  capture the page and print the agent view + a recapture delta\n    act <sub> <args...> [url]  perform an action and show the delta\n    state <sub> <args...>  inspect/modify cookies, storage, and tabs\n    mcp        run the MCP server (stdio JSON-RPC)\n    audit      run stealth vectors + boot self-check, print scorecard\n    help       show this message\n\n\
-         UPDATE HUB:\n    update, -u         check for updates and install\n    doctor, -doc       diagnose system, suggest fixes\n    rollback           restore previous version\n    -v, --version      show version + update status\n\n\
-         OPTIONS:\n    --host <h>   browser debug host (default 127.0.0.1)\n    --port <p>   browser debug port (default: auto-launch Chrome)\n\n\
-         With no --port, Bladebro finds Chrome, launches it with stealth flags,\n         and manages its lifecycle. Set CHROME_PATH to override the binary location.\n         To connect to an already-running Chrome, pass --port 9222."
-    );
-}

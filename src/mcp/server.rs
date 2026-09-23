@@ -1203,7 +1203,18 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let opt = args.get("option").and_then(|o| o.as_str())
                 .or_else(|| args.get("text").and_then(|t| t.as_str()))
                 .unwrap_or("");
-            Action::Select { ref_id: ref_id.into(), option: opt.into() }
+            // Label/role/nth addressing works here like click/type. The old
+            // arm used ref only, so `act select "Pet" cat` resolved to an
+            // EMPTY ref and failed with "stale ref: " (caught live).
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                resolve_text_target(page, label, rf, nth).await?
+            } else {
+                return Err(BladeError::Other("select requires 'ref' or 'label'".into()));
+            };
+            Action::Select { ref_id: resolved, option: opt.into() }
         }
         "press" => Action::Press { key: key.into() },
         "scroll" => Action::Scroll { dx, dy },
@@ -2427,7 +2438,17 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             let opt = step.get("option").and_then(|o| o.as_str())
                 .or_else(|| step.get("text").and_then(|t| t.as_str()))
                 .unwrap_or("");
-            Ok(Action::Select { ref_id: ref_id.into(), option: opt.into() })
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                resolve_text_target(page, label, rf, nth).await?
+            } else {
+                return Err(crate::error::BladeError::Other(
+                    "select step requires 'ref' or 'label'".into(),
+                ));
+            };
+            Ok(Action::Select { ref_id: resolved, option: opt.into() })
         }
         "press" => Ok(Action::Press { key: key.into() }),
         "scroll" => Ok(Action::Scroll { dx, dy }),
@@ -3208,6 +3229,13 @@ pub async fn handle_vision(
 ) -> std::result::Result<Value, BladeError> {
     let marks = args.get("marks").and_then(|m| m.as_bool()).unwrap_or(false);
     let mut note = String::new();
+
+    // A tab that is not the frontmost one can stall captureScreenshot —
+    // Chromium throttles occluded/background renderers, so the call burns
+    // its full CDP timeout and vision fails (reproduced live: vision right
+    // after open-tab timed out at 30s, twice, on the new tab). Activate
+    // first; best-effort (fails harmlessly when the target is mid-detach).
+    let _ = page.cdp_ref().send("Page.bringToFront", None).await;
 
     if marks {
         // V14: Set-of-Marks. Paint numbered ref badges on

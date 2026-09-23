@@ -306,17 +306,21 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
         }
 
         StateOp::OpenTab { url } => {
+            // Bare hosts must work here like everywhere else — a scheme-less
+            // URL ("localhost:3000") leaves a stuck tab (Chrome reads
+            // "localhost:" as the scheme).
+            let url = crate::page::with_scheme(url);
             let res = cdp
                 .send(
                     "Target.createTarget",
-                    Some(json!({ "url": url })),
+                    Some(json!({ "url": url.as_str() })),
                 )
                 .await?;
             let target_id = res
                 .get("targetId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| BladeError::Other("no targetId in response".into()))?;
-            Ok(format!("✓ opened tab {target_id}: {}", truncate(url, 60)))
+            Ok(format!("✓ opened tab {target_id}: {}", truncate(&url, 60)))
         }
 
         StateOp::CloseTab { target_id } => {

@@ -804,9 +804,14 @@ impl Page {
     /// target, and the page session may be dead exactly when we need this
     /// (dead-tab recovery).
     pub async fn open_tab_target(&self, url: &str) -> Result<String> {
+        // Bare hosts must work here exactly like `nav`: Target.createTarget
+        // with a scheme-less URL ("localhost:3000/x") never loads — Chrome
+        // reads "localhost:" as the scheme — leaving a stuck about:blank tab
+        // whose screenshot then burns its full CDP timeout (reproduced live).
+        let url = with_scheme(url);
         if let Some(bc) = &self.browser_client {
             let res = bc
-                .send("Target.createTarget", Some(json!({ "url": url })))
+                .send("Target.createTarget", Some(json!({ "url": url.as_str() })))
                 .await?;
             return res
                 .get("targetId")
@@ -821,7 +826,7 @@ impl Page {
             .ok_or_else(|| BladeError::Other("browser has no webSocketDebuggerUrl".into()))?;
         let client = CdpClient::connect(&ws).await?;
         let res = client
-            .send("Target.createTarget", Some(json!({ "url": url })))
+            .send("Target.createTarget", Some(json!({ "url": url.as_str() })))
             .await?;
         res.get("targetId")
             .and_then(|v| v.as_str())
@@ -1574,7 +1579,7 @@ fn extract_domain(url: &str) -> String {
 /// http:// (dev servers rarely have certs), public hosts to https://.
 /// URLs that already carry a scheme (http/https/about/file/data/blob/...) are
 /// left untouched.
-fn with_scheme(url: &str) -> String {
+pub(crate) fn with_scheme(url: &str) -> String {
     let u = url.trim();
     if u.is_empty()
         || u.contains("://")

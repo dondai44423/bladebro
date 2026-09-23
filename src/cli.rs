@@ -12,7 +12,16 @@
 //! - **One-shot**: if no daemon is running, each command launches Chrome,
 //!   runs, and exits.
 //!
-//! `--json` flag: structured output for AI agents. Human-readable by default.
+//! Agent contract (v3.9.7):
+//! - `bladebro help [--json]` is the single self-teaching surface: the JSON
+//!   form carries the same tool schemas as MCP `tools/list` plus CLI-only
+//!   details (usage, examples, exit codes, stdin/@file payloads).
+//! - `--json` on any command prints ONE machine-readable object on stdout:
+//!   `{"ok", "is_error", "text"}` (+ `"image_path"` for vision).
+//! - Exit codes: 0 ok, 1 command ran but failed, 2 usage error.
+//! - Flags mirror the MCP schema fields 1:1 (`--ref`, `--label`, `--text`,
+//!   …) and are accepted anywhere; unknown flags are loud errors, never
+//!   silently dropped.
 
 
 use serde_json::{json, Value};
@@ -193,11 +202,21 @@ fn daemon_running() -> bool {
 }
 
 /// Send a tool call to the daemon over Unix socket.
-#[cfg(unix)]
+///
+/// Hardening: the read has a timeout (`BLADE_CMD_TIMEOUT` seconds, default
+/// 300). Before this, a wedged daemon left the client blocking forever —
+/// an agent's shell call hung until its harness killed it, with no output
+/// and no way to tell "still working" from "dead".
 #[cfg(unix)]
 fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
+
+    let timeout_secs: u64 = std::env::var("BLADE_CMD_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(300);
 
     let mut stream = UnixStream::connect(socket_path())
         .map_err(|e| BladeError::Other(format!("daemon not running: {e}")))?;
@@ -206,9 +225,25 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
     writeln!(stream, "{req}")?;
     stream.flush()?;
 
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(timeout_secs)));
+
     let mut resp = String::new();
-    stream.read_to_string(&mut resp)
-        .map_err(|e| BladeError::Other(format!("failed to read daemon response: {e}")))?;
+    match stream.read_to_string(&mut resp) {
+        Ok(_) => {}
+        Err(e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            return Err(BladeError::Other(format!(
+                "no daemon response after {timeout_secs}s — the command may still be running.\n\
+                 Check with 'bladebro state tabs', cancel with 'bladebro stop', or raise the\n\
+                 client limit with BLADE_CMD_TIMEOUT=<seconds>."
+            )));
+        }
+        Err(e) => {
+            return Err(BladeError::Other(format!("failed to read daemon response: {e}")));
+        }
+    }
 
     let v: Value = serde_json::from_str(&resp)
         .map_err(|e| BladeError::Other(format!("invalid daemon response: {e}")))?;
@@ -226,6 +261,12 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
 }
 
 /// Main CLI entry point. Called from main.rs.
+///
+/// Exit-code contract (documented in `help`):
+/// - 0: the command ran successfully
+/// - 1: the command ran but failed (tool error, daemon failure) — details
+///   are in the output text
+/// - 2: usage error (unknown command/flag/argument) — fix the command
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let json_mode = args.iter().any(|a| a == "--json");
     let no_daemon = args.iter().any(|a| a == "--no-daemon");
@@ -233,86 +274,152 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     // Chrome instead of the local daemon / a freshly launched one. main.rs
     // parses these globally and (since issue #16's fix) re-injects them here.
     let (args, external) = extract_endpoint(args);
-    let args: Vec<String> = args.iter()
+    let args: Vec<String> = args
+        .iter()
         .filter(|a| a != &"--json" && a != &"--no-daemon")
         .cloned()
         .collect();
 
+    match run_cli_inner(&args, json_mode, no_daemon, external).await {
+        Ok(()) => Ok(()),
+        // Machine-readable failures also land on stdout: an agent parsing
+        // --json output must never get an empty read on a failed command.
+        Err(e) => {
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({ "ok": false, "is_error": true, "text": e.to_string() })
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn run_cli_inner(
+    args: &[String],
+    json_mode: bool,
+    no_daemon: bool,
+    external: Option<String>,
+) -> Result<()> {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     let rest = &args[1.min(args.len())..];
+
+    // `--help`/`-h` anywhere in a command's args → that command's help.
+    if cmd != "help" && rest.iter().any(|a| a == "--help" || a == "-h") {
+        if let Some(text) = command_help_text(cmd) {
+            print!("{text}");
+            return Ok(());
+        }
+    }
 
     match cmd {
         "daemon" => run_daemon().await,
         "stop" => stop_daemon().await,
         "nav" => {
-            let url = rest.first().cloned().unwrap_or_default();
-            let args = json!({ "action": "navigate", "url": url });
-            run_tool("act", &args, json_mode, no_daemon, external.clone()).await
+            let parsed = parse_nav_args(rest)?;
+            run_tool("act", &parsed, json_mode, no_daemon, external).await
         }
         "see" => {
-            let parsed = parse_see_args(rest);
-            run_tool("see", &parsed, json_mode, no_daemon, external.clone()).await
+            let parsed = parse_see_args(rest)?;
+            run_tool("see", &parsed, json_mode, no_daemon, external).await
         }
         "act" => {
             let parsed = parse_act_args(rest)?;
-            run_tool("act", &parsed, json_mode, no_daemon, external.clone()).await
+            run_tool("act", &parsed, json_mode, no_daemon, external).await
         }
         "state" => {
             let parsed = parse_state_args(rest)?;
-            run_tool("state", &parsed, json_mode, no_daemon, external.clone()).await
+            run_tool("state", &parsed, json_mode, no_daemon, external).await
         }
         "run" => {
             let parsed = parse_run_args(rest)?;
-            run_tool("run", &parsed, json_mode, no_daemon, external.clone()).await
+            run_tool("run", &parsed, json_mode, no_daemon, external).await
         }
         "vision" => {
-            let marks = rest.iter().any(|a| a == "--marks");
-            let args = json!({ "marks": marks });
-            run_tool("vision", &args, json_mode, no_daemon, external.clone()).await
+            let parsed = parse_vision_args(rest)?;
+            run_tool("vision", &parsed, json_mode, no_daemon, external).await
         }
         "help" => {
             if json_mode {
-                print_help_json();
+                print!("{}", help_json(rest.first().map(|s| s.as_str()))?);
             } else if rest.is_empty() {
-                print_cli_help();
+                print!("{}", help_text());
             } else {
-                print_command_help(&rest[0]);
+                match command_help_text(&rest[0]) {
+                    Some(t) => print!("{t}"),
+                    None => {
+                        return Err(BladeError::Usage(format!(
+                            "unknown command '{}' — run 'bladebro help' for the command list",
+                            rest[0]
+                        )))
+                    }
+                }
             }
             Ok(())
         }
-        _ => {
-            // Unknown command: fail loudly with a non-zero exit code.
-            // (It used to print help and exit 0 — scripts could not
-            // detect the typo, and via main.rs it even launched a
-            // whole Chrome first.)
-            eprintln!("Unknown command: {cmd}\nRun 'bladebro help' for the command list.");
-            Err(BladeError::Other(format!("unknown command: {cmd}")))
-        }
+        _ => Err(BladeError::Usage(format!(
+            "unknown command: {cmd} — run 'bladebro help' for the command list"
+        ))),
     }
 }
 
-/// Run a tool: auto-start daemon if not running, connect to it.
+/// Run a tool: auto-start the daemon if not running, connect to it.
 /// One-shot mode only with --no-daemon.
-async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool, external: Option<String>) -> Result<()> {
+///
+/// Exit hardening: a tool result with `is_error` prints normally and then
+/// exits 1 — the old CLI exited 0 on tool errors, so scripts and agents
+/// could not tell a failed click from a successful one.
+///
+/// Failure handling is deliberately two-tiered:
+/// - the socket connect fails → the daemon is dead; restart it and retry;
+/// - the socket connect succeeds but the call fails (e.g. client timeout) →
+///   the daemon is alive and may still be running the command; never kill
+///   or bypass it, surface the error instead.
+async fn run_tool(
+    tool: &str,
+    args: &Value,
+    json_mode: bool,
+    no_daemon: bool,
+    external: Option<String>,
+) -> Result<()> {
     // Explicit --host/--port: drive that already-running browser directly.
     // Skip the local daemon entirely (never launch or own Chrome here).
     if let Some(base) = external {
-        return run_connected(tool, args, json_mode, &base, true).await;
+        let result = run_connected(tool, args, &base, true).await?;
+        let code = print_result(&result, json_mode);
+        if code != 0 {
+            exit_with(code);
+        }
+        return Ok(());
     }
-    // Unless --no-daemon, ensure a daemon is running.
+
     if !no_daemon {
         #[cfg(unix)]
         {
-            // Try existing daemon first.
+            // Try the running daemon first.
             if daemon_running() {
                 match send_to_daemon(tool, args) {
                     Ok(result) => {
-                        print_result(&result, json_mode);
+                        let code = print_result(&result, json_mode);
+                        if code != 0 {
+                            exit_with(code);
+                        }
                         return Ok(());
                     }
                     Err(e) => {
-                        eprintln!("[bladebro] daemon connection failed ({e})");
-                        let _ = std::fs::remove_file(socket_path());
+                        let msg = e.to_string();
+                        let unreachable = msg.contains("Connection refused")
+                            || msg.contains("No such file")
+                            || msg.contains("daemon not running");
+                        if unreachable {
+                            eprintln!("[bladebro] daemon unreachable ({msg}) — restarting it");
+                            // A dead daemon can leave a stale socket file behind.
+                            let _ = std::fs::remove_file(socket_path());
+                        } else {
+                            // Alive but the call failed: do not kill or bypass.
+                            return Err(e);
+                        }
                     }
                 }
             }
@@ -326,23 +433,28 @@ async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool, ex
                 if daemon_running() {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 waited += 1;
             }
 
             if daemon_running() {
                 match send_to_daemon(tool, args) {
                     Ok(result) => {
-                        print_result(&result, json_mode);
+                        let code = print_result(&result, json_mode);
+                        if code != 0 {
+                            exit_with(code);
+                        }
                         return Ok(());
                     }
-                    Err(e) => {
-                        eprintln!("[bladebro] daemon failed after auto-start ({e}), falling back to one-shot");
-                        let _ = std::fs::remove_file(socket_path());
-                    }
+                    Err(e) => eprintln!(
+                        "[bladebro] daemon failed after auto-start ({e}), falling back to one-shot"
+                    ),
                 }
             } else {
-                eprintln!("[bladebro] daemon failed to start, falling back to one-shot");
+                eprintln!(
+                    "[bladebro] daemon didn't come up within 10s — falling back to one-shot\n\
+                     (run 'bladebro daemon' in a terminal to see startup errors)"
+                );
             }
         }
     }
@@ -352,23 +464,28 @@ async fn run_tool(tool: &str, args: &Value, json_mode: bool, no_daemon: bool, ex
     let browser = crate::browser::Browser::launch(0).await?;
     let base = browser.base();
 
-    let result = run_connected(tool, args, json_mode, &base, false).await;
+    let result = run_connected(tool, args, &base, false).await;
 
     // ALWAYS shut down Chrome, even if the above failed.
     // Without this, any error between launch and shutdown orphans Chrome + Xvfb.
     let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
 
-    result
+    let result = result?;
+    let code = print_result(&result, json_mode);
+    if code != 0 {
+        exit_with(code);
+    }
+    Ok(())
 }
 
-/// Attach to a page at `base`, run one tool call, print the result.
+/// Attach to a page at `base`, run one tool call, return the result.
 ///
 /// `external=true` drives a browser Bladebro does not own (an already-running
 /// Chrome reached via `--host`/`--port`): it must NOT re-inject saved logins,
 /// warm the profile (no surprise navigation away from the user's tab), or shut
 /// Chrome down. `external=false` owns the browser, so it restores logins,
 /// warms on first run, and the caller owns shutdown.
-async fn run_connected(tool: &str, args: &Value, json_mode: bool, base: &str, external: bool) -> Result<()> {
+async fn run_connected(tool: &str, args: &Value, base: &str, external: bool) -> Result<ToolResult> {
     let target = crate::cdp::first_page_target(base).await?;
     let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
     let mut page = Page::attach(
@@ -397,36 +514,50 @@ async fn run_connected(tool: &str, args: &Value, json_mode: bool, base: &str, ex
         let _ = crate::logins::snapshot(page.cdp_ref()).await;
     }
 
-    print_result(&result, json_mode);
-    Ok(())
+    Ok(result)
 }
 
-/// Print result in human or JSON format.
-fn print_result(result: &ToolResult, json_mode: bool) {
+/// Print a tool result and return the process exit code (0 ok, 1 error).
+fn print_result(result: &ToolResult, json_mode: bool) -> i32 {
+    let code = if result.is_error { 1 } else { 0 };
+
+    // Vision: always persist the PNG and hand back a PATH. The old --json
+    // inlined the full base64 (1-2MB for a screenshot) — one vision call
+    // could blow an agent's context. The file is the CLI-native artifact;
+    // MCP keeps the inline image because the protocol has image content.
+    let image_path = result.image.as_deref().and_then(|img| {
+        base64_decode(img).and_then(|data| crate::artifacts::write_artifact_bytes(&data, "png").ok())
+    });
+
     if json_mode {
-        let v = json!({
+        let mut v = json!({
             "ok": !result.is_error,
-            "text": result.text,
-            "image": result.image,
             "is_error": result.is_error,
+            "text": result.text,
         });
-        println!("{v}");
-    } else if let Some(ref img) = result.image {
-        // Vision: save the screenshot into the private artifacts dir
-        // (0700, rotating). SECURITY: it used to go to a predictable
-        // /tmp/bladebro-screenshot-<millis>.png — a symlink pre-placed at
-        // that path turned every vision call into an arbitrary-file
-        // overwrite.
-        match base64_decode(img) {
-            Some(data) => match crate::artifacts::write_artifact_bytes(&data, "png") {
-                Ok(path) => println!("{}\nsaved: {}", result.text, path),
-                Err(_) => println!("{}", result.text),
-            },
-            None => println!("{}", result.text),
+        if let Some(p) = &image_path {
+            v["image_path"] = json!(p);
         }
+        println!("{v}");
+    } else if let Some(p) = &image_path {
+        println!("{}\nsaved: {}", result.text, p);
     } else {
         println!("{}", result.text);
     }
+    code
+}
+
+/// Exit the process with `code` after flushing the std streams.
+///
+/// Safe here: cli.rs is the process's top surface for client commands and
+/// every cleanup step (browser shutdown, logins snapshot) has already run.
+/// Rust's stdout is line-buffered, but flush anyway — a half-written JSON
+/// object on exit would poison an agent's parse.
+fn exit_with(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code);
 }
 
 /// Decode base64 to bytes. Public: shared with the MCP vision handler
@@ -528,516 +659,918 @@ fn extract_endpoint(args: &[String]) -> (Vec<String>, Option<String>) {
     (cleaned, external)
 }
 
-/// Parse `see` args: [mode] [url] [--filter <role>] [--extract <type>] [--find <text>] [--json]
-fn parse_see_args(args: &[String]) -> Value {
-    let mut mode = String::new();
-    let mut url = String::new();
-    let mut filter = String::new();
-    let mut extract = String::new();
-    let mut find = String::new();
-    let mut logs = String::new();
-    let mut budget: Option<u64> = None;
-    let mut limit: Option<u64> = None;
-    let mut template = String::new();
+// ── Arg Parsing ────────────────────────────────────────────────────────
+//
+// Rules (v3.9.7, agent-native CLI):
+// - Known flags are accepted anywhere; `--flag value` always takes the next
+//   token (a missing value is a loud usage error, never a silent default).
+// - Unknown flags are hard errors pointing at `help` — the old parsers
+//   dropped them silently, so `see --budjet 5` read the wrong thing.
+// - Positionals fill the fields the action needs, MCP-style: target first,
+//   then value. Unquoted multi-word values join ("click Sign in" works).
+// - `@file` reads the value from a file, `-` reads stdin — no shell-quoting
+//   games for big JSON payloads.
+
+/// The next token as a flag value; loud error when missing.
+fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String> {
+    *i += 1;
+    args.get(*i)
+        .cloned()
+        .ok_or_else(|| BladeError::Usage(format!("--{flag} needs a value (e.g. --{flag} <value>)")))
+}
+
+/// The next token parsed as a number; loud error on both missing and bad.
+fn take_num<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -> Result<T> {
+    let raw = take_value(args, i, flag)?;
+    raw.parse::<T>()
+        .map_err(|_| BladeError::Usage(format!("--{flag} needs a number, got '{raw}'")))
+}
+
+/// Ref ids are `e` followed by digits (e1, e5, e12) — 'Edit'/'Enter' are text.
+fn is_ref(s: &str) -> bool {
+    s.len() > 1 && s.as_bytes()[0] == b'e' && s[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Resolve a payload argument: inline value, `@file`, or `-` (stdin).
+fn resolve_payload(arg: &str) -> Result<String> {
+    if arg == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| BladeError::Usage(format!("cannot read stdin: {e}")))?;
+        if buf.trim().is_empty() {
+            return Err(BladeError::Usage(
+                "stdin was empty — pipe the payload in, e.g. `cat steps.json | bladebro run -`".into(),
+            ));
+        }
+        return Ok(buf);
+    }
+    if let Some(path) = arg.strip_prefix('@') {
+        return std::fs::read_to_string(path)
+            .map_err(|e| BladeError::Usage(format!("cannot read {arg}: {e}")));
+    }
+    Ok(arg.to_string())
+}
+
+/// `fill` accepts several shapes — normalize to the array the MCP handler
+/// requires:
+/// - [{"ref":"e3","text":"John"}]   array form, as-is
+/// - {"e3":"John","e5":"Doe"}        flat ref map
+/// - {"label":"Email","text":"x"}    ONE field spec (any reserved key)
+///   The third shape used to be misread as a ref-map entry named "label"
+///   and failed with "stale ref: label" (caught live).
+fn normalize_fields(parsed: Value) -> Result<Value> {
+    match parsed {
+        Value::Array(_) => Ok(parsed),
+        Value::Object(map) => {
+            const RESERVED: &[&str] = &["ref", "label", "text", "option", "check"];
+            if map.keys().any(|k| RESERVED.contains(&k.as_str())) {
+                return Ok(Value::Array(vec![Value::Object(map)]));
+            }
+            Ok(Value::Array(
+                map.into_iter()
+                    .map(|(k, v)| json!({ "ref": k, "text": v }))
+                    .collect(),
+            ))
+        }
+        _ => Err(BladeError::Usage(
+            "fields must be a JSON object {\"e3\":\"John\"} (ref map), one spec {\"label\":\"Email\",\"text\":\"x\"}, or an array [{\"ref\":\"e3\",\"text\":\"John\"}]".into(),
+        )),
+    }
+}
+
+/// Token that looks like a URL/host: has a scheme, a port, or a dot.
+fn looks_like_url(s: &str) -> bool {
+    s.contains("://")
+        || s.starts_with("data:")
+        || s.starts_with("file:")
+        || s.starts_with("about:")
+        || s.contains("localhost")
+        || s.contains('.')
+}
+
+/// Parse `nav` args: <url> [--block <classes>]
+fn parse_nav_args(args: &[String]) -> Result<Value> {
+    let mut url: Option<String> = None;
+    let mut block: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].clone();
+        if let Some(flag) = a.strip_prefix("--") {
+            match flag {
+                "url" => url = Some(take_value(args, &mut i, "url")?),
+                "block" => block = Some(take_value(args, &mut i, "block")?),
+                _ => {
+                    return Err(BladeError::Usage(format!(
+                        "unknown flag --{flag} for nav — see 'bladebro help nav'"
+                    )))
+                }
+            }
+        } else if url.is_none() {
+            url = Some(a);
+        } else {
+            return Err(BladeError::Usage(format!(
+                "unexpected extra argument '{a}' — nav takes exactly one URL"
+            )));
+        }
+        i += 1;
+    }
+    let url = url.ok_or_else(|| BladeError::Usage("nav needs a URL — bladebro nav <url>".into()))?;
+    let mut j = json!({ "action": "navigate", "url": url });
+    if let Some(b) = block {
+        j["block"] = json!(b);
+    }
+    Ok(j)
+}
+
+/// Parse `see` args: [mode] [url] [extract <type>] [flags].
+fn parse_see_args(args: &[String]) -> Result<Value> {
+    let mut j = json!({});
+    let mut url: Option<String> = None;
+    let mut mode: Option<String> = None;
+    let mut extract_pending = false;
+    let mut extract_type: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--filter" | "-f" => {
-                i += 1;
-                if let Some(v) = args.get(i) { filter = v.clone(); }
+        let a = args[i].clone();
+        // Short aliases first: -f/-e/-b/-l/-t.
+        let long = match a.as_str() {
+            "-f" => "--filter",
+            "-e" => "--extract",
+            "-b" => "--budget",
+            "-l" => "--limit",
+            "-t" => "--template",
+            other => other,
+        };
+        if let Some(flag) = long.strip_prefix("--") {
+            match flag {
+                "filter" | "find" | "logs" | "scope" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    j[flag] = json!(v);
+                }
+                "budget" | "limit" => {
+                    let v: u64 = take_num(args, &mut i, flag)?;
+                    j[flag] = json!(v);
+                }
+                "extract" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    if !matches!(v.as_str(), "auto" | "links" | "forms" | "json") {
+                        return Err(BladeError::Usage(format!(
+                            "--extract must be auto|links|forms|json, got '{v}'"
+                        )));
+                    }
+                    extract_type = Some(v);
+                }
+                "template" => {
+                    let raw = resolve_payload(&take_value(args, &mut i, flag)?)?;
+                    let tpl: Value = serde_json::from_str(&raw).map_err(|e| {
+                        BladeError::Usage(format!("--template must be valid JSON: {e}"))
+                    })?;
+                    j["template"] = tpl;
+                }
+                "url" => url = Some(take_value(args, &mut i, flag)?),
+                "content" => j["content"] = json!(true),
+                _ => {
+                    return Err(BladeError::Usage(format!(
+                        "unknown flag --{flag} for see — see 'bladebro help see'"
+                    )))
+                }
             }
-            "--extract" | "-e" => {
-                i += 1;
-                if let Some(v) = args.get(i) { extract = v.clone(); }
+        } else if a == "extract" {
+            extract_pending = true;
+        } else if matches!(a.as_str(), "model" | "content" | "outline") && mode.is_none() {
+            mode = Some(a);
+        } else if extract_pending
+            && extract_type.is_none()
+            && matches!(a.as_str(), "auto" | "links" | "forms" | "json")
+        {
+            extract_type = Some(a);
+        } else if looks_like_url(&a) {
+            if url.is_some() {
+                return Err(BladeError::Usage(format!(
+                    "multiple URLs given ('{a}') — see takes at most one"
+                )));
             }
-            "--find" => {
-                i += 1;
-                if let Some(v) = args.get(i) { find = v.clone(); }
-            }
-            "--logs" => {
-                i += 1;
-                if let Some(v) = args.get(i) { logs = v.clone(); }
-            }
-            "--budget" | "-b" => {
-                i += 1;
-                if let Some(v) = args.get(i) { budget = v.parse().ok(); }
-            }
-            "--limit" | "-l" => {
-                i += 1;
-                if let Some(v) = args.get(i) { limit = v.parse().ok(); }
-            }
-            "--template" | "-t" => {
-                i += 1;
-                if let Some(v) = args.get(i) { template = v.clone(); }
-            }
-            // URLs first so `see https://x.com content` works (mode after
-            // url used to be silently dropped — the help documented an
-            // example that didn't work).
-            s if s.starts_with("http://") || s.starts_with("https://")
-                || s.starts_with("data:") || s.starts_with("file:") => {
-                if url.is_empty() { url = s.to_string(); }
-            }
-            s if s.starts_with("--") => {}
-            s if s == "model" || s == "content" || s == "outline" => {
-                if mode.is_empty() { mode = s.to_string(); }
-            }
-            s if mode.is_empty() => {
-                mode = s.to_string();
-            }
-            s if mode == "extract"
-                && matches!(s, "auto" | "links" | "forms" | "json") => {
-                // extract type token, NOT a URL: `see extract auto` must not
-                // navigate to "auto".
-            }
-            s if url.is_empty() => {
-                url = s.to_string();
-            }
-            _ => {}
+            url = Some(a);
+        } else {
+            return Err(BladeError::Usage(format!(
+                "unrecognized argument '{a}' — expected a mode (model|content|outline), \
+                 'extract <auto|links|forms|json>', or a URL. See 'bladebro help see'"
+            )));
         }
         i += 1;
     }
 
-    let mut j = json!({});
-    if !mode.is_empty() {
-        j["mode"] = json!(mode);
+    if extract_pending && extract_type.is_none() {
+        return Err(BladeError::Usage(
+            "see extract needs a type — auto, links, forms, or json (json also needs --template)"
+                .into(),
+        ));
     }
-    if !url.is_empty() {
-        j["url"] = json!(url);
-    }
-    if !filter.is_empty() {
-        j["filter"] = json!(filter);
-    }
-    if !extract.is_empty() {
-        j["extract"] = json!(extract);
-    }
-    if !find.is_empty() {
-        j["find"] = json!(find);
-    }
-    if !logs.is_empty() {
-        j["logs"] = json!(logs);
-    }
-    if let Some(b) = budget {
-        j["budget"] = json!(b);
-    }
-    if let Some(l) = limit {
-        j["limit"] = json!(l);
-    }
-    if !template.is_empty() {
-        j["template"] = serde_json::from_str(&template).unwrap_or(json!(template));
-    }
-    j
-}
-
-/// Parse `act` args: <action> [ref|label] [text|url|key|...] [options]
-fn parse_act_args(args: &[String]) -> Result<Value> {
-    if args.is_empty() {
-        return Err(BladeError::Other("act needs an action (click, type, fill, navigate, scroll, press, hover, select, clear, upload, download, wait, eval, back, forward, reload)".into()));
-    }
-
-    let action = args[0].as_str();
-    let mut j = json!({ "action": action });
-
-    match action {
-        "click" => {
-            // click <ref|label> [--role <role>] [--nth <n>]
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--role" => { i += 1; if let Some(v) = args.get(i) { j["role"] = json!(v); } }
-                    "--nth" => { i += 1; if let Some(v) = args.get(i) { j["nth"] = serde_json::from_str(v).unwrap_or(json!(1)); } }
-                    s if s.starts_with("--") => {}
-                    s if j.get("ref").is_none() && j.get("label").is_none() => {
-                        if s.starts_with("e") && s[1..].chars().all(|c| c.is_ascii_digit()) {
-                            j["ref"] = json!(s);
-                        } else {
-                            j["label"] = json!(s);
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "type" => {
-            // type <ref|label> <text>
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    s if s.starts_with("--") => {}
-                    s if j.get("ref").is_none() && j.get("label").is_none() => {
-                        if s.starts_with("e") && s[1..].chars().all(|c| c.is_ascii_digit()) {
-                            j["ref"] = json!(s);
-                        } else {
-                            j["label"] = json!(s);
-                        }
-                    }
-                    s if j.get("text").is_none() => {
-                        j["text"] = json!(s);
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "clear" => {
-            // clear <ref|label>
-            if let Some(v) = args.get(1) {
-                if v.starts_with("e") && v[1..].chars().all(|c| c.is_ascii_digit()) {
-                    j["ref"] = json!(v);
-                } else {
-                    j["label"] = json!(v);
-                }
-            }
-        }
-        "select" => {
-            // select <ref|label> <option>
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    s if s.starts_with("--") => {}
-                    s if j.get("ref").is_none() && j.get("label").is_none() => {
-                        if s.starts_with("e") && s[1..].chars().all(|c| c.is_ascii_digit()) {
-                            j["ref"] = json!(s);
-                        } else {
-                            j["label"] = json!(s);
-                        }
-                    }
-                    s if j.get("option").is_none() => {
-                        j["option"] = json!(s);
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "press" => {
-            // press <key>
-            if let Some(v) = args.get(1) {
-                j["key"] = json!(v);
-            }
-        }
-        "scroll" => {
-            // scroll <dx> <dy>
-            if let Some(v) = args.get(1) { j["dx"] = serde_json::from_str(v).unwrap_or(json!(0)); }
-            if let Some(v) = args.get(2) { j["dy"] = serde_json::from_str(v).unwrap_or(json!(0)); }
-        }
-        "hover" => {
-            // hover <ref|label>
-            if let Some(v) = args.get(1) {
-                if v.starts_with("e") && v[1..].chars().all(|c| c.is_ascii_digit()) {
-                    j["ref"] = json!(v);
-                } else {
-                    j["label"] = json!(v);
-                }
-            }
-        }
-        "navigate" => {
-            // navigate <url> [--block <classes>] — any non-flag token is the
-            // URL (bare domains like example.com or localhost:3000 are made
-            // absolute by the shared navigate path, which adds the scheme).
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--block" => { i += 1; if let Some(v) = args.get(i) { j["block"] = json!(v); } }
-                    s if !s.starts_with("--") => {
-                        j["url"] = json!(s);
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "fill" => {
-            // fill <json-fields> [--submit <ref>]
-            // Accepts both flat object ({"e1":"John","e2":"Doe"})
-            // and array format ([{"ref":"e1","text":"John"}]).
-            // Flat object is converted to array for the MCP handler.
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--submit" => { i += 1; if let Some(v) = args.get(i) { j["submit"] = json!(v); } }
-                    s if !s.starts_with("--") && j.get("fields").is_none() => {
-                        let parsed: Value = serde_json::from_str(s)
-                            .map_err(|e| BladeError::Other(format!("invalid fields JSON: {e}")))?;
-                        j["fields"] = match parsed {
-                            Value::Array(_) => parsed,
-                            Value::Object(map) => {
-                                let arr: Vec<Value> = map.into_iter().map(|(k, v)| {
-                                    json!({"ref": k, "text": v})
-                                }).collect();
-                                Value::Array(arr)
-                            }
-                            _ => return Err(BladeError::Other("fields must be a JSON object or array".into())),
-                        };
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "upload" => {
-            // upload <ref|label> <path>
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    s if s.starts_with("--") => {}
-                    s if j.get("ref").is_none() && j.get("label").is_none() => {
-                        if s.starts_with("e") && s[1..].chars().all(|c| c.is_ascii_digit()) {
-                            j["ref"] = json!(s);
-                        } else {
-                            j["label"] = json!(s);
-                        }
-                    }
-                    s if j.get("path").is_none() => {
-                        j["path"] = json!(s);
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "download" => {
-            // download <url> [--path <path>] — any non-flag token is the URL.
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--path" => { i += 1; if let Some(v) = args.get(i) { j["path"] = json!(v); } }
-                    s if !s.starts_with("--") => {
-                        j["url"] = json!(s);
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "wait" => {
-            // wait <condition> [--text <text>] [--timeout <secs>]
-            // A bare second positional is the text: `act wait js "document.title"`
-            // used to silently drop the expression (documented example, broken).
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--text" => { i += 1; if let Some(v) = args.get(i) { j["text"] = json!(v); } }
-                    "--timeout" => { i += 1; if let Some(v) = args.get(i) { j["timeout"] = serde_json::from_str(v).unwrap_or(json!(30)); } }
-                    s if !s.starts_with("--") && j.get("condition").is_none() => {
-                        j["condition"] = json!(s);
-                    }
-                    s if !s.starts_with("--") && j.get("text").is_none() => {
-                        j["text"] = json!(s);
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "eval" => {
-            // eval <js-expression> [--ref eN] — join remaining args so
-            // unquoted multi-word expressions aren't truncated; --ref binds
-            // the matching element as `el` in the expression scope.
-            let mut js_parts: Vec<String> = Vec::new();
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--ref" => {
-                        i += 1;
-                        if let Some(v) = args.get(i) {
-                            j["ref"] = json!(v);
-                        }
-                    }
-                    s => js_parts.push(s.to_string()),
-                }
-                i += 1;
-            }
-            if !js_parts.is_empty() {
-                j["js"] = json!(js_parts.join(" "));
-            }
-        }
-        "collect" => {
-            // collect <url> [--max <n>]
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--max" => { i += 1; if let Some(v) = args.get(i) { j["max"] = serde_json::from_str(v).unwrap_or(json!(100)); } }
-                    s if !s.starts_with("--") => {
-                        j["url"] = json!(s);
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "back" | "forward" | "reload" => {
-            // no args needed
-        }
-        "pdf" => {
-            // pdf [--path <path>] [--landscape]
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--path" => { i += 1; if let Some(v) = args.get(i) { j["path"] = json!(v); } }
-                    "--landscape" => { j["landscape"] = json!(true); }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        "save" | "load" => {
-            // save|load <name>
-            if let Some(v) = args.get(1) {
-                j["name"] = json!(v);
-            }
-        }
-        _ => {
-            return Err(BladeError::Other(format!(
-                "unknown action: {action}\navailable: click, type, clear, select, press, scroll, hover, navigate, fill, upload, download, wait, eval, collect, pdf, back, forward, reload, save, load"
-            )));
+    if let Some(t) = extract_type {
+        j["extract"] = json!(t);
+        if j.get("mode").is_none() {
+            j["mode"] = json!("extract");
         }
     }
-
-    // If a URL-shaped token appears in the remaining args and action isn't
-    // navigate, set it for pre-navigation. Only for actions whose positional
-    // IS a URL; textual actions (type/fill/click/eval...) already consumed
-    // their positionals and must never get pre-navigated (el.href contains
-    // a dot and would be misread as a URL).
-    let textual = matches!(
-        action,
-        "type" | "fill" | "click" | "hover" | "eval" | "wait" | "press" | "read" | "clear" | "select"
-    );
-    if !textual {
-        for a in args.iter().skip(1) {
-            let a = a.as_str();
-            let looks_url = !a.starts_with("--")
-                && !a.contains(' ')
-                && (a.contains("//") || a.contains('.') && !a.contains('('));
-            if j.get("url").is_none() && action != "navigate" && looks_url {
-                j["url"] = json!(a);
-                break;
-            }
-        }
+    if let Some(m) = mode {
+        j["mode"] = json!(m);
     }
-
+    if let Some(u) = url {
+        j["url"] = json!(u);
+    }
     Ok(j)
 }
 
-/// Parse `state` args: <op> [args]
-fn parse_state_args(args: &[String]) -> Result<Value> {
+/// Parse `act` args. Universal `--field` flags mirror the MCP schema exactly
+/// (--ref, --label, --text, --role, --nth, --key, --url, --option, …), so an
+/// agent that knows the MCP tool can drive the CLI 1:1. Positionals are the
+/// terse form: target first, value second.
+fn parse_act_args(args: &[String]) -> Result<Value> {
     if args.is_empty() {
-        return Err(BladeError::Other(
-            "state needs an op (cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, rm-ls, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, load, compress, block)".into()
+        return Err(BladeError::Usage(
+            "act needs an action — click, type, fill, select, clear, press, scroll, hover, \
+             navigate, upload, download, wait, eval, collect, read, batch, pdf, back, forward, \
+             reload, save, load, open-tab, close-tab, switch-tab (see 'bladebro help act')"
+                .into(),
         ));
     }
 
-    let op = args[0].as_str();
-    let mut j = json!({});
+    const ACTIONS: &[&str] = &[
+        "click", "type", "fill", "select", "clear", "press", "scroll", "hover", "navigate",
+        "upload", "download", "wait", "eval", "collect", "read", "batch", "pdf", "back",
+        "forward", "reload", "save", "load", "open-tab", "close-tab", "switch-tab",
+    ];
+    let action = args[0].as_str();
+    if !ACTIONS.contains(&action) {
+        return Err(BladeError::Usage(format!(
+            "unknown act action '{action}' — available: {} (see 'bladebro help act')",
+            ACTIONS.join(", ")
+        )));
+    }
 
-    match op {
-        "cookies" => {
-            j["op"] = json!("cookies");
-        }
-        "set-cookie" => {
-            // set-cookie <name> <value> [--url <url>] [--domain <d>] [--path <p>] [--secure] [--http-only] [--same-site <S>]
-            j["op"] = json!("set-cookie");
-            if let Some(v) = args.get(1) { j["name"] = json!(v); }
-            if let Some(v) = args.get(2) { j["value"] = json!(v); }
-            let mut i = 3;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--url" => { i += 1; if let Some(v) = args.get(i) { j["url"] = json!(v); } }
-                    "--domain" => { i += 1; if let Some(v) = args.get(i) { j["domain"] = json!(v); } }
-                    "--path" => { i += 1; if let Some(v) = args.get(i) { j["path"] = json!(v); } }
-                    "--secure" => { j["secure"] = json!(true); }
-                    "--http-only" => { j["httpOnly"] = json!(true); }
-                    "--same-site" => { i += 1; if let Some(v) = args.get(i) { j["sameSite"] = json!(v); } }
-                    _ => {}
+    let mut j = json!({ "action": action });
+    let mut pos: Vec<String> = Vec::new();
+
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].clone();
+        if let Some(flag) = a.strip_prefix("--") {
+            match flag {
+                "ref" | "label" | "text" | "role" | "key" | "url" | "option" | "js" | "path"
+                | "condition" | "press" | "submit" | "block" | "name" | "expect" | "steps"
+                | "fields" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    j[flag] = json!(v);
                 }
-                i += 1;
+                "target-id" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    j["target_id"] = json!(v);
+                }
+                "nth" | "timeout" | "max" => {
+                    let v: u64 = take_num(args, &mut i, flag)?;
+                    j[flag] = json!(v);
+                }
+                "dx" | "dy" => {
+                    let v: i64 = take_num(args, &mut i, flag)?;
+                    j[flag] = json!(v);
+                }
+                "x" | "y" | "scale" => {
+                    let v: f64 = take_num(args, &mut i, flag)?;
+                    j[flag] = json!(v);
+                }
+                "slim" => j["slim"] = json!(true),
+                "landscape" => j["landscape"] = json!(true),
+                "print-background" => j["printBackground"] = json!(true),
+                _ => {
+                    return Err(BladeError::Usage(format!(
+                        "unknown flag --{flag} for act — see 'bladebro help act'"
+                    )))
+                }
+            }
+        } else {
+            pos.push(a);
+        }
+        i += 1;
+    }
+
+    match action {
+        "click" | "hover" => {
+            if j.get("ref").is_none() && j.get("label").is_none() && !pos.is_empty() {
+                if is_ref(&pos[0]) {
+                    j["ref"] = json!(pos[0].clone());
+                    if pos.len() > 1 {
+                        return Err(BladeError::Usage(format!(
+                            "unexpected extra argument '{}' after a ref — use --label/--nth, or quote the label",
+                            pos[1]
+                        )));
+                    }
+                } else {
+                    j["label"] = json!(pos.join(" "));
+                }
             }
         }
-        "del-cookie" => {
-            j["op"] = json!("del-cookie");
-            if let Some(v) = args.get(1) { j["name"] = json!(v); }
+        "type" => {
+            let mut pi = 0usize;
+            if j.get("ref").is_none() && j.get("label").is_none() {
+                if let Some(t) = pos.first() {
+                    if is_ref(t) {
+                        j["ref"] = json!(t);
+                    } else {
+                        j["label"] = json!(t);
+                    }
+                    pi = 1;
+                }
+            }
+            if j.get("text").is_none() && pos.len() > pi {
+                j["text"] = json!(pos[pi..].join(" "));
+            }
+            if j.get("ref").is_none() && j.get("label").is_none() {
+                return Err(BladeError::Usage(
+                    "type needs a target — `act type <ref|label> <text>` or --ref/--label/--text"
+                        .into(),
+                ));
+            }
+            if j.get("text").is_none() {
+                return Err(BladeError::Usage(
+                    "type needs text — `act type <target> <text>` or --text <value>".into(),
+                ));
+            }
         }
-        "ls" | "localStorage" => {
-            j["op"] = json!("ls");
+        "fill" => {
+            if let Some(v) = j.get("fields").and_then(|f| f.as_str()).map(String::from) {
+                let raw = resolve_payload(&v)?;
+                let parsed: Value = serde_json::from_str(&raw)
+                    .map_err(|e| BladeError::Usage(format!("invalid fields JSON: {e}")))?;
+                j["fields"] = normalize_fields(parsed)?;
+            } else if j.get("fields").is_none() {
+                let raw_arg = pos.first().ok_or_else(|| {
+                    BladeError::Usage(
+                        "fill needs fields — bladebro act fill '{\"e3\":\"John\",\"e5\":\"Doe\"}' \
+                         [--submit <ref|text>] (or @file / - for big payloads)"
+                            .into(),
+                    )
+                })?;
+                let raw = resolve_payload(raw_arg)?;
+                let parsed: Value = serde_json::from_str(&raw)
+                    .map_err(|e| BladeError::Usage(format!("invalid fields JSON: {e}")))?;
+                j["fields"] = normalize_fields(parsed)?;
+            }
+            if pos.len() > 1 {
+                return Err(BladeError::Usage(format!(
+                    "unexpected extra argument '{}'",
+                    pos[1]
+                )));
+            }
         }
-        "ss" | "sessionStorage" => {
-            j["op"] = json!("ss");
+        "select" => {
+            let mut pi = 0usize;
+            if j.get("ref").is_none() && j.get("label").is_none() {
+                if let Some(t) = pos.first() {
+                    if is_ref(t) {
+                        j["ref"] = json!(t);
+                    } else {
+                        j["label"] = json!(t);
+                    }
+                    pi = 1;
+                }
+            }
+            if j.get("option").is_none() && pos.len() > pi {
+                j["option"] = json!(pos[pi..].join(" "));
+            }
+            if j.get("ref").is_none() && j.get("label").is_none() {
+                return Err(BladeError::Usage(
+                    "select needs a target — `act select <ref|label> <option>`".into(),
+                ));
+            }
+            if j.get("option").is_none() {
+                return Err(BladeError::Usage(
+                    "select needs an option — `act select <target> <option text|value>`".into(),
+                ));
+            }
         }
-        "set-ls" => {
-            j["op"] = json!("set-ls");
-            if let Some(v) = args.get(1) { j["key"] = json!(v); }
-            if let Some(v) = args.get(2) { j["value"] = json!(v); }
+        "clear" | "read" => {
+            if j.get("ref").is_none() && !pos.is_empty() {
+                j["ref"] = json!(pos[0].clone());
+            }
+            if j.get("ref").is_none() {
+                return Err(BladeError::Usage(format!(
+                    "{action} needs a ref — `act {action} e5` (refs come from see model / nav)"
+                )));
+            }
         }
-        "set-ss" => {
-            j["op"] = json!("set-ss");
-            if let Some(v) = args.get(1) { j["key"] = json!(v); }
-            if let Some(v) = args.get(2) { j["value"] = json!(v); }
+        "press" => {
+            if j.get("key").is_none() && !pos.is_empty() {
+                j["key"] = json!(pos[0].clone());
+            }
+            if j.get("key").is_none() {
+                return Err(BladeError::Usage(
+                    "press needs a key — `act press Enter` (Enter, Tab, Escape, ArrowDown, …)".into(),
+                ));
+            }
         }
-        "rm-ls" => {
-            j["op"] = json!("rm-ls");
-            if let Some(v) = args.get(1) { j["key"] = json!(v); }
+        "scroll" => {
+            if j.get("dx").is_none() && !pos.is_empty() {
+                let v: i64 = pos[0].parse().map_err(|_| {
+                    BladeError::Usage(format!("scroll dx must be a number, got '{}'", pos[0]))
+                })?;
+                j["dx"] = json!(v);
+            }
+            if j.get("dy").is_none() && pos.len() > 1 {
+                let v: i64 = pos[1].parse().map_err(|_| {
+                    BladeError::Usage(format!("scroll dy must be a number, got '{}'", pos[1]))
+                })?;
+                j["dy"] = json!(v);
+            }
+            if j.get("dx").is_none() && j.get("dy").is_none() {
+                return Err(BladeError::Usage(
+                    "scroll needs a distance — `act scroll 0 500` or --dy <px> (negative scrolls up)"
+                        .into(),
+                ));
+            }
         }
-        "clear-ls" => { j["op"] = json!("clear-ls"); }
-        "clear-ss" => { j["op"] = json!("clear-ss"); }
-        "tabs" => { j["op"] = json!("tabs"); }
+        "navigate" => {
+            if j.get("url").is_none() && !pos.is_empty() {
+                j["url"] = json!(pos[0].clone());
+            }
+            if j.get("url").is_none() {
+                return Err(BladeError::Usage(
+                    "navigate needs a URL — `act navigate example.com`".into(),
+                ));
+            }
+            if pos.len() > 1 {
+                return Err(BladeError::Usage(format!(
+                    "unexpected extra argument '{}'",
+                    pos[1]
+                )));
+            }
+        }
+        "upload" => {
+            let mut pi = 0usize;
+            if j.get("ref").is_none() && j.get("label").is_none() {
+                if let Some(t) = pos.first() {
+                    if is_ref(t) {
+                        j["ref"] = json!(t);
+                    } else {
+                        j["label"] = json!(t);
+                    }
+                    pi = 1;
+                }
+            }
+            // The MCP handler takes the file path in `text` (NOT `path`) —
+            // the old CLI sent `path`, so every CLI upload arrived empty.
+            let path = j
+                .get("path")
+                .and_then(|p| p.as_str())
+                .map(String::from)
+                .or_else(|| j.get("text").and_then(|t| t.as_str()).map(String::from))
+                .or_else(|| if pos.len() > pi { Some(pos[pi..].join(" ")) } else { None })
+                .ok_or_else(|| {
+                    BladeError::Usage("upload needs a file path — `act upload e5 /path/file.pdf`".into())
+                })?;
+            if let Some(obj) = j.as_object_mut() {
+                obj.remove("path");
+            }
+            j["text"] = json!(path);
+            if j.get("ref").is_none() && j.get("label").is_none() {
+                return Err(BladeError::Usage(
+                    "upload needs a target — `act upload <ref|label> <path>`".into(),
+                ));
+            }
+        }
+        "download" => {
+            if j.get("url").is_none() && !pos.is_empty() {
+                j["url"] = json!(pos[0].clone());
+            }
+            if j.get("url").is_none() {
+                return Err(BladeError::Usage(
+                    "download needs a URL — `act download https://x/file.pdf [--path <dir>]`".into(),
+                ));
+            }
+        }
+        "wait" => {
+            if j.get("condition").is_none() && !pos.is_empty() {
+                j["condition"] = json!(pos[0].clone());
+            }
+            if j.get("condition").is_none() {
+                return Err(BladeError::Usage(
+                    "wait needs a condition — element, title, url, text, settle, or js \
+                     (e.g. `act wait settle`, `act wait js \"document.title\"`)"
+                        .into(),
+                ));
+            }
+            let cond = j["condition"].as_str().unwrap_or("").to_string();
+            if !matches!(cond.as_str(), "element" | "title" | "url" | "text" | "settle" | "js") {
+                return Err(BladeError::Usage(format!(
+                    "unknown wait condition '{cond}' — element, title, url, text, settle, js"
+                )));
+            }
+            if j.get("text").is_none() && pos.len() > 1 {
+                j["text"] = json!(pos[1..].join(" "));
+            }
+            if cond != "settle" && j.get("text").is_none() {
+                return Err(BladeError::Usage(format!(
+                    "wait {cond} needs a match value — `act wait {cond} --text \"…\"`"
+                )));
+            }
+        }
+        "eval" => {
+            if j.get("js").is_none() && !pos.is_empty() {
+                let joined = pos.join(" ");
+                j["js"] = json!(resolve_payload(&joined)?);
+            } else if let Some(v) = j.get("js").and_then(|x| x.as_str()).map(String::from) {
+                j["js"] = json!(resolve_payload(&v)?);
+            }
+            if j.get("js").is_none() {
+                return Err(BladeError::Usage(
+                    "eval needs JS — `act eval \"document.title\"` (or @script.js / - for stdin)".into(),
+                ));
+            }
+        }
+        "collect" => {
+            if j.get("url").is_none() && !pos.is_empty() {
+                j["url"] = json!(pos[0].clone());
+            }
+            if j.get("url").is_none() {
+                return Err(BladeError::Usage(
+                    "collect needs a URL — `act collect <url> [--max N]`".into(),
+                ));
+            }
+        }
+        "pdf" => {
+            if !pos.is_empty() {
+                return Err(BladeError::Usage(format!(
+                    "unexpected extra argument '{}' for pdf — use --path/--landscape",
+                    pos[0]
+                )));
+            }
+        }
+        "back" | "forward" | "reload" => {
+            if !pos.is_empty() {
+                return Err(BladeError::Usage(format!(
+                    "{action} takes no arguments, got '{}'",
+                    pos[0]
+                )));
+            }
+        }
+        "save" | "load" => {
+            if j.get("name").is_none() && !pos.is_empty() {
+                j["name"] = json!(pos[0].clone());
+            }
+            if j.get("name").is_none() {
+                return Err(BladeError::Usage(format!(
+                    "{action} needs a name — `act {action} my-session`"
+                )));
+            }
+        }
+        "batch" => {
+            let raw = if let Some(s) = j.get("steps").and_then(|x| x.as_str()).map(String::from) {
+                s
+            } else if let Some(first) = pos.first() {
+                first.clone()
+            } else {
+                return Err(BladeError::Usage(
+                    "batch needs steps — bladebro act batch '[{\"action\":\"click\",\"ref\":\"e5\"}]' \
+                     (or @steps.json / - for stdin)"
+                        .into(),
+                ));
+            };
+            let raw = resolve_payload(&raw)?;
+            let steps: Value = serde_json::from_str(&raw)
+                .map_err(|e| BladeError::Usage(format!("invalid steps JSON: {e}")))?;
+            let arr = steps
+                .as_array()
+                .ok_or_else(|| BladeError::Usage("steps must be a JSON array".into()))?;
+            if arr.is_empty() {
+                return Err(BladeError::Usage("batch needs at least one step".into()));
+            }
+            j["steps"] = steps;
+        }
         "open-tab" => {
-            j["op"] = json!("open-tab");
-            if let Some(v) = args.get(1) { j["url"] = json!(v); }
-        }
-        "close-tab" => {
-            j["op"] = json!("close-tab");
-            if let Some(v) = args.get(1) { j["target_id"] = json!(v); }
-        }
-        "switch-tab" => {
-            j["op"] = json!("switch-tab");
-            if let Some(v) = args.get(1) { j["target_id"] = json!(v); }
-        }
-        "save" => {
-            j["op"] = json!("save");
-            if let Some(v) = args.get(1) { j["name"] = json!(v); }
-        }
-        "load" => {
-            j["op"] = json!("load");
-            if let Some(v) = args.get(1) { j["name"] = json!(v); }
-        }
-        "compress" => {
-            j["op"] = json!("compress");
-            if let Some(v) = args.get(1) { j["mode"] = json!(v); }
-        }
-        "block" => {
-            // block [classes] | block clear | block (get)
-            j["op"] = json!("block");
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--clear" | "clear" => { j["clear"] = json!(true); }
-                    v if !v.starts_with("--") => { j["classes"] = json!(v); }
-                    _ => {}
-                }
-                i += 1;
+            if j.get("url").is_none() && !pos.is_empty() {
+                j["url"] = json!(pos[0].clone());
+            }
+            if pos.len() > 1 {
+                return Err(BladeError::Usage(format!(
+                    "unexpected extra argument '{}'",
+                    pos[1]
+                )));
             }
         }
-        _ => {
-            return Err(BladeError::Other(format!(
-                "unknown state op: {op}\navailable: cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, rm-ls, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, load, compress, block"
-            )));
+        "close-tab" | "switch-tab" => {
+            if j.get("target_id").is_none() && !pos.is_empty() {
+                j["target_id"] = json!(pos[0].clone());
+            }
+            if j.get("target_id").is_none() {
+                return Err(BladeError::Usage(format!(
+                    "{action} needs a tab id — `act {action} <id>` (ids come from `bladebro state tabs`)"
+                )));
+            }
         }
+        _ => unreachable!("action validated above"),
     }
 
     Ok(j)
 }
 
-/// Parse `run` args: <json-steps>
+/// Parse `state` args: <op> [args] [flags]. Same op names as MCP (plus
+/// rm-ss), and unknown ops/flags are loud errors.
+fn parse_state_args(args: &[String]) -> Result<Value> {
+    if args.is_empty() {
+        return Err(BladeError::Usage(
+            "state needs an op — cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, \
+             rm-ls, rm-ss, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, \
+             load, compress, block (see 'bladebro help state')"
+                .into(),
+        ));
+    }
+
+    const OPS: &[&str] = &[
+        "cookies", "set-cookie", "del-cookie", "ls", "ss", "set-ls", "set-ss", "rm-ls",
+        "rm-ss", "clear-ls", "clear-ss", "tabs", "open-tab", "close-tab", "switch-tab",
+        "save", "load", "compress", "block",
+    ];
+    // Aliases: MCP-style names.
+    let op = match args[0].as_str() {
+        "localStorage" => "ls",
+        "sessionStorage" => "ss",
+        other => other,
+    };
+    if !OPS.contains(&op) {
+        return Err(BladeError::Usage(format!(
+            "unknown state op '{op}' — available: {} (see 'bladebro help state')",
+            OPS.join(", ")
+        )));
+    }
+
+    let mut j = json!({ "op": op });
+    let mut pos: Vec<String> = Vec::new();
+
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].clone();
+        if let Some(flag) = a.strip_prefix("--") {
+            match flag {
+                "url" | "domain" | "path" | "name" | "value" | "key" | "classes" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    j[flag] = json!(v);
+                }
+                "same-site" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    j["sameSite"] = json!(v);
+                }
+                "target-id" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    j["target_id"] = json!(v);
+                }
+                "mode" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    j["mode"] = json!(v);
+                }
+                "secure" => j["secure"] = json!(true),
+                "http-only" => j["httpOnly"] = json!(true),
+                "clear" => j["clear"] = json!(true),
+                _ => {
+                    return Err(BladeError::Usage(format!(
+                        "unknown flag --{flag} for state — see 'bladebro help state'"
+                    )))
+                }
+            }
+        } else {
+            pos.push(a);
+        }
+        i += 1;
+    }
+
+    // Positionals fill name/value per op (flags win when both are given).
+    match op {
+        "set-cookie" => {
+            let mut p = pos.into_iter();
+            let name = j
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| p.next());
+            let value = j
+                .get("value")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| p.next());
+            let name = name.ok_or_else(|| {
+                BladeError::Usage(
+                    "set-cookie needs a name — `state set-cookie <name> <value> [--url <u> | --domain <d>]`"
+                        .into(),
+                )
+            })?;
+            let value = value.ok_or_else(|| {
+                BladeError::Usage("set-cookie needs a value — `state set-cookie <name> <value>`".into())
+            })?;
+            j["name"] = json!(name);
+            j["value"] = json!(value);
+        }
+        "del-cookie" => {
+            let name = j
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| pos.first().cloned())
+                .ok_or_else(|| {
+                    BladeError::Usage(
+                        "del-cookie needs a name — `state del-cookie <name> [--url <u> | --domain <d>]`"
+                            .into(),
+                    )
+                })?;
+            j["name"] = json!(name);
+        }
+        "set-ls" | "set-ss" => {
+            // Storage ops take the key in `name` — the MCP schema field the
+            // handler actually reads. The old code emitted `key`, so every
+            // set-ls/set-ss stored an EMPTY key (caught live: `ls` showed
+            // "=dark"). `--key`/`--name` flags both work.
+            let key = j
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| j.get("key").and_then(|x| x.as_str()).map(String::from))
+                .or_else(|| pos.first().cloned())
+                .ok_or_else(|| {
+                    BladeError::Usage(format!("{op} needs a key — `state {op} <key> <value>`"))
+                })?;
+            let value = j
+                .get("value")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| pos.get(1).cloned())
+                .ok_or_else(|| {
+                    BladeError::Usage(format!("{op} needs a value — `state {op} <key> <value>`"))
+                })?;
+            if let Some(obj) = j.as_object_mut() {
+                obj.remove("key");
+            }
+            j["name"] = json!(key);
+            j["value"] = json!(value);
+        }
+        "rm-ls" | "rm-ss" => {
+            let key = j
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| j.get("key").and_then(|x| x.as_str()).map(String::from))
+                .or_else(|| pos.first().cloned())
+                .ok_or_else(|| BladeError::Usage(format!("{op} needs a key — `state {op} <key>`")))?;
+            if let Some(obj) = j.as_object_mut() {
+                obj.remove("key");
+            }
+            j["name"] = json!(key);
+        }
+        "cookies" => {
+            // Optional positional URL filters the list to that domain.
+            if j.get("url").is_none() {
+                if let Some(u) = pos.first() {
+                    j["url"] = json!(u);
+                }
+            }
+        }
+        "open-tab" => {
+            let url = j
+                .get("url")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| pos.first().cloned())
+                .ok_or_else(|| {
+                    BladeError::Usage("open-tab needs a URL — `state open-tab <url>`".into())
+                })?;
+            j["url"] = json!(url);
+        }
+        "close-tab" | "switch-tab" => {
+            let id = j
+                .get("target_id")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| pos.first().cloned())
+                .ok_or_else(|| {
+                    BladeError::Usage(format!(
+                        "{op} needs a tab id — `state {op} <id>` (ids come from `state tabs`)"
+                    ))
+                })?;
+            j["target_id"] = json!(id);
+        }
+        "save" | "load" => {
+            let name = j
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| pos.first().cloned())
+                .ok_or_else(|| {
+                    BladeError::Usage(format!("{op} needs a session name — `state {op} <name>`"))
+                })?;
+            j["name"] = json!(name);
+        }
+        "compress" => {
+            let mode = j
+                .get("mode")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| pos.first().cloned())
+                .unwrap_or_else(|| "status".to_string());
+            if !matches!(mode.as_str(), "on" | "off" | "status") {
+                return Err(BladeError::Usage(format!(
+                    "compress mode must be on|off|status, got '{mode}'"
+                )));
+            }
+            j["mode"] = json!(mode);
+        }
+        "block" => {
+            if j.get("classes").is_none() {
+                if let Some(c) = pos.first() {
+                    if c == "clear" {
+                        j["clear"] = json!(true);
+                    } else {
+                        j["classes"] = json!(c);
+                    }
+                }
+            }
+        }
+        "tabs" | "ls" | "ss" | "clear-ls" | "clear-ss" => {
+            if !pos.is_empty() {
+                return Err(BladeError::Usage(format!(
+                    "unexpected extra argument '{}' for {op}",
+                    pos[0]
+                )));
+            }
+        }
+        _ => unreachable!("op validated above"),
+    }
+
+    Ok(j)
+}
+
+/// Parse `run` args: <json-steps> | @file | - (stdin) | --steps <json>.
 fn parse_run_args(args: &[String]) -> Result<Value> {
-    let steps_json = args.first().ok_or_else(|| {
-        BladeError::Other("run needs a JSON steps array, e.g.: bladebro run '[{\"action\":\"click\",\"ref\":\"e5\"}]'".into())
+    let mut steps_raw: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].clone();
+        if let Some(flag) = a.strip_prefix("--") {
+            match flag {
+                "steps" => steps_raw = Some(take_value(args, &mut i, flag)?),
+                _ => {
+                    return Err(BladeError::Usage(format!(
+                        "unknown flag --{flag} for run — see 'bladebro help run'"
+                    )))
+                }
+            }
+        } else if steps_raw.is_none() {
+            steps_raw = Some(a);
+        } else {
+            return Err(BladeError::Usage(
+                "unexpected extra argument — pass steps once, or use @file / - for big payloads"
+                    .into(),
+            ));
+        }
+        i += 1;
+    }
+
+    let raw = steps_raw.ok_or_else(|| {
+        BladeError::Usage(
+            "run needs a JSON steps array, e.g. bladebro run '[{\"action\":\"click\",\"ref\":\"e5\"}]' \
+             (or @steps.json / - for stdin)"
+                .into(),
+        )
     })?;
-
-    let steps: Value = serde_json::from_str(steps_json)
-        .map_err(|e| BladeError::Other(format!("invalid steps JSON: {e}")))?;
-
+    let raw = resolve_payload(&raw)?;
+    let steps: Value = serde_json::from_str(&raw)
+        .map_err(|e| BladeError::Usage(format!("invalid steps JSON: {e}")))?;
+    let arr = steps
+        .as_array()
+        .ok_or_else(|| BladeError::Usage("steps must be a JSON array".into()))?;
+    if arr.is_empty() {
+        return Err(BladeError::Usage("steps must not be empty".into()));
+    }
     Ok(json!({ "steps": steps }))
+}
+
+/// Parse `vision` args: [--marks].
+fn parse_vision_args(args: &[String]) -> Result<Value> {
+    let mut marks = false;
+    for a in args {
+        match a.as_str() {
+            "--marks" => marks = true,
+            s if s.starts_with("--") => {
+                return Err(BladeError::Usage(format!(
+                    "unknown flag {s} for vision — see 'bladebro help vision'"
+                )))
+            }
+            s => {
+                return Err(BladeError::Usage(format!(
+                    "unexpected argument '{s}' for vision — bladebro vision [--marks]"
+                )))
+            }
+        }
+    }
+    Ok(json!({ "marks": marks }))
 }
 
 /// Wait for a termination signal (SIGTERM/SIGINT/SIGHUP on Unix, Ctrl+C on Windows).
@@ -1097,6 +1630,7 @@ pub async fn run_daemon() -> Result<()> {
     }
 
     eprintln!("[bladebro] daemon listening on {}", path.display());
+    let _ = std::fs::write(pid_path(), std::process::id().to_string());
 
     let mut browser: Option<crate::browser::Browser> = None;
     let mut page: Option<Page> = None;
@@ -1297,6 +1831,7 @@ pub async fn run_daemon() -> Result<()> {
         kb.sync();
     }
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(pid_path());
     eprintln!("[bladebro] daemon stopped");
     Ok(())
 }
@@ -1337,214 +1872,629 @@ async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
     }
 }
 
-/// Stop the daemon by sending a stop command.
+// ── Daemon lifecycle helpers ───────────────────────────────────────────
+
+/// Path of the daemon pid file. Stale files (SIGKILL) are detected by
+/// checking whether the pid is alive, and only then killed.
+#[cfg(unix)]
+fn pid_path() -> std::path::PathBuf {
+    crate::platform::blade_dir().join("cli.pid")
+}
+
+#[cfg(unix)]
+fn read_pid_file() -> Option<i32> {
+    std::fs::read_to_string(pid_path()).ok()?.trim().parse().ok()
+}
+
+#[cfg(unix)]
+fn process_alive(pid: i32) -> bool {
+    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Verify the pid is actually a bladebro process before killing it — pids
+/// get recycled and a blind kill could hit an innocent process. Without
+/// /proc (macOS), assume yes: the file was just written by a daemon whose
+/// socket went dead, so the risk window is tiny.
+#[cfg(unix)]
+fn looks_like_bladebro(pid: i32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(comm) => comm.trim().starts_with("bladebro"),
+        Err(_) => true,
+    }
+}
+
+/// Stop the daemon: graceful over the socket; idempotent when nothing runs.
+///
+/// Reliability: if the socket is gone but the pid file says a daemon is
+/// alive (wedged, or SIGKILLed mid-cleanup), terminate it — otherwise
+/// `stop` would lie "not running" while an orphan Chrome kept running.
+#[cfg(unix)]
 pub async fn stop_daemon() -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::net::UnixStream;
-        use std::io::{Read, Write};
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
 
-        let path = socket_path();
-        let mut stream = UnixStream::connect(&path)
-            .map_err(|e| BladeError::Other(format!("daemon not running: {e}")))?;
+    let path = socket_path();
 
+    // Graceful path: a live daemon answers the stop command itself
+    // (it flushes logins + knowledge before acknowledging).
+    if let Ok(mut stream) = UnixStream::connect(&path) {
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
         writeln!(stream, "{{\"tool\":\"stop\"}}")?;
         stream.flush()?;
-
         let mut resp = String::new();
-        stream.read_to_string(&mut resp)?;
+        let _ = stream.read_to_string(&mut resp);
+        // Wait for the daemon to finish teardown — it removes the socket
+        // file last. Without this, an immediate second `stop` could connect
+        // to the dying daemon's still-bound socket and report "stopped"
+        // again instead of "not running".
+        for _ in 0..50 {
+            if !path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         println!("daemon stopped");
+        return Ok(());
     }
+
+    // No socket. A daemon process may still linger — check the pid file.
+    if let Some(pid) = read_pid_file() {
+        if process_alive(pid) && looks_like_bladebro(pid) {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            for _ in 0..50 {
+                if !process_alive(pid) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            if process_alive(pid) {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            println!("daemon (pid {pid}) was unresponsive — terminated");
+        } else {
+            println!("daemon not running");
+        }
+        let _ = std::fs::remove_file(pid_path());
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+
+    let _ = std::fs::remove_file(&path);
+    println!("daemon not running");
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub async fn stop_daemon() -> Result<()> {
+    println!("daemon mode is Unix-only — commands run one-shot on this platform");
     Ok(())
 }
 
 // ── Help ───────────────────────────────────────────────────────────────
 
-/// Output structured tool definitions + CLI command mapping as JSON.
-/// This is the CLI equivalent of MCP `tools/list`. An AI agent calls
-/// `bladebro help --json` once to discover the full interface, then uses
-/// `--json` on every command for structured output.
-fn print_help_json() {
-    let tools = crate::mcp::tools::tools_to_json();
-    let cli_commands = json!({
-        "nav": {
+/// The CLI's agent manual — served by `help --json`. This is the single
+/// discovery surface: tool schemas (identical to MCP `tools/list`), the
+/// command map, the output contract, and the workflow that gets the most
+/// out of both.
+const INSTRUCTIONS: &str = "\
+Bladebro CLI — drive a real, stealthy browser from shell commands.
+SETUP: none. The first command auto-starts a background daemon (one Chrome for all later commands). --no-daemon forces isolated one-shot runs; 'bladebro stop' cleans up.
+DISCOVERY: 'bladebro help' (human) — 'bladebro help --json' (this document) — 'bladebro help <command>' for one command in depth.
+OUTPUT CONTRACT: --json on any command gives ONE JSON object on stdout: {\"ok\":bool,\"is_error\":bool,\"text\":string} (+ \"image_path\" for vision — the PNG is saved to a file, never inlined base64). Exit codes: 0 = success; 1 = the command ran but failed (read 'text' — it carries current page state so you can recover without an extra call); 2 = usage error (bad command/flag/argument — fix the command).
+WORKFLOW: 1) nav <url> gives refs + a content preview (often enough to act). 2) Address by text when you can: 'act click \"Sign in\"' needs no see; refs self-heal; labels work for form fields. 3) On list/search/product/profile pages, 'see extract auto' FIRST: one call returns structured items (site adapters add fields on Reddit/GitHub/product pages). 4) Collapse round-trips: 'act fill' for whole forms; 'act batch' / 'run' for sequences (if/while branching; {\"action\":\"see\"} steps read inline). 5) Big JSON payloads: @file or - (stdin) — no shell-quoting games. 6) Keep budgets default; big outputs are written to files with an inline preview.
+RELIABILITY: real Chromium with the full stealth stack and human-like input; per-domain knowledge (settle timing, block config, bot risk) compounds across runs. Errors are loud, never silent: unknown flags and missing values fail with exit 2; a failed action returns the page state for recovery. Vision is the last resort — refs and deltas are cheaper.
+";
+
+/// The human manual — printed by `bladebro help` / `-h` / bare `bladebro`.
+pub fn help_text() -> String {
+    HELP_TEXT.replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+}
+
+const HELP_TEXT: &str = r#"bladebro __VERSION__ — agentic browser driver (CLI)
+
+USAGE
+  bladebro <command> [args] [--json] [--no-daemon]
+  bladebro help [command]      this manual (start here)
+
+The first command auto-starts a background daemon: ONE Chrome instance for
+all later commands (no startup delay after the first launch). `bladebro stop`
+shuts it down. `--no-daemon` forces isolated one-shot runs.
+
+COMMANDS
+  nav <url> [--block <classes>]   navigate (refs + content preview; usually enough to act)
+  see [mode] [url] [flags]        read without acting: model|content|outline,
+                                  extract <auto|links|forms|json>, --find, --scope, --logs
+  act <action> [args]             interact: click, type, fill, select, clear, press, scroll,
+                                  hover, navigate, upload, download, wait, eval, collect,
+                                  read, batch, pdf, back, forward, reload, save, load,
+                                  open-tab, close-tab, switch-tab
+  state <op> [args]               cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss,
+                                  rm-ls, rm-ss, clear-ls, clear-ss, tabs, open-tab,
+                                  close-tab, switch-tab, save, load, compress, block
+  run '<json-steps>'              batch with if/while branching + inline see reads
+  vision [--marks]                screenshot (saved to a file; path printed)
+  daemon | stop                   manage the persistent Chrome session
+  help [command]                  this manual; 'help --json' for the machine version
+
+QUICK START
+  bladebro nav example.com                      navigate
+  bladebro see model                            interactive elements with refs
+  bladebro see content                          page as clean markdown
+  bladebro see extract auto                     structured data (lists, posts, repos, products)
+  bladebro act click e5                         click by ref
+  bladebro act click "Sign in"                  click by text (no see needed)
+  bladebro act type e12 "hello world"           type into one field
+  bladebro act fill '{"e12":"John"}' --submit e20      fill a form in ONE call
+  bladebro act batch '[{"action":"navigate","url":"x.com"},{"action":"see","mode":"content"}]'
+  bladebro run @steps.json                      big payload from a file (- = stdin)
+  bladebro act eval "document.title"            evaluate JS
+
+FLAGS
+  --json         one JSON object on stdout: {"ok", "is_error", "text"} (+ "image_path" for vision)
+  --no-daemon    one-shot mode: launch Chrome per command
+  --host/--port  drive an already-running Chrome on this debug port (skips the daemon)
+  --marks        vision: overlay numbered ref badges
+
+EXIT CODES
+  0  success
+  1  the command ran but failed — read the output text (it carries page state for recovery)
+  2  usage error — bad command/flag/argument; the message says how to fix it
+
+ENVIRONMENT
+  BLADE_HOME           isolate everything (daemon, Chrome, sessions, knowledge) in a directory
+  BLADE_CMD_TIMEOUT    client wait for a daemon response, seconds (default 300)
+  BLADE_IDLE_TIMEOUT   daemon idle before Chrome shuts down, seconds (default 600)
+  BLADE_NO_COMPRESS=1  disable response compression
+  CHROME_PATH          override the Chrome/Chromium binary
+
+Agents: `bladebro help --json` returns the machine version of this manual —
+tool schemas (same as MCP tools/list), per-command usage, exit codes, payload
+conventions, and examples. Fetch it once, then drive the CLI with --json.
+"#;
+
+/// Per-command machine help (`help <cmd> --json` and the `commands` map in
+/// the full JSON manual).
+fn command_help_json(cmd: &str) -> Option<Value> {
+    let cmd = if cmd == "navigate" { "nav" } else { cmd };
+    let v = match cmd {
+        "nav" => json!({
+            "usage": "bladebro nav <url> [--block <classes>]",
             "tool": "act",
-            "args": {"action": "navigate", "url": "<url>"},
-            "description": "Navigate to a URL. Returns refs + content preview."
-        },
-        "see": {
+            "args": { "url": "target URL; bare domains get https://" },
+            "flags": { "--block": "images,fonts,media,trackers (remembered per domain)" },
+            "examples": ["bladebro nav example.com", "bladebro nav https://x.com --block images,fonts --json"],
+            "notes": ["returns refs + a content preview — often enough to act without a separate see"]
+        }),
+        "see" => json!({
+            "usage": "bladebro see [mode] [url] [extract <type>] [flags]",
             "tool": "see",
-            "args": {"mode": "model|content|outline", "url": "<optional>", "extract": "auto|links|forms", "filter": "<role>", "find": "<text>", "budget": 8000},
-            "description": "Read the page without acting. model=interactive elements with refs, content=clean markdown, outline=headings only."
-        },
-        "act": {
+            "args": {
+                "mode": "model (default) | content | outline",
+                "url": "optional — navigates first",
+                "extract": "auto | links | forms | json (json needs --template)"
+            },
+            "flags": {
+                "--filter": "role filter (model mode)",
+                "--find": "search by text → refs",
+                "--scope": "ref id — read one element's subtree",
+                "--content": "include page text in model mode",
+                "--budget": "max chars (default 8000)",
+                "--limit": "max extract items (default 50)",
+                "--logs": "console | network",
+                "--template": "JSON or @file — for extract=json"
+            },
+            "examples": [
+                "bladebro see model",
+                "bladebro see content example.com",
+                "bladebro see extract auto --limit 20",
+                "bladebro see --find \"Submit\"",
+                "bladebro see --logs network"
+            ],
+            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items"]
+        }),
+        "act" => json!({
+            "usage": "bladebro act <action> [target] [value] [--flags]",
             "tool": "act",
-            "args": {"action": "click|type|fill|navigate|scroll|press|hover|select|clear|upload|download|wait|eval|back|forward|reload|collect|pdf", "ref": "e5", "label": "text", "text": "value", "url": "<url>", "key": "Enter", "dx": 0, "dy": 0},
-            "description": "Interact with the page. Returns verdict + delta. Use ref from see model, or label text."
-        },
-        "state": {
+            "actions": ["click","type","fill","select","clear","press","scroll","hover","navigate","upload","download","wait","eval","collect","read","batch","pdf","back","forward","reload","save","load","open-tab","close-tab","switch-tab"],
+            "universal_flags": {
+                "--ref": "element ref (self-heals)",
+                "--label": "field label",
+                "--text": "value — text to type, file path (upload), wait match value",
+                "--role": "role filter for text/label resolution",
+                "--nth": "1-based pick among matches",
+                "--key": "press key",
+                "--url": "navigate first (any action), or the URL for navigate/download/collect",
+                "--option": "select option",
+                "--condition": "wait condition",
+                "--timeout": "seconds",
+                "--dx/--dy": "scroll distance",
+                "--js": "eval expression (@file or - for scripts)",
+                "--submit": "fill: submit button ref or text",
+                "--slim": "skip the delta"
+            },
+            "examples": [
+                "bladebro act click e5",
+                "bladebro act click \"Sign in\"",
+                "bladebro act type e12 \"hello\"",
+                "bladebro act fill '{\"e3\":\"John\"}' --submit e8",
+                "bladebro act click Submit --url example.com/login",
+                "bladebro act upload e5 /tmp/file.pdf",
+                "bladebro act batch @steps.json",
+                "bladebro act wait settle",
+                "bladebro act eval \"document.title\""
+            ],
+            "notes": [
+                "unquoted multi-word values join: act click Sign in == act click \"Sign in\"",
+                "big JSON payloads: @file or - (stdin)",
+                "batch steps may include {\"action\":\"see\",...} to read inline"
+            ]
+        }),
+        "state" => json!({
+            "usage": "bladebro state <op> [args] [flags]",
             "tool": "state",
-            "args": {"op": "cookies|set-cookie|del-cookie|ls|ss|set-ls|set-ss|rm-ls|clear-ls|clear-ss|tabs|open-tab|close-tab|switch-tab|save|load", "name": "<key>", "value": "<val>", "url": "<url>"},
-            "description": "Manage cookies, storage, tabs, sessions."
-        },
-        "run": {
+            "ops": ["cookies","set-cookie","del-cookie","ls","ss","set-ls","set-ss","rm-ls","rm-ss","clear-ls","clear-ss","tabs","open-tab","close-tab","switch-tab","save","load","compress","block"],
+            "flags": {
+                "--url": "cookie scope / cookies filter / open-tab url",
+                "--domain": "cookie domain",
+                "--path": "cookie path",
+                "--secure": "secure cookie",
+                "--http-only": "httpOnly cookie",
+                "--same-site": "Strict | Lax | None",
+                "--target-id": "close-tab / switch-tab id",
+                "--clear": "block: stop blocking",
+                "--mode": "compress: on | off | status"
+            },
+            "examples": [
+                "bladebro state cookies",
+                "bladebro state cookies example.com",
+                "bladebro state set-cookie token abc --domain example.com",
+                "bladebro state tabs",
+                "bladebro state save my-session",
+                "bladebro state block images,fonts",
+                "bladebro state compress off"
+            ],
+            "notes": ["save/load persists cookies+storage; load then navigate to the site"]
+        }),
+        "run" => json!({
+            "usage": "bladebro run '<json-steps>' | @file | -",
             "tool": "run",
-            "args": {"steps": [{"action": "click", "ref": "e5"}]},
-            "description": "Batch actions with branching and loops."
-        },
-        "vision": {
+            "steps": "array; each {action:...} uses the same fields as act; plus {action:'if'|'while'|'see'}",
+            "examples": [
+                "bladebro run '[{\"action\":\"navigate\",\"url\":\"example.com\"},{\"action\":\"see\",\"mode\":\"content\"}]'",
+                "bladebro run @steps.json",
+                "cat steps.json | bladebro run -"
+            ],
+            "notes": ["stops on first error with the step number + page state", "while+see reads across pages in ONE call"]
+        }),
+        "vision" => json!({
+            "usage": "bladebro vision [--marks]",
             "tool": "vision",
-            "args": {"marks": false},
-            "description": "Screenshot as PNG. marks=true overlays numbered ref badges."
-        },
-        "daemon": {
+            "flags": { "--marks": "numbered ref badges (Set-of-Marks)" },
+            "examples": ["bladebro vision", "bladebro vision --marks --json | jq -r .image_path"],
+            "notes": ["screenshot is saved to a file; path printed (json: image_path)", "last resort — see/act are cheaper and return actionable refs"]
+        }),
+        "daemon" => json!({
+            "usage": "bladebro daemon",
             "tool": null,
-            "args": null,
-            "description": "Start persistent Chrome session. Subsequent commands connect via Unix socket."
-        },
-        "stop": {
+            "examples": [],
+            "notes": ["auto-starts on the first command; run manually only to watch startup errors"]
+        }),
+        "stop" => json!({
+            "usage": "bladebro stop",
             "tool": null,
-            "args": null,
-            "description": "Stop the daemon."
-        },
-        "help": {
+            "examples": [],
+            "notes": ["graceful (flushes logins + knowledge); idempotent — exit 0 when nothing is running"]
+        }),
+        "help" => json!({
+            "usage": "bladebro help [command] [--json]",
             "tool": null,
-            "args": {"json": true},
-            "description": "Show this help. Use --json for structured tool definitions (same as MCP tools/list)."
-        }
-    });
-    let flags = json!({
-        "--json": "Structured JSON output {{ok, text, image, is_error}} for scripts and agents.",
-        "--no-daemon": "Force one-shot mode (launch Chrome per command).",
-        "--marks": "Overlay numbered ref badges on screenshot (vision only).",
-        "--host <h>": "Browser debug host (default 127.0.0.1).",
-        "--port <p>": "Connect to an already-running Chrome on this debug port instead of launching one (or the daemon)."
-    });
-    let output = json!({
-        "tools": tools,
-        "cli_commands": cli_commands,
-        "flags": flags,
-    });
-    println!("{output}");
+            "examples": ["bladebro help --json", "bladebro help act"],
+            "notes": ["the single self-teaching surface — fetch 'help --json' once"]
+        }),
+        _ => return None,
+    };
+    Some(v)
 }
 
-fn print_cli_help() {
-    eprintln!(
-        "bladebro — agentic browser driver\n\n\
-         USAGE:\n    bladebro <COMMAND> [OPTIONS] [--json] [--no-daemon]\n    bladebro help <COMMAND>   — detailed help for a command\n\n\
-         The first command auto-starts a persistent daemon (one Chrome instance\n\
-         for all subsequent commands). No need to run 'bladebro daemon' first.\n\
-         Use --no-daemon to force one-shot mode (new Chrome per command).\n\n\
-         COMMANDS:\n    nav <url>              navigate to a URL\n    see [mode] [url]      read the page without acting\n    act <action> [args]   interact with the page\n    state <op> [args]      manage cookies, storage, tabs\n    run <json-steps>       batch actions with branching/loops\n    vision [--marks]       screenshot\n    daemon                 start persistent Chrome session\n    stop                   stop daemon\n    help [command]         show help (use 'help act' for act details)\n\n\
-         QUICK START:\n    bladebro nav https://example.com      — navigate\n    bladebro see model                   — interactive elements with refs\n    bladebro see content                 — read page as markdown\n    bladebro act click e5                — click element e5\n    bladebro act type e12 \"hello\"        — type text into one element\n    bladebro act fill '{{\"e12\":\"John\",\"e15\":\"pass\"}}'  — fill multiple fields\n    bladebro see extract auto            — auto-extract structured data\n    bladebro state cookies               — list cookies\n    bladebro stop                        — clean up Chrome\n\n\
-         FLAGS:\n    --json                 structured JSON output {{ok, text, image, is_error}}\n    --no-daemon            force one-shot mode (new Chrome per command)\n    --marks (vision)       overlay numbered ref badges on screenshot\n    --host <h>             browser debug host (default 127.0.0.1)\n    --port <p>             connect to an already-running Chrome on this port\n                           instead of launching one / the daemon\n\n\
-         Run 'bladebro help <command>' for detailed usage:\n    bladebro help act     — all actions with examples\n    bladebro help see     — reading modes and extraction\n    bladebro help state   — cookies, storage, tabs\n    bladebro help run     — batch actions with branching"
-    );
-}
-
-/// Detailed per-command help.
-fn print_command_help(cmd: &str) {
+/// The MCP tool a command maps to (for schema lookup in help --json).
+fn command_tool(cmd: &str) -> Option<&'static str> {
     match cmd {
-        "nav" | "navigate" => eprintln!(
-            "bladebro nav — navigate to a URL\n\n\
-             USAGE:\n    bladebro nav <url>\n\n\
-             The first command auto-starts a daemon. Returns page title,\n\
-             URL, and a content preview alongside interactive element refs.\n\n\
-             EXAMPLES:\n    bladebro nav https://example.com\n    bladebro nav https://example.com --json    — structured output"
-        ),
-        "see" => eprintln!(
-            "bladebro see — read the page without acting\n\n\
-             USAGE:\n    bladebro see [mode] [url] [options]\n\n\
-             MODES:\n    model (default)     interactive elements with refs (e1, e2, ...)\n    content             clean markdown for reading articles/docs\n    outline             heading hierarchy only (cheapest read)\n\n\
-             EXTRACTION:\n    extract auto        auto-detect and extract structured data (products, posts, repos)\n    extract links       all links on the page\n    extract forms       all forms with fields\n\n\
-             OPTIONS:\n    --filter <role>     filter elements by role (button, link, textbox, ...)\n    --find <text>       find elements by text — returns refs\n    --budget <N>        max chars in response (default 8000)\n    --limit <N>         max items for extract (default 50)\n    --logs console|network   read browser logs\n\n\
-             EXAMPLES:\n    bladebro see                            — interactive elements\n    bladebro see content                    — read as markdown\n    bladebro see outline                    — headings only\n    bladebro see extract auto               — structured data\n    bladebro see https://example.com content — navigate + read\n    bladebro see --filter button            — only buttons\n    bladebro see --find \"Submit\"            — find by text"
-        ),
-        "act" => eprintln!(
-            "bladebro act — interact with the page\n\n\
-             USAGE:\n    bladebro act <action> [args]\n\n\
-             ACTIONS:\n\n\
-             click <ref|label> [--role <role>] [--nth <N>]\n\
-                 Click an element. Use ref from 'see model' or label text.\n\
-                 Examples:\n    bladebro act click e5                  — click by ref\n    bladebro act click \"Submit\"            — click by text\n    bladebro act click \"Button\" --role button --nth 2  — 2nd button\n\n\
-             type <ref|label> <text>\n\
-                 Type text into ONE element. Clears first, then types.\n\
-                 Use for single inputs. For filling multiple fields at once,\n\
-                 use 'fill' instead.\n\
-                 Examples:\n    bladebro act type e12 \"hello world\"    — type by ref\n    bladebro act type \"Email\" \"user@test.com\" — type by label\n\n\
-             fill <json-fields> [--submit <ref>]\n\
-                 Fill MULTIPLE form fields in ONE call. Fields is a JSON\n\
-                 object mapping refs to values. Optionally submit after.\n\
-                 Faster than multiple type calls for forms.\n\
-                 Examples:\n    bladebro act fill '{{\"e3\":\"John\",\"e5\":\"Doe\"}}'\n    bladebro act fill '{{\"e3\":\"John\",\"e5\":\"Doe\"}}' --submit e8\n    bladebro act fill '{{\"e12\":\"user@test.com\",\"e15\":\"pass123\"}}' --submit e20\n\n\
-             navigate <url> [--block <classes>]\n\
-                 Go to a URL. Same as 'nav' command.\n\n\
-             scroll <dx> <dy>\n    bladebro act scroll 0 500     — scroll down 500px\n    bladebro act scroll 0 -200    — scroll up 200px\n\n\
-             press <key>\n    bladebro act press Enter     — press Enter key\n    bladebro act press Tab       — press Tab key\n    bladebro act press Escape    — press Escape key\n\n\
-             hover <ref|label>\n    bladebro act hover e5         — hover an element\n\n\
-             select <ref|label> <option>\n    bladebro act select e8 \"Large\"  — select option by text\n    bladebro act select e8 \"large\"  — select option by value\n\n\
-             clear <ref|label>\n    bladebro act clear e12        — clear an input\n\n\
-             upload <ref|label> <path>\n    bladebro act upload e5 /tmp/file.pdf  — upload a file\n\n\
-             download <url> [--path <path>]\n    bladebro act download https://example.com/file.pdf --path /tmp/\n\n\
-             wait <condition> [--text <text>] [--timeout <secs>]\n\
-                 Wait for a condition: element, title, url, text, settle, js.\n    bladebro act wait element --text \"Submit\"    — wait for element\n    bladebro act wait text --text \"Loaded\"       — wait for text\n    bladebro act wait url --text \"example.com\"   — wait for URL\n    bladebro act wait settle                       — wait for DOM quiet\n    bladebro act wait js \"document.title\"         — wait for JS truthy\n\n\
-             eval <js-expression>\n    bladebro act eval \"document.title\"           — evaluate JS\n    bladebro act eval \"JSON.stringify(data)\"     — return JSON\n\n\
-             back / forward / reload\n    bladebro act back\n    bladebro act forward\n    bladebro act reload\n\n\
-             collect <url> [--max <N>]\n\
-                 Navigate + infinite-scroll + auto-extract items.\n    bladebro act collect https://example.com/products --max 50"
-        ),
-        "state" => eprintln!(
-            "bladebro state — manage cookies, storage, tabs, sessions\n\n\
-             USAGE:\n    bladebro state <op> [args]\n\n\
-             COOKIES:\n    cookies [url]                         — list cookies (filtered by URL)\n    set-cookie <name> <value> [options]   — set a cookie\n    del-cookie <name>                     — delete a cookie\n\n\
-             set-cookie options:\n    --url <url>         scope to this URL\n    --domain <domain>   scope to this domain\n    --path <path>       cookie path (default /)\n    --secure            secure cookie (HTTPS only)\n    --http-only          httpOnly cookie (not accessible via JS)\n    --same-site <S>     Strict | Lax | None (default Lax)\n\n\
-             Examples:\n    bladebro state set-cookie token \"abc123\" --domain example.com\n    bladebro state set-cookie session \"xyz\" --secure --same-site Strict\n    bladebro state del-cookie token\n\n\
-             STORAGE:\n    ls                     — list localStorage\n    ss                     — list sessionStorage\n    set-ls <key> <value>   — set localStorage key\n    set-ss <key> <value>   — set sessionStorage key\n    rm-ls <key>            — remove localStorage key\n    clear-ls               — clear all localStorage\n    clear-ss               — clear all sessionStorage\n\n\
-             TABS:\n    tabs                   — list all open tabs (* = current)\n    open-tab <url>         — open a new tab (auto-switches to it)\n    close-tab <id>         — close a tab by target ID\n    switch-tab <id>        — switch to a tab by target ID\n\n\
-             SESSIONS:\n    save <name>            — save cookies + localStorage to ~/.blade/sessions/\n    load <name>            — load a saved session\n\n\
-             Examples:\n    bladebro state cookies\n    bladebro state set-cookie token \"abc\" --domain example.com --secure\n    bladebro state ls\n    bladebro state set-ls theme dark\n    bladebro state open-tab https://example.com\n    bladebro state save my-session"
-        ),
-        "run" => eprintln!(
-            "bladebro run — batch actions with branching and loops\n\n\
-             USAGE:\n    bladebro run '<json-steps>'\n\n\
-             Steps is a JSON array of action objects. Each step has an\n\
-             'action' field and supporting fields (ref, text, url, etc.).\n\
-             Supports if/else branching and while loops.\n\n\
-             Regular steps:\n    {{\"action\":\"click\",\"ref\":\"e5\"}}\n    {{\"action\":\"type\",\"ref\":\"e12\",\"text\":\"hello\"}}\n    {{\"action\":\"navigate\",\"url\":\"https://example.com\"}}\n    {{\"action\":\"wait\",\"condition\":\"settle\"}}\n    {{\"action\":\"see\",\"mode\":\"content\"}}   — read inline (mode/extract/find/budget; while+see reads across pages in one call)\n\n\
-             Branching:\n    {{\"action\":\"if\",\"condition\":\"text\",\"text\":\"Welcome\",\"then\":[...],\"else\":[...]}}\n    {{\"action\":\"while\",\"condition\":\"text\",\"text\":\"Load More\",\"steps\":[...]}}\n\n\
-             Conditions: element (visible), title, url, text, settle, js.\n\n\
-             Example:\n    bladebro run '[{{\"action\":\"navigate\",\"url\":\"https://example.com\"}},{{\"action\":\"click\",\"ref\":\"e5\"}}]'\n    bladebro run '[{{\"action\":\"click\",\"text\":\"Login\"}},{{\"action\":\"wait\",\"condition\":\"settle\"}},{{\"action\":\"type\",\"label\":\"Email\",\"text\":\"user@test.com\"}}]'"
-        ),
-        "vision" => eprintln!(
-            "bladebro vision — screenshot as PNG\n\n\
-             USAGE:\n    bladebro vision [--marks]\n\n\
-             --marks    overlay numbered ref badges on visible elements\n\
-                       so you can click by ref after seeing the screenshot.\n\n\
-             The screenshot is saved to a temp file. Path is printed.\n\n\
-             Example:\n    bladebro vision\n    bladebro vision --marks"
-        ),
-        "daemon" => eprintln!(
-            "bladebro daemon — start persistent Chrome session\n\n\
-             The daemon auto-starts on the first command. You don't need\n\
-             to run this manually. It's here for advanced use.\n\n\
-             The daemon keeps one Chrome instance alive across all commands.\n\
-             Idle timeout: 10 minutes (BLADE_IDLE_TIMEOUT env to change).\n\
-             'bladebro stop' shuts it down and cleans up Chrome."
-        ),
-        "stop" => eprintln!(
-            "bladebro stop — stop the daemon and clean up Chrome\n\n\
-             Sends a stop command to the running daemon. Chrome + Xvfb are\n\
-             shut down, the socket is removed, and session profiles are cleaned."
-        ),
-        _ => {
-            eprintln!("Unknown command: {cmd}\n\nRun 'bladebro help' for the command list.");
+        "nav" => Some("act"),
+        "see" => Some("see"),
+        "act" => Some("act"),
+        "state" => Some("state"),
+        "run" => Some("run"),
+        "vision" => Some("vision"),
+        _ => None,
+    }
+}
+
+/// The machine manual — `bladebro help --json` (optionally per command).
+/// One call teaches an agent everything the CLI can do: the same depth as
+/// MCP's tools + instructions, plus CLI-only details (exit codes, stdin/@file
+/// payloads, universal flags, examples).
+pub fn help_json(cmd: Option<&str>) -> Result<String> {
+    let tools = crate::mcp::tools::tools_to_json();
+
+    if let Some(name) = cmd {
+        let norm = if name == "navigate" { "nav" } else { name };
+        let detail = command_help_json(norm).ok_or_else(|| {
+            BladeError::Usage(format!(
+                "unknown command '{name}' — run 'bladebro help' for the command list"
+            ))
+        })?;
+        let mut out = json!({ "command": norm, "detail": detail });
+        if let Some(t) = command_tool(norm) {
+            if let Some(def) = tools
+                .iter()
+                .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(t))
+            {
+                out["tool_definition"] = def.clone();
+            }
+        }
+        return Ok(format!("{out}"));
+    }
+
+    let mut commands = serde_json::Map::new();
+    for c in ["nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help"] {
+        if let Some(d) = command_help_json(c) {
+            commands.insert(c.to_string(), d);
         }
     }
+
+    let out = json!({
+        "bladebro": { "version": env!("CARGO_PKG_VERSION"), "surface": "cli" },
+        "instructions": INSTRUCTIONS,
+        "quick_start": [
+            "bladebro nav example.com",
+            "bladebro see extract auto",
+            "bladebro act click \"Sign in\"",
+            "bladebro act fill '{\"e12\":\"John\"}' --submit e20",
+            "bladebro run '[{\"action\":\"navigate\",\"url\":\"x.com\"},{\"action\":\"see\",\"mode\":\"content\"}]'",
+            "bladebro stop"
+        ],
+        "commands": commands,
+        "tools": tools,
+        "output": {
+            "human": "result text on stdout; diagnostics on stderr",
+            "--json": "ONE JSON object on stdout: {\"ok\":bool,\"is_error\":bool,\"text\":string} (+ \"image_path\" for vision)",
+            "payloads": {
+                "@file": "read the argument from a file (steps, fields, templates, js)",
+                "-": "read from stdin",
+                "example": "bladebro run @steps.json  |  cat steps.json | bladebro run -"
+            }
+        },
+        "exit_codes": {
+            "0": "success",
+            "1": "command ran but failed — details in text (includes page state)",
+            "2": "usage error — bad command/flag/argument; the message says how to fix it"
+        },
+        "env": {
+            "BLADE_HOME": "isolate daemon/Chrome/sessions/knowledge in a directory",
+            "BLADE_CMD_TIMEOUT": "client wait for a daemon response, seconds (default 300)",
+            "BLADE_IDLE_TIMEOUT": "daemon idle before Chrome shuts down, seconds (default 600)",
+            "BLADE_NO_COMPRESS": "set 1 to disable response compression",
+            "BLADE_TRANSPORT": "mcp: 'ws' forces the WebSocket transport",
+            "CHROME_PATH": "override the Chrome/Chromium binary",
+            "RUST_LOG": "log filter (default warn,bladebro=info)"
+        }
+    });
+    Ok(format!("{out}"))
+}
+
+/// Detailed per-command human help (`help <cmd>`, `<cmd> --help`).
+pub fn command_help_text(cmd: &str) -> Option<String> {
+    let cmd = if cmd == "navigate" { "nav" } else { cmd };
+    let text = match cmd {
+        "nav" => r#"bladebro nav — navigate
+
+USAGE
+  bladebro nav <url> [--block <classes>] [--json]
+
+Returns the page title/URL, interactive element refs, and a content preview —
+usually enough to act without a separate see call. Bare domains work:
+`bladebro nav example.com` → https://example.com. The first command
+auto-starts the daemon (one Chrome shared by all later commands).
+
+--block <classes>   block inert resources for this load AND remember the
+                    choice for the domain: images,fonts,media,trackers
+
+EXAMPLES
+  bladebro nav example.com
+  bladebro nav https://x.com --block images,fonts
+  bladebro nav example.com --json | jq .text
+"#,
+        "see" => r#"bladebro see — read the page without acting
+
+USAGE
+  bladebro see [mode] [url] [extract <type>] [flags]
+
+MODES
+  model (default)   interactive elements with refs (e1, e2, …)
+  content           page text as clean markdown (reading articles/docs)
+  outline           heading hierarchy only (cheapest read)
+
+EXTRACTION
+  extract auto      structured items in ONE call — lists, search results,
+                    products, posts. Site-aware: Reddit feeds/comments,
+                    GitHub issues/repos and product pages get extra fields.
+  extract links     all links
+  extract forms     all forms with fields
+  extract json      custom template (--template '{"items":{…}}' or @file)
+
+FLAGS
+  --filter <role>     only elements of a role (button, link, textbox, …)
+  --find <text>       search by text → refs
+  --scope <ref>       read one element's subtree
+  --content           include text in model mode
+  --budget <N>        max response chars (default 8000)
+  --limit <N>         max extract items (default 50)
+  --logs console|network
+  --url <url>         navigate first (or pass the URL positionally)
+
+EXAMPLES
+  bladebro see                            interactive elements
+  bladebro see content                    page as markdown
+  bladebro see extract auto --limit 20    structured items
+  bladebro see example.com content        navigate + read in one call
+  bladebro see --find "Submit"            refs by text
+  bladebro see --logs network             recent requests
+"#,
+        "act" => r#"bladebro act — interact with the page
+
+USAGE
+  bladebro act <action> [target] [value] [--flags]
+
+ACTIONS
+  click <ref|label>        type <target> <text>      fill <fields> [--submit]
+  select <target> <option> clear <ref>               press <key>
+  scroll <dx> <dy>         hover <target>            navigate <url> [--block]
+  upload <target> <path>   download <url> [--path]  wait <condition> [value]
+  eval <js> [--ref]        collect <url> [--max N]   read <ref>
+  batch <steps|@file|->    pdf [--path] [--landscape]
+  back / forward / reload  save <name> / load <name>
+  open-tab [url] / switch-tab <id> / close-tab <id>
+
+UNIVERSAL FLAGS (mirror the MCP schema — accepted on every action)
+  --ref --label --text --role --nth --key --url --option --condition --timeout
+  --dx --dy --js --submit --block --slim   (per-action: --path, --max, --x/--y…)
+
+Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
+payloads: @file or - (stdin). Unknown flags fail loudly (exit 2).
+
+EXAMPLES
+  bladebro act click e5                          click a ref
+  bladebro act click "Sign in"                   click by text
+  bladebro act type e12 "hello world"            type
+  bladebro act fill '{"e3":"John","e5":"Doe"}' --submit e8
+  bladebro act click Submit --url example.com/login   navigate + click in ONE call
+  bladebro act upload e5 /tmp/file.pdf           file upload
+  bladebro act wait settle                       wait for DOM quiet
+  bladebro act wait element --text "Results"     wait for an element
+  bladebro act eval "document.title"             evaluate JS
+  bladebro act batch '[{"action":"reload"}]'     sequential steps in ONE call
+  bladebro act collect https://x.com/list --max 100   infinite-scroll collect
+"#,
+        "state" => r#"bladebro state — cookies, storage, tabs, sessions, blocking
+
+USAGE
+  bladebro state <op> [args] [flags]
+
+COOKIES
+  cookies [url]                        list (filtered to url / current page)
+  set-cookie <name> <value> [flags]    flags: --url --domain --path --secure
+                                       --http-only --same-site Strict|Lax|None
+  del-cookie <name> [--url|--domain]
+
+STORAGE
+  ls / ss                              list localStorage / sessionStorage
+  set-ls <key> <value> · set-ss <key> <value>
+  rm-ls <key> · rm-ss <key> · clear-ls · clear-ss
+
+TABS
+  tabs                                 list (* = current)
+  open-tab <url>                       open + auto-switch
+  switch-tab <id> · close-tab <id>     ids come from 'tabs'
+
+SESSIONS / CONTROL
+  save <name> · load <name>            persist/restore cookies+storage
+  block [classes] · block clear        image/font/media/tracker blocking
+  compress on|off|status               context pruning
+
+EXAMPLES
+  bladebro state cookies
+  bladebro state set-cookie token abc --domain example.com --secure
+  bladebro state tabs
+  bladebro state save my-session
+"#,
+        "run" => r#"bladebro run — batch actions with branching and loops
+
+USAGE
+  bladebro run '<json-steps>'      (or @file / - for stdin)
+
+Steps are action objects (same fields as act) plus:
+  {"action":"if","condition":…,"then":[…],"else":[…]}   branch
+  {"action":"while","condition":…,"steps":[…],"max":N}  loop
+  {"action":"see",…}        read inline — while+see reads across pages in ONE call
+  state ops (open-tab, save, load, …) work as steps too
+
+Stops on the first error and returns the step number + page state.
+Conditions: element, title, url, text, settle, js.
+
+EXAMPLES
+  bladebro run '[{"action":"navigate","url":"example.com"},{"action":"see","mode":"content"}]'
+  bladebro run @steps.json
+  cat steps.json | bladebro run -
+"#,
+        "vision" => r#"bladebro vision — screenshot
+
+USAGE
+  bladebro vision [--marks]
+
+Always saves a PNG to a file and prints the path (--json: "image_path").
+--marks overlays numbered ref badges (Set-of-Marks) so you can click by ref
+after looking at the image. Vision is the LAST RESORT: the structural model
+(see/act with refs) is cheaper and gives actionable refs.
+
+EXAMPLES
+  bladebro vision
+  bladebro vision --marks --json | jq -r .image_path
+"#,
+        "daemon" => r#"bladebro daemon — persistent Chrome session
+
+USAGE
+  bladebro daemon
+
+Auto-starts on the first command — run it manually only to watch startup
+errors. One Chrome instance serves every later command (Unix socket under the
+data dir; socket + pid file are 0600). Idle timeout: BLADE_IDLE_TIMEOUT
+seconds (default 600), then Chrome shuts down; the next command relaunches it.
+"#,
+        "stop" => r#"bladebro stop — shut the daemon down
+
+USAGE
+  bladebro stop
+
+Graceful: flushes logins + domain knowledge, kills Chrome, removes the
+socket. Idempotent — exit 0 even when nothing is running. If the daemon is
+wedged, falls back to terminating the pid from the pid file.
+"#,
+        "help" => r#"bladebro help — the single self-teaching surface
+
+USAGE
+  bladebro help              this manual
+  bladebro help <command>    one command in depth
+  bladebro help --json       the machine manual: tool schemas (same as MCP
+                             tools/list), per-command usage, exit codes,
+                             payload conventions, examples — call ONCE and
+                             you know the whole CLI
+  bladebro help <cmd> --json per-command machine help
+"#,
+        _ => return None,
+    };
+    Some(text.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::extract_endpoint;
+    use super::*;
+
+    fn a(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn tmp_file(tag: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("bt-cli-{}-{}.tmp", tag, std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    // ── endpoint extraction (issue #16) ────────────────────────────────
 
     #[test]
     fn port_maps_to_default_host_endpoint() {
@@ -1576,13 +2526,381 @@ mod tests {
 
     #[test]
     fn flags_before_command_still_parse() {
-        // Position-independent: main.rs may forward the endpoint after the
-        // command, but a caller can also put it first.
         let (cleaned, external) = extract_endpoint(&[
             "--port".into(), "9333".into(), "vision".into(), "--marks".into(),
         ]);
         assert_eq!(cleaned, vec!["vision".to_string(), "--marks".to_string()]);
         assert_eq!(external.as_deref(), Some("127.0.0.1:9333"));
     }
-}
 
+    // ── act parsing ────────────────────────────────────────────────────
+
+    #[test]
+    fn act_click_by_ref_and_by_label() {
+        let v = parse_act_args(&a(&["click", "e5"])).unwrap();
+        assert_eq!(v["action"], "click");
+        assert_eq!(v["ref"], "e5");
+
+        let v = parse_act_args(&a(&["click", "Sign", "in"])).unwrap();
+        assert_eq!(v["label"], "Sign in");
+        assert!(v.get("ref").is_none());
+    }
+
+    #[test]
+    fn act_click_flags_win() {
+        let v = parse_act_args(&a(&["click", "--ref", "e7", "--nth", "2"])).unwrap();
+        assert_eq!(v["ref"], "e7");
+        assert_eq!(v["nth"], 2);
+    }
+
+    #[test]
+    fn act_type_joins_unquoted_text() {
+        let v = parse_act_args(&a(&["type", "e12", "hello", "world"])).unwrap();
+        assert_eq!(v["ref"], "e12");
+        assert_eq!(v["text"], "hello world");
+
+        let v = parse_act_args(&a(&["type", "--ref", "e5", "hi", "there"])).unwrap();
+        assert_eq!(v["ref"], "e5");
+        assert_eq!(v["text"], "hi there");
+    }
+
+    #[test]
+    fn act_type_requires_text_and_target() {
+        assert!(parse_act_args(&a(&["type", "e5"])).is_err());
+        assert!(parse_act_args(&a(&["type"])).is_err());
+    }
+
+    #[test]
+    fn act_fill_normalizes_object_fields() {
+        let v = parse_act_args(&a(&["fill", "{\"e3\":\"John\",\"e5\":\"Doe\"}"])).unwrap();
+        let fields = v["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().any(|f| f["ref"] == "e3" && f["text"] == "John"));
+    }
+
+    #[test]
+    fn act_fill_accepts_array_and_rejects_garbage() {
+        let arr = "[{\"ref\":\"e1\",\"text\":\"x\"}]";
+        let v = parse_act_args(&a(&["fill", arr])).unwrap();
+        assert_eq!(v["fields"].as_array().unwrap().len(), 1);
+        assert!(parse_act_args(&a(&["fill", "not-json"])).is_err());
+    }
+
+    #[test]
+    fn act_fill_object_with_reserved_keys_is_one_field_spec() {
+        // {"label":"Email","text":"x"} means ONE field addressed by
+        // label — it used to be misread as a ref-map entry named "label"
+        // and failed live with "stale ref: label".
+        let v = parse_act_args(&a(&["fill", "{\"label\":\"Email\",\"text\":\"x\"}"])).unwrap();
+        let fields = v["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0]["label"], "Email");
+        assert_eq!(fields[0]["text"], "x");
+
+        let v = parse_act_args(&a(&["fill", "{\"ref\":\"e3\",\"text\":\"y\"}"])).unwrap();
+        assert_eq!(v["fields"].as_array().unwrap().len(), 1);
+        assert_eq!(v["fields"][0]["ref"], "e3");
+    }
+
+    #[test]
+    fn act_fill_from_file() {
+        let path = tmp_file("fill", "{\"e9\":\"from-file\"}");
+        let arg = format!("@{}", path.display());
+        let v = parse_act_args(&a(&["fill", &arg])).unwrap();
+        assert_eq!(v["fields"][0]["text"], "from-file");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn act_upload_sends_path_in_text() {
+        // Regression: the MCP handler reads the file path from `text`; the
+        // old CLI put it in `path`, so every CLI upload arrived empty.
+        let v = parse_act_args(&a(&["upload", "e5", "/tmp/f.pdf"])).unwrap();
+        assert_eq!(v["text"], "/tmp/f.pdf");
+        assert!(v.get("path").is_none());
+
+        let v = parse_act_args(&a(&["upload", "--ref", "e5", "--path", "/tmp/g.png"])).unwrap();
+        assert_eq!(v["text"], "/tmp/g.png");
+    }
+
+    #[test]
+    fn act_navigate_requires_exactly_one_url() {
+        let v = parse_act_args(&a(&["navigate", "example.com", "--block", "images"])).unwrap();
+        assert_eq!(v["url"], "example.com");
+        assert_eq!(v["block"], "images");
+        assert!(parse_act_args(&a(&["navigate"])).is_err());
+        assert!(parse_act_args(&a(&["navigate", "a.com", "b.com"])).is_err());
+    }
+
+    #[test]
+    fn act_wait_validates_condition_and_text() {
+        let v = parse_act_args(&a(&["wait", "js", "document.title"])).unwrap();
+        assert_eq!(v["condition"], "js");
+        assert_eq!(v["text"], "document.title");
+
+        let v = parse_act_args(&a(&["wait", "settle"])).unwrap();
+        assert_eq!(v["condition"], "settle");
+
+        assert!(parse_act_args(&a(&["wait", "text"])).is_err());
+        assert!(parse_act_args(&a(&["wait", "bogus", "x"])).is_err());
+    }
+
+    #[test]
+    fn act_scroll_numbers_and_negatives() {
+        let v = parse_act_args(&a(&["scroll", "0", "-500"])).unwrap();
+        assert_eq!(v["dx"], 0);
+        assert_eq!(v["dy"], -500);
+        assert!(parse_act_args(&a(&["scroll", "down"])).is_err());
+        assert!(parse_act_args(&a(&["scroll"])).is_err());
+    }
+
+    #[test]
+    fn act_batch_parses_steps_and_rejects_non_array() {
+        let v = parse_act_args(&a(&["batch", "[{\"action\":\"reload\"}]"])).unwrap();
+        assert_eq!(v["steps"][0]["action"], "reload");
+        assert!(parse_act_args(&a(&["batch", "{}"])).is_err());
+        assert!(parse_act_args(&a(&["batch", "[]"])).is_err());
+        assert!(parse_act_args(&a(&["batch"])).is_err());
+    }
+
+    #[test]
+    fn act_tabs_save_load_and_read() {
+        let v = parse_act_args(&a(&["open-tab", "https://x.com"])).unwrap();
+        assert_eq!(v["url"], "https://x.com");
+        let v = parse_act_args(&a(&["switch-tab", "ABC123"])).unwrap();
+        assert_eq!(v["target_id"], "ABC123");
+        let v = parse_act_args(&a(&["read", "e5"])).unwrap();
+        assert_eq!(v["ref"], "e5");
+        let v = parse_act_args(&a(&["save", "me"])).unwrap();
+        assert_eq!(v["name"], "me");
+        assert!(parse_act_args(&a(&["switch-tab"])).is_err());
+    }
+
+    #[test]
+    fn act_rejects_unknown_flags_and_actions_loudly() {
+        let e = parse_act_args(&a(&["click", "e5", "--bogus", "x"])).unwrap_err();
+        assert!(e.to_string().contains("--bogus"));
+        let e = parse_act_args(&a(&["clik", "e5"])).unwrap_err();
+        assert!(e.to_string().contains("clik"));
+    }
+
+    #[test]
+    fn act_flag_value_missing_is_loud() {
+        assert!(parse_act_args(&a(&["click", "--ref"])).is_err());
+        assert!(parse_act_args(&a(&["click", "e5", "--nth", "abc"])).is_err());
+    }
+
+    #[test]
+    fn act_eval_joins_and_reads_files() {
+        let v = parse_act_args(&a(&["eval", "1", "+", "2"])).unwrap();
+        assert_eq!(v["js"], "1 + 2");
+
+        let path = tmp_file("eval", "6*7");
+        let arg = format!("@{}", path.display());
+        let v = parse_act_args(&a(&["eval", &arg])).unwrap();
+        assert_eq!(v["js"], "6*7");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── see parsing ────────────────────────────────────────────────────
+
+    #[test]
+    fn see_bare_domain_is_a_url_not_a_mode() {
+        let v = parse_see_args(&a(&["example.com"])).unwrap();
+        assert_eq!(v["url"], "example.com");
+        assert!(v.get("mode").is_none());
+    }
+
+    #[test]
+    fn see_mode_and_url_in_any_order() {
+        let v = parse_see_args(&a(&["content", "example.com"])).unwrap();
+        assert_eq!(v["mode"], "content");
+        assert_eq!(v["url"], "example.com");
+        let v = parse_see_args(&a(&["https://x.com", "outline"])).unwrap();
+        assert_eq!(v["mode"], "outline");
+        assert_eq!(v["url"], "https://x.com");
+    }
+
+    #[test]
+    fn see_extract_type_attaches() {
+        let v = parse_see_args(&a(&["extract", "auto"])).unwrap();
+        assert_eq!(v["extract"], "auto");
+        let v = parse_see_args(&a(&["--extract", "links", "--limit", "5"])).unwrap();
+        assert_eq!(v["extract"], "links");
+        assert_eq!(v["limit"], 5);
+    }
+
+    #[test]
+    fn see_extract_without_type_errors() {
+        assert!(parse_see_args(&a(&["extract"])).is_err());
+        assert!(parse_see_args(&a(&["--extract", "bogus"])).is_err());
+    }
+
+    #[test]
+    fn see_rejects_unknown_tokens_and_bad_numbers() {
+        assert!(parse_see_args(&a(&["bogus"])).is_err());
+        assert!(parse_see_args(&a(&["--budget", "abc"])).is_err());
+        assert!(parse_see_args(&a(&["--budjet", "5"])).is_err());
+        assert!(parse_see_args(&a(&["--budget"])).is_err());
+    }
+
+    #[test]
+    fn see_scope_content_and_template() {
+        let v = parse_see_args(&a(&["--scope", "e9", "--content"])).unwrap();
+        assert_eq!(v["scope"], "e9");
+        assert_eq!(v["content"], true);
+        let v = parse_see_args(&a(&["--template", "{\"items\":{}}"])).unwrap();
+        assert!(v["template"].is_object());
+        assert!(parse_see_args(&a(&["--template", "not-json"])).is_err());
+    }
+
+    // ── state parsing ──────────────────────────────────────────────────
+
+    #[test]
+    fn state_storage_ops_use_the_name_field() {
+        // Regression: the handler reads `name` (its MCP schema field).
+        // The old code emitted `key`, so every set-ls stored an EMPTY key —
+        // live `state ls` showed "=dark".
+        let v = parse_state_args(&a(&["rm-ss", "key1"])).unwrap();
+        assert_eq!(v["op"], "rm-ss");
+        assert_eq!(v["name"], "key1");
+
+        let v = parse_state_args(&a(&["set-ls", "theme", "dark"])).unwrap();
+        assert_eq!(v["name"], "theme");
+        assert_eq!(v["value"], "dark");
+        assert!(v.get("key").is_none());
+
+        let v = parse_state_args(&a(&["set-ss", "--key", "k", "--value", "v"])).unwrap();
+        assert_eq!(v["name"], "k");
+        assert_eq!(v["value"], "v");
+    }
+
+    #[test]
+    fn state_set_cookie_full_form() {
+        let v = parse_state_args(&a(&[
+            "set-cookie", "tok", "abc", "--domain", "example.com", "--secure",
+            "--http-only", "--same-site", "Strict",
+        ]))
+        .unwrap();
+        assert_eq!(v["name"], "tok");
+        assert_eq!(v["value"], "abc");
+        assert_eq!(v["domain"], "example.com");
+        assert_eq!(v["secure"], true);
+        assert_eq!(v["httpOnly"], true);
+        assert_eq!(v["sameSite"], "Strict");
+    }
+
+    #[test]
+    fn state_missing_values_are_loud() {
+        assert!(parse_state_args(&a(&["set-cookie", "tok"])).is_err());
+        assert!(parse_state_args(&a(&["set-ls", "k"])).is_err());
+        assert!(parse_state_args(&a(&["rm-ls"])).is_err());
+        assert!(parse_state_args(&a(&["close-tab"])).is_err());
+    }
+
+    #[test]
+    fn state_cookies_optional_url_and_block_clear() {
+        let v = parse_state_args(&a(&["cookies", "example.com"])).unwrap();
+        assert_eq!(v["url"], "example.com");
+        let v = parse_state_args(&a(&["block", "clear"])).unwrap();
+        assert_eq!(v["clear"], true);
+        let v = parse_state_args(&a(&["block", "images,fonts"])).unwrap();
+        assert_eq!(v["classes"], "images,fonts");
+    }
+
+    #[test]
+    fn state_compress_and_unknown_op() {
+        let v = parse_state_args(&a(&["compress", "off"])).unwrap();
+        assert_eq!(v["mode"], "off");
+        assert!(parse_state_args(&a(&["compress", "sometimes"])).is_err());
+        assert!(parse_state_args(&a(&["frobnicate"])).is_err());
+    }
+
+    // ── run parsing ────────────────────────────────────────────────────
+
+    #[test]
+    fn run_accepts_inline_file_and_validates() {
+        let v = parse_run_args(&a(&["[{\"action\":\"reload\"}]"])).unwrap();
+        assert_eq!(v["steps"][0]["action"], "reload");
+
+        let path = tmp_file("run", "[{\"action\":\"reload\"}]");
+        let arg = format!("@{}", path.display());
+        let v = parse_run_args(&a(&[&arg])).unwrap();
+        assert!(v["steps"].is_array());
+        let _ = std::fs::remove_file(&path);
+
+        assert!(parse_run_args(&a(&["{}"])).is_err());
+        assert!(parse_run_args(&a(&["[]"])).is_err());
+        assert!(parse_run_args(&a(&[])).is_err());
+    }
+
+    // ── nav / vision ───────────────────────────────────────────────────
+
+    #[test]
+    fn nav_requires_url_and_takes_block() {
+        let v = parse_nav_args(&a(&["example.com", "--block", "images"])).unwrap();
+        assert_eq!(v["action"], "navigate");
+        assert_eq!(v["url"], "example.com");
+        assert_eq!(v["block"], "images");
+        assert!(parse_nav_args(&a(&[])).is_err());
+        assert!(parse_nav_args(&a(&["a.com", "b.com"])).is_err());
+    }
+
+    #[test]
+    fn vision_only_takes_marks() {
+        assert_eq!(parse_vision_args(&a(&["--marks"])).unwrap()["marks"], true);
+        assert_eq!(parse_vision_args(&a(&[])).unwrap()["marks"], false);
+        assert!(parse_vision_args(&a(&["--bogus"])).is_err());
+        assert!(parse_vision_args(&a(&["wat"])).is_err());
+    }
+
+    // ── payloads / help ────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_payload_variants() {
+        assert_eq!(resolve_payload("inline").unwrap(), "inline");
+        let path = tmp_file("payload", "from file");
+        let arg = format!("@{}", path.display());
+        assert_eq!(resolve_payload(&arg).unwrap(), "from file");
+        let _ = std::fs::remove_file(&path);
+        assert!(resolve_payload("@/nonexistent/definitely-missing").is_err());
+    }
+
+    #[test]
+    fn help_json_is_complete_and_parses() {
+        let raw = help_json(None).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert!(v["instructions"].as_str().unwrap().len() > 200);
+        assert_eq!(v["tools"].as_array().unwrap().len(), 5);
+        assert!(v["commands"]["act"]["usage"].as_str().is_some());
+        assert!(v["commands"]["nav"].is_object());
+        assert!(v["exit_codes"]["2"].as_str().unwrap().contains("usage"));
+        assert!(v["output"]["payloads"]["@file"].as_str().is_some());
+
+        let raw = help_json(Some("act")).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["command"], "act");
+        assert_eq!(v["tool_definition"]["name"], "act");
+        assert!(help_json(Some("nope")).is_err());
+    }
+
+    #[test]
+    fn every_command_has_help_text_and_json() {
+        for c in ["nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help"] {
+            let text = command_help_text(c).unwrap_or_else(|| panic!("{c} human help"));
+            assert!(text.contains("USAGE"), "{c} help lacks USAGE");
+            let j = command_help_json(c).unwrap_or_else(|| panic!("{c} json help"));
+            assert!(j["usage"].as_str().is_some(), "{c} json lacks usage");
+        }
+        assert!(command_help_text("bogus").is_none());
+        assert!(command_help_json("bogus").is_none());
+    }
+
+    #[test]
+    fn help_text_mentions_version_and_contract() {
+        let t = help_text();
+        assert!(t.contains(env!("CARGO_PKG_VERSION")));
+        assert!(t.contains("EXIT CODES"));
+        assert!(t.contains("help --json"));
+    }
+}

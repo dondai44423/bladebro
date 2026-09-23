@@ -58,6 +58,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a[data-testid="issue-pr-title-link"]`, label links and octicon state;
   repo descriptions fall back to `og:description` (repo-slug suffix
   stripped).
+- **CLI: every silent failure made loud, every exit code meaningful.** Tool
+  errors exit 1 (the old CLI exited 0 on a failed click); usage errors exit 2
+  with actionable messages; unknown flags and missing values are hard errors
+  instead of being silently dropped (`see --budjet 5` used to read the current
+  page and "work"); `help`/`-h` now print to stdout (agents capturing stdout
+  got an empty read). `see example.com` treats a bare host as a URL, not a
+  mode. `stop` is idempotent (exit 0, waits for teardown, falls back to the
+  pid file and terminates a wedged daemon instead of orphaning it); a hung
+  daemon call times out with guidance (`BLADE_CMD_TIMEOUT`, default 300s)
+  instead of hanging forever; a stale socket is detected and the daemon
+  restarted.
+- **`act select` honors label addressing** (fixes MCP + CLI): `select "Pet"
+  cat` resolved to an EMPTY ref and failed with "stale ref:" — the handler
+  now resolves label/role/nth like click/type, and the same fix covers
+  batch/run steps.
+- **`state set-ls`/`set-ss`/`rm-ls`/`rm-ss` actually store something.** The
+  CLI sent the storage key in `key` while the handler reads `name` — every
+  write stored an EMPTY key (live `state ls` showed `=dark`).
+- **`act upload` sends the file path in `text`** — the field the handler
+  reads. The old CLI put it in `path`, so every CLI upload arrived empty
+  (caught by the live suite on a real file input).
+- **`act fill` accepts a single field spec** (`{"label":"Email","text":"x"}`)
+  instead of misreading it as a ref-map entry named "label" ("stale ref:
+  label"); the flat ref-map form (`{"e3":"John"}`) still works.
+- **`act open-tab`/`state open-tab` normalize bare hosts** like `nav` does —
+  a scheme-less URL ("localhost:3000/x") left a stuck about:blank tab — and
+  `vision` activates its target before capture, so screenshotting after tab
+  churn no longer burns the full CDP timeout. Both reproduced and re-verified
+  live.
 
 ### Added
 - **JS syntax guard for the injected capture script.** A `node --check` test
@@ -92,6 +121,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `state block [classes|clear]`, and the daemon now persists the knowledge
   base (periodic + on shutdown; `bladebro stop` flushes before it
   acknowledges).
+- **CLI: first-class agent surface.** `bladebro help --json` is the single
+  self-teaching manual: the same tool schemas as MCP `tools/list` plus
+  per-command usage, universal flags, payload conventions, exit codes and
+  examples — ONE call teaches the whole CLI (`help <cmd> --json` per
+  command). Every `act` action accepts the MCP field names as flags (`--ref
+  --label --text --role --nth --key --url --option --condition --timeout
+  --submit --block …`), positionals got forgiving (unquoted multi-word values
+  join: `act click Sign in` works), big JSON payloads come from `@file` or
+  stdin (`-`), and `act batch` / `read` / `open-tab` / `switch-tab` /
+  `close-tab` / `state rm-ss` close the remaining action-parity gaps with the
+  MCP surface. Vision reports `image_path` in --json (screenshot saved to a
+  file, never inline base64).
 
 ### Changed
 - **Sonic-speed pass — every interactive path ~2–3× faster, stealth intact.**
@@ -123,6 +164,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     nav, 3× click+read, exit — is ~3.2s in ONE call). The `wait` action
     keeps full time-based semantics (verified: an unreachable condition
     still consumes its whole budget).
+- **CLI `--json` contract is uniform:** one JSON object on stdout for EVERY
+  command including failures — `{"ok","is_error","text"}` (+ `"image_path"`
+  for vision) — with documented exit codes (`0` ok, `1` command failed, `2`
+  usage error). A failed command never yields an empty stdout read.
 
 ## [3.9.6] - 2026-09-02
 

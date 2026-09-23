@@ -152,12 +152,13 @@ pi install npm:bladebro
 
 The CLI has the **exact same power** as the MCP server. Same handlers, same stealth, same page model. Any feature update auto-propagates to both surfaces automatically.
 
-**How AI agents discover the CLI:** `bladebro help --json` returns the same structured tool definitions as MCP `tools/list`, plus a CLI command mapping. An agent calls it once to learn the full interface, then uses `--json` on every command for structured output. No guessing, no parsing help text.
+**How AI agents discover the CLI:** `bladebro help --json` is the single self-teaching manual — the same tool schemas as MCP `tools/list`, plus per-command usage, universal flags, payload conventions, exit codes, and examples in ONE call. Fetch it once, then drive every command with `--json` for machine-readable output. No guessing, no parsing help text.
 
 ```bash
-# Agent discovery: same schemas as MCP tools/list
+# Agent discovery: one call teaches the whole CLI
 bladebro help --json | jq '.tools[].name'
 # ["act", "see", "state", "run", "vision"]
+bladebro help act --json | jq '.detail.actions'   # per-command detail
 ```
 
 **Daemon mode** (persistent Chrome, zero startup delay after first launch):
@@ -207,8 +208,10 @@ bladebro state cookies               # list cookies
 bladebro state tabs                   # list tabs
 bladebro state open-tab https://example.com
 
-# Batch actions
+# Batch actions (JSON inline, from a file, or from stdin)
 bladebro run '[{"action":"click","ref":"e5"},{"action":"type","ref":"e12","text":"hello"}]'
+bladebro run @steps.json
+bladebro act batch @steps.json
 
 # Screenshot
 bladebro vision                      # save screenshot to /tmp
@@ -223,11 +226,13 @@ bladebro act click e5 --json | jq .is_error
 
 | Flag | What it does |
 |---|---|
-| `--json` | Structured JSON output `{ok, text, image, is_error}` for scripts and agents |
+| `--json` | One JSON object per command: `{ok, is_error, text}` (+ `image_path` for vision — screenshots go to a file, never inline base64) |
 | `--no-daemon` | Force one-shot mode (launch Chrome per command) |
 | `--marks` | Overlay numbered ref badges on screenshot (vision only) |
 | `--host <h>` | Browser debug host (default `127.0.0.1`) |
 | `--port <p>` | Drive an already-running Chrome on this debug port instead of launching one / the daemon. Applies to every tool command (`state`, `see`, `act`, …). Never owns or warms the external browser |
+
+**Exit codes are the contract:** `0` success · `1` the command ran but failed (the output text carries page state for recovery) · `2` usage error (bad flag/argument — the message says how to fix it). Big JSON payloads come from a file or stdin — no shell-quoting games: `bladebro run @steps.json`, `cat steps.json | bladebro run -`, `bladebro act eval @script.js`.
 
 ### Diagnostics
 

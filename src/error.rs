@@ -53,6 +53,10 @@ pub enum BladeError {
     #[error("{0}")]
     Other(String),
 
+    /// A CLI usage error (unknown command/flag/argument) — exit code 2.
+    #[error("usage: {0}")]
+    Usage(String),
+
     /// An I/O error (stdin/stdout) in the MCP server.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
