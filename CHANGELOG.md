@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.7] - 2026-09-23
+
 ### Fixed
 - **Sequential downloads no longer report the previous file (issue #22).**
   `act download url=...` keyed its wait off the newest tracker entry, so while
