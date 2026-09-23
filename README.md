@@ -458,6 +458,16 @@ A bot detector tracking behavioral consistency across visits sees the same ident
 
 **Corruption recovery:** corrupted files are deleted and regenerated. Atomic writes (`.tmp` then `rename`). Never half-written. Values clamped to human-like ranges on load.
 
+## 🧩 Site adapters
+
+Built-in site-aware handling — automatic, no config, and zero cost to the tool definitions (adapters are runtime heuristics; extra fields only appear on pages that have them):
+
+- **Reddit** — `see extract=auto` on a subreddit returns typed posts: title, score, comments, author, subreddit, date, domain. On a post page it returns the comment tree: author, score, depth, text. `see mode=content` on a post gives clean title/meta/body markdown.
+- **GitHub** — repo pages: description, stars, forks, language, topics, README. Issues/PR lists: number, title, status, labels, author per row.
+- **Product pages** — price (with strikethrough original), rating, availability, key features — on any shop, not a fixed list of stores.
+
+Adapters are heuristic and self-improving: the domain knowledge base learns per-site behavior across sessions — consent selectors, block history, settle timing, and your resource-blocking choice — and reuses it on later visits. Per-domain stealth overrides (timezone/locale) live in an editable `profiles.json` under your data root. No plugin API: if a site needs special handling, that behavior belongs in the heuristics or in the learned knowledge, not in per-site config.
+
 ## 🛡️ Stealth system
 
 <div align="center">

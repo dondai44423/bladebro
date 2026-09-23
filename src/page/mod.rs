@@ -937,6 +937,30 @@ impl Page {
         Ok(mask)
     }
 
+    /// Persist the agent's explicit resource-block choice for the domain of
+    /// `url`. `active` = the choice turned blocking on (mask != 0): the raw
+    /// spec is stored so later navigations reproduce it. An inactive
+    /// clear-word ("", "none", "clear") erases any stored config;
+    /// anything else inactive (typo, unknown classes) is ignored.
+    pub fn remember_block_choice(&self, url: &str, spec: &str, active: bool) {
+        let domain = crate::knowledge::domain_from_url(url);
+        if domain.is_empty() {
+            return;
+        }
+        let stored = if active {
+            spec.to_string()
+        } else if spec.is_empty() || spec.eq_ignore_ascii_case("none") || spec.eq_ignore_ascii_case("clear") {
+            String::new()
+        } else {
+            return;
+        };
+        if let Some(kb) = self.knowledge.as_ref() {
+            if let Ok(mut kb) = kb.lock() {
+                kb.learn_block_config(&domain, &stored);
+            }
+        }
+    }
+
     /// Current block-class bitmask (for `state op=block get`).
     pub fn block_rules(&self) -> u32 {
         self.intercept.rules()
@@ -1290,6 +1314,25 @@ impl Page {
         self.apply_domain_profile(url).await;
         // Reset isolated world on navigation — old context is destroyed.
         self.reset_isolated();
+        // Knowledge: per-domain resource-block config the agent set before.
+        // Applied only when nothing is active — an explicit session choice
+        // always wins; `state block clear` erases the stored config.
+        let domain = crate::knowledge::domain_from_url(url);
+        let (stored_block, learned_settle) = self.knowledge.as_ref()
+            .and_then(|kb| kb.lock().ok())
+            .map(|kb| (
+                kb.get_block_config(&domain).map(|s| s.to_string()),
+                kb.get_settle_ms(&domain),
+            ))
+            .unwrap_or((None, None));
+        if let Some(spec) = stored_block.filter(|s| !s.is_empty()) {
+            if self.block_rules() == 0 {
+                if let Err(e) = self.set_block_classes(&spec).await {
+                    eprintln!("[bladebro] stored block config failed to apply: {e}");
+                }
+            }
+        }
+        let settle_cap = crate::knowledge::nav_settle_cap_ms(learned_settle);
         let _nav_t = std::time::Instant::now();
         let _t = |label: &str| {
             if std::env::var("NAV_TIMING").is_ok() {
@@ -1308,12 +1351,24 @@ impl Page {
         _t("frameNavigated");
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
         _t("load");
-        wait_for_settle_with_network(&self.cdp, Duration::from_millis(2500), Some(&self.in_flight)).await?;
+        let _settle_t = std::time::Instant::now();
+        wait_for_settle_with_network(&self.cdp, Duration::from_millis(settle_cap), Some(&self.in_flight)).await?;
         _t("settle");
+        // Knowledge: learn this domain's real settle duration (only when it
+        // finished early — a cap timeout is not a settle sample).
+        if !domain.is_empty() {
+            let elapsed = _settle_t.elapsed().as_millis() as u64;
+            if elapsed + 150 < settle_cap {
+                if let Some(kb) = self.knowledge.as_ref() {
+                    if let Ok(mut kb) = kb.lock() {
+                        kb.update_timing(&domain, elapsed);
+                    }
+                }
+            }
+        }
         // M4+M6: Check for consent banners and block pages after navigation.
         // Knowledge-base integration: try stored consent selector first,
         // learn from successful dismissals, record the visit.
-        let domain = crate::knowledge::domain_from_url(url);
         let stored_consent = self.knowledge.as_ref()
             .and_then(|kb| kb.lock().ok())
             .and_then(|kb| kb.get_consent(&domain).map(|c| c.selector.clone()));
@@ -1328,11 +1383,20 @@ impl Page {
         // If either happens, the challenge was solved — do NOT report a block.
         // Only JS-challenge types can self-solve; rate-limit/akamai/recaptcha
         // walls never do (waiting there only added 5s latency to a final verdict).
+        // Knowledge: heavier vendors get a longer self-solve window (learned
+        // per domain, raised by every real block we hit there).
+        let domain_risk = self.knowledge.as_ref()
+            .and_then(|kb| kb.lock().ok())
+            .map(|kb| kb.get_bot_risk(&domain))
+            .unwrap_or_default();
+        let challenge_polls: u32 = if domain_risk >= crate::knowledge::BotRiskLevel::Heavy { 16 } else { 10 };
+        let mut challenge_seen = false;
         let blocked = match blocked.as_deref() {
             Some("cloudflare") | Some("datadome") | Some("perimeterx") => {
+                challenge_seen = true;
                 let pre_url = eval_location_href(&self.cdp).await;
                 let mut solved = false;
-                for _ in 0..10 {
+                for _ in 0..challenge_polls {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     let post_url = eval_location_href(&self.cdp).await;
                     if post_url != pre_url && !post_url.is_empty() {
@@ -1357,6 +1421,21 @@ impl Page {
             }
             other => other.map(String::from),
         };
+        // Knowledge: persist what this domain does to us — a real block wall
+        // counts in stats and raises the domain's risk level; a solved JS
+        // challenge marks the domain as challenge-serving (medium).
+        if !domain.is_empty() {
+            if let Some(kb) = self.knowledge.as_ref() {
+                if let Ok(mut kb) = kb.lock() {
+                    if let Some(ref bt) = blocked {
+                        kb.record_block_detected();
+                        kb.raise_bot_risk(&domain, crate::knowledge::vendor_risk(bt));
+                    } else if challenge_seen {
+                        kb.raise_bot_risk(&domain, crate::knowledge::BotRiskLevel::Medium);
+                    }
+                }
+            }
+        }
         // Learn from successful consent dismissal (only specific selectors, not "generic").
         if let Some(ref result) = consent {
             if result != "generic" && !result.is_empty() && !domain.is_empty() {

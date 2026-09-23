@@ -56,6 +56,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a `see` body reads multiple pages in a single tool call. Budget defaults
   to 3000 chars for step reads. Live-verified: 4-step form flow (navigate →
   type → click → read) and a 3-iteration pagination loop, each in ONE call.
+- **Site adapters: purpose-built fast paths for feed/list pages.** `extract=auto`
+  now reads known structures directly instead of structural guessing: Reddit
+  feeds (title, score, comments, author, subreddit, date, domain, post type,
+  submitted URL), Reddit post pages (the comment tree: author, score, depth,
+  text), GitHub issue/PR lists (title, number, status, labels, author),
+  GitHub repo pages (description, stars, forks, topics), and product detail
+  pages (price, original price, rating, reviews, availability, features).
+  `see mode=content` gains matching upgrades: repo pages read the live
+  stars/forks counters, real topics links and `og:description`; Reddit post
+  pages include score/comments in the meta line. Adapters are runtime
+  heuristics — zero tool-definition cost; extra fields appear only on pages
+  that have them. README has a "Site adapters" section.
+- **Domain knowledge fully wired.** Per-domain nav settle timing is sampled
+  (EWMA) and gives slow domains settle headroom (cap 2.5–6s); observed
+  block pages raise a per-domain bot-risk level, and heavy vendors get a
+  longer JS-challenge self-solve window; the agent's resource-block choice
+  is remembered per domain and auto-applied on later visits (`state block
+  clear` erases it); block detections count in global stats. CLI gains
+  `state block [classes|clear]`, and the daemon now persists the knowledge
+  base (periodic + on shutdown; `bladebro stop` flushes before it
+  acknowledges).
 
 ### Changed
 - **Sonic-speed pass — every interactive path ~2–3× faster, stealth intact.**
@@ -87,6 +108,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     nav, 3× click+read, exit — is ~3.2s in ONE call). The `wait` action
     keeps full time-based semantics (verified: an unreachable condition
     still consumes its whole budget).
+
+### Fixed
+- **`extract=auto` list detection could crown a script bundle as "the list".**
+  On a hydrating Reddit feed an invisible container won with raw JS source
+  (`SML.load([...])`) as the item title. Quality gates now require list items
+  to be visible (rendered text, a link, or an image), scoring uses visible
+  text only, and ad-post wrappers are skipped — when nothing qualifies the
+  result is an honest empty list instead of garbage. A bounded settle+retry
+  absorbs hydration races (only while the page is still loading; quiet pages
+  pay nothing).
+- **GitHub selectors refreshed for the current UI.** Stars/forks now come
+  from the counter elements (`#repo-stars-counter-star`,
+  `#repo-network-counter`) — the old `a[href$="/stargazers"]` link no longer
+  exists; topics read `a[href^="/topics/"]`; issue rows read
+  `a[data-testid="issue-pr-title-link"]`, label links and octicon state;
+  repo descriptions fall back to `og:description` (repo-slug suffix
+  stripped).
 
 ## [3.9.6] - 2026-09-02
 

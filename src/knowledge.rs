@@ -109,7 +109,7 @@ pub struct TimingKnowledge {
 }
 
 /// Observed bot detection risk for a domain.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum BotRiskLevel {
     #[default]
@@ -481,6 +481,7 @@ impl KnowledgeBase {
     pub fn get_block_config(&self, domain: &str) -> Option<&str> {
         self.domains.get(domain)
             .and_then(|d| d.block_config.as_deref())
+            .filter(|s| !s.trim().is_empty())
     }
 
     /// Learn block config from agent's explicit setting.
@@ -530,6 +531,18 @@ impl KnowledgeBase {
         self.dirty = true;
     }
 
+    /// Last observed bot-detection risk for a domain.
+    pub fn get_bot_risk(&self, domain: &str) -> BotRiskLevel {
+        self.domains.get(domain).map(|d| d.bot_risk).unwrap_or_default()
+    }
+
+    /// Raise (never lower) the recorded bot-detection risk for a domain.
+    pub fn raise_bot_risk(&mut self, domain: &str, risk: BotRiskLevel) {
+        if risk > self.get_bot_risk(domain) {
+            self.set_bot_risk(domain, risk);
+        }
+    }
+
     // ── Visit tracking ────────────────────────────────────────────────
 
     pub fn record_visit(&mut self, domain: &str) {
@@ -554,6 +567,25 @@ impl KnowledgeBase {
         self.stats.total_navigations += 1;
         self.dirty = true;
     }
+}
+
+/// Vendor → severity for observed block pages. Heavy vendors ring the
+/// bell that this domain actively fights automation; the level scales
+/// challenge patience and is persisted per domain.
+pub fn vendor_risk(vendor: &str) -> BotRiskLevel {
+    match vendor {
+        "datadome" | "akamai" | "perimeterx" => BotRiskLevel::Heavy,
+        "cloudflare" | "recaptcha" => BotRiskLevel::Medium,
+        "rate-limit" => BotRiskLevel::Low,
+        _ => BotRiskLevel::Medium,
+    }
+}
+
+/// Navigation settle cap from learned per-domain timing. Unknown domains
+/// keep the 2.5s default; known domains get headroom proportional to
+/// their observed settle (bounded 2.5-6s) so slow SPAs finish quieting.
+pub fn nav_settle_cap_ms(learned: Option<u64>) -> u64 {
+    learned.map(|ms| ms.saturating_mul(2).clamp(2500, 6000)).unwrap_or(2500)
 }
 
 /// Infer the consent framework from a CSS selector.
@@ -857,5 +889,42 @@ mod tests {
         let dk = kb.domains.get("amazon.com").unwrap();
         let c = dk.consent.as_ref().unwrap();
         assert_eq!(c.selector, "#user-learned-btn", "pre-seed should not overwrite existing");
+    }
+
+    #[test]
+    fn bot_risk_raises_but_never_lowers() {
+        let mut kb = KnowledgeBase::default();
+        kb.raise_bot_risk("example.com", BotRiskLevel::Heavy);
+        kb.raise_bot_risk("example.com", BotRiskLevel::Low);
+        assert_eq!(kb.get_bot_risk("example.com"), BotRiskLevel::Heavy);
+        assert_eq!(kb.get_bot_risk("other.com"), BotRiskLevel::Unknown);
+    }
+
+    #[test]
+    fn vendor_risk_mapping() {
+        assert_eq!(vendor_risk("datadome"), BotRiskLevel::Heavy);
+        assert_eq!(vendor_risk("akamai"), BotRiskLevel::Heavy);
+        assert_eq!(vendor_risk("perimeterx"), BotRiskLevel::Heavy);
+        assert_eq!(vendor_risk("cloudflare"), BotRiskLevel::Medium);
+        assert_eq!(vendor_risk("recaptcha"), BotRiskLevel::Medium);
+        assert_eq!(vendor_risk("rate-limit"), BotRiskLevel::Low);
+    }
+
+    #[test]
+    fn settle_cap_adapts_and_clamps() {
+        assert_eq!(nav_settle_cap_ms(None), 2500);
+        assert_eq!(nav_settle_cap_ms(Some(200)), 2500);
+        assert_eq!(nav_settle_cap_ms(Some(900)), 2500);
+        assert_eq!(nav_settle_cap_ms(Some(1400)), 2800);
+        assert_eq!(nav_settle_cap_ms(Some(9000)), 6000);
+    }
+
+    #[test]
+    fn cleared_block_config_is_not_returned() {
+        let mut kb = KnowledgeBase::default();
+        kb.learn_block_config("example.com", "images,fonts");
+        assert_eq!(kb.get_block_config("example.com"), Some("images,fonts"));
+        kb.learn_block_config("example.com", "");
+        assert_eq!(kb.get_block_config("example.com"), None, "explicit clear must not read as a config");
     }
 }

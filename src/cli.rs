@@ -924,7 +924,7 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
 fn parse_state_args(args: &[String]) -> Result<Value> {
     if args.is_empty() {
         return Err(BladeError::Other(
-            "state needs an op (cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, rm-ls, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, load)".into()
+            "state needs an op (cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, rm-ls, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, load, compress, block)".into()
         ));
     }
 
@@ -1005,9 +1005,22 @@ fn parse_state_args(args: &[String]) -> Result<Value> {
             j["op"] = json!("compress");
             if let Some(v) = args.get(1) { j["mode"] = json!(v); }
         }
+        "block" => {
+            // block [classes] | block clear | block (get)
+            j["op"] = json!("block");
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--clear" | "clear" => { j["clear"] = json!(true); }
+                    v if !v.starts_with("--") => { j["classes"] = json!(v); }
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
         _ => {
             return Err(BladeError::Other(format!(
-                "unknown state op: {op}\navailable: cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, rm-ls, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, load, compress"
+                "unknown state op: {op}\navailable: cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss, rm-ls, clear-ls, clear-ss, tabs, open-tab, close-tab, switch-tab, save, load, compress, block"
             )));
         }
     }
@@ -1136,6 +1149,13 @@ pub async fn run_daemon() -> Result<()> {
 
                 // Stop command.
                 if tool == "stop" {
+                    // Flush the knowledge base BEFORE acknowledging: once
+                    // `bladebro stop` returns, consent/visits/timing/block
+                    // knowledge must already be durable on disk.
+                    if let Ok(mut kb) = knowledge.lock() {
+                        kb.prune();
+                        kb.sync();
+                    }
                     let resp = json!({ "ok": true, "text": "daemon stopped" });
                     let resp_str = serde_json::to_string(&resp).unwrap_or_default();
                     let _ = reader.get_mut().write_all(resp_str.as_bytes()).await;
@@ -1250,6 +1270,15 @@ pub async fn run_daemon() -> Result<()> {
                             let _ = crate::logins::snapshot(p.cdp_ref()).await;
                         }
                     }
+                    // Sync the knowledge base to disk (prune + write) —
+                    // consent/visits/timing/block-risk compound across sessions.
+                    let kb = knowledge.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(mut kb) = kb.lock() {
+                            kb.prune();
+                            kb.sync();
+                        }
+                    }).await;
                 }
             }
         }
@@ -1261,6 +1290,11 @@ pub async fn run_daemon() -> Result<()> {
     }
     if let Some(b) = browser {
         let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+    }
+    // Flush the knowledge base before exit (consent, visits, timing, risk).
+    if let Ok(mut kb) = knowledge.lock() {
+        kb.prune();
+        kb.sync();
     }
     let _ = std::fs::remove_file(&path);
     eprintln!("[bladebro] daemon stopped");

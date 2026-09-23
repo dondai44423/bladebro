@@ -93,7 +93,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
 mode=content: page text as clean markdown. For READING articles, docs. Use budget=N to cap output, scope=eN for one element's subtree.\n\
 mode=outline: title + heading hierarchy only. Cheapest \"what's on this page\" check.\n\
 mode=model (default): interactive elements with refs. Use when you need to ACT.\n\
-For structured list data (products, posts, search results, listings): use extract=auto FIRST — extracts all items with fields (title, price, url, rating, score) in ONE call. Cheaper than clicking into each item.\n\
+For structured list data (products, posts, search results, listings): use extract=auto FIRST — extracts all items with fields (title, url, price, score) in ONE call, plus site-specific extras (Reddit posts/comments, GitHub repos/issues) when detected. Cheaper than clicking into each item.\n\
 eval (act eval) is for custom JS extraction when extract=auto does not cover your use case. Runs like the DevTools console: statements allowed, the LAST expression's value is returned (e.g. 'var x=5; x+7' -> 12), IIFEs work. Variables are scoped per call (no leakage or collisions between calls).\n\
 Other params: filter (zoom by role), find (search by text → refs), extract=json+template (custom), extract=links|forms, logs=console|network.\n\
 Big data (>12KB) goes to a file path with inline preview.\n\
