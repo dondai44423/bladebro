@@ -87,7 +87,6 @@ impl Action {
 struct FoundElement {
     ok: bool,
     #[serde(default)]
-    #[allow(dead_code)]
     reason: Option<String>,
     #[serde(default, rename = "box")]
     box_: Option<[f64; 4]>,
@@ -112,6 +111,13 @@ struct FoundElement {
     /// Text content of the element (for "read" mode).
     #[serde(default)]
     text: Option<String>,
+    /// Live options of a select whose pick failed (#21): `text` or
+    /// `text=value` tokens, capped at 80.
+    #[serde(default)]
+    options: Option<Vec<String>>,
+    /// Total option count on the live element at failure time.
+    #[serde(default, rename = "ototal")]
+    options_total: Option<usize>,
 }
 
 /// Resolve a ref to its (signature, frame path) in the LPM.
@@ -637,7 +643,7 @@ async fn find_by_sig(
         + "if(n.tagName==='SELECT'){"
         + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
         + "if(match){n.value=match.value;n.dispatchEvent(new Event('change',{bubbles:true}));n.dispatchEvent(new Event('input',{bubbles:true}));return{ok:true};}"
-        + "return{ok:false,reason:'option not found in select'};"
+        + "var __lo=[...n.options].slice(0,80).map(o=>{var t=(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦');var v=(o.value||'').trim().split('|').join('¦');if(t&&v&&t!==v)return t+'='+v;return t||(v?'='+v:'');}).filter(Boolean);return{ok:false,reason:'option not found in select',options:__lo,ototal:n.options.length};"
         + "}"
         + "n.value=" + &text_js + ";n.dispatchEvent(new Event('change',{bubbles:true}));n.dispatchEvent(new Event('input',{bubbles:true}));return{ok:true};}"
         + "if(mode==='read'){var txt=n.innerText||n.textContent||'';if(!txt&&('value' in n)&&n.value)txt=n.value;return{ok:true,text:txt.slice(0,5000)};}"
@@ -1306,8 +1312,40 @@ pub async fn perform_with_network(
             }
             let found = find_by_sig(cdp, sig, frame, "select", Some(option)).await?;
             if !found.ok {
+                let reason = found.reason.as_deref().unwrap_or("not found");
+                if reason == "option not found in select" {
+                    // #21: the PICK failed, not the element. List the real
+                    // live options so one retry succeeds, and don't raise
+                    // ElementNotFound — the DOM-drift heal would retry the
+                    // same losing pick and drop this list on the way.
+                    let mut msg = format!("{ref_id} ({sig}) — option \"{option}\" not found");
+                    let live = found.options.clone().unwrap_or_default();
+                    if !live.is_empty() {
+                        let hidden = found
+                            .options_total
+                            .unwrap_or(live.len())
+                            .saturating_sub(live.len());
+                        msg.push_str(&format!(". available: {}", live.join(" | ")));
+                        if hidden > 0 {
+                            msg.push_str(&format!(" (+{hidden} more)"));
+                        }
+                    } else if let Some(opts) = &el.raw.options {
+                        // Fallback: the captured copy (covers frames the
+                        // live read couldn't reach).
+                        let (tokens, hidden) = opts.tokens(80);
+                        if !tokens.is_empty() {
+                            msg.push_str(&format!(". available: {}", tokens.join(" | ")));
+                            if hidden > 0 {
+                                msg.push_str(&format!(" (+{hidden} more)"));
+                            }
+                        }
+                    }
+                    return Err(BladeError::Other(msg));
+                }
+                // Element hidden / frame gone / not found — healing may
+                // legitimately help; keep ElementNotFound.
                 return Err(BladeError::ElementNotFound(format!(
-                    "{ref_id} ({sig}) — option {option} not found"
+                    "{ref_id} ({sig}) — select failed: {reason}"
                 )));
             }
         }

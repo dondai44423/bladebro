@@ -39,6 +39,11 @@ pub struct RawElement {
     pub element_type: Option<String>,
     #[serde(default)]
     pub value: Option<String>,
+    /// For `<select>` elements: the captured option list (visible labels +
+    /// submitted values), so the agent can pick an option without guessing
+    /// (#21). `None` for everything that is not a select.
+    #[serde(default)]
+    pub options: Option<SelectOptions>,
     #[serde(default)]
     pub disabled: bool,
     /// Present only for checkbox/radio.
@@ -84,6 +89,50 @@ pub struct RawElement {
     /// Zero for scars from pre-fingerprint builds (backwards compat).
     #[serde(default)]
     pub fingerprint: u64,
+}
+
+/// Options of a `<select>` element as captured for the agent (#21): the
+/// visible labels plus the submitted values (which are never visible as page
+/// text), so `act select` is a choice, not a guess.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SelectOptions {
+    /// Index of the currently selected option (-1 = none).
+    #[serde(default)]
+    pub sel: i64,
+    /// Total option count on the live element (may exceed `items.len()` when
+    /// the capture cap kicked in).
+    #[serde(default)]
+    pub total: usize,
+    /// `(text, value)` pairs in DOM order, capped by the capture script.
+    #[serde(default)]
+    pub items: Vec<(String, String)>,
+}
+
+impl SelectOptions {
+    /// Agent-facing option tokens: `text`, or `text=value` when the submitted
+    /// value differs from the visible text; the selected option is prefixed
+    /// `»`. Shows at most `max` options.
+    ///
+    /// Returns `(tokens, hidden)` — `hidden` is how many options exist beyond
+    /// the ones shown.
+    pub fn tokens(&self, max: usize) -> (Vec<String>, usize) {
+        let mut out = Vec::new();
+        for (i, (t, v)) in self.items.iter().take(max).enumerate() {
+            let base = match (t.is_empty(), v.is_empty() || v == t) {
+                (true, true) => continue, // nothing on either side to show
+                (true, false) => format!("={v}"),
+                (false, true) => t.clone(),
+                (false, false) => format!("{t}={v}"),
+            };
+            out.push(if i as i64 == self.sel {
+                format!("»{base}")
+            } else {
+                base
+            });
+        }
+        let hidden = self.total.saturating_sub(out.len());
+        (out, hidden)
+    }
 }
 
 /// The full capture: page identity + every actionable element.
@@ -151,7 +200,7 @@ pub const JS_ROLE_FN: &str = r#"const roleMap={button:'button',link:'link',check
 // capture compute names for ALL elements (needed for stable sigs) cheaply.
 pub const JS_LABEL_CACHE: &str = r#"const __BLC=new WeakMap();function getLabels(doc){let m=__BLC.get(doc);if(!m){m={};try{for(const l of doc.querySelectorAll('label[for]')){const f=l.getAttribute('for');if(f&&!(f in m)){const t=(l.textContent||'').trim();if(t)m[f]=t.replace(/\s+/g,' ').slice(0,120);}}}catch(e){}__BLC.set(doc,m);}return m;}"#;
 
-pub const JS_NAME_FN: &str = r#"function name(n,includeValue){const al=n.getAttribute('aria-label');if(al&&al.trim())return al.trim().replace(/\s+/g,' ').slice(0,120);const doc=n.ownerDocument;const lb=n.getAttribute('aria-labelledby');if(lb&&doc){const e=doc.getElementById(lb);if(e&&(e.textContent||' ').trim())return e.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const id=n.id;if(id&&doc){const lt=getLabels(doc)[id];if(lt)return lt;}const cl=n.closest('label');if(cl&&(cl.textContent||' ').trim())return cl.textContent.trim().replace(/\s+/g,' ').slice(0,120);const ti=n.title;if(ti&&ti.trim())return ti.trim().slice(0,120);const ph=n.placeholder;if(ph&&ph.trim())return ph.trim().slice(0,120);const ac=n.getAttribute('autocomplete');if(ac&&ac.trim()){const tok=ac.trim().split(/\s+/).pop();if(tok&&tok!=='off'&&tok!=='on')return tok.replace(/-/g,' ').slice(0,80);}const ty=n.type;if(ty==='password')return'password';if(ty==='email')return'email';if(ty==='search')return'search';if(ty==='tel')return'phone';if(ty==='url')return'url';const nm=n.getAttribute('name');if(nm&&nm.trim()){const h=nm.trim().replace(/[_\-]/g,' ').replace(/\s+/g,' ').trim();if(h.length>1&&h.length<=60)return h.slice(0,60);}const tc=n.textContent;if(tc&&tc.trim())return tc.trim().replace(/\s+/g,' ').slice(0,120);const alt=n.getAttribute('alt');if(alt&&alt.trim())return alt.trim().slice(0,120);if(includeValue){const val=n.value;if(val&&typeof val==='string'&&val.trim()&&n.tagName==='INPUT')return val.trim().slice(0,60);}return'';}"#;
+pub const JS_NAME_FN: &str = r#"function name(n,includeValue){const al=n.getAttribute('aria-label');if(al&&al.trim())return al.trim().replace(/\s+/g,' ').slice(0,120);const doc=n.ownerDocument;const lb=n.getAttribute('aria-labelledby');if(lb&&doc){const e=doc.getElementById(lb);if(e&&(e.textContent||' ').trim())return e.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const id=n.id;if(id&&doc){const lt=getLabels(doc)[id];if(lt)return lt;}const cl=n.closest('label');if(cl&&(cl.textContent||' ').trim())return cl.textContent.trim().replace(/\s+/g,' ').slice(0,120);const ti=n.title;if(ti&&ti.trim())return ti.trim().slice(0,120);const ph=n.placeholder;if(ph&&ph.trim())return ph.trim().slice(0,120);const ac=n.getAttribute('autocomplete');if(ac&&ac.trim()){const tok=ac.trim().split(/\s+/).pop();if(tok&&tok!=='off'&&tok!=='on')return tok.replace(/-/g,' ').slice(0,80);}const ty=n.type;if(ty==='password')return'password';if(ty==='email')return'email';if(ty==='search')return'search';if(ty==='tel')return'phone';if(ty==='url')return'url';const nm=n.getAttribute('name');if(nm&&nm.trim()){const h=nm.trim().replace(/[_\-]/g,' ').replace(/\s+/g,' ').trim();if(h.length>1&&h.length<=60)return h.slice(0,60);}if(n.tagName==='SELECT'){const oo=n.options;if(oo&&oo.length){const ft=(oo[0].label||oo[0].text||'').trim();if(ft)return ft.replace(/\s+/g,' ').slice(0,120);if(n.selectedIndex>=0){const sv=(oo[n.selectedIndex].label||oo[n.selectedIndex].text||'').trim();if(sv)return sv.replace(/\s+/g,' ').slice(0,120);}}return'';}const tc=n.textContent;if(tc&&tc.trim())return tc.trim().replace(/\s+/g,' ').slice(0,120);const alt=n.getAttribute('alt');if(alt&&alt.trim())return alt.trim().slice(0,120);if(includeValue){const val=n.value;if(val&&typeof val==='string'&&val.trim()&&n.tagName==='INPUT')return val.trim().slice(0,60);}return'';}"#;
 
 /// The shared preamble: just the selector + helper functions.
 /// Each script (capture, find-by-sig) sets up its own document context,
@@ -257,6 +306,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "disabled:!!n.disabled,"
         + "checked:(r==='checkbox'||r==='radio')?!!n.checked:null,"
         + "href:n.href||null,placeholder:n.placeholder||null,"
+        + "options:n.tagName==='SELECT'?{sel:n.selectedIndex,total:n.options.length,items:[...n.options].slice(0,80).map(o=>[(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦').slice(0,60),(o.value||'').split('|').join('¦').slice(0,40)]).filter(p=>p[0]||p[1])}:null,"
         + "required:!!n.required||n.getAttribute('aria-required')==='true',"
         + "haspopup:!!n.getAttribute('aria-haspopup'),"
         + "landmark:landmarkOf(n),"
@@ -699,7 +749,7 @@ return null;})()"#;
 /// Uses `innerText` which respects CSS visibility (unlike `textContent`).
 /// The text is collapsed to single spaces and truncated to the budget.
 pub async fn capture_content(cdp: &CdpSession, budget: usize) -> Result<String> {
-    let expr = r#"(()=>{const d=document;if(!d||!d.body)return'';const c=d.body.cloneNode(true);c.querySelectorAll("script,style,noscript,svg,template,link,meta,[class*='dfp'],[id*='dfp'],[class*='advert'],[id*='advert'],[class*='sponsored'],[data-sponsored],[data-ad],[data-ad-slot],[data-ad-client],[data-google-query-id],ins.adsbygoogle,[id*='google_ads'],[class*='ad-container'],[class*='ad-wrapper'],[class*='ad-slot'],[class*='ad-banner'],[class*='ad-feedback'],[class*='adBanner'],[class*='adSense'],[class*='adBlock'],[class*='ad-label'],[class*='ads-label'],[class*='ads-container'],[class*='mol-ads'],[class*='promoted'],[aria-label*='advertisement' i]").forEach(e=>e.remove());const t=(c.innerText||c.textContent||'').replace(/\s+/g,' ').trim();return t.slice(0,__BUDGET__);})()"#.replace("__BUDGET__", &budget.to_string());
+    let expr = r#"(()=>{const d=document;if(!d||!d.body)return'';const c=d.body.cloneNode(true);c.querySelectorAll("script,style,noscript,svg,template,link,meta,[class*='dfp'],[id*='dfp'],[class*='advert'],[id*='advert'],[class*='sponsored'],[data-sponsored],[data-ad],[data-ad-slot],[data-ad-client],[data-google-query-id],ins.adsbygoogle,[id*='google_ads'],[class*='ad-container'],[class*='ad-wrapper'],[class*='ad-slot'],[class*='ad-banner'],[class*='ad-feedback'],[class*='adBanner'],[class*='adSense'],[class*='adBlock'],[class*='ad-label'],[class*='ads-label'],[class*='ads-container'],[class*='mol-ads'],[class*='promoted'],[aria-label*='advertisement' i]").forEach(e=>e.remove());c.querySelectorAll('select').forEach(s=>{const ts=[...s.options].map(o=>(o.label||o.text||'').trim()).filter(Boolean).slice(0,12);if(ts.length){const extra=Math.max(0,s.options.length-ts.length);s.replaceChildren(document.createTextNode('['+ts.join(' | ')+(extra?' | +'+extra+' more':'')+'] '));}});const t=(c.innerText||c.textContent||'').replace(/\s+/g,' ').trim();return t.slice(0,__BUDGET__);})()"#.replace("__BUDGET__", &budget.to_string());
     let res = cdp
         .send(
             "Runtime.evaluate",
@@ -775,4 +825,46 @@ pub async fn capture_outline(cdp: &CdpSession) -> Result<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     Ok(text.to_string())
+}
+
+#[cfg(test)]
+mod script_syntax_tests {
+    //! Guards the injected page scripts against syntax errors. A broken
+    //! capture script disables every page operation at once; `node --check`
+    //! catches that at test time instead of live time. Skipped (with a
+    //! notice) when node is not installed — the driver itself never needs it.
+
+    use std::process::{Command, Stdio};
+
+    fn node_check(name: &str, js: &str) {
+        let has_node = Command::new("node")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !has_node {
+            eprintln!("node not available — skipping {name} syntax check");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("bladebro-js-check-{name}.js"));
+        std::fs::write(&path, js).expect("write js fixture");
+        let out = Command::new("node")
+            .arg("--check")
+            .arg(&path)
+            .output()
+            .expect("run node --check");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "{name} has a JS syntax error:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn capture_script_is_valid_js() {
+        node_check("capture", &super::CAPTURE_SCRIPT);
+    }
 }

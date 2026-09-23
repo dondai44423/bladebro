@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Sequential downloads no longer report the previous file (issue #22).**
+  `act download url=...` keyed its wait off the newest tracker entry, so while
+  a new transfer was still starting it returned the previous download's
+  completion metadata (filename + size) — an automated workflow could bind the
+  wrong document to the requested URL. The wait is now keyed off a guid
+  snapshot taken before the trigger; when several downloads appear, a name
+  match against the requested URL wins (Chrome's `name (1).pdf` de-dup suffix
+  included). The click-then-`act download` flow keeps the newest pre-existing
+  entry as candidate but holds a completed one back for a short grace window,
+  so a download whose CDP event trails the click still wins. Verified live:
+  sequential downloads each return their own path+size (the 3.9.6 binary
+  reproduces the old lag).
+- **`see` no longer glues a select's options into its name (issue #21).**
+  A `<select>` with no label was named by its whole `textContent` — every
+  option concatenated (`"Please select an option Option 1 Option 2"`). The
+  name fallback now uses the first option's label (stable across
+  interactions, unlike the selected one), and the element line surfaces the
+  real choices: `e77 combobox "Field to search" [20 options: »all | astro-ph |
+  … | +8 more]` — submitted values shown when they differ from the visible
+  text (`Option 1=1`, `France=FR`), the selected option marked `»`, first 12
+  inline. The content preview renders selects delimited instead of the old
+  unsegmentable blob.
+- **`act select` failures list the available options.** The error now carries
+  the live option list (`option "nlinnucl-ex" not found. available: all |
+  astro-ph | … | nlin | …`), so one retry succeeds without re-dumping the
+  page. A failed pick is also no longer misclassified as a missing element —
+  that triggered a pointless DOM-drift heal-retry which dropped the list and
+  churned the ref.
+
+### Added
+- **JS syntax guard for the injected capture script.** A `node --check` test
+  (skipped when node is absent — the driver itself never needs it) fails at
+  test time on a syntax error in the assembled page script, instead of
+  disabling every page operation at runtime.
+
 ## [3.9.6] - 2026-09-02
 
 ### Fixed

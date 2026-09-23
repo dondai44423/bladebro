@@ -169,6 +169,7 @@ impl LivePageModel {
             name: name.to_string(),
             element_type: None,
             value: None,
+            options: None,
             disabled: false,
             checked: None,
             href: None,
@@ -591,6 +592,20 @@ fn format_element(el: &PageElement) -> String {
             s.push_str(&format!(" [{t}]"));
         }
     }
+    // #21: a select's options — the visible choices, their submitted values
+    // (never visible as page text), and which one is active. Without this
+    // the agent guessed option names; the old name fallback glued every
+    // option together instead.
+    if let Some(opts) = &el.raw.options {
+        let (tokens, hidden) = opts.tokens(12);
+        if !tokens.is_empty() {
+            let mut list = tokens.join(" | ");
+            if hidden > 0 {
+                list.push_str(&format!(" | +{hidden} more"));
+            }
+            s.push_str(&format!(" [{} options: {}]", opts.total, list));
+        }
+    }
     if let Some(h) = &el.raw.href {
         if !h.is_empty() {
             s.push_str(&format!(" → {}", truncate(h, 60)));
@@ -689,6 +704,69 @@ mod tests {
     fn role_summary_handles_single_role() {
         assert_eq!(role_summary(std::iter::once("link")), "1 link");
         assert_eq!(role_summary(std::iter::empty::<&str>()), "");
+    }
+
+    /// Helper: a `<select>` element with the given options (#21).
+    fn select_el(name: &str, opts: crate::page::perception::SelectOptions) -> PageElement {
+        PageElement {
+            ref_id: "e1".into(),
+            raw: crate::page::perception::RawElement {
+                tag: "select".into(),
+                role: "combobox".into(),
+                name: name.into(),
+                element_type: None,
+                value: None,
+                options: Some(opts),
+                disabled: false,
+                checked: None,
+                href: None,
+                placeholder: None,
+                required: false,
+                has_popup: false,
+                landmark: None,
+                box_: [0.0; 4],
+                sig: "combobox|x|1".into(),
+                frame: Vec::new(),
+                shadow: false,
+                fingerprint: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn select_options_render_values_and_selection() {
+        use crate::page::perception::SelectOptions;
+        let el = select_el(
+            "Field to search",
+            SelectOptions {
+                sel: 1,
+                total: 3,
+                items: vec![
+                    ("all".into(), "all".into()),
+                    ("astro-ph".into(), "astro".into()),
+                    ("gr-qc".into(), String::new()),
+                ],
+            },
+        );
+        // Value shown only when it differs from the text; the selected
+        // option (index 1) carries the `»` marker.
+        assert_eq!(
+            format_element(&el),
+            "e1 combobox \"Field to search\" [3 options: all | »astro-ph=astro | gr-qc]"
+        );
+    }
+
+    #[test]
+    fn select_options_truncate_with_more_marker() {
+        use crate::page::perception::SelectOptions;
+        let items: Vec<(String, String)> = (1..=20)
+            .map(|i| (format!("opt{i}"), format!("v{i}")))
+            .collect();
+        let el = select_el("s", SelectOptions { sel: -1, total: 20, items });
+        let line = format_element(&el);
+        // 12 shown inline, the remaining 8 collapsed into the marker.
+        assert!(line.starts_with("e1 combobox \"s\" [20 options: opt1=v1 | "), "{line}");
+        assert!(line.ends_with(" | +8 more]"), "{line}");
     }
 }
 

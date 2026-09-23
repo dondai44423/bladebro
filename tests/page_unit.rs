@@ -12,6 +12,7 @@ fn el(role: &str, name: &str, sig: &str, value: Option<&str>, disabled: bool) ->
         name: name.into(),
         element_type: Some("text".into()),
         value: value.map(String::from),
+        options: None,
         disabled,
         checked: None,
         href: None,
