@@ -1476,7 +1476,7 @@ fn print_command_help(cmd: &str) {
              Steps is a JSON array of action objects. Each step has an\n\
              'action' field and supporting fields (ref, text, url, etc.).\n\
              Supports if/else branching and while loops.\n\n\
-             Regular steps:\n    {{\"action\":\"click\",\"ref\":\"e5\"}}\n    {{\"action\":\"type\",\"ref\":\"e12\",\"text\":\"hello\"}}\n    {{\"action\":\"navigate\",\"url\":\"https://example.com\"}}\n    {{\"action\":\"wait\",\"condition\":\"settle\"}}\n\n\
+             Regular steps:\n    {{\"action\":\"click\",\"ref\":\"e5\"}}\n    {{\"action\":\"type\",\"ref\":\"e12\",\"text\":\"hello\"}}\n    {{\"action\":\"navigate\",\"url\":\"https://example.com\"}}\n    {{\"action\":\"wait\",\"condition\":\"settle\"}}\n    {{\"action\":\"see\",\"mode\":\"content\"}}   — read inline (mode/extract/find/budget; while+see reads across pages in one call)\n\n\
              Branching:\n    {{\"action\":\"if\",\"condition\":\"text\",\"text\":\"Welcome\",\"then\":[...],\"else\":[...]}}\n    {{\"action\":\"while\",\"condition\":\"text\",\"text\":\"Load More\",\"steps\":[...]}}\n\n\
              Conditions: element (visible), title, url, text, settle, js.\n\n\
              Example:\n    bladebro run '[{{\"action\":\"navigate\",\"url\":\"https://example.com\"}},{{\"action\":\"click\",\"ref\":\"e5\"}}]'\n    bladebro run '[{{\"action\":\"click\",\"text\":\"Login\"}},{{\"action\":\"wait\",\"condition\":\"settle\"}},{{\"action\":\"type\",\"label\":\"Email\",\"text\":\"user@test.com\"}}]'"

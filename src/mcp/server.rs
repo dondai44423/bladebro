@@ -45,7 +45,7 @@ const SUPPORTED_VERSIONS: &[&str] = &[
 ];
 
 /// Server instructions shared by `initialize` and `server/discover`.
-const INSTRUCTIONS: &str = "Stealth browser driver. `see` reads the page (diff-first), `act` interacts (click/type/navigate), `state` manages cookies/tabs/sessions, `run` executes batch JS, `vision` screenshots.";
+const INSTRUCTIONS: &str = "Stealth browser driver. `see` reads the page (diff-first), `act` interacts (click/type/navigate), `state` manages cookies/tabs/sessions, `run` runs step batches with branching/loops/inline reads, `vision` screenshots.";
 
 /// Extract the per-request protocol version (SEP-2575). New-spec clients
 /// send `_meta["io.modelcontextprotocol/protocolVersion"]` on every
@@ -1386,8 +1386,33 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let mut halted: Option<usize> = None;
             let start_url = page.model().url().to_string();
             let mut prev_url = start_url.clone();
+            // v3.10: `see` steps turn a batch into navigate+interact+READ in
+            // ONE call. Their output collects under a --- read --- section.
+            let mut reads: Vec<String> = Vec::new();
             for (i, step) in steps.iter().enumerate() {
                 let step_action = step.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
+                if step_action == "see" {
+                    let mut see_args = step.clone();
+                    if see_args.get("budget").is_none() {
+                        if let Some(obj) = see_args.as_object_mut() {
+                            obj.insert("budget".into(), serde_json::json!(3000));
+                        }
+                    }
+                    match Box::pin(handle_see(&see_args, page)).await {
+                        Ok(out) => {
+                            ok_count += 1;
+                            let chars = out.chars().count();
+                            reads.push(format!("=== see (step {}) ===\n{out}", i + 1));
+                            verdicts.push(format!("step{}[see]: {} chars", i + 1, chars));
+                        }
+                        Err(e) => {
+                            halted = Some(i + 1);
+                            verdicts.push(format!("step{}[see]: HALT: {e}", i + 1));
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 match Box::pin(handle_act(step, page)).await {
                     Ok(verdict) => {
                         ok_count += 1;
@@ -1397,7 +1422,14 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                         // SPA time to render and recapture for fresh refs.
                         // Without this, the next step acts on a half-rendered page.
                         if curr_url != prev_url {
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            // Settle-based (typically ~120ms) instead of a
+                            // blind 200ms sleep — and content-aware.
+                            let _ = crate::page::wait_for_settle_with_network(
+                                page.cdp_ref(),
+                                std::time::Duration::from_millis(1200),
+                                Some(page.in_flight_ref()),
+                            )
+                            .await;
                             let _ = page.recapture().await;
                             verdicts.push(format!("step{}[{}]: {} (→ {})", i+1, step_action, vline, curr_url));
                         } else {
@@ -1420,7 +1452,12 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else {
                 format!("batch ({} steps, {} ok)", steps.len(), ok_count)
             };
-            return Ok(format!("{summary}\n{verdicts}\n{view}",
+            let reads_block = if reads.is_empty() {
+                String::new()
+            } else {
+                format!("\nread ({}):\n{}\n", reads.len(), reads.join("\n"))
+            };
+            return Ok(format!("{summary}\n{verdicts}{reads_block}\n{view}",
                 summary=summary,
                 verdicts=if verdicts.is_empty() { String::new() } else { format!("(steps: {})\n", verdicts.join(" | ")) },
                 view=view));
@@ -2939,7 +2976,14 @@ async fn execute_step(
             let url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
             let delta = page.navigate(url).await?;
             if delta.navigated {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // navigate already waited for load+settle; one more quiet pass
+                // catches late SPA render without the old blind 500ms.
+                crate::page::wait_for_settle_with_network(
+                    page.cdp_ref(),
+                    std::time::Duration::from_millis(800),
+                    Some(page.in_flight_ref()),
+                )
+                .await?;
                 let _ = page.recapture().await;
             }
             observations.push(format!("step {path}: {}", page.delta_view(&delta, 4000)));
@@ -2984,6 +3028,20 @@ async fn execute_step(
                     )));
                 }
             }
+        }
+        "see" => {
+            // v3.10: read steps — `run` can navigate, interact, and extract in
+            // ONE call; with while-loops this turns multi-page scraping into a
+            // single tool call.
+            let mut see_args = step.clone();
+            if see_args.get("budget").is_none() {
+                if let Some(obj) = see_args.as_object_mut() {
+                    obj.insert("budget".into(), serde_json::json!(3000));
+                }
+            }
+            let out = handle_see(&see_args, page).await?;
+            let chars = out.chars().count();
+            observations.push(format!("step {path}: see ({chars} chars):\n{out}"));
         }
         "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies" | "set-cookie" => {
             let mut state_args = step.clone();

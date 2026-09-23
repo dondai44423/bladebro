@@ -138,15 +138,15 @@ pub fn mouse_path(start: (f64, f64), target: (f64, f64), rng: &mut Rng) -> Vec<P
         start.1 + dy * 0.7 + perp_y * cp2_offset,
     );
 
-    // Number of steps: proportional to distance, min 5, max 40.
-    // v3.9 (M8): the old 25-step cap gave a 1200px traverse ~48px jumps
-    // (~4000px/s peak) — a superhuman flick in the velocity curve.
-    let steps = (dist / 15.0).round().clamp(5.0, 40.0) as usize;
+    // Number of steps: proportional to distance, min 4, max 22.
+    // v3.10 (speed pass): ~50px per step at a fast flick — enough samples
+    // that the trajectory reads as real movement, far fewer dispatches.
+    let steps = (dist / 24.0).round().clamp(4.0, 22.0) as usize;
 
-    // Total movement time: 80ms floor, distance-scaled, 650ms ceiling.
-    // A 1200px flick at ~620ms (~2000px/s peak) matches fast human
-    // mouse work; the old 300ms cap forced superhuman speeds.
-    let total_ms = (dist * 0.45 + 80.0).clamp(80.0, 650.0);
+    // Total movement time: 45ms floor, distance-scaled, 360ms ceiling.
+    // A 1200px flick at ~360ms is a fast human flick (competitive players
+    // reach 250-300ms); the old 650ms ceiling was a deliberate slow-down.
+    let total_ms = (dist * 0.26 + 45.0).clamp(45.0, 360.0);
     let step_ms = total_ms / steps as f64;
 
     let mut path = Vec::with_capacity(steps + 4);
@@ -185,20 +185,20 @@ pub fn mouse_path(start: (f64, f64), target: (f64, f64), rng: &mut Rng) -> Vec<P
     path.push(PathPoint {
         x: over_x,
         y: over_y,
-        delay: log_normal(rng, 32.0, 0.35),
+        delay: log_normal(rng, 18.0, 0.35),
     });
     // Correct back to the actual click point.
     path.push(PathPoint {
         x: click_x,
         y: click_y,
-        delay: log_normal(rng, 50.0, 0.35),
+        delay: log_normal(rng, 26.0, 0.35),
     });
 
     // Small pause before clicking — humans hesitate briefly.
     path.push(PathPoint {
         x: click_x,
         y: click_y,
-        delay: log_normal(rng, 80.0, 0.3),
+        delay: log_normal(rng, 40.0, 0.3),
     });
 
     path
@@ -215,18 +215,18 @@ pub fn click_target(path: &[PathPoint]) -> (f64, f64) {
 
 /// Generate human-like inter-key delays for typing `text`.
 ///
-/// Base cadence: log-normal around 55ms per keystroke — matches a fast
-/// typist (120+ WPM). Longer pauses after spaces (word boundaries).
-/// Rare "thinking" pauses (1-3% chance, 300-1200ms).
+/// Base cadence: log-normal from the persistent profile — v3.10 generates
+/// it in the fast-typist band (42-58ms per keystroke). Longer pauses after
+/// spaces (word boundaries). Rare "thinking" pauses (1-3% chance).
 pub fn typing_cadence(text: &str, rng: &mut Rng) -> Vec<Duration> {
     text.chars()
         .map(|c| {
             if c == ' ' {
-                // Word boundary: longer pause, 100-250ms.
-                log_normal(rng, 120.0, 0.25)
-            } else if rng.uniform() < 0.02 {
+                // Word boundary: longer pause, ~55-95ms.
+                log_normal(rng, 70.0, 0.25)
+            } else if rng.uniform() < 0.012 {
                 // Rare "thinking" pause: 300-1200ms.
-                log_normal(rng, 500.0, 0.4)
+                log_normal(rng, 420.0, 0.4)
             } else {
                 // Normal keystroke: log-normal from persistent profile.
                 log_normal(
@@ -303,6 +303,21 @@ mod tests {
         let final_dist = final_pt.x.abs();
         assert!(overshoot_dist >= final_dist - 5.0,
             "overshoot ({overshoot_dist}) should be >= final ({final_dist})");
+    }
+
+    #[test]
+    fn mouse_path_total_time_is_fast_but_not_teleport() {
+        let mut rng = Rng::new();
+        let mut totals: Vec<u64> = Vec::new();
+        for _ in 0..30 {
+            let path = mouse_path((0.0, 0.0), (1200.0, 0.0), &mut rng);
+            totals.push(path.iter().map(|p| p.delay.as_millis() as u64).sum());
+            assert!(path.len() <= 25, "dispatch count stays bounded: {}", path.len());
+        }
+        totals.sort_unstable();
+        let median = totals[totals.len() / 2];
+        assert!(median < 480, "1200px traverse should be fast: median {median}ms");
+        assert!(median > 200, "traverse must not read as teleport: median {median}ms");
     }
 
     #[test]

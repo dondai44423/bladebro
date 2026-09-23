@@ -490,11 +490,23 @@ impl Page {
             // Pending request metadata for the V8 net log.
             let mut pending: HashMap<String, (String, String, i64)> = HashMap::new();
             let mut last_sweep = std::time::Instant::now();
+            let mut sweep_tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
-                match rx.recv().await {
-                    Ok(ev) if ev.method == "Network.requestWillBeSent" => {
+                // Sweep on a timer too: a stuck request must expire even when
+                // no further network events arrive to wake the loop (a pinned
+                // counter made every settle pay its drain plateau).
+                let msg = tokio::select! {
+                    m = rx.recv() => Some(m),
+                    _ = sweep_tick.tick() => None,
+                };
+                match msg {
+                    Some(Ok(ev)) if ev.method == "Network.requestWillBeSent" => {
+                        // WebSocket/EventSource "requests" never fire
+                        // loadingFinished — counting them pinned the in-flight
+                        // counter indefinitely on any page holding a socket.
+                        let ty = ev.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
                         let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
-                        if !id.is_empty() {
+                        if !id.is_empty() && ty != "WebSocket" && ty != "EventSource" {
                             open.insert(id.to_string(), std::time::Instant::now());
                             let req = ev.params.get("request");
                             let method = req.and_then(|r| r.get("method")).and_then(|m| m.as_str()).unwrap_or("GET").to_string();
@@ -502,7 +514,7 @@ impl Page {
                             pending.insert(id.to_string(), (method, url, 0));
                         }
                     }
-                    Ok(ev) if ev.method == "Network.responseReceived" => {
+                    Some(Ok(ev)) if ev.method == "Network.responseReceived" => {
                         let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
                         let status = ev.params.get("response")
                             .and_then(|r| r.get("status"))
@@ -512,7 +524,7 @@ impl Page {
                             entry.2 = status;
                         }
                     }
-                    Ok(ev) if ev.method == "Network.loadingFinished"
+                    Some(Ok(ev)) if ev.method == "Network.loadingFinished"
                         || ev.method == "Network.loadingFailed" =>
                     {
                         let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
@@ -534,21 +546,23 @@ impl Page {
                             }
                         }
                     }
-                    Ok(_) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Some(Ok(_)) => {}
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                         // Events were dropped — the set may now hold stale IDs.
                         // Clear rather than risk a permanently blocked settle.
                         open.clear();
                         pending.clear();
-                        continue;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                    None => {}
                 }
-                // Periodic sweep: remove entries older than 30 seconds.
+                // Periodic sweep: remove entries older than 8 seconds.
                 // Data URLs, long-poll connections, and server-sent events
-                // may never fire loadingFinished, leaving stale entries.
-                if last_sweep.elapsed().as_secs() >= 5 {
-                    let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
+                // may never fire loadingFinished. 8s is the in-flight horizon:
+                // a legit resource still loading after that is a download, not
+                // a page-load blocker.
+                if last_sweep.elapsed().as_secs() >= 1 {
+                    let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(8);
                     open.retain(|_, ts| *ts > cutoff);
                     last_sweep = std::time::Instant::now();
                 }
@@ -960,7 +974,7 @@ impl Page {
     }
 
     /// S5: pacing governor — sleep so the inter-action gap follows a
-    /// log-normal distribution matching real human think-time. Skipped for
+    /// log-normal distribution matching fast human think-time. Skipped for
     /// the first action, disabled by BLADE_PACE=off.
     async fn pace(&mut self, action: &crate::action::Action) {
         if std::env::var("BLADE_PACE").as_deref() == Ok("off") {
@@ -977,19 +991,22 @@ impl Page {
         let elapsed = now.saturating_sub(last);
 
         let (median_ms, sigma) = match action {
-            crate::action::Action::Click { .. } => (500.0, 0.5),
-            crate::action::Action::Type { .. } => (350.0, 0.4),
-            crate::action::Action::Scroll { .. } => (250.0, 0.4),
-            crate::action::Action::Back => (800.0, 0.6),
-            crate::action::Action::Hover { .. } => (400.0, 0.4),
+            crate::action::Action::Click { .. } => (170.0, 0.5),
+            crate::action::Action::Type { .. } => (130.0, 0.4),
+            crate::action::Action::Scroll { .. } => (90.0, 0.4),
+            crate::action::Action::Back => (280.0, 0.6),
+            crate::action::Action::Hover { .. } => (150.0, 0.4),
             // Wait/Read are perception, not human actions — no pacing.
             crate::action::Action::Wait { .. } | crate::action::Action::Read { .. } => return,
-            _ => (400.0, 0.4),
+            _ => (140.0, 0.4),
         };
         let mut rng = crate::stealth::biometrics::Rng::new();
+        // v3.10 (speed pass): medians ~3x faster than the v3.9 pacing, and a
+        // 3x-median cap so a rare log-normal tail can't stall an agent flow.
         let target = crate::stealth::biometrics::log_normal(&mut rng, median_ms, sigma);
-        if elapsed < target.as_millis() as u64 {
-            let sleep_for = target.as_millis() as u64 - elapsed;
+        let target_ms = (target.as_millis() as u64).min((median_ms * 3.0) as u64);
+        if elapsed < target_ms {
+            let sleep_for = target_ms - elapsed;
             tokio::time::sleep(std::time::Duration::from_millis(sleep_for)).await;
         }
     }
@@ -1291,7 +1308,7 @@ impl Page {
         _t("frameNavigated");
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
         _t("load");
-        wait_for_settle_with_network(&self.cdp, Duration::from_secs(3), Some(&self.in_flight)).await?;
+        wait_for_settle_with_network(&self.cdp, Duration::from_millis(2500), Some(&self.in_flight)).await?;
         _t("settle");
         // M4+M6: Check for consent banners and block pages after navigation.
         // Knowledge-base integration: try stored consent selector first,
@@ -1331,7 +1348,7 @@ impl Page {
                 }
                 if solved {
                     wait_for_settle_with_network(
-                        &self.cdp, Duration::from_secs(3), Some(&self.in_flight),
+                        &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
                     ).await?;
                     None // clear block — was a JS challenge, not a real block
                 } else {

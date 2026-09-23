@@ -25,7 +25,7 @@ ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (f
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call.\n\
 fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit gets JS click fallback if mouse click fails.\n\
-batch: use text/label addressing in steps (not ref) — refs go stale after navigation. Auto-settles after each navigation (500ms + recapture).\n\
+batch: use text/label addressing in steps (not ref) — refs go stale after navigation. Auto-settles after navigation. A step may be {\"action\":\"see\", mode|extract|find, budget} — the read lands in a --- read --- section: navigate+interact+read in ONE call.\n\
 Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
             input_schema: json!({
                 "type": "object",
@@ -70,12 +70,12 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "submit": {"type": "string", "description": "Fill: ref or text of submit button. JS click fallback if mouse click fails."},
                     "steps": {
                         "type": "array",
-                        "description": "Batch: sequential steps, same fields as act (action, ref, text, label, role, nth, key, url, dx, dy). Navigation doesn't halt — subsequent steps act on the new page. Stops on error only.",
+                        "description": "Batch: sequential steps, same fields as act (action, ref, text, label, role, nth, key, url, dx, dy), plus see steps ({action:'see', mode, extract, find, budget}) that read inline. Navigation doesn't halt — subsequent steps act on the new page. Stops on error only.",
                         "items": {
                             "type": "object",
                             "required": ["action"],
                             "properties": {
-                                "action": {"type": "string", "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "open-tab", "close-tab", "switch-tab"]}
+                                "action": {"type": "string", "enum": ["click", "type", "clear", "select", "press", "scroll", "navigate", "read", "wait", "back", "forward", "reload", "hover", "upload", "open-tab", "close-tab", "switch-tab", "see"]}
                             }
                         }
                     },
@@ -151,14 +151,14 @@ State ops (open-tab, save, load, etc.) also work as steps in batch and run.",
         ToolDef {
             name: "run",
             description: "Batch actions with branching and loops. Use instead of `act batch` when you need: if/else ({action:\"if\",condition,text,then:[...],else:[...]}), while loops ({action:\"while\",condition,text,steps:[...],max:5}), or state ops that change tabs (open-tab halts batch but works in run).\n\
-Steps use the same fields as act. Stops on first error, returns step number + page state for recovery.",
+Steps use the same fields as act, plus {\"action\":\"see\",...} to READ inline (see fields: mode, extract, find, budget; default budget 3000). while+see reads across pages in ONE call. Stops on first error, returns step number + page state for recovery.",
             input_schema: json!({
                 "type": "object",
                 "required": ["steps"],
                 "properties": {
                     "steps": {
                         "type": "array",
-                        "description": "Action objects. action='if' for branching, 'while' for loops. All act actions + state ops work.",
+                        "description": "Action objects. action='if' for branching, 'while' for loops, 'see' to read inline. All act actions + state ops work.",
                         "items": {
                             "type": "object",
                             "required": ["action"],

@@ -395,7 +395,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
         "element" => {
@@ -428,7 +428,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
         "url" => {
@@ -461,7 +461,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
         "text" => {
@@ -497,7 +497,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
         "js" => {
@@ -538,7 +538,7 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
         "settle" | "network" => {
@@ -757,10 +757,10 @@ async fn dispatch_mouse_click(
 
     let mut rng = crate::stealth::Rng::new();
     let to = Duration::from_secs(5);
-    // Micro-tremors: 2-4 tiny jitter points (1-3px) before clicking.
+    // Micro-tremors: 1-3 tiny jitter points (1-3px) before clicking.
     // Real humans have involuntary hand tremors even when "holding still".
     // A perfectly stationary cursor before a click is a bot signal.
-    let tremor_count = rng.range(2, 5) as usize;
+    let tremor_count = rng.range(1, 3) as usize;
     for _ in 0..tremor_count {
         let jx = gaussian(&mut rng, 0.0, 1.5).clamp(-3.0, 3.0);
         let jy = gaussian(&mut rng, 0.0, 1.5).clamp(-3.0, 3.0);
@@ -784,7 +784,7 @@ async fn dispatch_mouse_click(
         )
         .await?;
         *last_mouse.lock().unwrap_or_else(|e| e.into_inner()) = Some((tx, ty));
-        tokio::time::sleep(Duration::from_millis(rng.range(15, 45) as u64)).await;
+        tokio::time::sleep(Duration::from_millis(rng.range(8, 24) as u64)).await;
     }
     // Press + release at the final position.
     cdp.send_with_timeout(
@@ -796,8 +796,8 @@ async fn dispatch_mouse_click(
         to,
     )
     .await?;
-    // Small delay between press and release (50-120ms).
-    tokio::time::sleep(Duration::from_millis(50 + rng.range(0, 70) as u64)).await;
+    // Small delay between press and release (28-70ms).
+    tokio::time::sleep(Duration::from_millis(28 + rng.range(0, 42) as u64)).await;
     cdp.send_with_timeout(
         "Input.dispatchMouseEvent",
         Some(json!({
@@ -830,9 +830,9 @@ async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
             "windowsVirtualKeyCode": vk, "text": key, "modifiers": modifiers,
             "keyChar": key,
         }))).await?;
-        // Key press duration: 40-110ms — real humans hold before releasing.
+        // Key press duration: 25-70ms — real humans hold before releasing.
         let mut rng = crate::stealth::Rng::new();
-        tokio::time::sleep(Duration::from_millis(40 + rng.range(0, 70) as u64)).await;
+        tokio::time::sleep(Duration::from_millis(25 + rng.range(0, 45) as u64)).await;
         cdp.send("Input.dispatchKeyEvent", Some(json!({
             "type": "keyUp", "key": key, "code": code,
             "windowsVirtualKeyCode": vk, "modifiers": modifiers,
@@ -1174,19 +1174,19 @@ pub async fn perform_with_network(
                         _ = sub_fires(&mut dlg_sub, "Page.javascriptDialogOpening") => true,
                     }
                 };
-                match tokio::time::timeout(Duration::from_millis(200), early).await {
+                match tokio::time::timeout(Duration::from_millis(150), early).await {
                     Ok(true) => dialog_fired = true,
                     Ok(false) => {
                         // Small delay to let the new execution context
                         // be created before we send Runtime.evaluate
                         // commands. Without this, the evaluate can hang
                         // on JSON/binary response pages (e.g. httpbin.org/post).
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(80)).await;
                         crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
                     }
                     _ => {}
                 }
-                wait_for_settle_with_network(cdp, Duration::from_secs(2), in_flight).await?;
+                wait_for_settle_with_network(cdp, Duration::from_millis(1500), in_flight).await?;
                 let cap = capture(cdp).await?;
                 delta = lpm.ingest(cap);
 
@@ -1357,8 +1357,8 @@ pub async fn perform_with_network(
             // Produces trusted wheel events (window.scrollBy is untrusted).
             let total_x = *dx as f64;
             let total_y = *dy as f64;
-            let steps = (((total_x.abs() + total_y.abs()) / 80.0).round() as usize)
-                .clamp(6, 20);
+            let steps = (((total_x.abs() + total_y.abs()) / 150.0).round() as usize)
+                .clamp(4, 12);
 
             // Viewport center for the wheel event position.
             let (cx, cy) = cdp
@@ -1399,8 +1399,8 @@ pub async fn perform_with_network(
                     )
                     .await;
 
-                // 15-30ms jitter between steps.
-                let jitter = 15 + rng.range(0, 15) as u64;
+                // 8-18ms jitter between steps.
+                let jitter = 8 + rng.range(0, 10) as u64;
                 tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
             }
         }
@@ -1538,14 +1538,15 @@ pub async fn perform_with_network(
 
     // Action-dependent timeouts: type/clear/scroll don't trigger navigation,
     // and their DOM settles fast. Shorter nav check + shorter settle = faster.
-    let nav_check_ms = match action {
-        Action::Type { .. } | Action::Clear { .. } | Action::Scroll { .. } => 150,
-        _ => 200,
-    };
-    let settle_secs = match action {
-        Action::Type { .. } | Action::Clear { .. } => 1,
-        Action::Press { .. } | Action::Select { .. } | Action::Scroll { .. } | Action::Hover { .. } => 1,
-        _ => 3,
+    // A wait's condition check already settled the state it waited on; the
+    // extra nav-check + settle would be a pure 150-300ms tax on every wait.
+    // Other waits keep one settle (the condition can match mid-mutation).
+    let (nav_check_ms, settle_ms) = match action {
+        Action::Type { .. } | Action::Clear { .. } | Action::Scroll { .. } => (120, 900),
+        Action::Press { .. } | Action::Select { .. } | Action::Hover { .. } => (150, 900),
+        Action::Wait { condition, .. } if condition.as_str() == "settle" || condition.as_str() == "network" => (0, 0),
+        Action::Wait { .. } => (0, 500),
+        _ => (150, 2000),
     };
 
     // Check if navigation was triggered (with a short timeout).
@@ -1556,7 +1557,7 @@ pub async fn perform_with_network(
     if let Ok(true) = nav_result {
         crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
     }
-    wait_for_settle_with_network(cdp, Duration::from_secs(settle_secs), in_flight).await?;
+    wait_for_settle_with_network(cdp, Duration::from_millis(settle_ms), in_flight).await?;
 
     // Recapture → delta.
     let cap = capture(cdp).await?;

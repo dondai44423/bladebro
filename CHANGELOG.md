@@ -49,6 +49,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (skipped when node is absent — the driver itself never needs it) fails at
   test time on a syntax error in the assembled page script, instead of
   disabling every page operation at runtime.
+- **Inline `see` steps in `act batch` and `run`.** A step of `{"action":"see", ...}`
+  (mode=content|model|outline, extract, find, budget) reads the page *within*
+  the sequence: batch collects outputs under a `read (N):` section, `run` prints
+  them inline. One call now navigates, interacts, and extracts — a `while` loop
+  with a `see` body reads multiple pages in a single tool call. Budget defaults
+  to 3000 chars for step reads. Live-verified: 4-step form flow (navigate →
+  type → click → read) and a 3-iteration pagination loop, each in ONE call.
+
+### Changed
+- **Sonic-speed pass — every interactive path ~2–3× faster, stealth intact.**
+  Frozen before/after suite (median of 5, same machine, fresh profiles):
+  wait-for-settle 580→130ms, click 1381→791ms, click-through-nav 1548→666ms,
+  scroll 888→438ms, press 806→468ms, form flow (5 calls) 3396→1739ms, tab
+  open 372→107ms, tab switch 77→33ms, real-site nav 1403→197ms; typing
+  4596→3057ms for 33 chars (per-keystroke event dispatch is the floor).
+  - Human-but-fast timing band: pacing medians ~3× faster (click 500→170,
+    type 350→130, hover 400→150ms…) with a 3×-median tail cap so a rare
+    log-normal draw can't stall an agent flow; mouse flicks ≤360ms with the
+    bezier/overshoot/tremor structure untouched; typing cadence 42–58ms/char.
+    Existing installs rescale their `behavior.json` once (versioned
+    migration) so old profiles move to the faster band too.
+  - Content-aware settle: DOM-quiet window 150→110ms, network-drain grace
+    600→280ms; a wait no longer pays a redundant second settle + navigation
+    check after its condition already settled (that was ~300ms per wait);
+    batch/run navigation waits are settle-based instead of blind 200/500ms
+    sleeps.
+  - Network tracker hygiene: WebSocket/EventSource connections (which never
+    fire a completion) are no longer counted as in-flight, and the stale
+    sweep runs on a 1s timer with an 8s horizon — a stuck request can no
+    longer pin the counter and tax every settle with its drain plateau.
 
 ## [3.9.6] - 2026-09-02
 

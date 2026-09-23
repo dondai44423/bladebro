@@ -362,8 +362,9 @@ pub async fn wait_for_load(cdp: &CdpSession, timeout: Duration) -> Result<()> {
 }
 
 /// Wait for the DOM to settle after an action (S18). ONE `awaitPromise`
-/// evaluate installs a MutationObserver and resolves after 600ms of DOM
-/// quiet (or timeout). Replaces the Rust-side polling loop — on heavy-JS
+/// evaluate installs a MutationObserver and resolves after ~110ms of DOM
+/// quiet (v3.10 speed pass; the 4s of silence before was dead waiting
+/// time), or timeout. Replaces the Rust-side polling loop — on heavy-JS
 /// pages this cut per-action latency from ~2 minutes to seconds.
 ///
 /// Note: observes childList + characterData only — NOT attributes, since
@@ -392,9 +393,9 @@ pub async fn wait_for_settle_with_network(
             function fin(v){{if(done)return;done=true;try{{if(mo)mo.disconnect();}}catch(e){{}}res(v);}}\
             (function tick(){{\
                 var now=performance.now();\
-                if(document.readyState!=='loading'&&(now-last)>=150){{fin('settled');return;}}\
+                if(document.readyState!=='loading'&&(now-last)>=110){{fin('settled');return;}}\
                 if((now-t0)>={ms}){{fin('timeout');return;}}\
-                setTimeout(tick,60);\
+                setTimeout(tick,40);\
             }})();\
         }})",
     );
@@ -423,7 +424,7 @@ pub async fn wait_for_settle_with_network(
         // it has plateaued for GRACE, when it hits zero, or at the hard
         // deadline. Fast by default; agents needing full network quiet
         // can `act wait condition=network` explicitly.
-        const GRACE: Duration = Duration::from_millis(600);
+        const GRACE: Duration = Duration::from_millis(280);
         let hard_deadline = tokio::time::Instant::now() + timeout;
         let mut lowest = counter.load(Ordering::Relaxed);
         let mut last_new_low = tokio::time::Instant::now();
@@ -444,7 +445,7 @@ pub async fn wait_for_settle_with_network(
                 // finished or only persistent connections remain.
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
         }
     }
     Ok(())

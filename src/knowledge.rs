@@ -156,17 +156,25 @@ pub struct BehavioralProfile {
     pub overshoot_max: i64,
     #[serde(default = "default_hum_mean")]
     pub hum_interval_ms: f64,
+    /// Timing-profile version. Bumped when the generated speed baseline
+    /// changes; older behavior.json files are rescaled on load (see `migrate`).
+    #[serde(default)]
+    pub version: u32,
 }
 
 fn default_click_precision() -> f64 { 2.5 }
 fn default_curve_factor() -> f64 { 0.15 }
-fn default_typing_mean() -> f64 { 55.0 }
+fn default_typing_mean() -> f64 { 50.0 }
 fn default_typing_sigma() -> f64 { 0.3 }
 fn default_gap_mean() -> f64 { 400.0 }
 fn default_gap_sigma() -> f64 { 0.35 }
 fn default_overshoot_min() -> i64 { 5 }
 fn default_overshoot_max() -> i64 { 15 }
 fn default_hum_mean() -> f64 { 2000.0 }
+
+/// Current timing baseline version. Bump when generated speed parameters
+/// change; older behavior.json files are rescaled on load (see `migrate`).
+const BEHAVIOR_VERSION: u32 = 2;
 
 /// One-time load. Thread-safe. Read-only after init.
 pub static BEHAVIOR: LazyLock<BehavioralProfile> = LazyLock::new(BehavioralProfile::load_or_create);
@@ -182,7 +190,16 @@ impl BehavioralProfile {
         let p = Self::path();
         if let Ok(content) = std::fs::read_to_string(&p) {
             if let Ok(bp) = serde_json::from_str::<BehavioralProfile>(&content) {
-                return bp.clamped();
+                let was = bp.version;
+                let bp = bp.migrate().clamped();
+                if bp.version != was {
+                    // Persist the one-time rescale so it doesn't re-run.
+                    let _ = crate::platform::secure_write_file(
+                        &p,
+                        serde_json::to_string_pretty(&bp).unwrap_or_default().as_bytes(),
+                    );
+                }
+                return bp;
             }
             eprintln!("[knowledge] corrupted behavior.json — regenerating");
             let _ = std::fs::remove_file(&p);
@@ -201,14 +218,27 @@ impl BehavioralProfile {
         BehavioralProfile {
             click_precision: vary_f64(t, 2.5, 0.5),         // 2.0-3.0
             curve_factor: vary_f64(t.wrapping_mul(3), 0.15, 0.03), // 0.12-0.18
-            typing_mean_ms: vary_f64(t.wrapping_mul(5), 90.0, 15.0), // 75-105
+            typing_mean_ms: vary_f64(t.wrapping_mul(5), 50.0, 8.0), // 42-58 (fast typist)
             typing_sigma: vary_f64(t.wrapping_mul(7), 0.3, 0.05),  // 0.25-0.35
             action_gap_mean_ms: vary_f64(t.wrapping_mul(11), 400.0, 60.0), // 340-460
             action_gap_sigma: vary_f64(t.wrapping_mul(13), 0.35, 0.05), // 0.30-0.40
             overshoot_min: 5,
             overshoot_max: vary_i64(t.wrapping_mul(17), 15, 3),  // 12-18
             hum_interval_ms: vary_f64(t.wrapping_mul(19), 2000.0, 300.0), // 1700-2300
+            version: BEHAVIOR_VERSION,
         }
+    }
+
+    /// Rescale timing fields of pre-v2 profiles onto the fast-human band.
+    /// Maps the old generation distribution (75-105ms/char) linearly onto
+    /// the new one (42-58) so every install keeps its relative personality
+    /// while shedding the old self-imposed slowness.
+    fn migrate(mut self) -> BehavioralProfile {
+        if self.version < 2 {
+            self.typing_mean_ms = 50.0 + (self.typing_mean_ms - 90.0) * (8.0 / 15.0);
+            self.version = 2;
+        }
+        self
     }
 
     /// Clamp all fields to sane human-like ranges. Protects against corrupted files.
@@ -216,13 +246,14 @@ impl BehavioralProfile {
         BehavioralProfile {
             click_precision: self.click_precision.clamp(1.0, 5.0),
             curve_factor: self.curve_factor.clamp(0.05, 0.3),
-            typing_mean_ms: self.typing_mean_ms.clamp(50.0, 150.0),
+            typing_mean_ms: self.typing_mean_ms.clamp(38.0, 80.0),
             typing_sigma: self.typing_sigma.clamp(0.1, 0.6),
             action_gap_mean_ms: self.action_gap_mean_ms.clamp(200.0, 800.0),
             action_gap_sigma: self.action_gap_sigma.clamp(0.1, 0.6),
             overshoot_min: self.overshoot_min.clamp(2, 10),
             overshoot_max: self.overshoot_max.clamp(8, 25),
             hum_interval_ms: self.hum_interval_ms.clamp(1000.0, 4000.0),
+            version: self.version,
         }
     }
 }
@@ -700,7 +731,8 @@ mod tests {
         let bp = BehavioralProfile::generate();
         assert!(bp.click_precision >= 2.0 && bp.click_precision <= 3.0);
         assert!(bp.curve_factor >= 0.12 && bp.curve_factor <= 0.18);
-        assert!(bp.typing_mean_ms >= 75.0 && bp.typing_mean_ms <= 105.0);
+        assert!(bp.typing_mean_ms >= 42.0 && bp.typing_mean_ms <= 58.0);
+        assert_eq!(bp.version, 2);
         assert!(bp.overshoot_max >= 12 && bp.overshoot_max <= 18);
         assert!(bp.hum_interval_ms >= 1700.0 && bp.hum_interval_ms <= 2300.0);
     }
@@ -711,6 +743,7 @@ mod tests {
             click_precision: 100.0,
             curve_factor: -1.0,
             typing_mean_ms: 999.0,
+            version: 0,
             typing_sigma: 99.0,
             action_gap_mean_ms: 9999.0,
             action_gap_sigma: 99.0,
@@ -721,9 +754,26 @@ mod tests {
         let c = bp.clamped();
         assert_eq!(c.click_precision, 5.0);
         assert_eq!(c.curve_factor, 0.05);
-        assert_eq!(c.typing_mean_ms, 150.0);
+        assert_eq!(c.typing_mean_ms, 80.0);
         assert_eq!(c.overshoot_max, 25);
         assert_eq!(c.hum_interval_ms, 4000.0);
+    }
+
+    #[test]
+    fn behavioral_profile_migrates_legacy_timing() {
+        // Old range maps linearly: 75 -> 42, 90 -> 50, 105 -> 58.
+        let fast = BehavioralProfile { typing_mean_ms: 75.0, version: 0, ..BehavioralProfile::generate() };
+        let m = fast.migrate();
+        assert_eq!(m.version, 2);
+        assert!((m.typing_mean_ms - 42.0).abs() < 0.001, "got {}", m.typing_mean_ms);
+        let slow = BehavioralProfile { typing_mean_ms: 105.0, version: 0, ..BehavioralProfile::generate() };
+        assert!((slow.migrate().typing_mean_ms - 58.0).abs() < 0.001);
+        // Already-current profiles are untouched.
+        let v2 = BehavioralProfile { typing_mean_ms: 47.3, version: 2, ..BehavioralProfile::generate() };
+        assert!((v2.migrate().typing_mean_ms - 47.3).abs() < 0.001);
+        // Migration runs BEFORE clamping: a corrupted 999 comes out clamped, not scaled.
+        let corrupt = BehavioralProfile { typing_mean_ms: 999.0, version: 0, ..BehavioralProfile::generate() };
+        assert_eq!(corrupt.migrate().clamped().typing_mean_ms, 80.0);
     }
 
     #[test]
