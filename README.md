@@ -85,11 +85,11 @@ That's it. No Rust, no compilation, no dependencies. The npm package ships a pre
 
 | Platform | Package | Size | Status |
 |---|---|---|---|
-| Linux x86_64 | `bladebro-linux-x64` | 6.1 MB | Live-verified |
-| Linux ARM64 (aarch64) | `bladebro-linux-arm64` | 5.3 MB | Not live-verified |
-| Windows x86_64 | `bladebro-windows-x64` | 5.7 MB | Live-verified |
-| macOS Intel | `bladebro-darwin-x64` | 5.7 MB | CI-verified |
-| macOS Apple Silicon | `bladebro-darwin-arm64` | 5.2 MB | CI-verified |
+| Linux x86_64 | `bladebro-linux-x64` | 6.6 MB | Live-verified |
+| Linux ARM64 (aarch64) | `bladebro-linux-arm64` | 5.7 MB | Not live-verified |
+| Windows x86_64 | `bladebro-windows-x64` | 6.1 MB | Live-verified |
+| macOS Intel | `bladebro-darwin-x64` | 6.1 MB | CI-verified |
+| macOS Apple Silicon | `bladebro-darwin-arm64` | 5.6 MB | CI-verified |
 
 npm resolves the correct binary automatically via `os`/`cpu` fields. Users only download the binary for their platform. Zero postinstall scripts, zero warnings.
 
@@ -525,7 +525,7 @@ Run `bladebro audit` to verify your own setup.
 | Runtime | None (static binary) | Node.js daemon | Node.js | Node.js |
 | Process model | Long-lived daemon (stateful) | Long-lived daemon | Stateless | Stateless |
 | Page model | Persistent, ref-stable, diff-first | Accessibility tree snapshot | None | None |
-| Binary size | 6.1 MB | ~50 MB (node + deps) | ~50 MB (node + deps) | ~50 MB (node + deps) |
+| Binary size | 6.6 MB | ~50 MB (node + deps) | ~50 MB (node + deps) | ~50 MB (node + deps) |
 | Install | `npm install -g bladebro` | npm + agent-browser install | npm + playwright install | npm |
 | Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
