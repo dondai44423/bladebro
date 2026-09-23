@@ -151,7 +151,7 @@ State ops (open-tab, save, load, etc.) also work as steps in batch and run.",
         ToolDef {
             name: "run",
             description: "Batch actions with branching and loops. Use instead of `act batch` when you need: if/else ({action:\"if\",condition,text,then:[...],else:[...]}), while loops ({action:\"while\",condition,text,steps:[...],max:5}), or state ops that change tabs (open-tab halts batch but works in run).\n\
-Steps use the same fields as act, plus {\"action\":\"see\",...} to READ inline (see fields: mode, extract, find, budget; default budget 3000). while+see reads across pages in ONE call. Stops on first error, returns step number + page state for recovery.",
+Steps use the same fields as act, plus {\"action\":\"see\",...} to READ inline (see fields: mode, extract, find, budget; default budget 3000). while+see reads across pages in ONE call. if/while: a false condition on a quiet page exits in ~0.8s (timeout = max wait; use a wait step for time-based waiting). Stops on first error, returns step number + page state for recovery.",
             input_schema: json!({
                 "type": "object",
                 "required": ["steps"],

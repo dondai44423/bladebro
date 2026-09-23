@@ -2911,6 +2911,7 @@ async fn execute_step(
                 condition,
                 match_text,
                 std::time::Duration::from_secs(timeout_secs),
+                Some(page.in_flight_ref()),
             )
             .await;
 
@@ -2956,6 +2957,7 @@ async fn execute_step(
                 let met = crate::action::check_condition(
                     page.cdp_ref(), condition, match_text,
                     std::time::Duration::from_secs(timeout_secs),
+                    Some(page.in_flight_ref()),
                 ).await;
                 if !met {
                     observations.push(format!("step {path}: while({condition} \"{match_text}\") \u{2192} done after {i} iterations"));

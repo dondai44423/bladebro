@@ -79,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     fire a completion) are no longer counted as in-flight, and the stale
     sweep runs on a 1s timer with an 8s horizon — a stuck request can no
     longer pin the counter and tax every settle with its drain plateau.
+    (Live-verified with a real open EventSource and a real WebSocket.)
+  - `if`/`while` checks confirm absence instead of waiting it out: a false
+    condition on a quiet page (no requests in flight) exits in ~0.8s rather
+    than burning the full timeout — a false `if` guard drops 5.0s → 0.8s,
+    and a finished `while` pagination exits fast (the whole 3-page crawl —
+    nav, 3× click+read, exit — is ~3.2s in ONE call). The `wait` action
+    keeps full time-based semantics (verified: an unreachable condition
+    still consumes its whole budget).
 
 ## [3.9.6] - 2026-09-02
 

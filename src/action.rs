@@ -345,6 +345,25 @@ fn shorten_url(u: &str) -> String {
     }
 }
 
+/// Confirmed-absence window for `if`/`while` condition checks (v3.10). Once
+/// the condition has been false this long AND the page has no requests in
+/// flight, the check concludes "not present" instead of polling to the full
+/// timeout — a false `if` guard or a finished `while` loop exits in ~0.8s.
+const ABSENCE_CONFIRM: Duration = Duration::from_millis(800);
+
+/// See [`ABSENCE_CONFIRM`]. `probe = None` disables the fast path (used by
+/// the `wait` action, whose timeout is a deliberate wait budget).
+fn absence_confirmed(
+    absent_since: &mut Option<std::time::Instant>,
+    probe: Option<&std::sync::atomic::AtomicUsize>,
+) -> bool {
+    let Some(counter) = probe else {
+        return false;
+    };
+    let since = *absent_since.get_or_insert_with(std::time::Instant::now);
+    since.elapsed() >= ABSENCE_CONFIRM && counter.load(std::sync::atomic::Ordering::Relaxed) == 0
+}
+
 /// Check if a condition is met, optionally waiting up to `timeout`.
 /// Returns `true` if the condition was met, `false` if timed out.
 ///
@@ -362,8 +381,10 @@ pub async fn check_condition(
     condition: &str,
     text: &str,
     timeout: Duration,
+    absence_probe: Option<&std::sync::atomic::AtomicUsize>,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut absent_since: Option<std::time::Instant> = None;
     match condition {
         "title" => {
             let needle = text.to_lowercase();
@@ -393,6 +414,11 @@ pub async fn check_condition(
                     return true;
                 }
                 if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                // v3.10: confirmed-absence fast path — `if`/`while` pass the
+                // in-flight counter as the probe; `wait` passes None.
+                if absence_confirmed(&mut absent_since, absence_probe) {
                     return false;
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
@@ -428,6 +454,11 @@ pub async fn check_condition(
                 if tokio::time::Instant::now() >= deadline {
                     return false;
                 }
+                // v3.10: confirmed-absence fast path — `if`/`while` pass the
+                // in-flight counter as the probe; `wait` passes None.
+                if absence_confirmed(&mut absent_since, absence_probe) {
+                    return false;
+                }
                 tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
@@ -459,6 +490,11 @@ pub async fn check_condition(
                     return true;
                 }
                 if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                // v3.10: confirmed-absence fast path — `if`/`while` pass the
+                // in-flight counter as the probe; `wait` passes None.
+                if absence_confirmed(&mut absent_since, absence_probe) {
                     return false;
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
@@ -495,6 +531,11 @@ pub async fn check_condition(
                     return true;
                 }
                 if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                // v3.10: confirmed-absence fast path — `if`/`while` pass the
+                // in-flight counter as the probe; `wait` passes None.
+                if absence_confirmed(&mut absent_since, absence_probe) {
                     return false;
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
@@ -536,6 +577,11 @@ pub async fn check_condition(
                     return true;
                 }
                 if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                // v3.10: confirmed-absence fast path — `if`/`while` pass the
+                // in-flight counter as the probe; `wait` passes None.
+                if absence_confirmed(&mut absent_since, absence_probe) {
                     return false;
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
@@ -1412,7 +1458,7 @@ pub async fn perform_with_network(
             // check_condition polls until the condition is met or timeout.
             // On timeout, error so the agent gets the current page state to
             // recover (a silent "waited" would be a lie — the condition failed).
-            let met = check_condition(cdp, condition, text, *timeout).await;
+            let met = check_condition(cdp, condition, text, *timeout, None).await;
             if !met {
                 return Err(BladeError::Other(format!(
                     "wait timeout: condition '{condition}' not met within {}s",
@@ -1609,5 +1655,21 @@ mod action_tests {
         assert!(js.contains("_lClick"), "leaf-target rewrites the click box");
         assert!(js.contains("_lhr"), "leaf-target rewrites the target label");
         assert!(!js.contains('\u{2014}'), "no em-dash in injected JS");
+    }
+
+    // The if/while absence fast path (v3.10): only a QUIET page counts as
+    // confirmed absence, and only when a probe is supplied (wait passes None
+    // and keeps its full time budget).
+    #[test]
+    fn absence_confirms_only_when_quiet_and_past_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut since = None;
+        assert!(!super::absence_confirmed(&mut since, None));
+        assert!(since.is_none(), "no probe must not start the absence clock");
+        let counter = AtomicUsize::new(1);
+        since = Some(std::time::Instant::now() - std::time::Duration::from_millis(900));
+        assert!(!super::absence_confirmed(&mut since, Some(&counter)), "busy page never confirms");
+        counter.store(0, Ordering::Relaxed);
+        assert!(super::absence_confirmed(&mut since, Some(&counter)), "quiet + past window confirms");
     }
 }
