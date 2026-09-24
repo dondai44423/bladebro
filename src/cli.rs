@@ -1986,7 +1986,7 @@ Bladebro CLI — drive a real, stealthy browser from shell commands.
 SETUP: none. The first command auto-starts a background daemon (one Chrome for all later commands). --no-daemon forces isolated one-shot runs; 'bladebro stop' cleans up.
 DISCOVERY: 'bladebro help' (human) — 'bladebro help --json' (this document) — 'bladebro help <command>' for one command in depth.
 OUTPUT CONTRACT: --json on any command gives ONE JSON object on stdout: {\"ok\":bool,\"is_error\":bool,\"text\":string} (+ \"image_path\" for vision — the PNG is saved to a file, never inlined base64). Exit codes: 0 = success; 1 = the command ran but failed (read 'text' — it carries current page state so you can recover without an extra call); 2 = usage error (bad command/flag/argument — fix the command).
-WORKFLOW: 1) nav <url> gives refs + a content preview (often enough to act). 2) Address by text when you can: 'act click \"Sign in\"' needs no see; refs self-heal; labels work for form fields. 3) On list/search/product/profile pages, 'see extract auto' FIRST: one call returns structured items (site adapters add fields on Reddit/GitHub/product pages). 4) Collapse round-trips: 'act fill' for whole forms; 'act batch' / 'run' for sequences (if/while branching; {\"action\":\"see\"} steps read inline). 5) Big JSON payloads: @file or - (stdin) — no shell-quoting games. 6) Keep budgets default; big outputs are written to files with an inline preview.
+WORKFLOW: 1) nav <url> gives refs + a content preview (often enough to act). 2) Address by text when you can: 'act click \"Sign in\"' needs no see; refs self-heal; labels work for form fields. 3) On list/search/product/profile pages, 'see extract auto' FIRST: one call returns structured items (site adapters add fields on Reddit/GitHub/product pages; on Reddit POST pages it returns the full comment tree — all replies, thread order, complete flag). 4) Collapse round-trips: 'act fill' for whole forms; 'act batch' / 'run' for sequences (if/while branching; {\"action\":\"see\"} steps read inline). 5) Big JSON payloads: @file or - (stdin) — no shell-quoting games. 6) Keep budgets default; big outputs are written to files with an inline preview.
 RELIABILITY: real Chromium with the full stealth stack and human-like input; per-domain knowledge (settle timing, block config, bot risk) compounds across runs. Errors are loud, never silent: unknown flags and missing values fail with exit 2; a failed action returns the page state for recovery. Vision is the last resort — refs and deltas are cheaper.
 ";
 
@@ -2084,7 +2084,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--scope": "ref id — read one element's subtree",
                 "--content": "include page text in model mode",
                 "--budget": "max chars (default 8000)",
-                "--limit": "max extract items (default 50)",
+                "--limit": "max extract items (default 50; Reddit post comments: all up to 1000 unless set)",
                 "--logs": "console | network",
                 "--template": "JSON or @file — for extract=json"
             },
@@ -2095,7 +2095,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro see --find \"Submit\"",
                 "bladebro see --logs network"
             ],
-            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items"]
+            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it returns the full comment tree (every reply, complete flag)"]
         }),
         "act" => json!({
             "usage": "bladebro act <action> [target] [value] [--flags]",
@@ -2321,8 +2321,9 @@ MODES
 
 EXTRACTION
   extract auto      structured items in ONE call — lists, search results,
-                    products, posts. Site-aware: Reddit feeds/comments,
-                    GitHub issues/repos and product pages get extra fields.
+                    products, posts. Site-aware: Reddit POST pages → the
+                    full comment tree (every reply incl. collapsed, thread
+                    order, complete flag); feeds/GitHub/products get fields.
   extract links     all links
   extract forms     all forms with fields
   extract json      custom template (--template '{"items":{…}}' or @file)
@@ -2333,7 +2334,7 @@ FLAGS
   --scope <ref>       read one element's subtree
   --content           include text in model mode
   --budget <N>        max response chars (default 8000)
-  --limit <N>         max extract items (default 50)
+  --limit <N>         max extract items (default 50; Reddit comments: all ≤1000)
   --logs console|network
   --url <url>         navigate first (or pass the URL positionally)
 

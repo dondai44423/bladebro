@@ -21,6 +21,9 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
+        // Logs go to stderr: stdout is a machine contract (ONE JSON object
+        // for --json, pure JSON-RPC for `mcp`).
+        .with_writer(std::io::stderr)
         .init();
 
     let code = match run() {

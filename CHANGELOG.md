@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Reddit post pages: `see extract=auto` returns the complete comment tree in ONE call.**
+  Every comment — collapsed replies included (“1 more reply” / “load more
+  comments” are no longer a dead end) — comes back thread-ordered with depth,
+  author, score, date, full text, an `op` flag on the submitter’s comments,
+  and honest `count`/`total`/`complete` fields. The sweep reads reddit’s own
+  JSON endpoints from inside the page (same-origin, same cookies — the
+  traffic the web app itself makes), then resolves every “more” region through
+  one batched, deduplicated id sweep via concurrent `/api/info` waves, plus
+  parent-subtree recovery for regions whose id lists are partial. Rate-limit
+  aware (an HTTP 429 stops the sweep instead of hammering, and says so),
+  bounded by a request/time budget, and it reports exactly what it got — on a
+  5.4k-comment thread: `capped: 1000 of 5450 comments shown (raise limit to
+  fetch more)` in 6 requests (~5s). Default returns the whole discussion (all,
+  up to 1000; `limit` caps it). Verified live: 27/27 complete on a small
+  thread; 217/218 on a 218-comment thread (the one missing is reddit’s own
+  deleted-comment accounting — the note says so); depth-7 nesting intact.
+
+### Fixed
+- **Element names no longer swallow inline script text.** Reddit comment
+  summaries carry an inline `SML.load([...])` script; the name fallback read
+  raw `textContent`, so 24 elements were named with script source
+  (`button "XtremeGoose • 2d ago SML.load(["28YPyQW8vz",…`). Names now walk
+  text nodes with SCRIPT/STYLE/NOSCRIPT/TEMPLATE subtrees skipped — the same
+  elements read `button "XtremeGoose • 2d ago"`.
+- **`see mode=content` marks its Reddit comment-area truncation** instead of
+  silently cutting mid-sentence: `[comment area truncated — extract auto
+  returns the full comment tree]`.
+- **`extract=auto` reads that land mid-hydration retry when the list is tiny
+  (<8 items) and requests are still in flight** — a feed read right after
+  navigate returned 3 of ~27 posts; it now settles, re-reads (bounded, 2
+  retries), and quiet pages pay zero extra latency.
+- **Logs go to stderr.** tracing output (RUST_LOG) wrote to stdout, so a
+  `--json` run with RUST_LOG set emitted log lines around the JSON object and
+  `bladebro mcp` risked corrupting its JSON-RPC stream. stdout is now a pure
+  machine contract.
+
 ## [3.9.7] - 2026-09-23
 
 ### Fixed

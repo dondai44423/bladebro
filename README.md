@@ -467,7 +467,7 @@ A bot detector tracking behavioral consistency across visits sees the same ident
 
 Built-in site-aware handling — automatic, no config, and zero cost to the tool definitions (adapters are runtime heuristics; extra fields only appear on pages that have them):
 
-- **Reddit** — `see extract=auto` on a subreddit returns typed posts: title, score, comments, author, subreddit, date, domain. On a post page it returns the comment tree: author, score, depth, text. `see mode=content` on a post gives clean title/meta/body markdown.
+- **Reddit** — `see extract=auto` on a subreddit returns typed posts: title, score, comments, author, subreddit, date, domain. On a post page it returns the FULL comment tree in ONE call — every reply (collapsed included), thread-ordered with depth, author/score/date, full text, an `op` flag on the submitter's comments, and honest `count`/`total`/`complete` fields, read from the thread's own JSON endpoints. `see mode=content` on a post gives clean title/meta/body markdown; the comment-area truncation says where the full tree lives.
 - **GitHub** — repo pages: description, stars, forks, language, topics, README. Issues/PR lists: number, title, status, labels, author per row.
 - **Product pages** — price (with strikethrough original), rating, availability, key features — on any shop, not a fixed list of stores.
 

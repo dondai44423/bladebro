@@ -1647,6 +1647,9 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     let logs = args.get("logs").and_then(|l| l.as_str()).unwrap_or("");
     let template = args.get("template").cloned();
     let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
+    // Distinguishes "fetch the whole discussion" defaults (Reddit comments)
+    // from a caller-chosen cap.
+    let limit_explicit = args.get("limit").is_some();
     let mode = args.get("mode").and_then(|m| m.as_str()).unwrap_or("");
 
     // mode=content: clean markdown extraction for reading. No refs, no
@@ -1685,7 +1688,7 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // and INFERS field names by content type (title/link/image/price/date).
     // No template, no LLM.
     if extract == "auto" {
-        return handle_auto_extract(page, limit).await;
+        return handle_auto_extract(page, limit, limit_explicit).await;
     }
 
     // M11: find — search all actionable elements by text, return matches with refs.
@@ -1961,7 +1964,7 @@ pub async fn handle_template_extract(
 /// Finds the DOM container whose direct children are the most
 /// structurally-repeated (the "main list"), extracts per-item fields by
 /// content type, returns a JSON array. No template, no LLM.
-fn auto_extract_expr(limit: usize) -> String {
+fn auto_extract_expr(limit: usize, post_marker: bool) -> String {
     let lim = limit.min(500);
     r#"(()=>{
 // Price: currency symbol required (no bare decimal numbers — false positives).
@@ -2024,6 +2027,10 @@ const SKIP_TAGS=new Set(['STYLE','SCRIPT','HEAD','NOSCRIPT','SVG','TEMPLATE','LI
  // the feed finishes streaming.
  if(IS_REDDIT){
  const isCp=location.pathname.indexOf('/comments/')>=0;
+ // Post pages: hand off to the Rust comment sweep (reddit.rs) — it reads the
+ // thread's own JSON endpoints and returns EVERY comment (collapsed replies
+ // included) in one call. The DOM path below remains as the fallback.
+ if(__POST_MARKER__&&isCp){var rbase=(location.pathname.match(/^(.*?\/comments\/[a-z0-9]+)/i)||[])[1];if(rbase){var rsort='confidence';var rsel=document.querySelector('[aria-selected=true],[aria-checked=true]');if(rsel){var rp=rsel;for(var ri=0;ri<6&&rp&&rp!==document.body;ri++){if(rp.tagName==='DATA'&&rp.getAttribute('value')){rsort=rp.getAttribute('value').toLowerCase();break;}rp=rp.parentElement;}}return JSON.stringify({container:'reddit-post-page',permalink:rbase,sort:rsort});}}
  const cmts=[...document.querySelectorAll('shreddit-comment')];
  const posts=[...document.querySelectorAll('shreddit-post')];
  if(isCp&&cmts.length>=3){
@@ -2111,20 +2118,21 @@ return o;
 return JSON.stringify({container:best.tagName.toLowerCase(),count:items.length,items});
 })()"#
     .replace("__LIMIT__", &lim.to_string())
+    .replace("__POST_MARKER__", if post_marker { "true" } else { "false" })
 }
 
 /// Run auto-extract and return the parsed JSON value.
 ///
 /// Feeds hydrate asynchronously — an extract fired during the stream can
-/// find no list yet. When the result is empty AND requests are still in
-/// flight, settle briefly and re-run (bounded: 2 retries). Quiet pages
-/// return their empty result immediately — no added latency.
-async fn run_auto_extract(page: &Page, limit: usize) -> Result<serde_json::Value> {
-    let expr = auto_extract_expr(limit);
+/// find no list yet, or only the first few items. When the result is empty
+/// OR tiny (<8 items) and requests are still in flight, settle briefly and
+/// re-run (bounded: 2 retries). Quiet pages pay zero extra latency.
+async fn run_auto_extract(page: &Page, limit: usize, post_marker: bool) -> Result<serde_json::Value> {
+    let expr = auto_extract_expr(limit, post_marker);
     let mut val = auto_extract_eval(page, &expr).await?;
     for _ in 0..2 {
-        let empty = val.get("items").and_then(|i| i.as_array()).map(|a| a.is_empty()).unwrap_or(true);
-        if !empty || page.in_flight() == 0 {
+        let items_len = val.get("items").and_then(|i| i.as_array()).map(|a| a.len()).unwrap_or(0);
+        if items_len >= 8 || page.in_flight() == 0 {
             break;
         }
         crate::page::wait_for_settle_with_network(
@@ -2153,11 +2161,10 @@ async fn auto_extract_eval(page: &Page, expr: &str) -> Result<serde_json::Value>
     Ok(serde_json::from_str(json_str).unwrap_or_else(|_| serde_json::json!({"error": "parse failed", "items": []})))
 }
 
-pub async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String> {
-    let val = run_auto_extract(page, limit).await?;
-    let json_str = serde_json::to_string(&val)?;
+/// Offload big extract payloads to an artifact; render inline otherwise.
+fn auto_extract_output(json_str: &str) -> Result<String> {
     if json_str.len() > 12000 {
-        let path = crate::artifacts::write_artifact(&json_str, "json")?;
+        let path = crate::artifacts::write_artifact(json_str, "json")?;
         let preview: String = json_str.chars().take(1000).collect();
         return Ok(format!(
             "extract auto ({} bytes) → {path}\npreview: {preview}…\nread the file for the full data",
@@ -2165,6 +2172,46 @@ pub async fn handle_auto_extract(page: &mut Page, limit: usize) -> Result<String
         ));
     }
     Ok(format!("extract auto:\n{json_str}"))
+}
+
+pub async fn handle_auto_extract(page: &mut Page, limit: usize, limit_explicit: bool) -> Result<String> {
+    let val = run_auto_extract(page, limit, true).await?;
+
+    // Reddit post pages: the marker hands off to the comment-tree sweep — one
+    // in-page API pass returns every comment (collapsed replies included),
+    // thread-ordered and structured, instead of scraping the rendered DOM.
+    if val.get("container").and_then(|c| c.as_str()) == Some("reddit-post-page") {
+        let permalink = val.get("permalink").and_then(|p| p.as_str()).unwrap_or("").to_string();
+        let sort = val.get("sort").and_then(|s| s.as_str()).unwrap_or("confidence").to_string();
+        if !permalink.is_empty() {
+            let cap = if limit_explicit {
+                limit.clamp(1, crate::reddit::MAX_COMMENT_CAP)
+            } else {
+                crate::reddit::DEFAULT_COMMENT_CAP
+            };
+            match crate::reddit::fetch_comments(page.cdp_ref(), &permalink, &sort, cap).await {
+                Ok(payload) => {
+                    let json_str = serde_json::to_string(&payload)?;
+                    return auto_extract_output(&json_str);
+                }
+                Err(e) => {
+                    // API route failed (exotic host, blocked page): fall back to
+                    // the DOM listing — and say so, because the DOM misses
+                    // collapsed replies.
+                    let val = run_auto_extract(page, limit, false).await?;
+                    let json_str = serde_json::to_string(&val)?;
+                    let mut out = auto_extract_output(&json_str)?;
+                    out.push_str(&format!(
+                        "\nnote: full-thread fetch failed ({e}); items above are a DOM fallback and may miss collapsed replies"
+                    ));
+                    return Ok(out);
+                }
+            }
+        }
+    }
+
+    let json_str = serde_json::to_string(&val)?;
+    auto_extract_output(&json_str)
 }
 
 /// V22: collect — auto-extract + scroll + dedupe loop. ONE call collects
@@ -2187,7 +2234,7 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     loop {
-        let val = run_auto_extract(page, 500).await?;
+        let val = run_auto_extract(page, 500, false).await?;
         let items = val.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default();
         let mut new_count = 0usize;
         for item in items {
@@ -3506,28 +3553,34 @@ mod extract_script_tests {
 
     #[test]
     fn extract_script_is_valid_js() {
-        let js = super::auto_extract_expr(50);
-        assert!(js.contains("Quality gate"), "quality gate must survive placeholder substitution");
-        assert!(!js.contains("__LIMIT__"), "limit placeholder must be substituted everywhere");
-        let has_node = std::process::Command::new("node")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !has_node {
-            eprintln!("node not available — skipping extract script syntax check");
-            return;
+        for post_marker in [false, true] {
+            let js = super::auto_extract_expr(50, post_marker);
+            assert!(js.contains("Quality gate"), "quality gate must survive placeholder substitution");
+            assert!(!js.contains("__LIMIT__"), "limit placeholder must be substituted everywhere");
+            assert!(!js.contains("__POST_MARKER__"), "marker placeholder must be substituted everywhere");
+            if post_marker {
+                assert!(js.contains("reddit-post-page"), "post marker present when enabled");
+            }
+            let has_node = std::process::Command::new("node")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !has_node {
+                eprintln!("node not available — skipping extract script syntax check");
+                return;
+            }
+            let path = std::env::temp_dir().join(format!("bladebro-js-check-extract-{post_marker}.js"));
+            std::fs::write(&path, &js).expect("write js fixture");
+            let out = std::process::Command::new("node")
+                .arg("--check")
+                .arg(&path)
+                .output()
+                .expect("run node --check");
+            let _ = std::fs::remove_file(&path);
+            assert!(out.status.success(), "node --check failed: {}", String::from_utf8_lossy(&out.stderr));
         }
-        let path = std::env::temp_dir().join("bladebro-js-check-extract.js");
-        std::fs::write(&path, &js).expect("write js fixture");
-        let out = std::process::Command::new("node")
-            .arg("--check")
-            .arg(&path)
-            .output()
-            .expect("run node --check");
-        let _ = std::fs::remove_file(&path);
-        assert!(out.status.success(), "node --check failed: {}", String::from_utf8_lossy(&out.stderr));
     }
 }

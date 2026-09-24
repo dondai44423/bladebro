@@ -93,7 +93,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
 mode=content: page text as clean markdown. For READING articles, docs. Use budget=N to cap output, scope=eN for one element's subtree.\n\
 mode=outline: title + heading hierarchy only. Cheapest \"what's on this page\" check.\n\
 mode=model (default): interactive elements with refs. Use when you need to ACT.\n\
-For structured list data (products, posts, search results, listings): use extract=auto FIRST — extracts all items with fields (title, url, price, score) in ONE call, plus site-specific extras (Reddit posts/comments, GitHub repos/issues) when detected. Cheaper than clicking into each item.\n\
+For structured list data (products, posts, search results, listings): use extract=auto FIRST — extracts all items with fields (title, url, price, score) in ONE call, plus site-specific extras (Reddit posts/comments, GitHub repos/issues) when detected. On Reddit POST pages it returns the FULL comment tree in ONE call — every reply (collapsed included), thread order with depth, author/score/date and full text, plus a complete flag. Cheaper than clicking into each item.\n\
 eval (act eval) is for custom JS extraction when extract=auto does not cover your use case. Runs like the DevTools console: statements allowed, the LAST expression's value is returned (e.g. 'var x=5; x+7' -> 12), IIFEs work. Variables are scoped per call (no leakage or collisions between calls).\n\
 Other params: filter (zoom by role), find (search by text → refs), extract=json+template (custom), extract=links|forms, logs=console|network.\n\
 Big data (>12KB) goes to a file path with inline preview.\n\
@@ -112,10 +112,10 @@ Truncation: model output over budget ends with '…(N more: X link, Y button)' �
                     "extract": {
                         "type": "string",
                         "enum": ["links", "forms", "json", "auto"],
-                        "description": "auto (template-free, site-aware), json (needs template), links, forms."
+                        "description": "auto (template-free, site-aware; Reddit post pages → the complete comment tree), json (needs template), links, forms."
                     },
                     "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}."},
-                    "limit": {"type": "integer", "description": "Max items for extract. Default 50."},
+                    "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set)."},
                     "logs": {"type": "string", "enum": ["console", "network"], "description": "Console (JS errors) or network (requests)."},
                     "scope": {"type": "string", "description": "Ref id of element to view subtree text of."},
                     "budget": {"type": "integer", "description": "Max chars in response. Default 8000."}
