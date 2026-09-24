@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.8] - 2026-09-24
+
 ### Added
 - **Reddit post pages: `see extract=auto` returns the complete comment tree in ONE call.**
   Every comment — collapsed replies included (“1 more reply” / “load more
