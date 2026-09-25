@@ -1,16 +1,10 @@
 <div align="center">
 
-<img src="Assets/png/hero.png" width="800" alt="Bladebro" />
-
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
 Re-render-immune refs · batch actions · auto-extract · self-improving · 6-layer stealth
 
 One MCP server · one CLI · one persistent page model · no Node.js · one binary · Linux · macOS · Windows
-
-[![npm version](https://img.shields.io/npm/v/bladebro?color=00d4aa&label=npm&style=flat-square)](https://www.npmjs.com/package/bladebro) [![Rust](https://img.shields.io/badge/Rust-1.86+-ce422b?style=flat-square)](https://www.rust-lang.org) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-00d4aa?style=flat-square)](LICENSE) [![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?color=00d4aa&label=release&style=flat-square)](https://github.com/dondai44423/bladebro/releases) [![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI&style=flat-square)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml) [![Downloads](https://img.shields.io/npm/dw/bladebro?color=7c5cfc&label=downloads&style=flat-square)](https://www.npmjs.com/package/bladebro) [![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?color=ff9f43&style=flat-square)](https://github.com/dondai44423/bladebro) [![Stealth Bench V1](https://img.shields.io/badge/Stealth_Bench_V1-85%25__68%2F80-00d4aa?style=flat-square)](STEALTH_BENCH.md)
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
 ```bash
 npm install -g bladebro && bladebro mcp
@@ -33,13 +27,6 @@ Run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benc
 - **Where it stands** — perfect on Cloudflare (22/22) and reCaptcha (6/6); cleared the two sites browser-use-cloud did not (Shape, Temu); one named gap: Akamai (3/6).
 
 **[Full report and methodology →](STEALTH_BENCH.md)** · **[Per-site results (CSV)](stealth-bench-sites.csv)**
-
-## 🎬 Demo
-
-<div align="center">
-  <img src="Assets/video/demo.gif" width="720" alt="Bladebro demo" />
-  <sub>Bladebro drives Amazon, Reddit and Wikipedia, fills a form, and manages tabs — <a href="https://github.com/dondai44423/bladebro/releases/download/v3.9.0/demos.mp4">full video (MP4)</a></sub>
-</div>
 
 ## ✨ What makes it different
 
@@ -96,10 +83,6 @@ cargo build --release
 ```
 
 ## 🎯 The 5 tools
-
-<div align="center">
-<img src="Assets/png/tools-comparison.png" width="800" alt="5 tools vs 20+" />
-</div>
 
 ### `act` — do, then observe
 
@@ -268,10 +251,6 @@ bladebro vision --marks --json | jq -r .image_path
 
 ## 🧠 How it works
 
-<div align="center">
-<img src="Assets/png/architecture.png" width="800" alt="Agent → Bladebro → CDP → Chromium, plus the Live Page Model" />
-</div>
-
 The core is the **Live Page Model** — a persistent, compressed, ref-stable model of the page held across every tool call. Three pillars:
 
 - **Semantic refs** (`e1`, `e2`, …) — anchors assigned by signature (`framePath|role|name|rank`), not position. They survive scrolls, insertions and re-renders.
@@ -309,10 +288,6 @@ bladebro state compress off     # on / off / status — or BLADE_NO_COMPRESS=1
 The counter resets on navigation, any `see`, or any error. `see`, `state`, `run` and `vision` are never compressed.
 
 ## 🥷 Stealth
-
-<div align="center">
-<img src="Assets/png/stealth-layers.png" width="800" alt="6-layer stealth system" />
-</div>
 
 Six layers, all on by default, no config needed:
 
@@ -360,10 +335,6 @@ Learns from every session, persists in `knowledge/` under your data root, surviv
 **Behavioral fingerprint** — biometric parameters generated once per installation and reused forever, so detectors see the same "person" every session: click precision, mouse curvature, typing cadence, inter-action gaps, overshoot and idle-hum frequency, all clamped to human ranges, written atomically.
 
 ## 📊 Comparison
-
-<div align="center">
-<img src="Assets/png/token-efficiency.png" width="800" alt="Token efficiency comparison" />
-</div>
 
 | | Bladebro | agent-browser | Playwright MCP | Chrome DevTools MCP |
 |---|---|---|---|---|
