@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.10] - 2026-09-25
+
 ### Fixed
 - **`npm install -g bladebro` no longer drags the pi agent's whole dependency
   tree.** The pi-extension `peerDependencies` were auto-installed by npm 7+:
