@@ -14,8 +14,6 @@ npm install -g bladebro && bladebro mcp
 
 [Install](#-install) · [The 5 tools](#-the-5-tools) · [Usage](#-usage) · [Stealth Bench V1](#-stealth-bench-v1) · [Stealth](#-stealth) · [Adapters](#-site-adapters) · [Comparison](#-comparison) · [Gotchas & limits](#-gotchas--limits)
 
-<img src="Assets/png/hero.png" alt="Bladebro — give your AI agent a browser" width="100%">
-
 </div>
 
 ---
