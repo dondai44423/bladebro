@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dondai44423/bladebro"
+    "url": "git+https://github.com/dondai44423/bladebro.git"
   },
   "homepage": "https://github.com/dondai44423/bladebro#readme",
   "bugs": {
