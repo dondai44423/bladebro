@@ -6,71 +6,54 @@
 
 Re-render-immune refs · batch actions · auto-extract · self-improving · 6-layer stealth
 
-One MCP server · one persistent page model · zero Node.js · one binary · Linux · macOS · Windows
+One MCP server · one CLI · one persistent page model · no Node.js · one binary · Linux · macOS · Windows
 
-[![npm version](https://img.shields.io/npm/v/bladebro?color=00d4aa&label=npm&style=flat-square)](https://www.npmjs.com/package/bladebro)
-[![Rust](https://img.shields.io/badge/Rust-1.86+-ce422b?style=flat-square)](https://www.rust-lang.org)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-00d4aa&style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?color=00d4aa&label=release&style=flat-square)](https://github.com/dondai44423/bladebro/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI&style=flat-square)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml)
-[![Downloads](https://img.shields.io/npm/dw/bladebro?color=7c5cfc&label=downloads&style=flat-square)](https://www.npmjs.com/package/bladebro)
-[![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?color=ff9f43&style=flat-square)](https://github.com/dondai44423/bladebro)
-[![Stealth Bench V1](https://img.shields.io/badge/Stealth_Bench_V1-85%25__68%2F80-00d4aa?style=flat-square)](STEALTH_BENCH.md)
+[![npm version](https://img.shields.io/npm/v/bladebro?color=00d4aa&label=npm&style=flat-square)](https://www.npmjs.com/package/bladebro) [![Rust](https://img.shields.io/badge/Rust-1.86+-ce422b?style=flat-square)](https://www.rust-lang.org) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-00d4aa?style=flat-square)](LICENSE) [![Release](https://img.shields.io/github/v/release/dondai44423/bladebro?color=00d4aa&label=release&style=flat-square)](https://github.com/dondai44423/bladebro/releases) [![CI](https://img.shields.io/github/actions/workflow/status/dondai44423/bladebro/ci.yml?label=CI&style=flat-square)](https://github.com/dondai44423/bladebro/actions/workflows/ci.yml) [![Downloads](https://img.shields.io/npm/dw/bladebro?color=7c5cfc&label=downloads&style=flat-square)](https://www.npmjs.com/package/bladebro) [![Stars](https://img.shields.io/github/stars/dondai44423/bladebro?color=ff9f43&style=flat-square)](https://github.com/dondai44423/bladebro) [![Stealth Bench V1](https://img.shields.io/badge/Stealth_Bench_V1-85%25__68%2F80-00d4aa?style=flat-square)](STEALTH_BENCH.md)
 
----
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
 ```bash
 npm install -g bladebro && bladebro mcp
 ```
 
-[Install](#-install) · [Stealth Bench V1](#-stealth-bench-v1) · [The 5 tools](#-the-5-tools) · [Architecture](#-architecture) · [Re-render immunity](#-re-render-immunity) · [Self-improvement](#-self-improvement) · [Stealth](#-stealth-system) · [Comparison](#-comparison) · [Gotchas](#-gotchas) · [Limits](#-honest-limits)
+[Install](#-install) · [The 5 tools](#-the-5-tools) · [Usage](#-usage) · [Stealth Bench V1](#-stealth-bench-v1) · [Stealth](#-stealth) · [Adapters](#-site-adapters) · [Comparison](#-comparison) · [Gotchas & limits](#-gotchas--limits)
 
 </div>
 
 ---
 
-Bladebro is an **agentic browser driver** built from the agent's perspective. Instead of 20+ tools that each do one thing, Bladebro gives you **5 tools** that together provide full control. It drives stock Chromium over CDP, holds a persistent **Live Page Model** across tool calls, and returns **diff-first** results: the agent sees what *changed*, not the whole world, every single time.
+**Bladebro is an agentic browser driver** — it gives an AI agent full control of a real browser through **5 tools**, not thirty. Built in Rust on a self-built CDP transport: one static binary, no Node.js, no Playwright, no runtime. It holds a persistent **Live Page Model** across tool calls, so every action returns **what changed** — never the whole page again.
 
-### 🏆 Stealth Bench V1: 85% (68 / 80)
+## 🏆 Stealth Bench V1
 
-Bladebro was run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benchmark): 80 real, anti-bot-protected production sites across 11 vendors. It walked through **68 of 80 (85%)**, above every provider on browser-use's published leaderboard (browser-use-cloud 81%).
+Run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benchmark): **80 real production sites** protected by 11 anti-bot vendors. Bladebro cleared **68 (85%)** — above every provider on the published leaderboard (browser-use-cloud: 81%).
 
-- **Out of the box**: one IP, no proxy, no captcha solver, no fingerprint rotation, no cloud. Stock Chromium with Bladebro's stealth layer on by default.
-- **Honest run**: real navigation of the real 80 sites; an opencode agent (open model) acted as the browsing agent because we had no paid access to browser-use's cloud agent, and the deviations are disclosed in full. The benchmark isolates browser stealth from agent ability, and the defensive layer being measured is Bladebro's own.
-- **Per-vendor**: perfect on Cloudflare (22/22) and reCaptcha (6/6); cleared the two sites browser-use-cloud's own results did not (Shape, Temu). Single named gap: Akamai (3/6).
+- **Out of the box** — one IP, no proxy, no captcha solver, no fingerprint rotation, no cloud. Stock Chromium with Bladebro's stealth layer on by default.
+- **Honest run** — real navigation of the real 80 sites; an open-model agent acted as the browsing agent because there was no paid cloud access, and the deviations are disclosed in full. The defensive layer being measured is Bladebro's own.
+- **Where it stands** — perfect on Cloudflare (22/22) and reCaptcha (6/6); cleared the two sites browser-use-cloud did not (Shape, Temu); one named gap: Akamai (3/6).
 
-**[Full report and methodology →](STEALTH_BENCH.md)** · **[All 80 per-site results (CSV)](stealth-bench-sites.csv)**
+**[Full report and methodology →](STEALTH_BENCH.md)** · **[Per-site results (CSV)](stealth-bench-sites.csv)**
 
-### Demo
+## 🎬 Demo
 
 <div align="center">
   <img src="Assets/video/demo.gif" width="720" alt="Bladebro demo" />
+  <sub>Bladebro drives Amazon, Reddit and Wikipedia, fills a form, and manages tabs — <a href="https://github.com/dondai44423/bladebro/releases/download/v3.9.0/demos.mp4">full video (MP4)</a></sub>
 </div>
 
-<div align="center">
-  <sub>Bladebro drives Amazon, Reddit, Wikipedia, fills a form, and manages tabs. Full video: <a href="https://github.com/dondai44423/bladebro/releases/download/v3.9.0/demos.mp4">MP4 download</a></sub>
-</div>
+## ✨ What makes it different
 
-<br/>
-
-Built in **Rust**. One static binary. No runtime. No Node.js. No Playwright shim. Just the browser engine and your agent. Native on Linux, macOS, and Windows.
-
-Speaks MCP **2024-11-05 through 2026-07-28**: legacy `initialize` handshake and the new stateless per-request negotiation with `server/discover`, dual-dialect. Works with every MCP client, old and new.
-
-### What makes it different
-
-| Features | What it means | Status |
-|---|---|---|
-| **Re-render immunity** | Refs survive React/Vue/Angular DOM replacement via structural fingerprints. No other agent browser does this. | Live-verified |
-| **Self-improvement** | Learns consent selectors, biometrics, and per-domain patterns across sessions. Compounds with use, never degrades. | v3.0.14 |
-| **Batch actions** | Multi-step workflows (fill 5 fields, submit, wait) in ONE MCP call instead of 11. | Live-verified |
-| **Auto-extract** | Template-free list extraction. No CSS selectors, no setup. Detects structure, scores content, extracts rows. | 10+ sites verified |
-| **Infinite-scroll collect** | Scroll + dedupe loop for feeds. ONE call, ONE artifact, zero duplicates. | 80 items verified |
-| **6-layer stealth** | Protocol, environment, behavior, coherence, residue, seasoning. All on by default. | incolumitas 8/8 |
-| **Delta-first tokens** | Every action returns what changed, not the whole page. 5x cheaper than competitors. | ~1,900-token tool defs |
-| **Context pruning** | Act responses compress after turn 3 on the same page. 54% fewer tokens over a session, zero capability loss. On by default. | Live-verified |
-| **Self-healing refs** | Stale refs re-resolve automatically. Agent never sees "element not found" after navigation. | 26/26 sites |
+| What | Why it matters |
+|---|---|
+| **Re-render immunity** | Refs survive React/Vue/Angular DOM replacement via structural fingerprints — no other agent browser does this. |
+| **Delta-first results** | Every action returns what changed: 60–570 tokens per action, not full-page snapshot dumps. |
+| **5 tools, not 30** | ~1,900 tokens of tool definitions total; comparable tools ship 8,000–13,700. |
+| **Batch + branching** | `act batch` runs multi-step workflows in ONE call; `run` adds `if`/`while` logic. |
+| **Auto-extract + adapters** | Template-free list extraction, site-aware: Reddit comment trees, X.com threads, GitHub repos, product pages. |
+| **Infinite-scroll collect** | `act collect` scrolls, dedupes and returns a whole feed as one artifact, in one call. |
+| **6-layer stealth** | Protocol, environment, behavior, coherence, residue, seasoning — on by default, verified against real detectors. |
+| **Self-improving** | Learns consent selectors, block choices and settle timing per domain; one behavioral fingerprint forever. |
+| **Self-healing** | Dead refs re-resolve, dead tabs reopen, crashed Chrome relaunches — transparently. |
 
 ## 🚀 Install
 
@@ -81,17 +64,17 @@ npm install -g bladebro
 bladebro mcp
 ```
 
-That's it. No Rust, no compilation, no dependencies. The npm package ships a prebuilt binary for your platform:
+No Rust, no compilation, no dependencies. npm resolves the prebuilt binary for your platform — zero postinstall scripts.
 
 | Platform | Package | Size | Status |
 |---|---|---|---|
-| Linux x86_64 | `bladebro-linux-x64` | 6.6 MB | Live-verified |
-| Linux ARM64 (aarch64) | `bladebro-linux-arm64` | 5.7 MB | Not live-verified |
-| Windows x86_64 | `bladebro-windows-x64` | 6.1 MB | Live-verified |
-| macOS Intel | `bladebro-darwin-x64` | 6.1 MB | CI-verified |
-| macOS Apple Silicon | `bladebro-darwin-arm64` | 5.6 MB | CI-verified |
+| Linux x86_64 | `bladebro-linux-x64` | 6.5 MB | Live-verified |
+| Linux ARM64 | `bladebro-linux-arm64` | 5.6 MB | Not live-verified |
+| Windows x86_64 | `bladebro-windows-x64` | 6.0 MB | Live-verified |
+| macOS Intel | `bladebro-darwin-x64` | 6.0 MB | CI-verified |
+| macOS Apple Silicon | `bladebro-darwin-arm64` | 5.5 MB | CI-verified |
 
-npm resolves the correct binary automatically via `os`/`cpu` fields. Users only download the binary for their platform. Zero postinstall scripts, zero warnings.
+<sub>Every release builds and passes CI on Ubuntu, macOS and Windows. Linux ARM64 and macOS binaries are cross-compiled from Linux with cargo-zigbuild.</sub>
 
 ### Pi coding agent
 
@@ -99,13 +82,11 @@ npm resolves the correct binary automatically via `os`/`cpu` fields. Users only 
 pi install npm:bladebro
 ```
 
-That's it. The extension spawns the binary as a stdio MCP subprocess, discovers tools via `tools/list`, and registers them natively with pi via `pi.registerTool()`. The agent gets 5 first-class tools (`browser.act`, `browser.see`, `browser.state`, `browser.run`, `browser.vision`) — no adapter, no config files, no proxy tool.
-
-Tool definitions come from the binary at startup, so they auto-adapt to any tool def changes with zero extension maintenance. Auto-updates via `pi update --extensions`.
+Registers 5 native tools (`browser.act`, `browser.see`, `browser.state`, `browser.run`, `browser.vision`) from the binary's own `tools/list` — tool definitions auto-adapt to any change, with zero extension maintenance.
 
 ### From source
 
-**Prerequisites:** Chromium or Google Chrome (auto-detected), Rust 1.86+. Linux: Xvfb for headless servers (macOS/Windows run headful natively).
+Requires Chromium or Chrome (auto-detected) and Rust 1.86+. Linux servers need Xvfb for headful.
 
 ```bash
 git clone https://github.com/dondai44423/bladebro.git
@@ -114,21 +95,103 @@ cargo build --release
 ./target/release/bladebro mcp
 ```
 
-## 🔌 Two ways to use Bladebro
+## 🎯 The 5 tools
 
-Bladebro gives you the **same 5 tools, same stealth, same page model** through two interfaces. Pick one or use both.
+<div align="center">
+<img src="Assets/png/tools-comparison.png" width="800" alt="5 tools vs 20+" />
+</div>
 
-| | MCP Server | CLI |
+### `act` — do, then observe
+
+Every call returns an **outcome verdict + page delta**. Click auto-escalates mouse → JS → Enter; clicking by text skips the read step (`act click text="Sign in"`), and ambiguous text returns matches with refs + `nth` values.
+
+| Action | Example | What it does |
+|---|---|---|
+| `click` | `act click e5` / `act click text="Sign in"` | Mouse, JS, Enter escalation |
+| `type` | `act type label="Search" text="hello"` | Cadenced typing into textboxes |
+| `fill` | `act fill fields=[...] submit="Go"` | Multi-field forms in ONE call, auto-detects field type |
+| `batch` | `act batch steps=[...]` | Multi-step workflows in ONE call |
+| `navigate` | `act navigate url="https://example.com"` | Idempotent; returns the page model |
+| `collect` | `act collect max=50 timeout=30` | Auto-extract + scroll + dedupe an infinite feed |
+| `wait` | `act wait condition=url text="dashboard"` | 6 conditions: element, title, settle, url, text, js |
+| `eval` | `act eval js="document.title"` | Console-style JS; `el` in scope when a ref is given |
+| `scroll` | `act scroll dy=800` | Smooth, eased wheel events |
+| `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
+| `press` | `act press key=Enter` | Real key event |
+| `select` | `act select e4 option="Nepal"` | Dropdown by option text or value |
+| `read` | `act read e5` | Element text content |
+| `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
+| `clear` | `act clear e3` | Empty an input or rich editor |
+| `download` | `act download url=... timeout=10` | Fetch + Blob download, returns the path |
+| `pdf` | `act pdf` | Export the page as a PDF artifact |
+| `back` / `forward` / `reload` | `act back` | History + reload |
+
+- **Self-healing refs** — a dead ref re-resolves by identity: `act click e5` after navigation finds the new "Sign in" and reports `[ref e5 healed]`.
+- **Batch** — one call fills, submits, clicks; it continues through navigation and stops on the first error with step number + page state.
+- **`url=` on any action** — navigate first, then act: `act fill url="https://..." fields=[...]` reaches a page and fills it in one call.
+- **`slim=true`** — verdict only, no delta.
+
+### `see` — observe
+
+| Call | What you get |
+|---|---|
+| `see` | Full model — interactive elements with refs (nav/footer auto-folded) |
+| `see mode=content` | Page text as clean markdown — for reading |
+| `see mode=outline` | Heading hierarchy only (~50–200 bytes) |
+| `see find="price"` | Search elements by text → refs + scores |
+| `see filter="button,link"` | Zoom by role/name/landmark |
+| `see extract="auto"` | Template-free list extraction, site-aware (below) |
+| `see extract="json" template={...}` | Custom CSS-template extraction |
+| `see extract="links"` / `"forms"` | All links / all form fields |
+| `see scope=e5` | One element's subtree text |
+| `see logs="console"` / `"network"` | JS errors / requests, failures first |
+
+- **Truncation is deterministic:** output ends with `…(N more: X link, Y button)` — roles sorted by count desc, then alphabetically; the full set stays available via `see filter=`.
+- **Big data goes to files.** Payloads over 12KB are written to `artifacts/` and returned as a path + preview.
+- **Site-aware:** on Reddit post pages and X.com status pages, `extract=auto` returns the full comment tree / thread in ONE call.
+
+### `state` — cookies, storage, tabs, sessions
+
+| op | What it does |
+|---|---|
+| `tabs` / `open-tab` / `switch-tab` / `close-tab` | Tab management (auto-focus on open) |
+| `cookies` / `set-cookie` / `del-cookie` | Cookies |
+| `save name=login` / `load name=login` | Persist + restore a login (cookies + storage, then navigates) |
+| `ls` / `ss` / `set-ls` / `set-ss` / `rm-ls` / `rm-ss` | localStorage / sessionStorage |
+| `block classes="images,fonts,trackers"` | Block inert assets — never first-party scripts |
+| `compress on/off/status` | Context pruning toggle |
+
+### `run` — batch + branch + JS
+
+```json
+{"steps":[
+  {"action":"type","label":"Email","text":"user@mail.com"},
+  {"action":"type","label":"Password","text":"secret"},
+  {"action":"click","text":"Sign in"},
+  {"action":"wait","condition":"element","text":"Dashboard","timeout":10}
+]}
+```
+
+Use instead of `act batch` when you need branching (`if`/`else`), loops (`while`), or state ops that change tabs. `see` steps read inline — nav + loop + read across pages in ONE call.
+
+### `vision` — screenshot (last resort)
+
+Screenshot as PNG; `marks=true` overlays numbered ref badges. MCP returns it as an image; the CLI writes a file and reports `image_path`. The structural model is almost always better: cheaper, more reliable, and it hands you refs to act on.
+
+## 🔌 Usage
+
+Same 5 tools, same handlers, same stealth — two surfaces. Use MCP for agents; use the CLI for scripts, shells and CI. One codebase, so every fix lands on both.
+
+| | MCP server | CLI |
 |---|---|---|
 | **Best for** | AI agents (Claude, Cursor, pi, Cline) | Shell scripts, CI/CD, quick one-offs |
-| **How it works** | stdio JSON-RPC server | Direct command line |
-| **Agent discovery** | `tools/list` JSON-RPC call | `bladebro help --json` |
-| **Setup** | Add to MCP config | Just run `bladebro <command>` |
-| **Session** | One Chrome per agent session | Daemon (persistent) or one-shot |
+| **Works over** | stdio JSON-RPC | `bladebro <command>`, daemon-backed |
+| **Discovery** | `tools/list` | `bladebro help --json` |
+| **Session** | one Chrome per agent session | persistent daemon, or `--no-daemon` per command |
 
-### Option 1: MCP Server 
+### MCP server
 
-Just tell your agent to add Bladebro to its MCP config. For Claude Desktop, Cursor, and most MCP clients, add this to your config file:
+Add to your client's config:
 
 ```json
 {
@@ -141,368 +204,160 @@ Just tell your agent to add Bladebro to its MCP config. For Claude Desktop, Curs
 }
 ```
 
+Speaks MCP **2024-11-05 through 2026-07-28** — the legacy `initialize` handshake and the stateless per-request dialect (`server/discover`). Works with every MCP client, old and new.
 
-### Using pi? One command, no config:
+### CLI
+
+`bladebro help --json` is the single self-teaching manual: the same tool schemas as MCP, plus per-command usage, universal flags, payload conventions and exit codes — in ONE call.
 
 ```bash
-pi install npm:bladebro
+bladebro help --json | jq '.tools[].name'   # ["act","see","state","run","vision"]
+bladebro help act --json | jq .detail.actions
 ```
 
-### Option 2: CLI 
-
-The CLI has the **exact same power** as the MCP server. Same handlers, same stealth, same page model. Any feature update auto-propagates to both surfaces automatically.
-
-**How AI agents discover the CLI:** `bladebro help --json` is the single self-teaching manual — the same tool schemas as MCP `tools/list`, plus per-command usage, universal flags, payload conventions, exit codes, and examples in ONE call. Fetch it once, then drive every command with `--json` for machine-readable output. No guessing, no parsing help text.
+**Daemon mode** — the first command auto-starts a daemon; Chrome stays alive across calls:
 
 ```bash
-# Agent discovery: one call teaches the whole CLI
-bladebro help --json | jq '.tools[].name'
-# ["act", "see", "state", "run", "vision"]
-bladebro help act --json | jq '.detail.actions'   # per-command detail
-```
-
-**Daemon mode** (persistent Chrome, zero startup delay after first launch):
-
-```bash
-# Start the daemon (Chrome stays alive across commands)
-bladebro daemon
-
-# All commands now connect to the daemon instead of launching new Chrome
 bladebro nav https://news.ycombinator.com
 bladebro see content
 bladebro act click e5
-bladebro see model --json | jq .text
-bladebro state cookies
-bladebro vision --marks
-bladebro stop
+bladebro stop                              # clean shutdown
 ```
-
-**One-shot mode** (no daemon, launches Chrome per command):
 
 ```bash
-bladebro see content https://example.com --no-daemon
-bladebro nav https://news.ycombinator.com --no-daemon
+bladebro see content https://example.com --no-daemon   # one-shot: launch Chrome per command
 ```
 
-**All 5 tools work from the CLI:**
-
-```bash
-# Navigate
-bladebro nav https://example.com
-
-# Read the page (6 modes: model, content, outline, extract, links, forms)
-bladebro see model                   # interactive elements with refs
-bladebro see content                # clean markdown
-bladebro see outline                 # heading hierarchy
-bladebro see extract auto            # auto-detect structured data
-
-# Interact (20+ actions: click, type, fill, scroll, press, hover, ...)
-bladebro act click e5                # click element e5
-bladebro act type e12 "hello world"  # type text
-bladebro act scroll 0 500            # scroll down
-bladebro act press Enter             # press a key
-bladebro act fill '[{"label":"Email","text":"a@b.com"},{"label":"Password","text":"secret"}]' --submit e20
-
-# Manage state
-bladebro state cookies               # list cookies
-bladebro state tabs                   # list tabs
-bladebro state open-tab https://example.com
-
-# Batch actions (JSON inline, from a file, or from stdin)
-bladebro run '[{"action":"click","ref":"e5"},{"action":"type","ref":"e12","text":"hello"}]'
-bladebro run @steps.json
-bladebro act batch @steps.json
-
-# Screenshot
-bladebro vision                      # save screenshot to /tmp
-bladebro vision --marks              # with numbered ref badges
-
-# JSON output for scripts and agents
-bladebro see model --json | jq .text
-bladebro act click e5 --json | jq .is_error
-```
-
-**Flags:**
+**Universal flags**
 
 | Flag | What it does |
 |---|---|
-| `--json` | One JSON object per command: `{ok, is_error, text}` (+ `image_path` for vision — screenshots go to a file, never inline base64) |
-| `--no-daemon` | Force one-shot mode (launch Chrome per command) |
-| `--marks` | Overlay numbered ref badges on screenshot (vision only) |
-| `--host <h>` | Browser debug host (default `127.0.0.1`) |
-| `--port <p>` | Drive an already-running Chrome on this debug port instead of launching one / the daemon. Applies to every tool command (`state`, `see`, `act`, …). Never owns or warms the external browser |
+| `--json` | One JSON object on stdout: `{ok, is_error, text}` (+ `image_path` for vision) |
+| `--no-daemon` | Launch Chrome per command instead of using the daemon |
+| `--host` / `--port` | Drive an already-running Chrome on this debug port |
+| `--marks` | Vision: overlay numbered ref badges |
 
-**Exit codes are the contract:** `0` success · `1` the command ran but failed (the output text carries page state for recovery) · `2` usage error (bad flag/argument — the message says how to fix it). Big JSON payloads come from a file or stdin — no shell-quoting games: `bladebro run @steps.json`, `cat steps.json | bladebro run -`, `bladebro act eval @script.js`.
+**Exit codes are the contract:** `0` success · `1` command failed (the text carries page state for recovery) · `2` usage error (the message says how to fix it).
 
-### Diagnostics
+Big payloads come from a file or stdin — no shell-quoting games: `bladebro run @steps.json`, `cat steps.json | bladebro run -`, `bladebro act eval @script.js`.
+
+<details>
+<summary><b>More CLI examples</b></summary>
 
 ```bash
-bladebro -doc    # system check (Chrome, Xvfb, profile, network, version)
-bladebro -v      # version + update status
-bladebro audit   # stealth verification
+# Forms — one call
+bladebro act fill '[{"label":"Email","text":"a@b.com"},{"label":"Password","text":"secret"}]' --submit e20
+
+# Batch steps from a file
+bladebro run @steps.json
+bladebro act batch @steps.json
+
+# Read + extract
+bladebro see model --json | jq .text
+bladebro see extract auto --json
+
+# State
+bladebro state cookies
+bladebro state open-tab https://example.com
+
+# Screenshot with ref badges
+bladebro vision --marks --json | jq -r .image_path
 ```
 
-| Env Var | Default | What it does |
-|---|---|---|
-| `BLADE_HOME` | auto | Data root override (highest priority): knowledge, logins, fingerprint live here |
-| `XDG_STATE_HOME` | auto (XDG spec) | Data root = `$XDG_STATE_HOME/blade` when set |
-| `CHROME_PATH` | auto | Path to Chrome/Chromium binary |
-| `BLADE_PROFILE_DIR` | `<data root>/profile` | Persistent browser profile |
-| `BLADE_FRESH` | unset | `1` = ephemeral profile (no persistence) |
-| `BLADE_LOCALE` | `en-US` | BCP-47 locale (e.g. `en-GB`, `ne-NP`) |
-| `BLADE_TZ` | auto (IP geo) | Timezone (e.g. `Europe/London`, `Asia/Kathmandu`) |
-| `BLADE_NOISE` | unset | `1` = enable canvas/audio fingerprint noise |
-| `BLADE_WEBGL` | `auto` | `spoof` / `real` / `auto` |
-| `BLADE_MEDIA` | `auto` | `patch` / `real` / `auto` |
-| `BLADE_PROXY` | none | Proxy URL |
-| `BLADE_GPU` | `auto` | `intel` / `amd` / `nvidia` / `mali` / `adreno` / `auto` (lspci detection) |
-| `BLADE_CONSENT` | `reject` | `accept` / `reject` / `off` — consent banner policy |
-| `BLADE_NO_COMPRESS` | unset | `1` = disable context pruning (all act responses are full) |
-| `BLADE_NO_WARMING` | unset | `1` = skip first-run profile warming (no visits to google.com/github.com/wikipedia.org) |
+</details>
 
-Data root resolution order (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME/.local/state/blade` (when that tree exists or is creatable) → `$HOME/.blade`. Migration-safe: an existing install with state in `~/.blade` keeps using it; nothing is ever split across two directories. Windows keeps `%USERPROFILE%\.blade` (plus `BLADE_HOME`). `bladebro doctor` prints the resolved data root.
-
-## 🎯 The 5 tools
+## 🧠 How it works
 
 <div align="center">
-<img src="Assets/png/tools-comparison.png" width="800" alt="Tool comparison: 5 tools vs 20+" />
+<img src="Assets/png/architecture.png" width="800" alt="Agent → Bladebro → CDP → Chromium, plus the Live Page Model" />
 </div>
 
-### `act` — act, then observe
+The core is the **Live Page Model** — a persistent, compressed, ref-stable model of the page held across every tool call. Three pillars:
 
-Every `act` returns an **outcome verdict + page delta**. Click auto-escalates: mouse, JS, Enter. Click by text (no see needed): `act click text="Sign in"`. Ambiguous text? Error lists matches with refs and nth values: retry `nth=2`.
+- **Semantic refs** (`e1`, `e2`, …) — anchors assigned by signature (`framePath|role|name|rank`), not position. They survive scrolls, insertions and re-renders.
+- **Structural fingerprints** — an FNV-1a hash of the ancestor chain, tag, children and identity attributes: the mechanism behind re-render immunity.
+- **Deltas only** — every action returns what changed, so the agent never re-reads what it already knows.
 
-| Action | Example | What it does |
-|---|---|---|
-| `click` | `act click e5` or `act click text="Sign in"` | Mouse, JS, Enter escalation |
-| `type` | `act type label="Search" text="hello"` | Cadenced typing into textboxes |
-| `fill` | `act fill fields=[...] submit="Go"` | Multi-field form fill, auto-detects type |
-| `batch` | `act batch steps=[{click},{type},{click}]` | **Multi-step workflows in ONE call** |
-| `navigate` | `act navigate url="https://example.com"` | Idempotent, returns full page model |
-| `scroll` | `act scroll dy=800` | Smooth eased wheel events |
-| `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
-| `collect` | `act collect max=50 timeout=30` | **Auto-extract + scroll + dedupe loop** for infinite feeds |
-| `wait` | `act wait condition=url text="dashboard"` | 6 conditions: element, title, settle, url, text, js |
-| `eval` | `act eval js="document.title"` | JS eval; `el` in scope when ref given |
-| `read` | `act read e5` | Element text content |
-| `press` | `act press key=Enter` | Real key event |
-| `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
-| `select` | `act select e4 option="Nepal"` | Dropdown by text or value |
-| `pdf` | `act pdf` | Export page as PDF artifact |
-| `download` | `act download url=... timeout=10` | Fetch+Blob download, returns path |
-| `back` / `forward` / `reload` | `act back` | History + reload |
-
-**Self-healing refs** — stale refs re-resolve automatically. If e5 was "Sign in" and the page navigated, `act click e5` finds the new "Sign in" and clicks it. You see `[ref e5 healed]` in the verdict.
-
-**Batch actions** — run multi-step workflows in ONE MCP call. Fills, submits, multi-click sequences: one call, one final delta. Halts on navigation or first error with step-level context. 5-step form fill+submit in one call instead of 11.
-
-**`url=` on any action** — `act fill url="https://..." fields=[...]` navigates first, then fills. One call to go to a page AND act on it. Exception: `download` fetches via JS (no navigation), `set-cookie` uses url for cookie scope.
-
-**`slim=true`** — returns verdict only, no delta. Use when you know what happens next.
-
-### `see` — observe
-
-Navigate and act already return page state. Use `see` for:
-
-| Call | What you get |
-|---|---|
-| `see` | Full view (semantic folding: nav/footer auto-fold) |
-| `see filter="button,link"` | Filtered by role/name/landmark |
-| `see find="price"` | Search elements by text, get refs + scores |
-| `see extract="auto"` | **Template-free list extraction**: structural detection, content-value scoring |
-| `see extract="json" template={...}` | Structured data from listing pages (one call) |
-| `see extract="links"` or `"forms"` | All links or all form fields |
-| `see mode=content` | Page text as clean markdown (articles, docs, search results) |
-| `see mode=outline` | Ultra-minimal heading hierarchy (~50-200 bytes) |
-| `see logs="console"` | JS errors/warnings, errors first |
-| `see logs="network"` | Requests with status, failures first |
-| `see scope=e5` | One element's subtree text |
-
-**Truncation.** When the model output exceeds the element budget, it ends with a summary line: `…(N more: X link, Y button)`. Roles are ordered by count (descending), then alphabetically — deterministic, so the same page always truncates the same way. The full set stays available via `see filter=`.
-
-**Auto-extract (`extract=auto`)** — deterministic structural list extraction. For every element with 3+ children, groups by structural signature, scores by content value. Extracts title, URL, image, price, date, description. **Site-aware**: shopping sites get rating/reviews/availability, Reddit gets score/comments/author, GitHub gets stars/forks/labels. Verified on HN, Lobste.rs, Wikipedia, DuckDuckGo, StackOverflow, Reddit, GitHub, MDN, Amazon.
-
-**Collect (`act collect`)** — native scroll+dedupe loop for infinite feeds. Auto-extract, dedupe by URL/title, scroll, repeat until max or no new items. ONE call, ONE artifact. Verified: 80 items from infinite-scroll test page, 0 duplicates.
-
-**Big data goes to files.** Extracts over ~6KB are written to `artifacts/` under your data root and the response gives you the path + preview. Read the file.
-
-### `state` — cookies, storage, tabs, sessions, blocking
-
-| Call | What it does |
-|---|---|
-| `state op=tabs` | List tabs (* = current) |
-| `state op=open-tab url="..."` | Open + auto-focus new tab |
-| `state op=switch-tab target_id="..."` | Switch to a tab |
-| `state op=close-tab target_id="..."` | Close tab (auto-switches if current) |
-| `state op=cookies` | List cookies |
-| `state op=set-cookie name=token value=abc` | Set a cookie |
-| `state op=save name=login` | Save session (cookies + storage) |
-| `state op=load name=login` | Restore session (then auto-navigate) |
-| `state op=ls` / `ss` | List localStorage / sessionStorage |
-| `state op=set-ls` / `set-ss` | Set localStorage / sessionStorage |
-| `state op=block classes="images,fonts,trackers"` | Block inert assets (never first-party scripts) |
-
-**Login persistence**: `save` after login, `load` in a later session. Restores cookies + storage, then navigates to the site.
-
-### `run` — batch + branch + JS
-
-All act fields work in steps (ref, text, label, nth, js, key, url, etc). Plus `if` and `while` control flow.
-
-```json
-{"steps":[
-  {"action":"type","label":"Email","text":"user@mail.com"},
-  {"action":"type","label":"Password","text":"secret"},
-  {"action":"click","text":"Sign in"},
-  {"action":"wait","condition":"element","text":"Dashboard","timeout":10}
-]}
-```
-
-Use `run` instead of `act batch` when you need branching (`if`/`else`), loops (`while`), or state ops that change tabs.
-
-### `vision` — screenshot (last resort)
-
-Returns base64 PNG. `vision marks=true` overlays numbered ref badges on elements so you can say "click e5" after seeing the screenshot. The structural model is almost always better: cheaper, more reliable, gives you refs to act on.
-
-## 🏗️ Architecture
-
-<div align="center">
-<img src="Assets/png/architecture.png" width="800" alt="Architecture: Agent → MCP → CDP → Chromium + Live Page Model" />
-</div>
-
-The **Live Page Model** is the core innovation. It holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page. Refs (`e1`, `e2`, ...) are stable semantic anchors that survive DOM mutations AND re-renders. No more "stale element" failures.
-
-Three pillars:
-- **Stable refs** (`e1`, `e2`, ...) — semantic anchors that self-heal across navigations and re-renders
-- **Structural fingerprints** (`fp=0xdeadbeef`) — FNV-1a hash of ancestor chain, tag, children, identity attributes
-- **Deltas only** (`{ -x, +y }`) — every action returns what changed, not the whole world
+Everything is built from scratch where it counts — the CDP transport, perception, stealth injection, biometrics, session management. Chromium is the only borrowed part.
 
 ## 🧬 Re-render immunity
 
 **The #1 reliability gap in every other agent browser, solved.**
 
-When React, Vue, or Angular re-renders a component, the DOM nodes are destroyed and recreated. Every other agent browser loses all refs — the agent must recapture, re-identify elements, and re-learn the page. Bladebro doesn't.
-
-Every captured element gets a **structural fingerprint** — an FNV-1a hash of its ancestor chain, tag, children, and identity attributes. When a re-render changes text (the sig changes) but preserves structure (the fingerprint is identical), the stabilizer rebinds the ref via fingerprint match instead of invalidating it.
+When React, Vue or Angular re-renders a component, the DOM nodes are destroyed and recreated — and every other agent browser loses its refs. Bladebro re-binds them: when text changes but structure survives, the ref follows the fingerprint instead of dying.
 
 ```
-Before re-render:  e2 button "Buy Now"     sig=button|Buy Now|1  fp=0xdeadbeef
-After re-render:   e2 button "Buy Now v1"  sig=button|Buy Now v1|1  fp=0xdeadbeef  ← SAME fp
+Before re-render:  e2 button "Buy Now"     sig=button|Buy Now|1     fp=0xdeadbeef
+After re-render:   e2 button "Buy Now v1"  sig=button|Buy Now v1|1  fp=0xdeadbeef  ← same fp
                    ↺ e2 (re-render survived)
 ```
 
-The agent sees `↺ e2 (re-render survived)` in the delta. The ref never died. The click works. No recapture needed.
+The agent sees `↺ e2 (re-render survived)` in the delta. The click works. No recapture. Playwright, Puppeteer, CDP wrappers, accessibility-tree snapshots — all lose refs here.
 
-**No other agent browser does this.** Playwright, Puppeteer, CDP wrappers, SerpAPI — all lose refs on re-render.
+## 🪙 Token efficiency
 
-## ✂️ Context pruning
+**5× more token-efficient than every competitor.**
 
-**54% fewer tokens over a browsing session, zero capability loss.**
+- **Delta results** — 60–570 tokens per action; snapshot-based tools spend ~1,400–2,000+.
+- **Tool defs** — ~1,900 tokens vs 8,000–13,700. The agent plans; it doesn't juggle APIs.
+- **Context pruning** — `act` responses compress after turn 3 on the same page: full (8K) → reduced (3K) → verdict-only (500 chars). ~54% fewer tokens over a session, zero capability loss.
 
-When an agent is in the middle of a multi-step interaction on the same page (click, type, scroll, click, scroll...), each `act` response includes the full page element list. After the first 2-3 turns, the agent already knows the page. The repeated element list is pure token waste.
-
-Bladebro progressively compresses `act` responses on the same page:
-
-| Turn | Response size | What's included |
-|---|---|---|
-| 0-2 | Full (8K budget) | Verdict + full element list + content preview on navigation |
-| 3-5 | Compressed (3K budget) | Verdict + reduced element list, no content preview |
-| 6+ | Ultra-compact (500 chars) | Verdict + page state + changed elements only |
-
-**Counter resets on:**
-- Navigation to a new page
-- Any `see` call (agent is re-orienting)
-- Any error (agent needs full state to recover)
-
-**Never compressed:** `see`, `state`, `vision`, `run` responses. Only `act` is compressed, and only when the agent is repeatedly interacting on the same page.
-
-**Toggle:**
 ```bash
-bladebro state compress status   # check current state
-bladebro state compress off       # disable
-bladebro state compress on        # re-enable (default)
+bladebro state compress off     # on / off / status — or BLADE_NO_COMPRESS=1
 ```
 
-Or via environment variable: `BLADE_NO_COMPRESS=1` disables at startup.
+The counter resets on navigation, any `see`, or any error. `see`, `state`, `run` and `vision` are never compressed.
 
-## 🧠 Self-improvement
-
-**Learns from every session. Compounds with use. Never degrades.**
-
-Two subsystems, both persisted in `knowledge/` under your data root, both surviving machine restarts:
-
-### Domain knowledge base
-
-Per-site consent dialog selectors, learned from successful dismissals. On known sites (confidence >= 0.7), Bladebro tries the stored CSS selector first — skips the full 20-line detection JS entirely. Falls back to full detection if the selector doesn't match. Learns from every successful dismissal.
-
-| Visit | What happens |
-|---|---|
-| Visit 1 (cold) | Full consent detection JS runs, agent dismisses, selector stored at confidence 0.6 |
-| Visit 2-4 | Stored selector tried first. Each success bumps confidence +0.05 |
-| Visit 5+ (trusted) | Confidence crosses 0.7. Auto-applied. Zero detection overhead. |
-
-**Safety mechanics:**
-- Learn only from success. Never learn from failures.
-- Confidence scoring is asymmetric: success +0.05, failure -0.15. Failures cost 3x more.
-- Below 0.3 confidence AND 30 days old = evicted. Bounded at 2000 domains.
-- Zero regression for unknown sites — falls back to full detection transparently.
-
-### Behavioral fingerprint
-
-Biometric parameters generated once per installation with small random variations, reused forever. Same "person" types at the same speed, moves the mouse with the same style, has consistent reaction time — every session.
-
-| Parameter | What it controls | Range |
-|---|---|---|
-| `click_precision` | Pixel offset from target center | 2.0-3.0 |
-| `curve_factor` | Mouse path curvature | 0.12-0.18 |
-| `typing_mean_ms` | Average inter-key delay | 75-105ms |
-| `action_gap_mean_ms` | Inter-action pause | 340-460ms |
-| `overshoot_max` | Mouse overshoot distance | 12-18px |
-| `hum_interval_ms` | Idle mouse drift frequency | 1700-2300ms |
-
-A bot detector tracking behavioral consistency across visits sees the same identity every time. Without this, every session looks like a different person using the same browser — a red flag.
-
-**Corruption recovery:** corrupted files are deleted and regenerated. Atomic writes (`.tmp` then `rename`). Never half-written. Values clamped to human-like ranges on load.
-
-## 🧩 Site adapters
-
-Built-in site-aware handling — automatic, no config, and zero cost to the tool definitions (adapters are runtime heuristics; extra fields only appear on pages that have them):
-
-- **Reddit** — `see extract=auto` on a subreddit returns typed posts: title, score, comments, author, subreddit, date, domain. On a post page it returns the FULL comment tree in ONE call — every reply (collapsed included), thread-ordered with depth, author/score/date, full text, an `op` flag on the submitter's comments, and honest `count`/`total`/`complete` fields, read from the thread's own JSON endpoints. `see mode=content` on a post gives clean title/meta/body markdown; the comment-area truncation says where the full tree lives.
-- **X.com (Twitter)** — `see extract=auto` on a status page returns the FULL conversation in ONE call: the focal post plus every reply and nested reply, thread-ordered with depth, author/date/counts, media, and an `op` flag on the author’s thread — read from the page’s own API traffic (query ids captured live, self-healing across deploys). Profile/search/home pages return their timeline the same way; search falls back to a bounded in-page collection when X gates its API. The composer works through the normal tools: `act click` the Reply button, `act type` into the editor (contenteditable-aware), `act click` Post.
-- **GitHub** — repo pages: description, stars, forks, language, topics, README. Issues/PR lists: number, title, status, labels, author per row.
-- **Product pages** — price (with strikethrough original), rating, availability, key features — on any shop, not a fixed list of stores.
-
-Adapters are heuristic and self-improving: the domain knowledge base learns per-site behavior across sessions — consent selectors, block history, settle timing, and your resource-blocking choice — and reuses it on later visits. Per-domain stealth overrides (timezone/locale) live in an editable `profiles.json` under your data root. No plugin API: if a site needs special handling, that behavior belongs in the heuristics or in the learned knowledge, not in per-site config.
-
-## 🛡️ Stealth system
+## 🥷 Stealth
 
 <div align="center">
 <img src="Assets/png/stealth-layers.png" width="800" alt="6-layer stealth system" />
 </div>
 
-Six layers. All on by default. No config needed.
+Six layers, all on by default, no config needed:
 
 | Layer | What it does |
 |---|---|
-| **Protocol** | No `Runtime.enable` (defuses DataDome console trap), CDP over pipe (zero listening ports, Unix), isolated world for DOM reads (invisible to anti-bot scripts) |
-| **Environment** | UA override (no HeadlessChrome), WebGL renderer, outerWidth/innerWidth, screen geometry, hardwareConcurrency, deviceMemory, permissions, mediaDevices |
-| **Behavior** | Bezier mouse paths with overshoot+correction, `movementX`/`movementY` deltas on every event, micro-tremors before clicks, non-zero key press duration, log-normal typing cadence, idle hum, smooth scroll. **Persistent behavioral fingerprint** — same personality every session. |
-| **Coherence** | Per-domain stealth memory (timezone + locale), geo-consistent identity, WebRTC fail-closed, stable canvas/audio (no noise by default) |
-| **Residue** | cdc_ property removal, native toString integrity, MutationObserver for late artifacts |
-| **Seasoning** | Persistent browser profile (localStorage survives restarts) + a CDP login snapshot that survives clean shutdowns, SIGKILL, and power loss, storage quota, font audit, window.chrome object |
+| **Protocol** | No `Runtime.enable` (defuses the DataDome console trap); CDP over a zero-port pipe; isolated world for DOM reads. |
+| **Environment** | UA + Client Hints override (no HeadlessChrome), WebGL renderer, screen geometry, hardwareConcurrency, deviceMemory, mediaDevices, permissions. |
+| **Behavior** | Bezier mouse paths with overshoot + correction, `movementX/Y` deltas, micro-tremors, non-zero key-press duration, log-normal typing, idle hum, smooth scroll. |
+| **Coherence** | Per-domain timezone/locale memory, geo-consistent identity, WebRTC fail-closed, stable canvas/audio (noise off by default). |
+| **Residue** | `cdc_` removal, native `toString` integrity, MutationObserver for late artifacts. |
+| **Seasoning** | Persistent profile (cookies, history, HSTS) + a login snapshot that survives clean shutdown, SIGKILL and power loss. |
 
 **Verified against real detection sites:**
 
-| Test | Score |
+| Test | Result |
 |---|---|
-| 36-vector local suite | 36/36 pass |
-| bot.sannysoft.com | ALL PASS |
-| incolumitas.com | 8/8 automated tests PASS (webdriver=false, no UA leak, no override/overflow) |
-| CreepJS | headless: 6%, stealth: 20% (hasSwiftShader=false, hasBadWebGL=undefined) |
+| 36-vector local suite + boot self-check (`bladebro audit`) | 36/36 pass |
+| bot.sannysoft.com | All pass |
+| incolumitas.com | 8/8 automated tests (webdriver=false, no UA leak) |
+| CreepJS | headless: 6%, stealth: 20% (hasSwiftShader=false) |
 | PerimeterX/HUMAN (Zillow, Fiverr) | Full page load, no block |
-| Boot self-check | 4/4 OK |
 
 Run `bladebro audit` to verify your own setup.
+
+## 🧩 Site adapters
+
+Built-in, automatic, zero config — and zero cost to the tool definitions. Adapters are runtime heuristics: they add no tools and no parameters, and their extra fields appear only on pages that have them.
+
+- **Reddit** — `see extract=auto` on a post returns the FULL comment tree in ONE call: every reply (collapsed included), thread-ordered with depth, author/score/date, full text, an `op` flag on the submitter's comments, and honest `count`/`total`/`complete` fields. On feeds: typed posts (title, score, comments, author, subreddit, date, domain). `see mode=content` gives clean title/meta/body markdown.
+- **X.com (Twitter)** — `see extract=auto` on a status page returns the FULL conversation in ONE call: the focal post plus every reply and nested reply, thread-ordered with depth, author/date/counts, media and an `op` flag — read from the page's own API traffic (query ids captured live, self-healing across deploys). Profile/search/home return timelines the same way; search falls back to bounded in-page collection when X gates its API. The composer works through the normal tools: `act click` Reply → `act type` → `act click` Post.
+- **GitHub** — repo pages: description, stars, forks, language, topics; issue/PR lists: number, title, status, labels, author per row.
+- **Product pages** — price (with strikethrough original), rating, availability, key features — on any shop, not a fixed list of stores.
+
+Adapters self-improve through the domain knowledge base (below): consent selectors, block history, settle timing and resource-blocking choices are learned per domain and reused on later visits. No plugin API — site-specific behavior belongs in the heuristics, not in config.
+
+## 🌱 Self-improvement
+
+Learns from every session, persists in `knowledge/` under your data root, survives restarts.
+
+**Domain knowledge base** — per-site consent selectors and behavior, learned from success only:
+
+- Confidence +0.05 per success, −0.15 per failure (failures cost 3×). Auto-applied at ≥0.7, so known sites skip the full detection JS entirely.
+- Evicted below 0.3 after 30 days; bounded at 2,000 domains. Unknown sites fall back to full detection — zero regression.
+
+**Behavioral fingerprint** — biometric parameters generated once per installation and reused forever, so detectors see the same "person" every session: click precision, mouse curvature, typing cadence, inter-action gaps, overshoot and idle-hum frequency, all clamped to human ranges, written atomically.
 
 ## 📊 Comparison
 
@@ -512,131 +367,135 @@ Run `bladebro audit` to verify your own setup.
 
 | | Bladebro | agent-browser | Playwright MCP | Chrome DevTools MCP |
 |---|---|---|---|---|
-| Tool defs | ~1,900 tokens | 0 (CLI) | ~13,700 tokens | ~8,000 tokens |
-| Per-click result | 60-570 tokens (delta) | ~1,400 tokens (snapshot) | 2,000+ tokens (full page) | 2,000+ tokens |
-| Stealth | 6-layer, behavioral biometrics, isolated world | None | None | None |
-| Re-render immunity | Yes (structural fingerprints) | No | No | No |
-| Self-improvement | Yes (learns across sessions) | No | No | No |
-| Auto-extraction | Template-free, site-aware (shopping, Reddit, GitHub) | No | No | No |
-| Infinite scroll collect | Yes (act collect) | No | No | No |
-| Batch actions | Yes (act batch) | No | No | No |
-| Shadow DOM | Pierced (deepAll) | Partial | Partial | Partial |
-| PDF export | Yes (act pdf) | Yes | No | No |
-| Download handling | Yes (act download) | Yes | No | No |
-| Runtime | None (static binary) | Node.js daemon | Node.js | Node.js |
-| Process model | Long-lived daemon (stateful) | Long-lived daemon | Stateless | Stateless |
-| Page model | Persistent, ref-stable, diff-first | Accessibility tree snapshot | None | None |
-| Binary size | 6.6 MB | ~50 MB (node + deps) | ~50 MB (node + deps) | ~50 MB (node + deps) |
-| Install | `npm install -g bladebro` | npm + agent-browser install | npm + playwright install | npm |
-| Platforms | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
+| Tool defs | **~1,900 tokens** | 0 (CLI) | ~13,700 tokens | ~8,000 tokens |
+| Per-click result | **60–570 tokens** (delta) | ~1,400 (snapshot) | 2,000+ | 2,000+ |
+| Stealth | **6 layers + biometrics** | None | None | None |
+| Re-render immunity | **Yes** | No | No | No |
+| Self-improvement | **Yes** | No | No | No |
+| Auto-extraction | **Template-free, site-aware** | No | No | No |
+| Batch actions | **Yes** (`act batch` / `run`) | No | No | No |
+| Infinite-scroll collect | **Yes** | No | No | No |
+| Runtime | **None (static binary)** | Node.js daemon | Node.js | Node.js |
+| Page model | **Persistent, ref-stable, diff-first** | A11y snapshot | None | None |
+| Binary size | **6.5 MB** | ~50 MB (node + deps) | ~50 MB | ~50 MB |
+| Platforms | **Linux, macOS, Windows** | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
-**5x more token-efficient** than every competitor. The Live Page Model holds a persistent, compressed, ref-stable model of the page across tool calls. Every `act` returns a **delta** (what changed), not the full page.
+### Head-to-head: Bladebro vs agent-browser
 
-### Live head-to-head: Bladebro vs agent-browser
-
-Tested on real sites with agent-browser v0.33.2 at its best (headed, system Chromium, persistent profile, custom UA) vs Bladebro v3.0.21 defaults.
+agent-browser v0.33.2 at its best (headed, system Chromium, persistent profile, custom UA) vs Bladebro defaults, same machine:
 
 | Task | agent-browser | Bladebro |
 |---|---|---|
-| Wikipedia (navigate + read) | 153K chars, 3 calls | 82K chars, 2 calls (**47% less**) |
-| Hacker News (interactive elements) | 14K chars, 2 calls | 5.5K chars, 1 call (**61% less**) |
-| Reddit (search) | 5.7K chars, 2 calls (no URLs) | 4.5K chars, 2 calls (URLs + content) |
-| Zillow (PerimeterX) | **Blocked** (Press & Hold challenge) | **Full access** (searched Seattle, 992 listings) |
-| HN (structured extraction) | No feature (parse 14K chars manually) | 30 items as JSON, 1 call |
+| Wikipedia (navigate + read) | 153K chars, 3 calls | **82K chars, 2 calls (−47%)** |
+| Hacker News (elements) | 14K chars, 2 calls | **5.5K chars, 1 call (−61%)** |
+| Reddit (search) | 5.7K chars, 2 calls, no URLs | 4.5K chars, 2 calls, URLs + content |
+| Zillow (PerimeterX) | **Blocked** (Press & Hold) | **Full access** (992 listings) |
+| HN structured extraction | No feature | **30 items as JSON, 1 call** |
 
-Key findings:
+<details>
+<summary><b>Stealth benchmark: Bladebro vs Camoufox</b></summary>
 
-- **Stealth is the biggest gap.** agent-browser gets flagged by PerimeterX even headed. Bladebro's behavioral biometrics (bezier mouse, movementX/movementY, micro-tremors, human typing cadence, no Runtime.enable) are built into the CDP layer. Not a config option.
-- **Token efficiency.** Bladebro returns model + content + URLs in one navigate call. agent-browser needs separate open + snapshot + read calls.
-- **Noise folding.** Bladebro folds nav/footer elements and shows "193 more" instead of listing everything. agent-browser dumps the full tree.
-- **Structured extraction.** Bladebro has `see extract=auto` (template-free, site-aware JSON). agent-browser has no equivalent.
-
-### Stealth benchmark: Bladebro vs Camoufox
-
-This is a pure stealth comparison, not an agent browser comparison. Camoufox is a patched Firefox for web scraping, not an agent tool. But since people ask, here's how they compare on detection sites.
-
-Both tested headed, same machine, same network, no proxy. 8 detection sites.
+A pure stealth comparison — Camoufox is a patched Firefox for scraping, not an agent tool. Both headed, same machine, same network, no proxy, 8 detection sites.
 
 | Detection site | Camoufox | Bladebro |
 |---|---|---|
-| Sannysoft | 1 fail (Chrome obj, expected for Firefox) | All pass |
+| Sannysoft | 1 fail (Chrome obj — expected for Firefox) | All pass |
 | CreepJS | Fingerprint computed | headless: 6%, stealth: 20% |
-| BotD | Pass | Pass |
-| Pixelscan | Bot check pass, masking detected | Bot check pass, masking detected |
-| FingerprintJS | Pass | Pass |
-| Zillow (PerimeterX) | Pass | Pass |
-| Reddit | Pass | Pass |
-| Fiverr (HUMAN) | Pass | Pass |
+| BotD / FingerprintJS | Pass | Pass |
+| Pixelscan | Pass (masking detected) | Pass (masking detected) |
+| Zillow / Reddit / Fiverr | Pass | Pass |
 
-Near equal on stealth. Both pass real-world bot protection. Both get masking flagged on Pixelscan (expected for any anti-detect tool, flagged our real browser too). Neither was blocked anywhere.
+Near equal on stealth; both flagged for masking on Pixelscan (expected for any anti-detect tool). The difference is delivery: Bladebro ships this out of the box in one binary — Camoufox needs Python, a venv and a Playwright script to drive it.
 
-Camoufox is impressive considering their situation: a year-long maintenance gap, stale fingerprints, and they still match. Respect for that.
+</details>
 
-The difference: Bladebro ships this stealth out of the box as an agent tool. No setup, no config, no Python venv. `npm install -g bladebro && bladebro mcp` and you're behind 6 layers of behavioral biometrics on a stock Chromium. Camoufox needs Python, a venv, and a Playwright script to drive it.
+## 🚧 Gotchas & limits
 
-## ⚠️ Gotchas
+Honest boundaries: what surprises people, and what Bladebro deliberately does not do.
 
-| Surprise | Why |
+| Situation | What happens — and why |
 |---|---|
-| Cloudflare Turnstile blocks Bladebro | Turnstile requires actual challenge solving, not just fingerprint spoofing. You get a `blocked:` verdict, not a hang. |
-| Datacenter IPs get flagged | Server/VPS IPs are flagged regardless of browser fingerprint. Use `BLADE_PROXY` with a residential proxy. |
-| Cross-origin iframes are invisible | SecurityError on `contentDocument`. Deliberate limitation; would need `Runtime.enable` (breaks stealth). |
-| macOS/Windows binaries cross-compiled | Built via cargo-zigbuild (zig linker) from Linux, not native-tested on real macOS/Windows machines. File an issue if something breaks. |
-| Linux ARM64 not live-verified | Cross-compiled via cargo-zigbuild. Compiles clean, should work on Graviton/Oracle/Pi. Needs community testing — file an issue if something breaks. |
-| `BLADE_NOISE=1` can *hurt* stealth | FingerprintJS ML detects noise injection as "browser tampering." Off by default. Only use if you know why. |
+| **CAPTCHA / Turnstile challenges** | Not solved, deliberately. You get a `blocked:` verdict with a remediation ladder — hand off to a solver if needed. |
+| **Datacenter / VPS IPs** | Flagged regardless of fingerprint. Use `BLADE_PROXY` with a residential proxy. |
+| **Cross-origin iframe content** | Invisible (`SecurityError`). Deliberate: access would need `Runtime.enable`, which defuses the protocol stealth layer. |
+| **Browser extensions** | Not supported — CDP cannot load them, and they would break the stealth profile. |
+| **Session video recording** | Not supported. Use `vision` screenshots. |
+| **Firefox / Gecko** | Not supported — the driver speaks CDP, which is Chromium-only. |
+| **macOS binaries** | Cross-compiled from Linux via cargo-zigbuild; CI builds and tests macOS natively on every release, but the released binary is not live-driven on macOS hardware yet. File an issue if something breaks. |
+| **Linux ARM64** | Cross-compiled; not live-verified on ARM hardware yet. Community reports welcome. |
+| **`BLADE_NOISE=1`** | Canvas/audio noise can *hurt* — FingerprintJS ML reads it as tampering. Off by default; enable only if you know why. |
 
-## 🧱 Honest limits
+## 🔧 Configuration
 
-| What it can NOT do | Why |
-|---|---|
-| Solve CAPTCHAs | Deliberate. CAPTCHA solving is a separate problem. You get a `blocked:` verdict and can hand off to a solver. |
-| Run browser extensions | CDP does not support extension loading. Would break the stealth profile. |
-| Access cross-origin iframe content | SecurityError. Would need `Runtime.enable` which defuses the stealth protocol layer. |
-| Record video of the session | CDP does not expose frame buffers. Use screenshots (`vision`) instead. |
-| Run Firefox/Gecko browsers | CDP is Chromium-only. Firefox needs a different protocol (Marionette). |
+Everything optional; configuration is environment variables.
 
-## 💖 Sponsors
+**Data & profile**
 
-Bladebro is open source and free to use. If you want to support development, consider sponsoring.
-
-| Tier | Price | What you get |
+| Var | Default | What it does |
 |---|---|---|
-| 🥉 Bronze | $10/mo | Name + link in Sponsors section |
-| 🥈 Silver | $25/mo | Small logo + link in Sponsors section |
-| 🥇 Gold | $50/mo | Large logo + link, pinned at top of Sponsors section |
+| `BLADE_HOME` | auto | Data root override (highest priority): knowledge, logins, artifacts, fingerprint |
+| `XDG_STATE_HOME` | XDG spec | Data root becomes `$XDG_STATE_HOME/blade` when set |
+| `BLADE_PROFILE_DIR` | `<data root>/profile` | Persistent browser profile location |
+| `BLADE_FRESH` | unset | `1` = ephemeral profile (no persistence) |
+| `CHROME_PATH` | auto-detected | Chrome/Chromium binary |
 
-One-time sponsorships are also welcome at any amount.
+**Identity & stealth**
 
-**Pricing will increase as the project grows.** Right now Bladebro is early (small but growing), so sponsorship is cheap. A Gold tier at $50/mo is high reward, near zero investment for any company that relies on browser automation. Lock in the current rate before it goes up.
+| Var | Default | What it does |
+|---|---|---|
+| `BLADE_LOCALE` | `en-US` | BCP-47 locale (`en-GB`, `ne-NP`, …) |
+| `BLADE_TZ` | IP geo | Timezone (`Europe/London`, `Asia/Kathmandu`, …) |
+| `BLADE_GPU` | `auto` | `intel` / `amd` / `nvidia` / `mali` / `adreno` / `auto` (lspci detection) |
+| `BLADE_WEBGL` | `auto` | `spoof` / `real` / `auto` |
+| `BLADE_MEDIA` | `auto` | `patch` / `real` / `auto` |
+| `BLADE_NOISE` | unset | `1` = canvas/audio fingerprint noise (see gotchas) |
+| `BLADE_PROXY` | none | Proxy URL |
+| `BLADE_CONSENT` | `reject` | Consent banners: `accept` / `reject` / `off` |
 
-Email [bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com) to become a sponsor.
+**Behavior & ops**
 
-<!-- Add sponsor logos below as they come in -->
+| Var | Default | What it does |
+|---|---|---|
+| `BLADE_PACE` | on | `off` = disable the pacing governor (human inter-action gaps) |
+| `BLADE_NO_COMPRESS` | unset | `1` = disable context pruning |
+| `BLADE_NO_WARMING` | unset | `1` = skip first-run profile warming |
+| `BLADE_NO_UPDATE_CHECK` | unset | `1` = skip update checks |
+| `BLADE_CMD_TIMEOUT` | `300` | How long the CLI waits for a daemon response, seconds |
+| `BLADE_IDLE_TIMEOUT` | `600` | Daemon idle time before Chrome shuts down, seconds |
+| `BLADE_TRANSPORT` | auto | MCP: `ws` forces the WebSocket transport |
+| `BLADE_CHROME_FLAGS` | none | Extra Chrome launch flags |
 
-<div align="center">
+Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME/.local/state/blade` → `$HOME/.blade` (legacy). Existing installs keep their tree — nothing is ever split across two directories. Windows: `%USERPROFILE%\.blade` (plus `BLADE_HOME`). `bladebro doctor` prints the resolved data root.
 
-<!-- <a href="https://example.com"><img src="sponsor-logo.png" width="200" alt="Sponsor Name" /></a> -->
-
-</div>
-
----
-
-## 🔄 Update hub
+## 🔄 Maintenance
 
 | Command | What it does |
 |---|---|
-| `npm update -g bladebro` | Update to latest (npm install) |
-| `bladebro -u` | Check for updates, download, install (from-source install) |
-| `bladebro -doc` | Diagnose system, suggest fixes |
-| `bladebro --rollback` | Restore previous version after broken update |
-| `bladebro -v` | Show version + update status |
+| `bladebro -doc` / `bladebro doctor` | System check — Chrome, display, profile hygiene, logins, data root, network, version |
+| `bladebro audit` | Stealth audit — 36-vector suite + boot self-check, against your setup |
+| `bladebro -v` | Version + update status |
+| `bladebro -u` | Self-update: check, download, SHA-256-verify, swap (source installs) |
+| `bladebro --rollback` | Restore the previous version |
+| `npm update -g bladebro` | Update npm installs |
 
-Set `BLADE_NO_UPDATE_CHECK=1` to skip update checks.
+`BLADE_NO_UPDATE_CHECK=1` skips update checks entirely.
+
+## 💖 Sponsors
+
+Bladebro is free and open source. Sponsoring keeps development independent.
+
+| Tier | Price | What you get |
+|---|---|---|
+| 🥉 Bronze | $10/mo | Name + link |
+| 🥈 Silver | $25/mo | Small logo + link |
+| 🥇 Gold | $50/mo | Large logo + link, pinned at top |
+
+One-time sponsorships welcome at any amount. Rates rise as the project grows — lock in the current tier now. Email [bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com) to sponsor.
 
 ## 🤝 Contributing
 
-PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Run `cargo clippy --release -- -D warnings` and `cargo test --release` before submitting.
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Before submitting: `cargo clippy --release -- -D warnings` and `cargo test --release`.
 
 ## 📄 License
 
-Apache-2.0 | see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE).
