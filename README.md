@@ -8,6 +8,10 @@ Re-render-immune refs · batch actions · auto-extract · self-improving · 6-la
 
 One MCP server · one CLI · one persistent page model · no Node.js · one binary · Linux · macOS · Windows
 
+[![npm version](https://img.shields.io/npm/v/bladebro?style=flat-square)](https://www.npmjs.com/package/bladebro) [![npm downloads](https://img.shields.io/npm/dm/bladebro?style=flat-square)](https://www.npmjs.com/package/bladebro) [![license](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE) [![platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue?style=flat-square)](#-install) [![GitHub stars](https://img.shields.io/github/stars/dondai44423/bladebro?style=flat-square)](https://github.com/dondai44423/bladebro/stargazers)
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
+
 ```bash
 npm install -g bladebro && bladebro mcp
 ```
@@ -477,11 +481,13 @@ Bladebro is free and open source. Sponsoring keeps development independent.
 
 | Tier | Price | What you get |
 |---|---|---|
-| 🥉 Bronze | $10/mo | Name + link |
-| 🥈 Silver | $25/mo | Small logo + link |
-| 🥇 Gold | $50/mo | Large logo + link, pinned at top |
+| 🥉 Bronze | $15/mo | Name + link |
+| 🥈 Silver | $40/mo | Small logo + link |
+| 🥇 Gold | $60/mo | Large logo/banner + link, pinned at top |
 
-One-time sponsorships welcome at any amount. Rates rise as the project grows — lock in the current tier now. Email [bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com) to sponsor.
+**How to sponsor.** GitHub Sponsors is enabled and featured on this repo — but my region isn't supported for payouts yet, so the reliable route is email: **[bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com)**. Write me, I'll share my PayPal, and we go through the steps. One-time sponsorships are welcome at any amount — [Ko-fi](https://ko-fi.com/G5Y624N5RE) covers quick one-offs too.
+
+**Prepay to lock your rate.** You can pay for any number of months in one go at today's price, and that rate is fixed for the whole term — e.g. 6 months of Gold at today's $60/mo = $360, and a later increase (even to $150) doesn't touch it. Price changes only ever apply to sponsorships started after them.
 
 ## 🤝 Contributing
 
