@@ -22,6 +22,8 @@ If any of these fail, fix them before opening a PR.
 - Bug fixes (with a test that would have caught the bug)
 - Stealth improvements (verified against `bladebro audit` + real detection sites)
 - New actions on `act` (that fit the "few tools, full control" philosophy)
+- Adapter fixes (the `extract=auto` site-aware paths — with a live repro on the real site)
+- New adapters (pure optimization only — zero new tools, zero new params; must be live-tested, token-efficient and actually good — reviewed closely)
 - Performance improvements (with benchmarks)
 - Cross-platform support (macOS, Windows — currently Only linux is live tested)
 - AI generated PR are fine but make sure to review it first.
