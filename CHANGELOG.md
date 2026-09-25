@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`npm install -g bladebro` no longer drags the pi agent's whole dependency
+  tree.** The pi-extension `peerDependencies` were auto-installed by npm 7+:
+  every npm install pulled ~175 extra packages (~437 MB) with install-script
+  warnings. Both peers are now `optional` — plain npm installs get exactly
+  what they need (~7 MB); `pi install npm:bladebro` is unchanged (pi satisfies
+  the peers from its own tree).
+- **Daemon lifecycle: no more ghost-daemon multiplication.** `bladebro daemon`
+  now checks the socket first and refuses to steal it from a live daemon, and
+  a daemon's shutdown removes the socket + pidfile only while it still owns
+  them. Before: a stale ("ghost") daemon dying unlinked the *active* daemon's
+  socket — the next command spawned yet another daemon and orphaned the
+  previous one, self-perpetuating and invisible to `stop`.
+- `bladebro … | head` no longer panics ("failed printing to stdout: Broken
+  pipe") — CLI-output commands restore the default SIGPIPE; `daemon`/`mcp`
+  keep EPIPE as a handled error.
+- `bladebro help mcp` works (also `audit`, `update`/`-u`, `doctor`/`-doc`,
+  `rollback`/`--rollback`, `-v`/`--version`); the manual and `help --json`
+  now list every command. Before: only the 9 CLI commands were covered.
+- `doctor`'s Xvfb install hint (said "brew install chromium (Nix)").
+
 ## [3.9.9] - 2026-09-25
 
 ### Added

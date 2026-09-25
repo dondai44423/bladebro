@@ -1610,7 +1610,15 @@ pub async fn run_daemon() -> Result<()> {
     ignore_sighup();
 
     let path = socket_path();
-    // Remove stale socket.
+    // Never steal a LIVE daemon's socket: connect to check first. Without
+    // this, a second `bladebro daemon` rebinds over the active one and
+    // orphans it — a ghost that keeps its Chrome but that `stop` can no
+    // longer reach (and whose death later unlinks the new daemon's socket).
+    if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+        eprintln!("[bladebro] daemon already running on {} — exiting", path.display());
+        return Ok(());
+    }
+    // Remove stale socket (connect failed — nobody is listening).
     let _ = std::fs::remove_file(&path);
     // Create parent dir with secure permissions.
     if let Some(parent) = path.parent() {
@@ -1830,8 +1838,14 @@ pub async fn run_daemon() -> Result<()> {
         kb.prune();
         kb.sync();
     }
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(pid_path());
+    // Clean up only while WE still own the socket + pidfile. If a newer
+    // daemon has taken over (this one is a "ghost"), unlinking would
+    // delete the LIVE daemon's files and orphan it in turn — the
+    // self-perpetuating ghost cycle. Ownership test: the pidfile says us.
+    if read_pid_file() == Some(std::process::id() as i32) {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(pid_path());
+    }
     eprintln!("[bladebro] daemon stopped");
     Ok(())
 }
@@ -2019,6 +2033,11 @@ COMMANDS
   run '<json-steps>'              batch with if/while branching + inline see reads
   vision [--marks]                screenshot (saved to a file; path printed)
   daemon | stop                   manage the persistent Chrome session
+  mcp                             MCP server on stdio — add to your agent's client config
+  audit                           stealth audit — 36-vector suite + boot self-check
+  update | -u [--check] [--force]  self-update; --rollback restores the previous binary
+  doctor | -doc                   system diagnostics (13 checks)
+  -v | --version                  version + install method + update status
   help [command]                  this manual; 'help --json' for the machine version
 
 QUICK START
@@ -2057,10 +2076,23 @@ tool schemas (same as MCP tools/list), per-command usage, exit codes, payload
 conventions, and examples. Fetch it once, then drive the CLI with --json.
 "#;
 
+/// Canonical command name: resolve aliases to what the user actually types
+/// on the CLI, so every help surface accepts the same spellings.
+fn normalize_cmd(cmd: &str) -> &str {
+    match cmd {
+        "navigate" => "nav",
+        "-u" => "update",
+        "-doc" => "doctor",
+        "--rollback" => "rollback",
+        "-v" | "--version" => "version",
+        _ => cmd,
+    }
+}
+
 /// Per-command machine help (`help <cmd> --json` and the `commands` map in
 /// the full JSON manual).
 fn command_help_json(cmd: &str) -> Option<Value> {
-    let cmd = if cmd == "navigate" { "nav" } else { cmd };
+    let cmd = normalize_cmd(cmd);
     let v = match cmd {
         "nav" => json!({
             "usage": "bladebro nav <url> [--block <classes>]",
@@ -2196,6 +2228,53 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             "examples": ["bladebro help --json", "bladebro help act"],
             "notes": ["the single self-teaching surface — fetch 'help --json' once"]
         }),
+        "mcp" => json!({
+            "usage": "bladebro mcp",
+            "tool": null,
+            "examples": ["bladebro mcp"],
+            "notes": [
+                "MCP server on stdio — the integration surface for AI agents (Claude, Cursor, opencode, pi)",
+                "client config: {\"command\":\"bladebro\",\"args\":[\"mcp\"]}",
+                "Unix defaults to the zero-port pipe transport; BLADE_TRANSPORT=ws forces WebSocket"
+            ]
+        }),
+        "audit" => json!({
+            "usage": "bladebro audit",
+            "tool": null,
+            "examples": ["bladebro audit"],
+            "notes": ["stealth audit — 36-vector local suite + boot self-check scorecard; 36/36 is the bar"]
+        }),
+        "update" => json!({
+            "usage": "bladebro update | -u [--check] [--force]",
+            "tool": null,
+            "flags": {
+                "--check / -c": "dry run — check only",
+                "--force / -f": "reinstall even at the same version"
+            },
+            "examples": ["bladebro -u --check", "bladebro -u"],
+            "notes": [
+                "download → verify → back up → swap, from GitHub releases",
+                "npm installs are detected and redirected to `npm update -g bladebro` (override: --force)"
+            ]
+        }),
+        "doctor" => json!({
+            "usage": "bladebro doctor | -doc",
+            "tool": null,
+            "examples": ["bladebro doctor"],
+            "notes": ["13 system checks: data root, Chrome, Xvfb, profile, logins, hygiene, locks, network, binary, disk, version"]
+        }),
+        "rollback" => json!({
+            "usage": "bladebro --rollback",
+            "tool": null,
+            "examples": ["bladebro --rollback"],
+            "notes": ["restores the previous binary from <data dir>/backups (written by every self-update)"]
+        }),
+        "version" => json!({
+            "usage": "bladebro -v | --version",
+            "tool": null,
+            "examples": ["bladebro -v"],
+            "notes": ["version + install method + update status (behind / on latest / ahead — never a false 'up to date')"]
+        }),
         _ => return None,
     };
     Some(v)
@@ -2241,7 +2320,10 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
     }
 
     let mut commands = serde_json::Map::new();
-    for c in ["nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help"] {
+    for c in [
+        "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help",
+        "mcp", "audit", "update", "doctor", "rollback", "version",
+    ] {
         if let Some(d) = command_help_json(c) {
             commands.insert(c.to_string(), d);
         }
@@ -2289,7 +2371,7 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
 
 /// Detailed per-command human help (`help <cmd>`, `<cmd> --help`).
 pub fn command_help_text(cmd: &str) -> Option<String> {
-    let cmd = if cmd == "navigate" { "nav" } else { cmd };
+    let cmd = normalize_cmd(cmd);
     let text = match cmd {
         "nav" => r#"bladebro nav — navigate
 
@@ -2475,6 +2557,67 @@ USAGE
                              payload conventions, examples — call ONCE and
                              you know the whole CLI
   bladebro help <cmd> --json per-command machine help
+"#,
+        "mcp" => r#"bladebro mcp — MCP server (stdio JSON-RPC)
+
+USAGE
+  bladebro mcp
+
+The integration surface for AI agents. Client config:
+
+  {"mcpServers": {"bladebro": {"command": "bladebro", "args": ["mcp"]}}}
+
+Speaks MCP 2024-11-05 through 2026-07-28 (legacy initialize handshake +
+the 2026-07-28 stateless dialect). Unix defaults to the zero-port pipe
+transport (no scannable debugging port); BLADE_TRANSPORT=ws forces
+WebSocket. Chrome launches lazily on the first tool call.
+"#,
+        "audit" => r#"bladebro audit — stealth audit
+
+USAGE
+  bladebro audit
+
+Runs the 36-vector local suite (tests/vectors.html) plus a boot
+self-check (webdriver, cdc_, plugins, toString integrity) and prints a
+scorecard. Run it after any stealth-affecting change; 36/36 is the bar.
+"#,
+        "update" => r#"bladebro -u / update — self-update
+
+USAGE
+  bladebro -u [--check | -c] [--force | -f]
+
+Download → verify (magic + size + executes) → back up → swap, from
+GitHub releases. --check is a dry run; --force reinstalls the current
+version. npm installs are detected (path contains node_modules) and
+redirected to `npm update -g bladebro`; --force overrides. After an
+update: restart your MCP client. Regret it: bladebro --rollback.
+"#,
+        "doctor" => r#"bladebro doctor / -doc — system diagnostics
+
+USAGE
+  bladebro doctor
+
+13 checks: data directory, Chrome (+version), Xvfb, profile dir, login
+persistence, profile hygiene, stale locks, GitHub reachability, binary
+integrity, disk space, version-vs-latest. Failures print a fix.
+"#,
+        "rollback" => r#"bladebro --rollback — restore the previous binary
+
+USAGE
+  bladebro --rollback
+
+Restores the most recent backup from <data dir>/backups (written by every
+self-update). The backup is verified as a valid binary first — a corrupted
+newest backup falls through to the next one.
+"#,
+        "version" => r#"bladebro -v / --version — version + update status
+
+USAGE
+  bladebro -v
+
+Version + build id, install method (npm / source / binary) and update
+state: behind (with the hint), on the latest release, or ahead of it
+(dev builds). Never a misleading "up to date" when the check failed.
 "#,
         _ => return None,
     };
@@ -2875,6 +3018,8 @@ mod tests {
         assert_eq!(v["tools"].as_array().unwrap().len(), 5);
         assert!(v["commands"]["act"]["usage"].as_str().is_some());
         assert!(v["commands"]["nav"].is_object());
+        assert!(v["commands"]["mcp"].is_object(), "help --json must cover mcp");
+        assert!(v["commands"]["doctor"].is_object());
         assert!(v["exit_codes"]["2"].as_str().unwrap().contains("usage"));
         assert!(v["output"]["payloads"]["@file"].as_str().is_some());
 
@@ -2887,12 +3032,19 @@ mod tests {
 
     #[test]
     fn every_command_has_help_text_and_json() {
-        for c in ["nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help"] {
+        for c in [
+            "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help",
+            "mcp", "audit", "update", "doctor", "rollback", "version",
+        ] {
             let text = command_help_text(c).unwrap_or_else(|| panic!("{c} human help"));
             assert!(text.contains("USAGE"), "{c} help lacks USAGE");
             let j = command_help_json(c).unwrap_or_else(|| panic!("{c} json help"));
             assert!(j["usage"].as_str().is_some(), "{c} json lacks usage");
         }
+        // Aliases resolve to the canonical command (v3.9.10: `help mcp` etc. work).
+        assert!(command_help_text("-u").is_some() && command_help_text("-doc").is_some());
+        assert!(command_help_text("--version").is_some() && command_help_text("--rollback").is_some());
+        assert!(command_help_json("-u").is_some() && command_help_json("-v").is_some());
         assert!(command_help_text("bogus").is_none());
         assert!(command_help_json("bogus").is_none());
     }

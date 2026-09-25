@@ -71,6 +71,7 @@ fn run() -> Result<()> {
     let mut host_given = false;
     let mut port_given = false;
     let mut cmd: Option<String> = None;
+    let mut help_flag = false;
     let mut positional: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -90,8 +91,7 @@ fn run() -> Result<()> {
                 port_given = true;
             }
             "-h" | "--help" => {
-                print!("{}", bladebro::cli::help_text());
-                return Ok(());
+                help_flag = true;
             }
             "-u" | "-doc" | "-v" | "--version" | "--rollback" if cmd.is_none() => {
                 cmd = Some(args[i].clone());
@@ -104,6 +104,27 @@ fn run() -> Result<()> {
         i += 1;
     }
     let cmd = cmd.unwrap_or_else(|| "help".to_string());
+
+    // Restore the default SIGPIPE for CLI-output commands so an early pipe
+    // reader (`bladebro ... | head -1`) exits quietly instead of panicking —
+    // Rust std ignores SIGPIPE, which turns EPIPE into a println! panic.
+    // NOT for `daemon`/`mcp`: they must survive client disconnects (their
+    // teardown still runs and their socket writes handle EPIPE as an error).
+    #[cfg(unix)]
+    {
+        let effective = if help_flag { "help" } else { cmd.as_str() };
+        if effective != "daemon" && effective != "mcp" {
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+        }
+    }
+
+    if help_flag {
+        print!("{}", bladebro::cli::help_text());
+        return Ok(());
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

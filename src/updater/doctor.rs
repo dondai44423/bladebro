@@ -711,7 +711,7 @@ fn find_chrome_path() -> Option<String> {
 
 fn chrome_install_hint() -> String {
     if cfg!(target_os = "linux") {
-        "Install: sudo pacman -S chromium (Arch) / sudo apt install chromium-browser (Debian) / brew install chromium (Nix)".into()
+        "Install: sudo pacman -S chromium (Arch) / sudo apt install chromium-browser (Debian) / nix-shell -p chromium (Nix)".into()
     } else if cfg!(target_os = "macos") {
         "Install: brew install --cask google-chrome".into()
     } else if cfg!(windows) {
