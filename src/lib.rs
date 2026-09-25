@@ -27,6 +27,7 @@ pub mod updater;
 pub mod artifacts;
 pub mod knowledge;
 pub mod reddit;
+pub mod x;
 pub mod cli;
 
 pub use error::{BladeError, Result};

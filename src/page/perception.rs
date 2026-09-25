@@ -302,7 +302,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "const _cust=(n.type||'')+','+(n.name||'')+','+(n.getAttribute('data-testid')||'');"
         + "const _fp=fnv(nc(n)+','+n.tagName.toLowerCase()+','+_kids+'|'+_cust);"
         + "out.push({tag:n.tagName.toLowerCase(),role:r,name:nm,type:n.type||null,"
-        + "value:n.value&&n.value.length<=200?n.value:null,"
+        + "value:n.isContentEditable?((n.innerText||n.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200)||null):(n.value&&n.value.length<=200?n.value:null),"
         + "disabled:!!n.disabled,"
         + "checked:(r==='checkbox'||r==='radio')?!!n.checked:null,"
         + "href:n.href||null,placeholder:n.placeholder||null,"
@@ -425,7 +425,12 @@ pub async fn wait_for_settle_with_network(
         // deadline. Fast by default; agents needing full network quiet
         // can `act wait condition=network` explicitly.
         const GRACE: Duration = Duration::from_millis(280);
-        let hard_deadline = tokio::time::Instant::now() + timeout;
+        // The drain is a SHORT confirmation window, not a second full
+        // settle: on chirpy sites (x.com keeps ~14 requests in flight)
+        // trickle completions keep resetting the grace timer, which used
+        // to burn the whole learned cap here — on top of the DOM-quiet wait.
+        const DRAIN_MAX: Duration = Duration::from_millis(800);
+        let hard_deadline = tokio::time::Instant::now() + timeout.min(DRAIN_MAX);
         let mut lowest = counter.load(Ordering::Relaxed);
         let mut last_new_low = tokio::time::Instant::now();
         loop {
@@ -448,6 +453,39 @@ pub async fn wait_for_settle_with_network(
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     }
+    Ok(())
+}
+
+/// Bounded post-drain re-quiet for NAVIGATIONS: the drain window can run
+/// while a late fetch is still in flight, and the response then mounts a
+/// moment later (the "nav returned an empty shell" class). Resolves after
+/// ~110ms of DOM quiet; extends (bounded ≤700ms) while a mount is in
+/// progress. Nav-only — interaction settles stay snappy.
+pub async fn re_settle(cdp: &CdpSession) -> Result<()> {
+    const CAP_MS: u64 = 700;
+    let expr = format!(
+        "new Promise(function(res){{\
+         var t0=performance.now();var last=t0;var done=false;var mo=null;\
+         try{{mo=new MutationObserver(function(){{last=performance.now();}});\
+         mo.observe(document.documentElement||document,{{childList:true,subtree:true,characterData:true}});}}catch(e){{}}\
+         function fin(v){{if(done)return;done=true;try{{if(mo)mo.disconnect();}}catch(e){{}}res(v);}}\
+         (function tick(){{var now=performance.now();\
+           if((now-last)>=110){{fin('quiet');return;}}\
+           if((now-t0)>={CAP_MS}){{fin('timeout');return;}}\
+           setTimeout(tick,40);}})();\
+         }})"
+    );
+    let _ = cdp
+        .send_with_timeout(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expr,
+                "returnByValue": true,
+                "awaitPromise": true,
+            })),
+            Duration::from_millis(CAP_MS + 3000),
+        )
+        .await;
     Ok(())
 }
 
@@ -701,7 +739,7 @@ pub fn remediation_ladder(block_type: &str) -> Vec<String> {
 /// body-length gate is the strongest discriminator between "the page is a
 /// wall" and "the page discusses walls".
 pub async fn detect_block(cdp: &CdpSession) -> Result<Option<String>> {
-    let expression = r#"(()=>{const d=document;if(!d)return null;const t=(d.title||'').toLowerCase();const raw=(d.body?d.body.innerText||d.body.textContent||'':'');const body=raw.toLowerCase();const bl=body.length;const q=s=>!!d.querySelector(s);
+    let expression = r#"(()=>{const d=document;if(!d)return null;const t=(d.title||'').toLowerCase();const raw=(()=>{if(!d.body)return'';if(d.querySelectorAll('*').length<=1500)return d.body.innerText||d.body.textContent||'';let s='';const w=n=>{if(s.length>1600)return;for(const c of n.childNodes){if(s.length>1600)return;if(c.nodeType===3)s+=c.textContent;else if(c.nodeType===1){const tg=c.tagName;if(tg==='SCRIPT'||tg==='STYLE'||tg==='NOSCRIPT'||tg==='TEMPLATE')continue;if(c.shadowRoot)w(c.shadowRoot);w(c);}}};w(d.body);return s;})();const body=raw.toLowerCase();const bl=body.length;const q=s=>!!d.querySelector(s);
 // Cloudflare interstitial: the title is the strongest signal. A bare
 // turnstile/challenge-platform SCRIPT is NOT — sites embed Turnstile
 // widgets in ordinary forms. Only call it a block when the title matches

@@ -623,16 +623,12 @@ fn no_effect_verdict(tried: &[&str], target_meta: &str) -> String {
     }
 }
 
-/// Inject the find-by-sig script: re-locates the element by its signature in
-/// the live DOM and either returns its box (mode "box") or performs an in-page
-/// action (mode "focus", "clear", "select").
-async fn find_by_sig(
-    cdp: &CdpSession,
-    sig: &str,
-    frame: &[usize],
-    mode: &str,
-    text: Option<&str>,
-) -> Result<FoundElement> {
+/// Build the find-by-sig page script: re-locates an element by signature in
+/// the live DOM and returns its box (`box`), performs an in-page action
+/// (`prepare`/`focus`/`clear`/`type`/`select`/`click`), or reads it
+/// (`check`/`read`/`hover`). Separate from `find_by_sig` so tests can
+/// syntax-check it without a live browser.
+fn find_sig_expr(sig: &str, mode: &str, text: Option<&str>, frame: &[usize]) -> Result<String> {
     let sig_js = serde_json::to_string(sig)?;
     let mode_js = serde_json::to_string(mode)?;
     let text_js = match text {
@@ -640,9 +636,7 @@ async fn find_by_sig(
         None => "null".to_string(),
     };
     let frame_js = serde_json::to_string(frame)?;
-
-    let expression = "((sig,mode,text,frame)=>{"
-        .to_string()
+    Ok("((sig,mode,text,frame)=>{".to_string()
         + "const d=document;if(!d||!d.body)return null;"
         + &JS_PREAMBLE
         + "let doc=d;let ox=0,oy=0;"
@@ -652,10 +646,6 @@ async fn find_by_sig(
         + "try{doc=f.contentDocument;if(!doc)return{ok:false,reason:'frame inaccessible'};}catch(e){return{ok:false,reason:'cross-origin'};}"
         + "const ir=f.getBoundingClientRect();ox+=ir.x;oy+=ir.y;}"
         + "const all=deepAll(doc,sel);"
-        // Sig = framePath | role | shortName | rank, rank counted over ALL
-        // matches (vis-failing included, role-hidden excluded) — identical to
-        // the capture script (V25c). vis() is checked only on the matched
-        // element, never for ranking, so ranks stay aligned with capture.
         + "const fps=frame.join(',');const counts={};"
         + "for(let i=0;i<all.length;i++){const n=all[i];"
         + "const r=role(n);if(r==='hidden')continue;"
@@ -669,22 +659,25 @@ async fn find_by_sig(
         + "const top=doc.elementFromPoint(cx,cy);"
         + "const isTopmost=top===n||n.contains(top);"
         + "var tgt=n;if(n.getAttribute&&n.getAttribute('role')==='combobox'&&n.tagName!=='SELECT'){var ii=n.querySelector('textarea,input:not([type=hidden])');if(ii)tgt=ii;}"
+        // Contenteditable handling: rich editors (x.com composer, Slack, …)
+        // are contenteditable DIVs — the input value-setter hack throws
+        // Illegal invocation on them and `.value` reads nothing.
+        + "var _ced=function(e){return !!(e&&(e.isContentEditable||(e.getAttribute&&e.getAttribute('contenteditable')==='true')));};"
+        + "var _clr=function(e){try{var _s=window.getSelection();_s.selectAllChildren(e);document.execCommand('delete',false);}catch(_e){}e.dispatchEvent(new Event('input',{bubbles:true}));};"
         + "if(mode==='box'){"
         + "function _lnb(e){return !!(e&&e.tagName&&(e.tagName==='BUTTON'||e.tagName==='A'||e.tagName==='SELECT'||e.tagName==='TEXTAREA'||(e.tagName==='INPUT'&&e.type!=='hidden'))&&(e.tagName!=='A'||!!e.href));}"
         + "function _lbx(e){var _lr=e.getBoundingClientRect();return [Math.round(_lr.x+ox)||0,Math.round(_lr.y+oy)||0,Math.round(_lr.width)||0,Math.round(_lr.height)||0];}"
         + LEAF_TARGET_JS
         + "var _lcbx=_lClick[0]+_lClick[2]/2,_lcby=_lClick[1]+_lClick[3]/2;var _lfc=doc.elementFromPoint(_lcbx-ox,_lcby-oy);"
         + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:(_lfc===n||(n.contains?n.contains(_lfc):false)),hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']')};}"
-        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled};}"
+        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}else if(_ced(tgt)){_clr(tgt);}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled};}"
         + "if(mode==='focus'){tgt.focus();return{ok:true};}"
-        + "if(mode==='clear'){if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}return{ok:true};}"
+        + "if(mode==='clear'){if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}else if(_ced(tgt)){_clr(tgt);}return{ok:true};}"
         + "if(mode==='click'){n.click();return{ok:true};}"
-        + "if(mode==='check'){return{ok:true,text:tgt.value||''};}"
-        + "if(mode==='type'){tgt.focus();var proto=tgt.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var setter=Object.getOwnPropertyDescriptor(proto,'value').set;if(setter){setter.call(tgt,"
+        + "if(mode==='check'){var _cv=('value' in tgt&&typeof tgt.value==='string')?tgt.value:((tgt.innerText||tgt.textContent||'').replace(/\\s+/g,' ').trim());return{ok:true,text:_cv};}"
+        + "if(mode==='type'){tgt.focus();var _tx="
         + &text_js
-        + ");}else{tgt.value="
-        + &text_js
-        + ";}tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true};}"
+        + ";if(_ced(tgt)){var _ok=false;try{var _s2=window.getSelection();_s2.selectAllChildren(tgt);_ok=document.execCommand('insertText',false,_tx);}catch(_e){_ok=false;}if(!_ok){tgt.textContent=_tx;tgt.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:_tx}));}return{ok:true};}var proto=tgt.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var setter=Object.getOwnPropertyDescriptor(proto,'value').set;if(setter&&('value' in tgt)){setter.call(tgt,_tx);}else{tgt.value=_tx;}tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true};}"
         + "if(mode==='select'){"
         + "if(n.tagName==='SELECT'){"
         + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
@@ -703,7 +696,20 @@ async fn find_by_sig(
         + &text_js
         + ","
         + &frame_js
-        + ")";
+        + ")")
+}
+
+/// Inject the find-by-sig script: re-locates the element by its signature in
+/// the live DOM and either returns its box (mode "box") or performs an in-page
+/// action (mode "focus", "clear", "select").
+async fn find_by_sig(
+    cdp: &CdpSession,
+    sig: &str,
+    frame: &[usize],
+    mode: &str,
+    text: Option<&str>,
+) -> Result<FoundElement> {
+    let expression = find_sig_expr(sig, mode, text, frame)?;
 
     let res = cdp
         .send(
@@ -1671,5 +1677,49 @@ mod action_tests {
         assert!(!super::absence_confirmed(&mut since, Some(&counter)), "busy page never confirms");
         counter.store(0, Ordering::Relaxed);
         assert!(super::absence_confirmed(&mut since, Some(&counter)), "quiet + past window confirms");
+    }
+
+    // The find-by-sig script is built at runtime; a syntax error in it
+    // disables every ref-targeted action at once. `node --check` guards it,
+    // following the perception.rs script-check pattern (skips without node).
+    #[test]
+    fn find_sig_script_is_valid_js() {
+        let has_node = std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !has_node {
+            eprintln!("node not available — skipping find-sig syntax check");
+            return;
+        }
+        for (mode, text) in [
+            ("box", None),
+            ("prepare", None),
+            ("check", None),
+            ("type", Some("hello 'quoted' text")),
+            ("clear", None),
+            ("select", Some("opt")),
+            ("read", None),
+            ("hover", None),
+        ] {
+            let js = super::find_sig_expr("0|textbox|Post text|1", mode, text, &[0])
+                .expect("find-sig expr builds");
+            let path = std::env::temp_dir().join(format!("bladebro-findsig-{mode}.js"));
+            std::fs::write(&path, &js).expect("write js fixture");
+            let out = std::process::Command::new("node")
+                .arg("--check")
+                .arg(&path)
+                .output()
+                .expect("run node --check");
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                out.status.success(),
+                "find-sig ({mode}) has a JS syntax error:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }

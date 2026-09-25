@@ -8,6 +8,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **X.com (Twitter) adapter: `see extract=auto` returns complete threads and
+  timelines in ONE call.** Status pages come back as the full conversation — the
+  focal post plus every reply and nested reply the ranking returns,
+  cursor-paginated while the timeline is not exhausted, thread-ordered with
+  depth, author, name, date, full text (note-tweets included), reply/repost/
+  like/view counts, media, an `op` flag on the author's own thread, and honest
+  `count`/`total`/`complete` fields. Profile, search and home pages return
+  their timeline the same way. The adapter reads the page's OWN API traffic
+  (the graphql calls the app already makes carry the query id, feature flags
+  and auth headers) and replays them from page context — query ids are
+  captured from live traffic, never hard-coded, so it self-heals across app
+  deploys. When a replay is rejected (X gates some ops behind single-use
+  `x-client-transaction-id` headers — search), the adapter falls back to a
+  bounded in-page scroll-collect of the rendered timeline: slower, still one
+  call, honest note. Promoted tweets are filtered; reply trees include nested
+  replies with computed depth. Pure optimization: zero new tools, zero new
+  params — `extract=auto` only.
+- Page-network introspection: an XHR/fetch ring (last 128 distinct endpoints,
+  full URLs, captured auth headers) backs the adapters; media-pipeline segments
+  (MSE blobs, HLS/DASH chunks, `blob:`/`data:` URLs) are filtered so playback
+  churn can never evict API traffic.
+- X.com transient render failures ("Something went wrong. Try reloading.")
+  get one bounded reload before extraction.
+- Bounded post-navigation re-quiet: SPAs that mount content after network
+  quiet no longer return empty shells; the re-check resolves in ~110ms on
+  pages with content and is nav-only (interactions stay snappy).
+
+### Changed
+- Navigation settle: the network drain is a short confirmation window
+  (bounded 800ms) instead of a second full settle cap; chirpy sites (x.com
+  keeps ~14 requests in flight) no longer burn multi-second waits — measured
+  x.com navs 5.8–7.1s → 2.4–3.6s, profile −60%, quiet pages unchanged
+  (example.com 0.6s, reddit/github in the same band).
+- Block detection reads a bounded text sample on huge DOMs (was a full-body
+  `innerText` read — ~1.4s on heavy SPAs).
+- CLI vs MCP parity verified by measurement — same ops, same handlers, same
+  latency (nav 0.63s both, `see` 5–7ms both; payload delta is the JSON
+  envelope). `help --json` is generated from the same tool definitions the
+  MCP server serves (single source, cannot drift).
+
+### Fixed
+- **Typing into contenteditable rich editors (x.com composer, Lexical-based
+  editors) no longer fails with `Illegal invocation`** — the JS fallback
+  applies the native value-setter only to real inputs; contenteditables use
+  selection + `execCommand('insertText')` with an InputEvent fallback.
+- `act clear` on contenteditable elements now actually clears (was a silent
+  no-op); the focus-clear (`prepare`) path does too.
+- Page capture records contenteditable text, so `act type` reports the value
+  read-back (`outcome: typed → value="…"`) instead of "value empty".
+
 ## [3.9.8] - 2026-09-24
 
 ### Added

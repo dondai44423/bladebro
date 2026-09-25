@@ -12,7 +12,7 @@ pub mod refs;
 use std::time::Duration;
 
 pub use model::{LivePageModel, PageDelta, PageElement};
-pub use perception::{capture, capture_content, dismiss_consent, dismiss_consent_with_stored, detect_block, wait_for_load, wait_for_settle, wait_for_settle_with_network, PageCapture, RawElement};
+pub use perception::{capture, capture_content, dismiss_consent, dismiss_consent_with_stored, detect_block, re_settle, wait_for_load, wait_for_settle, wait_for_settle_with_network, PageCapture, RawElement};
 pub use refs::{RefEntry, StateChange, StateProbe};
 
 use std::sync::{Arc, Mutex};
@@ -70,6 +70,47 @@ pub struct NetEntry {
     pub error: Option<String>,
 }
 
+/// An XHR/fetch request observed at START by the tracker (introspection).
+/// Unlike `NetEntry` (pushed on completion), entries appear while still in
+/// flight, and the URL is kept in FULL: API URLs carry their query state
+/// (graphql operations, cursors, tokens) and truncation would defeat the
+/// purpose. Small ring (128) — a working window, not a ledger.
+#[derive(Debug, Clone)]
+pub struct XhrEntry {
+    pub id: String,
+    pub method: String,
+    pub url: String,
+    /// HTTP status; 0 while in flight or on failure.
+    pub status: i64,
+    /// True once loading finished or failed (status/error meaningful).
+    pub done: bool,
+    /// Failure reason if the request failed.
+    pub error: Option<String>,
+    /// Auth/content header subset (`authorization`, `x-csrf-token`,
+    /// `x-twitter-*`, `content-type`) — replayed verbatim by adapters.
+    pub headers: Vec<(String, String)>,
+}
+
+/// Dedup key for the XHR ring: origin+path, query stripped. Repeats of the
+/// same endpoint (telemetry beacons, polling) collapse into one entry so
+/// the endpoints that matter are never evicted by noise.
+fn xhr_key(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or("")
+}
+
+/// Media/opaque noise for the introspection ring: MSE/blob playback
+/// segments (each retry mints a fresh UUID — they flooded the ring and
+/// evicted API entries), data: URLs, and HLS/DASH chunk extensions.
+fn is_media_url(url: &str) -> bool {
+    if url.starts_with("blob:") || url.starts_with("data:") {
+        return true;
+    }
+    let pl = url.split('?').next().unwrap_or("").to_ascii_lowercase();
+    [".m4s", ".m4a", ".mp4", ".m4v", ".mpd", ".webm", ".vtt", ".ts"]
+        .iter()
+        .any(|e| pl.ends_with(e))
+}
+
 ///
 /// Also owns a background dialog-handler task that auto-dismisses
 /// alert()/confirm()/prompt() dialogs so the page never deadlocks.
@@ -89,6 +130,10 @@ pub struct Page {
     in_flight: Arc<AtomicUsize>,
     /// Ring buffer of the last 50 completed/failed requests (V8).
     net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>>,
+    /// Ring of the last 128 XHR/fetch requests (start-observed, full URLs) —
+    /// API introspection used by site fast paths to read the page's own API
+    /// calls (query ids, cursors) and replay them.
+    xhr_log: Arc<Mutex<std::collections::VecDeque<XhrEntry>>>,
     /// Handle to the network-tracker background task. Aborted on Drop.
     network_task: Option<tokio::task::JoinHandle<()>>,
     /// Ambient events (consent dismissed, block detected) for the agent.
@@ -474,9 +519,12 @@ impl Page {
         let in_flight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let xhr_log: Arc<Mutex<std::collections::VecDeque<XhrEntry>>> =
+            Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let cdp_for_net = cdp.clone();
         let net_counter = in_flight.clone();
         let net_log_t = net_log.clone();
+        let xhr_log_t = xhr_log.clone();
         let network_task = tokio::spawn(async move {
             use std::collections::HashMap;
             let mut rx = cdp_for_net.subscribe();
@@ -511,6 +559,52 @@ impl Page {
                             let req = ev.params.get("request");
                             let method = req.and_then(|r| r.get("method")).and_then(|m| m.as_str()).unwrap_or("GET").to_string();
                             let url = req.and_then(|r| r.get("url")).and_then(|u| u.as_str()).unwrap_or("").to_string();
+                            if (ty == "XHR" || ty == "Fetch") && !url.is_empty() && !is_media_url(&url) {
+                                if url.contains("/i/api/graphql/") {
+                                    tracing::debug!("xhr gql: {} {}", method, url);
+                                }
+                                let mut hdrs: Vec<(String, String)> = Vec::new();
+                                if let Some(h) = req.and_then(|r| r.get("headers")).and_then(|h| h.as_object()) {
+                                    for (k, v) in h {
+                                        let kl = k.to_ascii_lowercase();
+                                        // Keep every header except transport noise the
+                                        // browser regenerates itself (cookie, UA,
+                                        // encodings, sizes, sec-*). X validates per-request
+                                        // client headers on some ops (search) but not
+                                        // others — a partial copy silently 404s replays.
+                                        if kl != "cookie"
+                                            && kl != "host"
+                                            && kl != "content-length"
+                                            && kl != "accept-encoding"
+                                            && kl != "connection"
+                                            && kl != "user-agent"
+                                            && !kl.starts_with("sec-")
+                                        {
+                                            if let Some(s) = v.as_str() {
+                                                hdrs.push((k.clone(), s.to_string()));
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Ok(mut log) = xhr_log_t.lock() {
+                                    let key = xhr_key(&url);
+                                    if let Some(pos) = log.iter().position(|e| xhr_key(&e.url) == key) {
+                                        log.remove(pos);
+                                    }
+                                    log.push_back(XhrEntry {
+                                        id: id.to_string(),
+                                        method: method.clone(),
+                                        url: url.clone(),
+                                        status: 0,
+                                        done: false,
+                                        error: None,
+                                        headers: hdrs,
+                                    });
+                                    if log.len() > 128 {
+                                        log.pop_front();
+                                    }
+                                }
+                            }
                             pending.insert(id.to_string(), (method, url, 0));
                         }
                     }
@@ -523,6 +617,13 @@ impl Page {
                         if let Some(entry) = pending.get_mut(id) {
                             entry.2 = status;
                         }
+                        if status > 0 {
+                            if let Ok(mut log) = xhr_log_t.lock() {
+                                if let Some(e) = log.iter_mut().rev().find(|e| e.id == id) {
+                                    e.status = status;
+                                }
+                            }
+                        }
                     }
                     Some(Ok(ev)) if ev.method == "Network.loadingFinished"
                         || ev.method == "Network.loadingFailed" =>
@@ -530,6 +631,26 @@ impl Page {
                         let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
                         if !id.is_empty() {
                             open.remove(id);
+                                if let Ok(mut log) = xhr_log_t.lock() {
+                                if let Some(e) = log.iter_mut().rev().find(|e| e.id == id) {
+                                    e.done = true;
+                                    if ev.method == "Network.loadingFailed" {
+                                        e.error = Some(ev.params.get("errorText")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("failed")
+                                            .to_string());
+                                    }
+                                    if e.url.contains("/i/api/graphql/") {
+                                        let st = e.error.clone().unwrap_or_else(|| e.status.to_string());
+                                        tracing::debug!(
+                                            "xhr gql done: {} {} -> {}",
+                                            e.method,
+                                            e.url.split('?').next().unwrap_or("").replace("https://x.com", ""),
+                                            st
+                                        );
+                                    }
+                                }
+                            }
                             if let Some((method, url, status)) = pending.remove(id) {
                                 let error = if ev.method == "Network.loadingFailed" {
                                     Some(ev.params.get("errorText")
@@ -621,6 +742,7 @@ impl Page {
             dialog_task: Some(dialog_task),
             in_flight,
             net_log,
+            xhr_log,
             network_task: Some(network_task),
             ambient,
             base: base.to_string(),
@@ -1275,6 +1397,14 @@ impl Page {
             .unwrap_or_default()
     }
 
+    /// Recent XHR/fetch requests (last 24, start-observed, full URLs).
+    pub fn xhr_log(&self) -> Vec<XhrEntry> {
+        self.xhr_log
+            .lock()
+            .map(|l| l.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// V8: read the console log captured by the injection hook.
     /// Returns raw JSON (array of {l, m, t}). The ring buffer lives under
     /// the same Symbol.for('q') slot the injection script defines — a
@@ -1358,6 +1488,10 @@ impl Page {
         _t("load");
         let _settle_t = std::time::Instant::now();
         wait_for_settle_with_network(&self.cdp, Duration::from_millis(settle_cap), Some(&self.in_flight)).await?;
+        // Bounded post-drain re-quiet: a late fetch resolving after the
+        // network plateau mounts its content a moment later; this catches
+        // that mount without taxing interactions (nav-only).
+        let _ = re_settle(&self.cdp).await;
         _t("settle");
         // Knowledge: learn this domain's real settle duration (only when it
         // finished early — a cap timeout is not a settle sample).
@@ -1419,6 +1553,7 @@ impl Page {
                     wait_for_settle_with_network(
                         &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
                     ).await?;
+                    let _ = re_settle(&self.cdp).await;
                     None // clear block — was a JS challenge, not a real block
                 } else {
                     blocked

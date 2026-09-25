@@ -2042,6 +2042,18 @@ const SKIP_TAGS=new Set(['STYLE','SCRIPT','HEAD','NOSCRIPT','SVG','TEMPLATE','LI
  if(items.length>0)return JSON.stringify({container:'reddit-feed',count:items.length,items});
  }
  }
+ const IS_X=HOST==='x.com'||HOST==='twitter.com';
+ // X: hand off to the Rust graphql fast path (x.rs) — the virtualized DOM
+ // only holds a few mounted cells; the page's own API traffic is complete.
+ if(__POST_MARKER__&&IS_X){
+ const p=location.pathname.split('/').filter(Boolean);
+ let xkind='other';
+ if(p.indexOf('status')>=0)xkind='status';
+ else if(location.pathname.startsWith('/search'))xkind='search';
+ else if(location.pathname==='/home')xkind='home';
+ else if(p.length===1)xkind='profile';
+ return JSON.stringify({container:'x-page',kind:xkind});
+ }
  if(IS_GITHUB){
  const tl=[...document.querySelectorAll('a[data-testid="issue-pr-title-link"]')];
  if(tl.length>=3){
@@ -2206,6 +2218,35 @@ pub async fn handle_auto_extract(page: &mut Page, limit: usize, limit_explicit: 
                     ));
                     return Ok(out);
                 }
+            }
+        }
+    }
+
+    // X.COM pages: the marker hands off to the graphql fast path — the
+    // page's own API traffic is replayed from page context, so the result
+    // is complete regardless of what the virtualized DOM has mounted.
+    if val.get("container").and_then(|c| c.as_str()) == Some("x-page") {
+        let kind = val.get("kind").and_then(|k| k.as_str()).unwrap_or("other");
+        let cap = if limit_explicit {
+            limit.clamp(1, crate::x::MAX_ITEM_CAP)
+        } else {
+            crate::x::DEFAULT_ITEM_CAP
+        };
+        match crate::x::extract(page, kind, cap).await {
+            Ok(payload) => {
+                let json_str = serde_json::to_string(&payload)?;
+                return auto_extract_output(&json_str);
+            }
+            Err(e) => {
+                // Capture/fetch failed (no API traffic seen, exotic page):
+                // fall back to the DOM listing and say so.
+                let val = run_auto_extract(page, limit, false).await?;
+                let json_str = serde_json::to_string(&val)?;
+                let mut out = auto_extract_output(&json_str)?;
+                out.push_str(&format!(
+                    "\nnote: x.com fast path failed ({e}); items above are a DOM fallback"
+                ));
+                return Ok(out);
             }
         }
     }
