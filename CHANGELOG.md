@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.11] - 2026-09-25
+
 ### Fixed
 - **Reddit: the network-security block and the page-load JS challenge are now
   handled end to end — `extract auto` and navigations stop tripping them.**
