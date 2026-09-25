@@ -12,13 +12,19 @@ One MCP server · one CLI · one persistent page model · no Node.js · one bina
 npm install -g bladebro && bladebro mcp
 ```
 
-[Install](#-install) · [The 5 tools](#-the-5-tools) · [Usage](#-usage) · [Stealth Bench V1](#-stealth-bench-v1) · [Stealth](#-stealth) · [Adapters](#-site-adapters) · [Comparison](#-comparison) · [Gotchas & limits](#-gotchas--limits)
+[Demo](#-demo) · [Install](#-install) · [The 5 tools](#-the-5-tools) · [Usage](#-usage) · [Stealth Bench V1](#-stealth-bench-v1) · [Stealth](#-stealth) · [Adapters](#-site-adapters) · [Comparison](#-comparison) · [Gotchas & limits](#-gotchas--limits)
 
 </div>
 
 ---
 
 **Bladebro is an agentic browser driver** — it gives an AI agent full control of a real browser through **5 tools**, not thirty. Built in Rust on a self-built CDP transport: one static binary, no Node.js, no Playwright, no runtime. It holds a persistent **Live Page Model** across tool calls, so every action returns **what changed** — never the whole page again.
+
+## 🎬 Demo
+
+**Bladebro doing real work on two bot-protected sites — Reddit and X.com — in under two minutes.** Real navigation, real actions, real content back: comment trees, threads and timelines as clean structured output.
+
+<https://github.com/user-attachments/assets/f67d80cc-a0ae-447a-8848-e35fce67f378>
 
 ## 🏆 Stealth Bench V1
 
