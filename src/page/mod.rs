@@ -1559,6 +1559,116 @@ impl Page {
                     blocked
                 }
             }
+            Some("js-challenge") => {
+                // Reddit's browser-solvable challenge: a hidden form that
+                // auto-submits `solution=<token><token>` and sets the `loid`
+                // token on the solved response. The page navigates itself in
+                // ~1s; wait bounded for it (URL change or wall gone), then
+                // settle on the real content. No interaction needed.
+                challenge_seen = true;
+                let pre_url = eval_location_href(&self.cdp).await;
+                let mut solved = false;
+                for _ in 0..challenge_polls {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let post_url = eval_location_href(&self.cdp).await;
+                    if post_url != pre_url && !post_url.is_empty() {
+                        solved = true;
+                        break;
+                    }
+                    if detect_block(&self.cdp).await.unwrap_or(None).is_none() {
+                        solved = true;
+                        break;
+                    }
+                }
+                if solved {
+                    wait_for_settle_with_network(
+                        &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
+                    ).await?;
+                    let _ = re_settle(&self.cdp).await;
+                    None // clear block — the challenge solved itself
+                } else {
+                    blocked
+                }
+            }
+            Some("reddit-humanity") => {
+                // Reddit's one-time humanity check (reCAPTCHA v2 checkbox)
+                // for sessions without the `loid` token. One humanized click
+                // on the checkbox passes it; the solve grants `loid` and the
+                // wall does not return for this profile. An image grid (if
+                // Google serves one) is not solvable in-house — report it.
+                challenge_seen = true;
+                match solve_reddit_humanity(&self.cdp).await {
+                    HumanityOutcome::Solved => {
+                        wait_for_settle_with_network(
+                            &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
+                        ).await?;
+                        let _ = re_settle(&self.cdp).await;
+                        if let Ok(mut a) = self.ambient.lock() {
+                            a.push(
+                                "reddit: humanity check solved automatically (one humanized click — grant stored for this profile)".into(),
+                            );
+                        }
+                        None
+                    }
+                    HumanityOutcome::Grid => {
+                        if let Ok(mut a) = self.ambient.lock() {
+                            a.push(
+                                "reddit: the humanity check escalated to an image grid — not solvable automatically; solve it once manually in the browser (the grant then persists for this profile), or retry later".into(),
+                            );
+                        }
+                        blocked
+                    }
+                    HumanityOutcome::Failed => blocked,
+                }
+            }
+            Some("reddit") => {
+                // The network-security wall is a soft, transient flag (its
+                // own 403 carries `retry-after: 0`) — a reload clears it in
+                // most cases. Walk a small jittered reload ladder before
+                // reporting a block; a domain already known Heavy gets one
+                // attempt instead of two.
+                challenge_seen = true;
+                let attempts: u32 = if domain_risk >= crate::knowledge::BotRiskLevel::Heavy {
+                    1
+                } else {
+                    2
+                };
+                let mut cleared = false;
+                for attempt in 0..attempts {
+                    let jitter = 1100
+                        + attempt as u64 * 900
+                        + std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.subsec_millis() as u64)
+                            .unwrap_or(200)
+                            % 350;
+                    tokio::time::sleep(Duration::from_millis(jitter)).await;
+                    let _ = self
+                        .cdp
+                        .send("Page.reload", Some(serde_json::json!({ "ignoreCache": false })))
+                        .await;
+                    let _ = wait_for_load(&self.cdp, Duration::from_secs(10)).await;
+                    let _ = wait_for_settle_with_network(
+                        &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
+                    ).await;
+                    let _ = re_settle(&self.cdp).await;
+                    let now = detect_block(&self.cdp).await.unwrap_or(None);
+                    if !matches!(now.as_deref(), Some("reddit")) {
+                        cleared = true;
+                        break;
+                    }
+                }
+                if cleared {
+                    if let Ok(mut a) = self.ambient.lock() {
+                        a.push(
+                            "reddit: transient network-security wall — auto-cleared on reload".into(),
+                        );
+                    }
+                    None
+                } else {
+                    blocked
+                }
+            }
             other => other.map(String::from),
         };
         // Knowledge: persist what this domain does to us — a real block wall
@@ -1689,6 +1799,119 @@ struct DomainProfile {
 }
 
 /// Extract the registrable domain from a URL for profile lookup.
+/// Reddit's "Prove your humanity" wall is a reCAPTCHA v2 checkbox. One
+/// humanized click on the (cross-origin) anchor iframe passes it — the
+/// solve auto-submits to `?captcha=1` and grants the `loid` token, after
+/// which the wall does not return for that profile.
+///
+/// Outcomes: `Solved` (grant obtained), `Grid` (Google escalated to an
+/// image challenge — not solvable in-house, report honestly), `Failed`
+/// (no widget to click, dispatch error, or no verdict in the window).
+async fn solve_reddit_humanity(cdp: &CdpSession) -> HumanityOutcome {
+    // The widget loads async (recaptcha scripts come from google) — wait
+    // bounded for the anchor iframe to exist at a sane size, then one short
+    // beat so the widget's own JS is listening before the click lands (an
+    // early click is swallowed silently — observed live).
+    let mut point: Option<(f64, f64)> = None;
+    for _ in 0..12 {
+        point = probe_click_point(cdp).await;
+        if point.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    let Some((x, y)) = point else {
+        return HumanityOutcome::Failed;
+    };
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let last_mouse = std::sync::Arc::new(std::sync::Mutex::new(None));
+    if crate::action::dispatch_mouse_click(cdp, x, y, &last_mouse)
+        .await
+        .is_err()
+    {
+        return HumanityOutcome::Failed;
+    }
+    // Poll bounded for the verdict: URL change or a filled token = solved;
+    // a visible b-frame twice in a row = an image grid is showing (bail).
+    // One click only — re-clicking could disturb a slow-but-passing
+    // verification, and a swallowed click is reported honestly instead.
+    let pre_url = eval_location_href(cdp).await;
+    let check = r#"(function(){var t=document.querySelector('#g-recaptcha-response');if(t&&t.value)return 'solved';var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){var s=fs[i].src||'';if(s.indexOf('bframe')>=0){var r=fs[i].getBoundingClientRect();if(r.y>-200&&r.width>0)return 'grid';}}return 'wait';})()"#;
+    let mut grid_seen = 0u32;
+    let mut re_clicks = 0u32;
+    for i in 0..60 {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let post_url = eval_location_href(cdp).await;
+        if post_url != pre_url && !post_url.is_empty() {
+            return HumanityOutcome::Solved;
+        }
+        let state = cdp
+            .send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({ "expression": check, "returnByValue": true })),
+            )
+            .await
+            .ok()
+            .and_then(|r| {
+                r.get("result")
+                    .and_then(|x| x.get("value"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default();
+        if state == "solved" {
+            return HumanityOutcome::Solved;
+        }
+        if state == "grid" {
+            grid_seen += 1;
+            if grid_seen >= 2 {
+                return HumanityOutcome::Grid;
+            }
+        } else {
+            grid_seen = 0;
+        }
+        // An early click can be swallowed before the widget listens; two
+        // spaced re-clicks recover exactly that case. A click that IS
+        // being verified also keeps state 'wait' — a checking widget
+        // ignores extra clicks, and this hedge is bounded at two.
+        if state == "wait" && (i == 8 || i == 24) && re_clicks < 2 {
+            re_clicks += 1;
+            if let Some((x2, y2)) = probe_click_point(cdp).await {
+                let lm = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let _ = crate::action::dispatch_mouse_click(cdp, x2, y2, &lm).await;
+            }
+        }
+    }
+    HumanityOutcome::Failed
+}
+
+/// Outcome of a humanity-check solve attempt.
+enum HumanityOutcome {
+    Solved,
+    Grid,
+    Failed,
+}
+
+/// Resolve the recaptcha anchor checkbox click point (left-center of the
+/// anchor iframe), or None while the widget is not mounted at a sane size.
+async fn probe_click_point(cdp: &CdpSession) -> Option<(f64, f64)> {
+    let probe = r#"(function(){if(typeof window.grecaptcha==='undefined'||typeof window.grecaptcha.getResponse!=='function')return null;var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){var s=fs[i].src||'';if(s.indexOf('/recaptcha/api2/anchor')>=0){var r=fs[i].getBoundingClientRect();if(r.width<60||r.height<30)return null;return JSON.stringify({x:Math.round(r.x+30),y:Math.round(r.y+r.height/2)});}}return null;})()"#;
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({ "expression": probe, "returnByValue": true })),
+        )
+        .await
+        .ok()?;
+    let point = res.get("result")?.get("value")?.as_str()?.to_string();
+    let p: serde_json::Value = serde_json::from_str(&point).ok()?;
+    let (x, y) = (p.get("x")?.as_f64()?, p.get("y")?.as_f64()?);
+    if x <= 0.0 || y <= 0.0 {
+        return None;
+    }
+    Some((x, y))
+}
+
 /// Get the current page URL via CDP. Used by JS challenge detection
 /// to detect redirects after a challenge page is served.
 async fn eval_location_href(cdp: &CdpSession) -> String {

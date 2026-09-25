@@ -688,7 +688,7 @@ pub async fn dismiss_consent_with_stored(
     dismiss_consent(cdp).await
 }
 
-/// M6: Detect block/challenge pages (Cloudflare, DataDome, PerimeterX, reCAPTCHA, Akamai).
+/// M6: Detect block/challenge pages (Cloudflare, DataDome, PerimeterX, reCAPTCHA, Akamai, Reddit).
 /// Returns the block type if detected, or None.
 /// S12: remediation ladder — actionable steps for each block type.
 /// Appended to ambient events so the agent knows what to try next.
@@ -722,6 +722,20 @@ pub fn remediation_ladder(block_type: &str) -> Vec<String> {
             "rate limited \u{2014} wait 30-60s before retrying".into(),
             "consider: BLADE_PROXY for a different IP".into(),
         ],
+        "reddit-humanity" => vec![
+            "reddit's one-time humanity check (reCAPTCHA v2 checkbox)".into(),
+            "solved automatically when detected \u{2014} one humanized click grants the profile token".into(),
+            "if it persists: an image challenge may be showing \u{2014} solve it manually once in the browser, or retry later; the wall does not return after a pass".into(),
+        ],
+        "reddit" => vec![
+            "reddit's network-security wall (soft, transient \u{2014} its own retry-after is 0)".into(),
+            "auto-recovery already reloaded; if it persists, wait ~30s and retry".into(),
+            "persistent walls usually mean a flagged IP (VPN/datacenter) \u{2014} use a residential connection; signed-in sessions are trusted more".into(),
+        ],
+        "js-challenge" => vec![
+            "reddit's JS challenge did not auto-resolve \u{2014} a reload usually completes it".into(),
+            "retry the same navigation; a cold profile gets the challenge once, then `loid` is stored".into(),
+        ],
         _ => vec!["unknown block \u{2014} try waiting and retrying".into()],
     }
 }
@@ -738,8 +752,7 @@ pub fn remediation_ladder(block_type: &str) -> Vec<String> {
 /// Real block/challenge pages are SMALL (a title, a spinner, a form) — the
 /// body-length gate is the strongest discriminator between "the page is a
 /// wall" and "the page discusses walls".
-pub async fn detect_block(cdp: &CdpSession) -> Result<Option<String>> {
-    let expression = r#"(()=>{const d=document;if(!d)return null;const t=(d.title||'').toLowerCase();const raw=(()=>{if(!d.body)return'';if(d.querySelectorAll('*').length<=1500)return d.body.innerText||d.body.textContent||'';let s='';const w=n=>{if(s.length>1600)return;for(const c of n.childNodes){if(s.length>1600)return;if(c.nodeType===3)s+=c.textContent;else if(c.nodeType===1){const tg=c.tagName;if(tg==='SCRIPT'||tg==='STYLE'||tg==='NOSCRIPT'||tg==='TEMPLATE')continue;if(c.shadowRoot)w(c.shadowRoot);w(c);}}};w(d.body);return s;})();const body=raw.toLowerCase();const bl=body.length;const q=s=>!!d.querySelector(s);
+const DETECT_BLOCK_SCRIPT: &str = r#"(()=>{const d=document;if(!d)return null;const t=(d.title||'').toLowerCase();const h=(location.hostname||'').toLowerCase();const raw=(()=>{if(!d.body)return'';if(d.querySelectorAll('*').length<=1500)return d.body.innerText||d.body.textContent||'';let s='';const w=n=>{if(s.length>1600)return;for(const c of n.childNodes){if(s.length>1600)return;if(c.nodeType===3)s+=c.textContent;else if(c.nodeType===1){const tg=c.tagName;if(tg==='SCRIPT'||tg==='STYLE'||tg==='NOSCRIPT'||tg==='TEMPLATE')continue;if(c.shadowRoot)w(c.shadowRoot);w(c);}}};w(d.body);return s;})();const body=raw.toLowerCase();const bl=body.length;const q=s=>!!d.querySelector(s);
 // Cloudflare interstitial: the title is the strongest signal. A bare
 // turnstile/challenge-platform SCRIPT is NOT — sites embed Turnstile
 // widgets in ordinary forms. Only call it a block when the title matches
@@ -751,6 +764,19 @@ if(q('cf-turnstile')||q('script[src*=challenge-platform]')){if(bl<800)return 'cl
 if(q('iframe[src*=captcha-delivery]')&&bl<1200)return 'datadome';
 if(bl<1200&&body.includes('datadome')&&q('iframe'))return 'datadome';
 if((q('#px-captcha')||q('script[src*=px-captcha]'))&&bl<1500)return 'perimeterx';
+// Reddit JS challenge — a tiny hidden auto-submitting form (a real browser
+// solves it in ~1s; solution = the token doubled). Not a wall: it clears
+// itself, so nav waits it out instead of reporting a block.
+if(bl<2000&&(q('input[name=js_challenge]')||q('input[name=jsc_token]')))return 'js-challenge';
+// Reddit network-security wall — small page, no title: "You've been
+// blocked by network security" / classic "whoa there, pardner!". Soft and
+// transient (its 403 carries retry-after: 0); a reload clears it.
+if(bl<1500&&(body.includes('blocked by network security')||body.includes('whoa there')))return 'reddit';
+// Reddit's one-time humanity check: a reCAPTCHA v2 checkbox on a small
+// reddit page ("Prove your humanity"). One humanized click passes it
+// (verified live); the solve grants `loid` and the wall does not return
+// for that profile. Host-gated so other sites' recaptchas stay untouched.
+if(bl<1500&&h.indexOf('reddit.com')>=0&&(q('.g-recaptcha')||q('iframe[src*=recaptcha]'))&&(t.includes('humanity')||body.includes('prove your humanity')))return 'reddit-humanity';
 // reCAPTCHA wall: needs BOTH the widget AND the "prove you're human"
 // phrasing on a SMALL page (a contact page with a recaptcha + an FAQ
 // mentioning robots is a normal page).
@@ -761,11 +787,15 @@ if(bl<1000&&body.includes('access denied')&&(body.includes('reference')||body.in
 if(bl<800&&(body.includes('too many requests')||body.includes('rate limit')))return 'rate-limit';
 return null;})()"#;
 
+/// M6: Detect block/challenge pages from their live DOM (small-page gated —
+/// the body-length gate is the strongest wall-vs-prose discriminator).
+/// Returns the block type if detected, or None.
+pub async fn detect_block(cdp: &CdpSession) -> Result<Option<String>> {
     let res = cdp
         .send(
             "Runtime.evaluate",
             Some(json!({
-                "expression": expression,
+                "expression": DETECT_BLOCK_SCRIPT,
                 "returnByValue": true,
             })),
         )
@@ -902,8 +932,83 @@ mod script_syntax_tests {
         );
     }
 
+    /// Run a JS file with node; None (with a notice) when node is missing.
+    fn node_exec(name: &str, js: &str) -> Option<std::process::Output> {
+        let has_node = Command::new("node")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !has_node {
+            eprintln!("node not available — skipping {name}");
+            return None;
+        }
+        let path = std::env::temp_dir().join(format!("bladebro-js-run-{name}.js"));
+        std::fs::write(&path, js).expect("write js fixture");
+        let out = Command::new("node")
+            .arg(&path)
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_file(&path);
+        Some(out)
+    }
+
     #[test]
     fn capture_script_is_valid_js() {
         node_check("capture", &super::CAPTURE_SCRIPT);
+    }
+
+    #[test]
+    fn detect_block_script_is_valid_js() {
+        node_check("detect-block", super::DETECT_BLOCK_SCRIPT);
+    }
+
+    #[test]
+    fn detect_block_rules_match_fixtures() {
+        // Runs the REAL detector against fixture documents (stubbed DOM):
+        // the reddit wall, the reddit challenge, Cloudflare, a normal page,
+        // and a long prose page that MENTIONS the wall (must not classify).
+        let src = serde_json::to_string(super::DETECT_BLOCK_SCRIPT).expect("serialize detector");
+        let mut js = String::from("const S = ");
+        js.push_str(&src);
+        js.push_str(
+            r#";
+const cases = [
+  ["wall", {t:"", x:"You've been blocked by network security. If you think you've been blocked by mistake, file a ticket below and we'll look into it. File a ticket", s:{}}, "reddit"],
+  ["wall_whoa", {t:"", x:"Whoa there, pardner! Your request has been blocked due to a network policy.", s:{}}, "reddit"],
+  ["challenge", {t:"Reddit", x:"", s:{"input[name=js_challenge]":1}}, "js-challenge"],
+  ["challenge_token", {t:"Reddit", x:"", s:{"input[name=jsc_token]":1}}, "js-challenge"],
+  ["cloudflare", {t:"Just a moment...", x:"Verifying you are human", s:{}}, "cloudflare"],
+  ["normal", {t:"GitHub", x:"Lots of ordinary content", s:{}}, null],
+  ["reddit_humanity", {t:"Reddit - Prove your humanity", x:"Prove your humanity We're committed to safety and security. But not for bots.", h:"www.reddit.com", s:{".g-recaptcha":1}}, "reddit-humanity"],
+  ["reddit_humanity_other_host", {t:"Reddit - Prove your humanity", x:"Prove your humanity We're committed to safety and security. But not for bots.", h:"example.com", s:{".g-recaptcha":1}}, "recaptcha"],
+  ["prose_mention", {t:"Blog", x:"blocked by network security ".repeat(120), s:{}}, null]
+];
+let fail = 0;
+for (const [name, c, want] of cases) {
+  globalThis.document = {
+    title: c.t,
+    body: { innerText: c.x, textContent: c.x },
+    querySelectorAll: () => ({ length: 10 }),
+    querySelector: (sel) => (c.s[sel] ? {} : null)
+  };
+  globalThis.location = { hostname: c.h || "example.com" };
+  const got = (0, eval)(S);
+  if (got !== want) { fail = 1; console.log("FAIL", name, "got", got, "want", want); }
+}
+if (!fail) console.log("detect_block fixtures pass");
+process.exit(fail);
+"#,
+        );
+        if let Some(out) = node_exec("detect-block-fixtures", &js) {
+            assert!(
+                out.status.success(),
+                "detect_block fixture failures:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }

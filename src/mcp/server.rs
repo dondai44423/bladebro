@@ -2209,12 +2209,19 @@ pub async fn handle_auto_extract(page: &mut Page, limit: usize, limit_explicit: 
                 Err(e) => {
                     // API route failed (exotic host, blocked page): fall back to
                     // the DOM listing — and say so, because the DOM misses
-                    // collapsed replies.
+                    // collapsed replies. A transient network-security wall gets
+                    // a retry hint: it clears in seconds, and the DOM fallback
+                    // is genuinely partial.
                     let val = run_auto_extract(page, limit, false).await?;
                     let json_str = serde_json::to_string(&val)?;
                     let mut out = auto_extract_output(&json_str)?;
+                    let hint = if crate::reddit::is_security_block(&e) {
+                        " (reddit's network-security wall is transient — retrying the extract in a few seconds usually returns the full thread)"
+                    } else {
+                        ""
+                    };
                     out.push_str(&format!(
-                        "\nnote: full-thread fetch failed ({e}); items above are a DOM fallback and may miss collapsed replies"
+                        "\nnote: full-thread fetch failed ({e}); items above are a DOM fallback and may miss collapsed replies{hint}"
                     ));
                     return Ok(out);
                 }

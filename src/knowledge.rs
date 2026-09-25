@@ -575,8 +575,8 @@ impl KnowledgeBase {
 pub fn vendor_risk(vendor: &str) -> BotRiskLevel {
     match vendor {
         "datadome" | "akamai" | "perimeterx" => BotRiskLevel::Heavy,
-        "cloudflare" | "recaptcha" => BotRiskLevel::Medium,
-        "rate-limit" => BotRiskLevel::Low,
+        "cloudflare" | "recaptcha" | "reddit" | "reddit-humanity" => BotRiskLevel::Medium,
+        "js-challenge" | "rate-limit" => BotRiskLevel::Low,
         _ => BotRiskLevel::Medium,
     }
 }
@@ -907,6 +907,9 @@ mod tests {
         assert_eq!(vendor_risk("perimeterx"), BotRiskLevel::Heavy);
         assert_eq!(vendor_risk("cloudflare"), BotRiskLevel::Medium);
         assert_eq!(vendor_risk("recaptcha"), BotRiskLevel::Medium);
+        assert_eq!(vendor_risk("reddit"), BotRiskLevel::Medium);
+        assert_eq!(vendor_risk("reddit-humanity"), BotRiskLevel::Medium);
+        assert_eq!(vendor_risk("js-challenge"), BotRiskLevel::Low);
         assert_eq!(vendor_risk("rate-limit"), BotRiskLevel::Low);
     }
 

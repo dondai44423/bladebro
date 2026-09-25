@@ -16,6 +16,13 @@
 //!
 //! The result is a flat, thread-ordered item list with full bodies and an
 //! honest `complete` flag: no evals, no vision, no collapsed replies missed.
+//!
+//! Both API paths are gated on Reddit's `loid` client token (set by the
+//! page-load JS challenge): without it the endpoints answer with the
+//! network-security wall (HTTP 403) instead of JSON — never the challenge.
+//! `ensure_loid` guards the sweep against sending those requests tokenless,
+//! and wall/challenge bodies that do slip through are classified as
+//! stop-signals (partial results + honest note), never hammered.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -179,6 +186,14 @@ pub async fn fetch_comments(
 
     tracing::debug!(post = post_base, sort, cap, "reddit sweep start");
 
+    // Never send API paths without the loid token: without it reddit answers
+    // with the network-security wall (guaranteed 403s) instead of JSON.
+    if !ensure_loid(cdp).await {
+        return Err(BladeError::Other(
+            "reddit: no loid session token yet (the page-load challenge has not resolved) — load the page once, then retry".into(),
+        ));
+    }
+
     if !budget.take(1) {
         return Err(BladeError::Other("reddit: fetch budget exhausted".into()));
     }
@@ -194,6 +209,7 @@ pub async fn fetch_comments(
     let mut capped = false;
     let mut budget_hit = false;
     let mut rate_limited = false;
+    let mut security_blocked = false;
     let mut gaps: Vec<String> = Vec::new();
 
     // Phase A — one batched id sweep across every "more" region. Both nested
@@ -216,7 +232,7 @@ pub async fn fetch_comments(
     let post_key = tree.post_id.clone();
     let mut cursor = 0usize;
     while cursor < pending.len() {
-        if rate_limited {
+        if rate_limited || security_blocked {
             break;
         }
         let need = cap.saturating_sub(tree.nodes.len());
@@ -271,6 +287,8 @@ pub async fn fetch_comments(
                         Err(e) => {
                             if is_rate_limit(&e) {
                                 rate_limited = true;
+                            } else if is_security_block(&e) {
+                                security_blocked = true;
                             } else {
                                 gaps.push(format!("comment batch fetch failed ({e})"));
                             }
@@ -292,6 +310,8 @@ pub async fn fetch_comments(
             Err(e) => {
                 if is_rate_limit(&e) {
                     rate_limited = true;
+                } else if is_security_block(&e) {
+                    security_blocked = true;
                 } else {
                     gaps.push(format!("comment batch wave failed ({e})"));
                 }
@@ -299,6 +319,19 @@ pub async fn fetch_comments(
             }
         }
         cursor += take;
+
+        // Human-ish gap between waves — the burst pattern is the one thing
+        // reddit's rate-scoring can object to, and only multi-wave sweeps
+        // pay it (a few hundred ms), never small threads.
+        if cursor < pending.len() && !rate_limited && !security_blocked {
+            let pause = 180
+                + std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_millis() as u64)
+                    .unwrap_or(120)
+                    % 320;
+            tokio::time::sleep(Duration::from_millis(pause)).await;
+        }
     }
 
     // Phase B — parent-subtree recovery for regions whose id lists are only
@@ -307,7 +340,7 @@ pub async fn fetch_comments(
     // regions with a real shortfall get a dedicated fetch.
     let mut residue_regions = 0usize;
     let mut residue_comments: i64 = 0;
-    if !capped && !budget_hit && !rate_limited {
+    if !capped && !budget_hit && !rate_limited && !security_blocked {
         let mut recovered = 0usize;
         // Snapshot: the loop merges into `tree` while reading the stub list.
         let stubs_snapshot = tree.stubs.clone();
@@ -349,6 +382,10 @@ pub async fn fetch_comments(
                             rate_limited = true;
                             break;
                         }
+                        if is_security_block(&e) {
+                            security_blocked = true;
+                            break;
+                        }
                         gaps.push(format!("subtree fetch failed ({e})"));
                     }
                 }
@@ -357,7 +394,7 @@ pub async fn fetch_comments(
             residue_comments += shortfall;
         }
     }
-    if residue_regions > 0 && !capped && !budget_hit && !rate_limited {
+    if residue_regions > 0 && !capped && !budget_hit && !rate_limited && !security_blocked {
         gaps.push(format!(
             "{residue_regions} more-regions incomplete ({residue_comments} comments not retrievable)"
         ));
@@ -371,9 +408,12 @@ pub async fn fetch_comments(
         capped,
         budget_hit,
         rate_limited,
+        security_blocked,
         "reddit sweep done"
     );
-    Ok(assemble(post, items, capped || dfs_capped, budget_hit, rate_limited, gaps))
+    Ok(assemble(
+        post, items, capped || dfs_capped, budget_hit, rate_limited, security_blocked, gaps,
+    ))
 }
 
 /// Assemble the payload: honest counts, deduplicated notes, completion flag.
@@ -383,6 +423,7 @@ fn assemble(
     capped: bool,
     budget_hit: bool,
     rate_limited: bool,
+    security_blocked: bool,
     mut gaps: Vec<String>,
 ) -> CommentsPayload {
     let count = items.len();
@@ -392,6 +433,10 @@ fn assemble(
     let mut status: Option<String> = None;
     if capped {
         status = Some(format!("capped: {count} of {total_s} comments shown (raise limit to fetch more)"));
+    } else if security_blocked {
+        status = Some(format!(
+            "reddit's network-security wall interrupted the sweep: {count} of {total_s} comments loaded (it's transient — retry in a few seconds for the rest)"
+        ));
     } else if rate_limited {
         status = Some(format!(
             "reddit rate limit reached: {count} of {total_s} comments loaded (retry in ~a minute for more)"
@@ -646,6 +691,75 @@ fn render_items(tree: &Tree, cap: usize) -> (Vec<CommentItem>, bool) {
     (items, capped)
 }
 
+/// Reddit gates its JSON paths (`.json`, `/api/info`, subtree listings) on
+/// the `loid` client token: without it they answer with the network-security
+/// wall (HTTP 403) rather than the JS challenge that HTML navigations get.
+/// The token is set by the page-load challenge and persists in the profile,
+/// so it is missing only on a cold profile or mid-challenge. Wait briefly
+/// (the challenge auto-submits in ~1s), then re-serve the page once; give up
+/// honestly rather than burn the sweep on guaranteed 403s.
+async fn ensure_loid(cdp: &CdpSession) -> bool {
+    async fn has_loid(cdp: &CdpSession) -> bool {
+        cdp.send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": "document.cookie.includes('loid=')",
+                "returnByValue": true,
+            })),
+        )
+        .await
+        .ok()
+        .and_then(|r| {
+            r.get("result")
+                .and_then(|x| x.get("value"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+    }
+
+    if has_loid(cdp).await {
+        return true;
+    }
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        if has_loid(cdp).await {
+            return true;
+        }
+    }
+    // Still tokenless — re-serve the page; the challenge resolves in ~1s
+    // and its solved response sets `loid`.
+    let _ = cdp
+        .send("Page.reload", Some(serde_json::json!({ "ignoreCache": false })))
+        .await;
+    let _ = crate::page::wait_for_load(cdp, Duration::from_secs(10)).await;
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        if has_loid(cdp).await {
+            return true;
+        }
+    }
+    false
+}
+
+/// Marker classification for HTML bodies served to reddit API paths: the
+/// network-security wall and the unsolved JS challenge both mean "stop the
+/// sweep — this is a gate, not a gap". Anything else keeps the generic
+/// HTTP / parse error.
+fn classify_gate_body(path: &str, text: &str) -> Option<BladeError> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("blocked by network security") || lower.contains("whoa there, pardner") {
+        return Some(BladeError::Other(format!(
+            "reddit: network-security block (soft, transient — retry shortly) on {path}"
+        )));
+    }
+    if lower.contains("js_challenge") || lower.contains("requestsubmit") {
+        return Some(BladeError::Other(format!(
+            "reddit: JS challenge served to an API path on {path}"
+        )));
+    }
+    None
+}
+
 /// Fetch one same-origin reddit JSON path from inside the page.
 async fn fetch_json(cdp: &CdpSession, path: &str) -> Result<Value> {
     let url_js = serde_json::to_string(path)?;
@@ -679,13 +793,16 @@ return {{s:r.status,t:x}};}}catch(e){{return {{s:0,t:String(e)}}}}}})()"
         return Err(BladeError::Other("reddit: rate limited (HTTP 429)".into()));
     }
     if status != 200 {
-        return Err(BladeError::Other(format!("reddit: GET {path} → HTTP {status}")));
+        return Err(classify_gate_body(path, text)
+            .unwrap_or_else(|| BladeError::Other(format!("reddit: GET {path} → HTTP {status}"))));
     }
     if text.trim().is_empty() {
         return Err(BladeError::Other("reddit: empty response (throttled?)".into()));
     }
-    serde_json::from_str(text)
-        .map_err(|e| BladeError::Other(format!("reddit: non-JSON response from {path} ({e})")))
+    serde_json::from_str(text).map_err(|e| {
+        classify_gate_body(path, text)
+            .unwrap_or_else(|| BladeError::Other(format!("reddit: non-JSON response from {path} ({e})")))
+    })
 }
 
 /// Fetch several reddit JSON paths concurrently in one CDP round-trip.
@@ -719,19 +836,21 @@ return fetch(u,{{credentials:'include',signal:c.signal}}).then(r=>r.text().then(
     let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
     let arr = value.as_array().cloned().unwrap_or_default();
     let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
+    for (item, url) in arr.iter().zip(urls) {
         let status = item["s"].as_i64().unwrap_or(0);
         let text = item["t"].as_str().unwrap_or_default();
         if status == 429 {
             out.push(Err(BladeError::Other("rate limited (HTTP 429)".into())));
         } else if status != 200 {
-            out.push(Err(BladeError::Other(format!("HTTP {status}"))));
+            out.push(Err(classify_gate_body(url, text)
+                .unwrap_or_else(|| BladeError::Other(format!("HTTP {status}")))));
         } else if text.trim().is_empty() {
             out.push(Err(BladeError::Other("empty response (throttled?)".into())));
         } else {
-            out.push(
-                serde_json::from_str(text).map_err(|e| BladeError::Other(format!("non-JSON response ({e})"))),
-            );
+            out.push(serde_json::from_str(text).map_err(|e| {
+                classify_gate_body(url, text)
+                    .unwrap_or_else(|| BladeError::Other(format!("non-JSON response ({e})")))
+            }));
         }
     }
     Ok(out)
@@ -741,6 +860,12 @@ return fetch(u,{{credentials:'include',signal:c.signal}}).then(r=>r.text().then(
 fn is_rate_limit(e: &BladeError) -> bool {
     let s = e.to_string();
     s.contains("429") || s.contains("throttled")
+}
+
+/// Security-wall signal: the sweep hit reddit's network-security block page
+/// and must stop — it is transient, and hammering extends it.
+pub fn is_security_block(e: &BladeError) -> bool {
+    e.to_string().contains("network-security block")
 }
 
 fn strip_prefix(fullname: &str) -> &str {
@@ -892,7 +1017,7 @@ mod tests {
         assert_eq!(straight.op, None);
 
         // Complete: rendered count equals the reported total.
-        let payload = assemble(post, items, false, false, false, vec![]);
+        let payload = assemble(post, items, false, false, false, false, vec![]);
         assert!(payload.complete);
         assert!(payload.note.is_none());
         assert_eq!(payload.count, 26);
@@ -949,7 +1074,7 @@ mod tests {
                 ("c".into(), 1),
             ]
         );
-        let payload = assemble(post, items, false, false, false, vec![]);
+        let payload = assemble(post, items, false, false, false, false, vec![]);
         assert!(payload.complete);
     }
 
@@ -980,7 +1105,7 @@ mod tests {
         let (items, _) = render_items(&tree, 100);
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", "c", "d"], "resolved top-level comments appended in order");
-        let payload = assemble(post, items, false, false, false, vec![]);
+        let payload = assemble(post, items, false, false, false, false, vec![]);
         assert!(payload.complete);
     }
 
@@ -991,7 +1116,7 @@ mod tests {
         assert!(capped);
         assert_eq!(items.len(), 3);
 
-        let payload = assemble(post, items, capped, false, false, vec![]);
+        let payload = assemble(post, items, capped, false, false, false, vec![]);
         assert!(!payload.complete);
         let note = payload.note.unwrap();
         assert!(note.contains("capped: 3 of 26"), "note names the cap: {note}");
@@ -999,13 +1124,13 @@ mod tests {
         // Clean full render → complete, no note.
         let (post2, tree2) = parse_discussion(&fixture()).unwrap();
         let (items2, capped2) = render_items(&tree2, 1_000);
-        let payload2 = assemble(post2, items2, capped2, false, false, vec![]);
+        let payload2 = assemble(post2, items2, capped2, false, false, false, vec![]);
         assert!(payload2.complete);
 
         // Budget shortfall reads as a budget issue, not as deletions.
         let (post3, tree3) = parse_discussion(&fixture()).unwrap();
         let (items3, _) = render_items(&tree3, 3);
-        let payload3 = assemble(post3, items3, false, true, false, vec![]);
+        let payload3 = assemble(post3, items3, false, true, false, false, vec![]);
         assert!(!payload3.complete);
         let note3 = payload3.note.unwrap();
         assert!(note3.contains("fetch budget exhausted: 3 of 26"), "{note3}");
@@ -1014,11 +1139,56 @@ mod tests {
         // Rate limiting reads as its own status, with a retry hint.
         let (post4, tree4) = parse_discussion(&fixture()).unwrap();
         let (items4, _) = render_items(&tree4, 3);
-        let payload4 = assemble(post4, items4, false, false, true, vec![]);
+        let payload4 = assemble(post4, items4, false, false, true, false, vec![]);
         assert!(!payload4.complete);
         let note4 = payload4.note.unwrap();
         assert!(note4.contains("rate limit reached: 3 of 26"), "{note4}");
         assert!(note4.contains("retry in ~a minute"), "{note4}");
+
+        // The network-security wall reads as its own transient status.
+        let (post5, tree5) = parse_discussion(&fixture()).unwrap();
+        let (items5, _) = render_items(&tree5, 3);
+        let payload5 = assemble(post5, items5, false, false, false, true, vec![]);
+        assert!(!payload5.complete);
+        let note5 = payload5.note.unwrap();
+        assert!(note5.contains("network-security wall interrupted"), "{note5}");
+        assert!(note5.contains("transient"), "{note5}");
+    }
+
+    #[test]
+    fn gate_bodies_classify_by_markers() {
+        // Real block-page text (captured live from a tokenless `.json` hit).
+        let wall = "<div>You've been blocked by network security.</div>\
+                    <div>If you think you've been blocked by mistake, file a ticket below and we'll look into it.</div>";
+        let e = classify_gate_body("/r/x/comments/y/.json", wall).expect("wall classified");
+        assert!(is_security_block(&e));
+        assert!(!is_rate_limit(&e));
+        assert!(e.to_string().contains("transient"), "{e}");
+
+        // The classic variant some reddit edges still serve.
+        let whoa = "<h1>Whoa there, pardner!</h1>Your request has been blocked due to a network policy.";
+        assert!(is_security_block(
+            &classify_gate_body("/api/info.json", whoa).expect("whoa variant classified")
+        ));
+
+        // The challenge page (hidden auto-submit form) served to an API path.
+        let challenge = "<form hidden method=\"GET\" action=\"/r/x/\">\
+            <input type=\"hidden\" name=\"solution\" />\
+            <input type=\"hidden\" name=\"js_challenge\" value=\"1\"/>\
+            <input type=\"hidden\" name=\"jsc_token\" value=\"abc\"/></form>\
+            <script>document.forms[0].requestSubmit()</script>";
+        let e = classify_gate_body("/api/info.json", challenge).expect("challenge classified");
+        assert!(!is_security_block(&e));
+        assert!(e.to_string().contains("JS challenge"), "{e}");
+
+        // Ordinary failures keep the generic path — no false classification.
+        assert!(classify_gate_body("/x.json", "{\"kind\":\"Listing\"}").is_none());
+        assert!(classify_gate_body("/x.json", "<html><body>Service Unavailable</body></html>").is_none());
+    }
+
+    #[test]
+    fn gate_classification_is_case_insensitive() {
+        assert!(classify_gate_body("/x.json", "YOU'VE BEEN BLOCKED BY Network Security.").is_some());
     }
 
     #[test]
@@ -1037,7 +1207,7 @@ mod tests {
     fn payload_serialization_keeps_field_order_and_skips_empty() {
         let (post, tree) = parse_discussion(&fixture()).unwrap();
         let (items, _) = render_items(&tree, 100);
-        let payload = assemble(post, items, false, false, false, vec![]);
+        let payload = assemble(post, items, false, false, false, false, vec![]);
         let s = serde_json::to_string(&payload).unwrap();
         assert!(s.starts_with("{\"container\":\"reddit-comments\","), "container first: {s:.80}");
         assert!(s.contains("\"complete\":true"));

@@ -799,7 +799,7 @@ async fn dispatch_mouse_move(
 
 /// Dispatch a real mouse click at (x, y) via `Input.dispatchMouseEvent`,
 /// with a human-like bezier mouse path from a random start point.
-async fn dispatch_mouse_click(
+pub(crate) async fn dispatch_mouse_click(
     cdp: &CdpSession,
     x: f64,
     y: f64,

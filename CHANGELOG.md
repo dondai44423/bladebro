@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Reddit: the network-security block and the page-load JS challenge are now
+  handled end to end — `extract auto` and navigations stop tripping them.**
+  Reddit gates its JSON paths (`.json`, `/api/info`, comment listings) on the
+  `loid` client token: without it, API requests get the "You've been blocked
+  by network security" wall (HTTP 403) instead of JSON, while HTML
+  navigations get a hidden auto-submitting JS challenge that sets `loid`.
+  The comment sweep now refuses to fire API requests without `loid` (waits
+  for the challenge to resolve, and re-serves the page once on a cold
+  profile — the challenge auto-solves in ~1s), classifies wall/challenge
+  bodies served to API paths as stop-signals (honest partial results + note
+  instead of hammering), and adds a human-ish gap between multi-wave sweeps.
+  Navigation recognizes both pages: the challenge is waited out (no
+  interaction needed — a real browser solves it itself), and the wall gets a
+  bounded jittered-reload ladder (its 403 carries `retry-after: 0`; a reload
+  clears it in most cases) before any `blocked:` verdict. Detectors are
+  regression-tested against fixtures taken from the live pages.
+- **Reddit's one-time "Prove your humanity" check is passed automatically.**
+  Sessions without the `loid` token get a reCAPTCHA v2 checkbox ("Prove your
+  humanity"); bladebro now clicks it once with the normal humanized click
+  machinery, waits bounded for the solve (grids bail out — they are not
+  solvable in-house and are reported honestly), and the grant is stored in
+  the profile, after which the wall does not return. Verified live on a
+  fresh profile: first nav → wall → auto-solved → full content with `loid`.
+
 ## [3.9.10] - 2026-09-25
 
 ### Fixed
