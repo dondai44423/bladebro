@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.9] - 2026-09-25
+
 ### Added
 - **X.com (Twitter) adapter: `see extract=auto` returns complete threads and
   timelines in ONE call.** Status pages come back as the full conversation — the
