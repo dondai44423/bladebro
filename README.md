@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="Assets/logo.png" alt="Bladebro" width="120">
+
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
 Re-render-immune refs · batch actions · auto-extract · self-improving · 6-layer stealth
@@ -11,6 +13,8 @@ npm install -g bladebro && bladebro mcp
 ```
 
 [Install](#-install) · [The 5 tools](#-the-5-tools) · [Usage](#-usage) · [Stealth Bench V1](#-stealth-bench-v1) · [Stealth](#-stealth) · [Adapters](#-site-adapters) · [Comparison](#-comparison) · [Gotchas & limits](#-gotchas--limits)
+
+<img src="Assets/png/hero.png" alt="Bladebro — give your AI agent a browser" width="100%">
 
 </div>
 
@@ -163,6 +167,10 @@ Screenshot as PNG; `marks=true` overlays numbered ref badges. MCP returns it as 
 
 ## 🔌 Usage
 
+<p align="center">
+  <img src="Assets/png/in-action.png" alt="Bladebro in action — one call extracts a full thread; ref badges mark clickable elements" width="100%">
+</p>
+
 Same 5 tools, same handlers, same stealth — two surfaces. Use MCP for agents; use the CLI for scripts, shells and CI. One codebase, so every fix lands on both.
 
 | | MCP server | CLI |
@@ -251,6 +259,10 @@ bladebro vision --marks --json | jq -r .image_path
 
 ## 🧠 How it works
 
+<p align="center">
+  <img src="Assets/png/architecture.png" alt="Bladebro architecture — your agent speaks MCP, Bladebro speaks CDP, driving Chromium" width="100%">
+</p>
+
 The core is the **Live Page Model** — a persistent, compressed, ref-stable model of the page held across every tool call. Three pillars:
 
 - **Semantic refs** (`e1`, `e2`, …) — anchors assigned by signature (`framePath|role|name|rank`), not position. They survive scrolls, insertions and re-renders.
@@ -288,6 +300,10 @@ bladebro state compress off     # on / off / status — or BLADE_NO_COMPRESS=1
 The counter resets on navigation, any `see`, or any error. `see`, `state`, `run` and `vision` are never compressed.
 
 ## 🥷 Stealth
+
+<p align="center">
+  <img src="Assets/png/stealth-layers.png" alt="6-layer stealth — nothing to detect" width="100%">
+</p>
 
 Six layers, all on by default, no config needed:
 
