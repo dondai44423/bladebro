@@ -909,8 +909,12 @@ _defFn(_pp,'query',_pp.query||_opq,_pq);
 /// skews innerHeight (measured: 932 vs 988) — so the value is masked instead,
 /// exactly like every other environment override: a proxy over the native
 /// getter that delegates first (receiver validation stays byte-native) and
-/// returns `false`. Residual: the proxy shape is lie-engine-visible, which is
-/// why the WS transport remains the cleaner lane.
+/// returns `false`. Residual: the proxy shape is lie-engine-visible (measured:
+/// CreepJS `webDriverIsOn: true` → 33% headless), and
+/// `Emulation.setAutomationOverride{enabled:false}` does NOT clear the flag
+/// (accepted, no effect — measured 2026-09-26, page- and browser-level). That
+/// is why the MCP now defaults to WS; this patch serves only the explicit
+/// `BLADE_TRANSPORT=pipe` opt-in.
 const WEBDRIVER_PATCH: &str = r#"
 try{
 var _wdg=_ogs(Navigator.prototype,'webdriver');

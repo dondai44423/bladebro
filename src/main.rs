@@ -181,13 +181,19 @@ fn run() -> Result<()> {
         std::process::exit(2);
     }
 
-    // S1: the mcp daemon defaults to the zero-port pipe transport (Unix).
-    // BLADE_TRANSPORT=ws forces the WebSocket transport; CLI one-shot
-    // commands always use WS since they depend on HTTP target discovery.
-    // Windows uses WS (pipe fds 3/4 don't exist on Windows).
+    // S1 (default flipped 2026-09-26): the MCP server drives Chrome over
+    // WebSocket by DEFAULT. The pipe transport enables Chrome's automation
+    // flag, so `navigator.webdriver` reads `true` there and the only way to
+    // hide it is a JS mask that lie engines catch (measured: CreepJS
+    // `webDriverIsOn` + 33% headless; `Emulation.setAutomationOverride` does
+    // NOT clear it — accepted, no effect). WS keeps the native `false` with
+    // zero patches — the same lane the CLI daemon uses. `BLADE_TRANSPORT=pipe`
+    // opts back into the zero-port transport.
+    // CLI one-shot commands always use WS since they depend on HTTP target
+    // discovery. Windows uses WS (pipe fds 3/4 don't exist on Windows).
     let use_pipe = port == 0
         && cmd == "mcp"
-        && std::env::var("BLADE_TRANSPORT").map(|v| v != "ws").unwrap_or(true)
+        && std::env::var("BLADE_TRANSPORT").map(|v| v == "pipe").unwrap_or(false)
         && cfg!(unix);
 
     // Auto-launch Chrome if port is 0 (default). When --port is explicitly
@@ -614,6 +620,13 @@ async fn cmd_audit(base: &str) -> Result<()> {
         format!("file://{}", path.canonicalize().unwrap_or(path.clone()).display())
     };
 
+    if bladebro::realbrowser::real_lane() {
+        eprintln!(
+            "{} the real-browser lane is ON — this audit measures YOUR browser (zero page patches); \
+             the mask vectors below are N/A. `bladebro rb off` (or BLADE_LANE=agent) audits the agent lane.",
+            ui::yellow("⚠")
+        );
+    }
     println!("[audit] running stealth vectors...");
     page.navigate(&vectors_url).await?;
     let _ = page

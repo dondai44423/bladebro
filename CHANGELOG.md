@@ -75,9 +75,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     when the resolved binary predates the lane (`rb` missing). A stale
     installed binary silently ignored `BLADE_LANE=real` — the run measured
     the agent lane and produced a bogus 15-key "regression" that was caught
-    here and traced to exactly that.
+    here and traced to exactly that. The agent lanes additionally pin
+    `BLADE_LANE=agent` — a live `rb on` config can no longer silently
+    redirect them to the user's own browser — and a `mcp-pipe` lane keeps the
+    zero-port transport covered.
 
 ### Fixed
+- **MCP now drives Chrome over WebSocket by default — `navigator.webdriver`
+  is `false` natively.** The pipe transport (the previous default) makes
+  Chrome enable its automation flag, so `navigator.webdriver` reads `true`
+  there; the only way to hide it was a JS mask, and lie-engine-style
+detectors flag exactly that (measured live: CreepJS `webDriverIsOn: true` →
+  33% headless on the MCP lane). WebSocket keeps the native `false` with zero
+  patches — the same lane the CLI daemon uses (CreepJS 0%/0%). The native
+  route was probed first: `Emulation.setAutomationOverride{enabled:false}`
+  is accepted but has no effect on the flag (page- and browser-level), and
+  the launch-flag route re-triggers the 56px unsupported-flag infobar, so the
+  transport default is the honest fix. `BLADE_TRANSPORT=pipe` opts back into
+  the zero-port transport (the mask remains there, and remains lie-visible).
 - **WebGL is no longer dead on the MCP/pipe lane.** The pipe transport built its
   Chrome command line without `--ignore-gpu-blocklist`, so on a software-GL
   display Chrome reported "WebGL1/2 blocklisted" and `getContext('webgl')`

@@ -2901,7 +2901,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             "notes": [
                 "MCP server on stdio — the integration surface for AI agents (Claude, Cursor, opencode, pi)",
                 "client config: {\"command\":\"bladebro\",\"args\":[\"mcp\"]}",
-                "Unix defaults to the zero-port pipe transport; BLADE_TRANSPORT=ws forces WebSocket"
+                "drives Chrome over WebSocket by default (navigator.webdriver stays false natively — zero page patches); BLADE_TRANSPORT=pipe opts into the zero-port pipe transport instead"
             ]
         }),
         "audit" => json!({
@@ -3030,7 +3030,7 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
             "BLADE_LANE": "real|agent — force the real-browser lane for this process",
             "BLADE_RB_DEBUG": "real lane: set 1 to surface the browser's own stderr on launch failures",
             "BLADE_PLAIN": "plain CLI output — no ANSI even on a TTY (NO_COLOR also honored; CLICOLOR_FORCE=1 forces color off-TTY)",
-            "BLADE_TRANSPORT": "mcp: 'ws' forces the WebSocket transport",
+            "BLADE_TRANSPORT": "mcp transport: WebSocket by default (native webdriver=false); set 'pipe' for the zero-port transport (its automation flag is masked)",
             "CHROME_PATH": "override the Chrome/Chromium binary",
             "RUST_LOG": "log filter (default warn,bladebro=info)"
         }
@@ -3280,9 +3280,11 @@ The integration surface for AI agents. Client config:
   {"mcpServers": {"bladebro": {"command": "bladebro", "args": ["mcp"]}}}
 
 Speaks MCP 2024-11-05 through 2026-07-28 (legacy initialize handshake +
-the 2026-07-28 stateless dialect). Unix defaults to the zero-port pipe
-transport (no scannable debugging port); BLADE_TRANSPORT=ws forces
-WebSocket. Chrome launches lazily on the first tool call.
+the 2026-07-28 stateless dialect). Drives Chrome over WebSocket by default
+(navigator.webdriver stays false natively — zero page patches);
+BLADE_TRANSPORT=pipe opts into the zero-port pipe transport instead (its
+automation flag is masked — lie-engine-style detectors can see the mask).
+Chrome launches lazily on the first tool call.
 "#,
         "audit" => r#"bladebro audit — stealth audit
 

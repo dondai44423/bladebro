@@ -317,7 +317,7 @@ Six layers, all on by default, no config needed:
 
 | Layer | What it does |
 |---|---|
-| **Protocol** | No `Runtime.enable` (defuses the DataDome console trap); CDP over a zero-port pipe; isolated world for DOM reads. |
+| **Protocol** | No `Runtime.enable` (defuses the DataDome console trap); CDP over WebSocket by default (native `webdriver=false`) with a zero-port pipe opt-in; isolated world for DOM reads. |
 | **Environment** | UA + Client Hints override (no HeadlessChrome), WebGL renderer/limits/extension coherent with the machine's real GPU, mediaDevices, permissions — every override installed as a Proxy over the native original, so it keeps native receiver/argument errors, own keys `{length,name}`, no `prototype`, and stringifies as native in **every** realm. |
 | **Display** | A window manager on the virtual display (xfwm4) plus a declared work area, so `outerWidth > innerWidth` and `availHeight < height` are real — window chrome and a taskbar, not patched getters. Falls back to a self-correcting mask on WM-less hosts. |
 | **Behavior** | Bezier mouse paths with overshoot + correction, `movementX/Y` deltas, micro-tremors, non-zero key-press duration, log-normal typing, idle hum, smooth scroll. |
@@ -496,7 +496,7 @@ Everything optional; configuration is environment variables.
 | `BLADE_NO_UPDATE_CHECK` | unset | `1` = skip update checks |
 | `BLADE_CMD_TIMEOUT` | `300` | How long the CLI waits for a daemon response, seconds |
 | `BLADE_IDLE_TIMEOUT` | `600` | Daemon idle time before Chrome shuts down, seconds |
-| `BLADE_TRANSPORT` | auto | MCP: `ws` forces the WebSocket transport |
+| `BLADE_TRANSPORT` | ws | MCP transport: WebSocket by default (native `webdriver=false`); `pipe` opts into the zero-port pipe (its automation flag is masked) |
 | `BLADE_CHROME_FLAGS` | none | Extra Chrome launch flags |
 | `BLADE_LANE` | auto | `real` forces the real-browser lane for this process (same as `rb on`) |
 | `BLADE_RB_DEBUG` | — | `1` surfaces the browser's own stderr on real-lane launches |

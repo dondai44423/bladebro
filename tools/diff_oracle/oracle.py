@@ -370,7 +370,15 @@ def main():
         stock = pristine_probe(chrome, free_port(), display, args.url, battery, lane=args.lane)
 
         print(f"[oracle] subject: {bladebro} (lane={args.lane})")
-        subject = bladebro_probe(bladebro, args.url, battery, env=real_env)
+        if args.lane == "real":
+            subject = bladebro_probe(bladebro, args.url, battery, env=real_env)
+        else:
+            # Pin the agent lane: a live real-browser config (`rb on`) would
+            # silently redirect the subject to the user's own browser and the
+            # mask surface would never be measured.
+            agent_env = dict(os.environ)
+            agent_env["BLADE_LANE"] = "agent"
+            subject = bladebro_probe(bladebro, args.url, battery, env=agent_env)
     finally:
         if wm_proc:
             wm_proc.terminate()

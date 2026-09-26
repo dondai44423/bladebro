@@ -2,9 +2,9 @@
 """Cold-start matrix: 5 launches per lane, checking the stealth-critical values.
 
 Lanes: daemon (persistent, WS), one-shot (--no-daemon, WS, own Xvfb+WM),
-MCP (stdio, zero-port pipe transport). The probe checks the two things the
-whole stealth layer depends on: a live WebGL context with the coherent mask,
-and a display with an honest work area.
+MCP (stdio; WebSocket by default, zero-port pipe via BLADE_TRANSPORT=pipe).
+The probe checks the two things the whole stealth layer depends on: a live
+WebGL context with the coherent mask, and a display with an honest work area.
 
 Real lane: real-clone (isolated BLADE_HOME, BLADE_LANE=real, invisible) —
 the probe checks the REAL-lane contract instead of the mask: navigator.webdriver
@@ -136,14 +136,24 @@ def lane_real(rounds=5):
     return out
 
 
+def agent_env():
+    """The agent lanes pin BLADE_LANE=agent: a live real-browser config
+    (`rb on`) would otherwise silently redirect these runs to the user's own
+    browser and every mask assertion would measure the wrong lane."""
+    env = dict(os.environ)
+    env["BLADE_LANE"] = "agent"
+    return env
+
+
 def lane_daemon(rounds=5):
     out = []
+    env = agent_env()
     for i in range(rounds):
         t0 = time.time()
-        subprocess.run([BLADE, "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-        r = subprocess.run([BLADE, "nav", "https://example.com/", "--json"],
+        subprocess.run([BLADE, "stop"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        r = subprocess.run([BLADE, "nav", "https://example.com/", "--json"], env=env,
                            capture_output=True, text=True, timeout=240)
-        r2 = subprocess.run([BLADE, "act", "eval", PROBE, "--json"],
+        r2 = subprocess.run([BLADE, "act", "eval", PROBE, "--json"], env=env,
                             capture_output=True, text=True, timeout=120)
         try:
             payload = json.loads(r2.stdout.strip().splitlines()[-1])
@@ -156,10 +166,11 @@ def lane_daemon(rounds=5):
 
 
 def lane_oneshot(rounds=5):
+    env = agent_env()
     out = []
     for i in range(rounds):
         t0 = time.time()
-        r2 = subprocess.run([BLADE, "--no-daemon", "act", "eval", PROBE, "--json"],
+        r2 = subprocess.run([BLADE, "--no-daemon", "act", "eval", PROBE, "--json"], env=env,
                             capture_output=True, text=True, timeout=300)
         try:
             payload = json.loads(r2.stdout.strip().splitlines()[-1])
@@ -188,12 +199,15 @@ def mcp_call(proc, msg, want_id):
     return None
 
 
-def lane_mcp(rounds=5, tool="act"):
+def lane_mcp(rounds=5, tool="act", env_extra=None):
     out = []
+    env = agent_env()
+    if env_extra:
+        env.update(env_extra)
     for i in range(rounds):
         t0 = time.time()
         proc = subprocess.Popen([BLADE, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                                stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
         try:
             mcp_call(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
@@ -250,8 +264,12 @@ if __name__ == "__main__":
         for n, res in lane_oneshot(rounds):
             print(f"  #{n}: {res}")
     if lane in ("mcp", "all"):
-        print("== mcp (pipe) lane")
+        print("== mcp (stdio, default WS) lane")
         for n, res in lane_mcp(rounds):
+            print(f"  #{n}: {res}")
+    if lane in ("mcp-pipe", "all"):
+        print("== mcp (pipe opt-in) lane")
+        for n, res in lane_mcp(rounds, env_extra={"BLADE_TRANSPORT": "pipe"}):
             print(f"  #{n}: {res}")
     if lane in ("real", "all"):
         print("== real lane (clone, isolated home, invisible)")

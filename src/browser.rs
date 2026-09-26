@@ -1404,7 +1404,7 @@ impl Browser {
             .map_err(|e| BladeError::Other(format!("pipe fd: {e}")))?;
         if child_read_fd.as_raw_fd() <= 4 || child_write_fd.as_raw_fd() <= 4 {
             return Err(BladeError::Other(
-                "pipe fds collided with stdio — set BLADE_TRANSPORT=ws to use the WebSocket transport".into(),
+                "pipe fds collided with stdio — unset BLADE_TRANSPORT (the MCP defaults to WebSocket) or set BLADE_TRANSPORT=ws to force it".into(),
             ));
         }
 
