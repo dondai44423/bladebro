@@ -29,5 +29,6 @@ pub mod knowledge;
 pub mod reddit;
 pub mod x;
 pub mod cli;
+pub mod realbrowser;
 
 pub use error::{BladeError, Result};

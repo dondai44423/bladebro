@@ -8,6 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Real-browser lane — `bladebro rb on|off`.** The agent can now drive *your*
+  own Chromium-family browser (Chrome, Chromium, Brave, Edge, Vivaldi, Opera)
+  with your real profile data on your real display — and with the page-injection
+  layer switched **off entirely**. A real environment has no manufactured
+  coherence to maintain, and every mask the stealth layer installs is a
+  measurable risk: on this lane the correct amount of page patching is zero.
+  Everything driver-side still runs — perception, Live Page Model, refs,
+  adapters, token efficiency, resource blocking — plus the behavioral layer
+  (mouse arcs, typing cadence, pacing, idle hum).
+  - **Three mechanisms** (`auto` picks per environment): **clone** (default) —
+    imports your profile once into a blade-owned copy (per-process sessions,
+    sole-survivor sync-back so the clone ages), runs your real binary on it;
+    your browser may stay open and the source profile is never written to.
+    **profile** — launches on your live profile (close the browser first;
+    branded Google Chrome 136+ refuses CDP on the default user-data dir, so
+    use clone/attach there). **attach** — drives a browser that already
+    exposes a debug endpoint (`--remote-debugging-port=0`, or Chrome 144+'s
+    `chrome://inspect#remote-debugging` approval flow); never owned, never
+    shut down.
+  - **Commands:** `rb on|off|status|mode <m>|use [browser]|profile [key]|`
+    `refresh|forget|pause|resume` (+ `--json`, `help rb`). Switching restarts
+    the daemon; MCP sessions pick the lane up at their next browser launch.
+  - **Manual control is first-class:** `rb pause` refuses every
+    input-dispatching action (click, type, fill, select, press, scroll, hover,
+    upload) and silences the idle hum; reads and waits keep working;
+    `rb resume` hands the wheel back.
+  - **Cross-platform discovery** (Linux incl. flatpak/snap profile roots,
+    macOS app bundles, Windows per-user installs), profile names from
+    `Local State`, and guards for browsers with a profile but no binary.
+  - **Verification:** on Linux/Chromium the lane is proven **page-visibly
+    identical to stock Chrome** — `oracle.py --lane real` disables the
+    EXPECTED table entirely and reports `67 keys: 67 ok, 0 expected,
+    0 divergent`; real-lane cold starts (`lane_matrix.py real 5`) assert
+    `webdriver=false` and no GL mask; the agent lane is unchanged (audit
+    61/61, oracle 0 divergent, three lanes 5/5). Windows/macOS are
+    compile-verified (zigbuild ×4) — live checklist pending hardware.
+  - **Safety:** `rb on` prints exactly what it uses and how to revert ("the
+    agent browses as *you*"; `rb forget` wipes the imported copy);
+    `BLADE_RB_DEBUG=1` surfaces the browser's own stderr when a visible launch
+    fails. New env: `BLADE_LANE=real|agent` (per-process lane override).
+
 ### Fixed
 - **WebGL is no longer dead on the MCP/pipe lane.** The pipe transport built its
   Chrome command line without `--ignore-gpu-blocklist`, so on a software-GL

@@ -243,6 +243,75 @@ fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
     args
 }
 
+/// Everything the real-browser lane's command line depends on. Same
+/// discipline as [`launch_args`]: one pure builder. The lane's contract is
+/// the *absence* of the stealth layer — every flag here is functional
+/// (reliable startup, OAuth popups, PDFs as downloads) or the debug
+/// transport. Nothing manufactures fingerprint coherence: a real
+/// environment needs none, and every mask is a measurable risk.
+struct RealLaunchCfg<'a> {
+    headless: bool,
+    no_sandbox: bool,
+    ozone_x11: bool,
+    port: u16,
+    user_data_dir: &'a std::path::Path,
+    profile_directory: Option<&'a str>,
+    proxy: Option<&'a str>,
+    extra: &'a [String],
+}
+
+fn launch_args_real(cfg: &RealLaunchCfg<'_>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        // Functional renderer-crash guard in small-/dev/shm containers.
+        // Changes nothing a page can observe.
+        "--disable-dev-shm-usage".into(),
+        // Driver functionality: allow window.open popups (OAuth, payment
+        // flows) in agent tabs.
+        "--disable-popup-blocking".into(),
+        // Driver functionality: PDFs download instead of opening inline.
+        "--disable-features=PdfPlugin".into(),
+    ];
+    if cfg.no_sandbox {
+        args.push("--no-sandbox".into());
+    }
+    if cfg.headless {
+        args.extend(HEADLESS_FLAGS.iter().map(|s| s.to_string()));
+        args.push("--window-size=1920,1080".into());
+        // Functional GL enablers for GPU-less servers: without them Chrome
+        // 139+ hands out null WebGL contexts even in software mode. This
+        // enables a working stack — the lane never rewrites what the stack
+        // then reports (no spoof, no mask).
+        args.push("--enable-unsafe-swiftshader".into());
+        args.push("--ignore-gpu-blocklist".into());
+    }
+    // NOTE: no `--disable-extensions` — the user's extensions are part of
+    // the real fingerprint surface and stay.
+    // Visible mode follows the ambient session: a real Wayland session is
+    // used as Wayland (no pin). When only X11 is reachable the caller sets
+    // `ozone_x11` and we pin it — auto-selection consults XDG_SESSION_TYPE,
+    // and a stale "wayland" claim routes Chrome to Wayland, which EXITS on
+    // connect failure instead of falling back (measured on Chrome 151).
+    if cfg.ozone_x11 {
+        args.push("--ozone-platform=x11".into());
+    }
+    args.push(format!("--remote-debugging-port={}", cfg.port));
+    args.push(format!("--user-data-dir={}", cfg.user_data_dir.display()));
+    if let Some(dir) = cfg.profile_directory {
+        // Which profile inside the root (`Default`, `Profile 1`, ...) — the
+        // root is what gets cloned/adopted, never a bare profile subdir.
+        args.push(format!("--profile-directory={dir}"));
+    }
+    if let Some(proxy) = cfg.proxy {
+        args.push(format!("--proxy-server={proxy}"));
+        // Only meaningful with a proxy: keep WebRTC off the real IP.
+        args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into());
+    }
+    args.extend(cfg.extra.iter().cloned());
+    args
+}
+
 /// The healthcheck expression — evaluated in a normal document (the probe
 /// navigates the target to about:blank first: the startup tab may be a
 /// WebUI where canvas access can be restricted).
@@ -831,6 +900,156 @@ impl Browser {
         }
     }
 
+    /// Launch the real-browser lane: the user's own Chromium-family binary
+    /// on a copied (clone) or live (profile) user-data-dir. No Xvfb, no GL
+    /// ladder, no stealth flags — this lane's whole point is that the
+    /// environment and the page-visible surface are the real thing.
+    pub async fn launch_real(
+        binary: &std::path::Path,
+        profile: crate::session_profile::SessionProfile,
+        visible: bool,
+        profile_directory: Option<&str>,
+    ) -> Result<Self> {
+        let user_data_dir = profile.dir().to_path_buf();
+
+        // Visible needs a display on Linux. No display → an honest
+        // headless fallback with a loud note. Never a virtual display:
+        // that would re-create the mock environment this lane deletes.
+        let mut headless = !visible;
+        let mut ozone_x11 = false;
+        #[cfg(target_os = "linux")]
+        {
+            let has_wayland = std::env::var_os("WAYLAND_DISPLAY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let has_x11 = std::env::var_os("DISPLAY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !headless {
+                if !has_wayland && !has_x11 {
+                    eprintln!(
+                        "[realbrowser] WARNING: no display in this environment — falling back to \
+                         --headless=new (reduced environment realism). Run from a desktop session \
+                         for the real lane's full power, or set `rb visible off` to make this \
+                         explicit."
+                    );
+                    headless = true;
+                } else if !has_wayland && has_x11 {
+                    // X11 is the only reachable display — pin it (see
+                    // `launch_args_real` for the failure this prevents).
+                    ozone_x11 = true;
+                }
+            }
+        }
+        set_launched_headless(headless);
+        set_launched_pipe(false);
+
+        let proxy = std::env::var("BLADE_PROXY").ok().filter(|p| !p.is_empty());
+        let extra: Vec<String> = std::env::var("BLADE_CHROME_FLAGS")
+            .map(|s| s.split_whitespace().map(String::from).collect())
+            .unwrap_or_default();
+
+        let mut last_err = None;
+        for (attempt, no_sandbox) in [(0u8, false), (1u8, true)] {
+            let port = free_port();
+            let args = launch_args_real(&RealLaunchCfg {
+                headless,
+                no_sandbox,
+                ozone_x11,
+                port,
+                user_data_dir: &user_data_dir,
+                profile_directory,
+                proxy: proxy.as_deref(),
+                extra: &extra,
+            });
+            eprintln!(
+                "[realbrowser] launching {} ({}) on port {port}",
+                binary.display(),
+                if headless { "headless" } else { "visible" }
+            );
+
+            let mut cmd = Command::new(binary);
+            // BLADE_RB_DEBUG=1 surfaces the browser's own stderr — the only
+            // way to see WHY a real-lane launch died (X11/Wayland/GL errors
+            // are otherwise discarded into /dev/null).
+            let child_stderr = if std::env::var("BLADE_RB_DEBUG").map(|v| v == "1").unwrap_or(false) {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            };
+            cmd.args(&args).stdout(Stdio::null()).stderr(child_stderr);
+            #[cfg(target_os = "linux")]
+            if ozone_x11 {
+                // Belt and braces with --ozone-platform=x11: drop a possibly
+                // stale session-type claim from the child env.
+                cmd.env_remove("XDG_SESSION_TYPE");
+            }
+            let mut child = cmd.spawn().map_err(|e| {
+                BladeError::Other(format!("failed to launch {}: {e}", binary.display()))
+            })?;
+
+            let base = format!("127.0.0.1:{port}");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                match crate::cdp::version(&base).await {
+                    Ok(v) => {
+                        eprintln!(
+                            "[realbrowser] browser ready: {} (protocol {})",
+                            v.browser, v.protocol_version
+                        );
+                        return Ok(Self {
+                            child,
+                            #[cfg(target_os = "linux")]
+                            xvfb: None,
+                            port,
+                            profile,
+                        });
+                    }
+                    Err(_) => {
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                last_err = Some(BladeError::Other(format!(
+                                    "browser exited during startup: {status}"
+                                )));
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                return Err(BladeError::Other(format!(
+                                    "failed to poll browser status: {e}"
+                                )));
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            last_err = Some(BladeError::Other(
+                                "browser debug endpoint not responding after 20s".into(),
+                            ));
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                }
+            }
+            if attempt == 0 {
+                eprintln!(
+                    "[realbrowser] browser died at startup — retrying once with --no-sandbox"
+                );
+            }
+        }
+        let failure = last_err.unwrap_or_else(|| BladeError::Other("real-browser launch failed".into()));
+        if headless {
+            Err(failure)
+        } else {
+            // Visible startup deaths are almost always display problems —
+            // point at the diagnostic switch instead of guessing.
+            Err(BladeError::Other(format!(
+                "{failure} — visible launches need a reachable display; re-run with \
+                 BLADE_RB_DEBUG=1 to see the browser's own error output"
+            )))
+        }
+    }
+
     /// The port Chrome's debug endpoint is listening on.
     pub fn port(&self) -> u16 {
         self.port
@@ -869,6 +1088,99 @@ impl Browser {
         drop(self); // kills Chrome + Xvfb
         // Chrome is dead — the profile is flushed and safe to sync.
         crate::session_profile::SessionProfile::cleanup_dir(&profile_dir);
+    }
+}
+
+/// Launch (or attach to) the lane's browser. Agent lane → the isolated
+/// Xvfb browser. Real lane → the user's own browser per config: clone or
+/// profile launch (owned, `Some`), or attach to a running debuggable
+/// browser (never owned, `None`). Returns that browser and the CDP base.
+pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
+    if !crate::realbrowser::real_lane() {
+        let browser = Browser::launch(0).await?;
+        let base = browser.base();
+        return Ok((Some(browser), base));
+    }
+
+    let cfg = crate::realbrowser::config();
+    let (spec, profile) = crate::realbrowser::resolve_selection(&cfg)?;
+    let mode = crate::realbrowser::effective_mode(&cfg, &profile.root);
+
+    match mode {
+        crate::realbrowser::Mode::Attach => {
+            let port = crate::realbrowser::devtools_port(&profile.root).ok_or_else(|| {
+                BladeError::Other(format!(
+                    "no live debug endpoint found for `{}`. Auto-discovery reads Chrome's \
+                     DevToolsActivePort file, which browsers write when started with \
+                     `--remote-debugging-port=0` (or via chrome://inspect#remote-debugging on \
+                     Chrome 144+). For a browser on a FIXED debug port, point bladebro at it \
+                     directly: `bladebro nav <url> --port <N>`. Or switch mechanism: \
+                     `bladebro rb mode clone`.",
+                    profile.path.display()
+                ))
+            })?;
+            eprintln!(
+                "[realbrowser] attaching to {} (`{}`) on port {port} — the browser stays yours \
+                 (no launch, no shutdown)",
+                spec.name, profile.name
+            );
+            Ok((None, format!("127.0.0.1:{port}")))
+        }
+        crate::realbrowser::Mode::Clone => {
+            if spec.binary.as_os_str().is_empty() {
+                return Err(BladeError::Other(format!(
+                    "{} has a profile on this machine but no launchable binary was found — \
+                     install it, pick another browser (`bladebro rb use`), or attach to a \
+                     running instance (`rb mode attach`).",
+                    spec.name
+                )));
+            }
+            if !crate::realbrowser::has_template(&spec.id) {
+                crate::realbrowser::ensure_import(&spec, &profile)?;
+            }
+            let root = crate::realbrowser::root_for(&spec.id);
+            let sp = crate::session_profile::SessionProfile::create_real(&root)?;
+            let browser = Browser::launch_real(&spec.binary, sp, cfg.visible, Some(profile.key.as_str()))
+                .await?;
+            let base = browser.base();
+            Ok((Some(browser), base))
+        }
+        crate::realbrowser::Mode::Profile => {
+            if spec.binary.as_os_str().is_empty() {
+                return Err(BladeError::Other(format!(
+                    "{} has a profile on this machine but no launchable binary was found — \
+                     install it, pick another browser (`bladebro rb use`), or attach to a \
+                     running instance (`rb mode attach`).",
+                    spec.name
+                )));
+            }
+            if crate::realbrowser::requires_non_default_dir(spec.brand)
+                && profile.root == spec.profile_root
+            {
+                return Err(BladeError::Other(format!(
+                    "Google Chrome (136+) refuses remote debugging on the DEFAULT profile dir \
+                     (`{}`) — the debug endpoint is never exposed, so profile mode cannot work \
+                     here. Options: (a) `bladebro rb mode clone` (recommended; works and your \
+                     browser may stay open), (b) attach via chrome://inspect#remote-debugging \
+                     on Chrome 144+, or (c) relaunch Chrome with a non-default \
+                     --user-data-dir.",
+                    profile.path.display()
+                )));
+            }
+            if let Some(pid) = crate::realbrowser::profile_owner_pid(&profile.root) {
+                return Err(BladeError::Other(format!(
+                    "your browser is running on this profile (pid {pid}) — Chrome would hand off \
+                     to it and swallow the debug flag. Close it first, or use `rb mode clone` \
+                     (works while it stays open), or `rb mode attach`."
+                )));
+            }
+            let sp = crate::session_profile::SessionProfile::adopt(&profile.root)?;
+            let browser = Browser::launch_real(&spec.binary, sp, cfg.visible, Some(profile.key.as_str()))
+                .await?;
+            let base = browser.base();
+            Ok((Some(browser), base))
+        }
+        crate::realbrowser::Mode::Auto => unreachable!("effective_mode resolves Auto"),
     }
 }
 

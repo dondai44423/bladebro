@@ -80,6 +80,24 @@ impl Action {
             Action::Press { .. } | Action::Scroll { .. } | Action::Wait { .. } | Action::Back | Action::Forward | Action::Reload => None,
         }
     }
+
+    /// True for actions that dispatch synthetic input events (or file
+    /// uploads) — refused while manual control is claimed (`rb pause`), so
+    /// the agent never fights the person using the browser.
+    pub fn injects_input(&self) -> bool {
+        matches!(
+            self,
+            Action::Click { .. }
+                | Action::ClickCoord { .. }
+                | Action::Type { .. }
+                | Action::Clear { .. }
+                | Action::Select { .. }
+                | Action::Press { .. }
+                | Action::Scroll { .. }
+                | Action::Hover { .. }
+                | Action::Upload { .. }
+        )
+    }
 }
 
 /// Result of the find-by-sig script: the element's current box + metadata.

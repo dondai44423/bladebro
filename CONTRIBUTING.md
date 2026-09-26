@@ -63,6 +63,12 @@ python3 tools/diff_oracle/oracle.py
 # Per-lane smoke (daemon / one-shot / MCP-pipe), 5 cold starts each
 python3 tools/lane_matrix.py all 5
 
+# Real-browser lane: 0 expected, 0 divergent — page-visibly identical to stock
+python3 tools/diff_oracle/oracle.py --lane real
+
+# Real-lane cold starts (clone mechanism, isolated home)
+python3 tools/lane_matrix.py real 5
+
 # Real detection sites
 # bot.sannysoft.com — all checks must pass
 # incolumitas.com — no bot detection

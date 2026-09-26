@@ -1040,6 +1040,15 @@ pub const STEALTH_SCRIPT_TEMPLATE: &str = STEALTH_CORE;
 /// via BLADE_NOISE=1. BLADE_WEBGL=spoof|real forces the GL decision.
 /// Returns the script identifier.
 pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<ScriptId> {
+    // Real-browser lane: the injection layer is OFF by design. The user's
+    // own browser on its real environment has no manufactured coherence to
+    // maintain — truth has no tells to catch, and every proxy/getter this
+    // module installs is a measurable risk. The lane's stealth is the real
+    // environment plus the driver-side behavior layer; nothing page-visible.
+    if crate::realbrowser::real_lane() {
+        return Ok(String::new());
+    }
+
     // Persistent seed: stable across sessions (canvas/audio fingerprint
     // consistency). Generated once, stored in ~/.blade/.fingerprint.json.
     let seed: u32 = crate::fingerprint::load_or_create_seed();
@@ -1210,6 +1219,10 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
 /// match the main frame or the mismatch is itself a fingerprint).
 /// D22: injected via CDP Target.setAutoAttach into each worker target.
 pub fn worker_gl_spoof(locale: Option<&str>) -> Option<String> {
+    // Real-browser lane: no worker patches either (see `apply`).
+    if crate::realbrowser::real_lane() {
+        return None;
+    }
     if !GL_SPOOFED.load(Ordering::Relaxed) {
         if locale.is_some() {
             let patch = worker_locale_patch(locale);

@@ -314,6 +314,7 @@ async fn run_cli_inner(
     }
 
     match cmd {
+        "rb" | "realbrowser" => run_rb(rest, json_mode).await,
         "daemon" => run_daemon().await,
         "stop" => stop_daemon().await,
         "nav" => {
@@ -459,16 +460,20 @@ async fn run_tool(
         }
     }
 
-    // One-shot: launch Chrome, run, exit.
-    // Use a guard to ensure browser is ALWAYS shut down, even on error.
-    let browser = crate::browser::Browser::launch(0).await?;
-    let base = browser.base();
+    // One-shot: launch (or attach to) the lane's browser, run, exit.
+    // Use a guard to ensure a browser WE OWN is ALWAYS shut down, even on
+    // error. The real lane's attach mechanism owns nothing — nothing to shut.
+    let (browser, base) = crate::browser::launch_lane().await?;
 
-    let result = run_connected(tool, args, &base, false).await;
+    // `external = real_lane`: on the real browser we never restore saved
+    // logins, warm the profile, or snapshot cookies — it is not ours.
+    let result = run_connected(tool, args, &base, crate::realbrowser::real_lane()).await;
 
     // ALWAYS shut down Chrome, even if the above failed.
     // Without this, any error between launch and shutdown orphans Chrome + Xvfb.
-    let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+    if let Some(browser) = browser {
+        let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+    }
 
     let result = result?;
     let code = print_result(&result, json_mode);
@@ -1598,6 +1603,347 @@ async fn wait_for_shutdown_signal() {
 
 // ── Daemon ──────────────────────────────────────────────────────────────
 
+// ── Real browser (`rb`) ─────────────────────────────────────────────────
+
+/// Best-effort daemon restart so a lane switch takes effect immediately:
+/// a running daemon holds the OLD lane's browser. Unix only (daemon mode is).
+async fn restart_daemon_for_lane() {
+    #[cfg(unix)]
+    {
+        if daemon_running() {
+            let _ = stop_daemon().await;
+        }
+    }
+}
+
+/// `bladebro rb ...` — switch between the default agent browser and the
+/// user's real browser (S18). Local config work only: nothing here talks to
+/// a running browser except the daemon restart that makes the switch take
+/// effect on the next launch.
+async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
+    use crate::realbrowser as rb;
+
+    let raw_sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+    let sub = match raw_sub {
+        "true" | "1" | "enable" => "on",
+        "false" | "0" | "disable" => "off",
+        other => other,
+    };
+    let rest = &args[1.min(args.len())..];
+    let mut cfg = rb::config();
+
+    match sub {
+        "status" => {
+            let paused = rb::input_paused();
+            let sel = rb::resolve_selection(&cfg);
+            if json_mode {
+                let v = serde_json::json!({
+                    "ok": true,
+                    "enabled": cfg.enabled,
+                    "mode": cfg.mode.as_str(),
+                    "effective_mode": sel.as_ref().ok().map(|(_, p)| rb::effective_mode(&cfg, &p.root).as_str()),
+                    "browser": cfg.browser.clone(),
+                    "profile": cfg.profile.clone(),
+                    "visible": cfg.visible,
+                    "idle_shutdown": cfg.idle_shutdown,
+                    "idle_hum": cfg.idle_hum,
+                    "paused": paused,
+                    "browsers_found": rb::discover().iter().map(|b| b.id.clone()).collect::<Vec<_>>(),
+                    "template": sel.as_ref().ok().map(|(s, _)| rb::has_template(&s.id)),
+                    "source": sel.as_ref().ok().and_then(|(s, _)| rb::template_source(&s.id)),
+                });
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                return Ok(());
+            }
+            println!("real browser: {}", if cfg.enabled { "ON" } else { "off" });
+            println!("  paused: {}", if paused { "yes (manual control)" } else { "no" });
+            match sel {
+                Ok((spec, profile)) => {
+                    println!(
+                        "  browser: {} ({}){}",
+                        spec.name,
+                        spec.brand.as_str(),
+                        if cfg.browser.is_none() { " — auto: most recently used" } else { "" }
+                    );
+                    println!("  binary:  {}", spec.binary.display());
+                    println!("  profile: \"{}\" — {}", profile.name, profile.path.display());
+                    println!(
+                        "  mode:    {} (configured) / {} (now)",
+                        cfg.mode.as_str(),
+                        rb::effective_mode(&cfg, &profile.root).as_str()
+                    );
+                    match rb::template_stats(&spec.id) {
+                        Some((files, bytes)) => {
+                            println!("  clone:   {files} files ({})", rb::human_bytes(bytes));
+                            if let Some(src) = rb::template_source(&spec.id) {
+                                println!("  source:  {src}");
+                            }
+                        }
+                        None => println!("  clone:   not imported yet (first launch imports)"),
+                    }
+                }
+                Err(e) => println!("  selection: {e}"),
+            }
+            println!("hint: `bladebro rb on|off` switches the lane; `bladebro help rb` for the full story");
+            Ok(())
+        }
+
+        "on" => {
+            if cfg.enabled {
+                // Already on: still self-heal a missing clone (e.g. after
+                // `rb forget`) so the next launch never imports mid-run.
+                if let Ok((spec, profile)) = rb::resolve_selection(&cfg) {
+                    if rb::effective_mode(&cfg, &profile.root) == rb::Mode::Clone
+                        && !rb::has_template(&spec.id)
+                    {
+                        rb::ensure_import(&spec, &profile)?;
+                    }
+                }
+                if json_mode {
+                    println!("{}", serde_json::json!({"ok": true, "enabled": true, "note": "already on"}));
+                } else {
+                    println!("real browser already ON — `bladebro rb status` for details");
+                }
+                return Ok(());
+            }
+            let (spec, profile) = rb::resolve_selection(&cfg)?;
+            let mode = rb::effective_mode(&cfg, &profile.root);
+            if mode != rb::Mode::Attach && spec.binary.as_os_str().is_empty() {
+                return Err(crate::error::BladeError::Other(format!(
+                    "{} has a profile dir but no launchable binary — install it, or pick \
+                     another browser with `bladebro rb use`.",
+                    spec.name
+                )));
+            }
+            // Import now (clone lane) so problems surface HERE, not inside a
+            // later agent run.
+            if mode == rb::Mode::Clone && !rb::has_template(&spec.id) {
+                rb::ensure_import(&spec, &profile)?;
+            }
+            cfg.enabled = true;
+            rb::save_config(&cfg)?;
+            restart_daemon_for_lane().await;
+            if json_mode {
+                let v = serde_json::json!({
+                    "ok": true, "enabled": true, "mode": mode.as_str(),
+                    "browser": spec.id, "profile": profile.key,
+                });
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                return Ok(());
+            }
+            println!("real browser: ON — the next browser launch uses YOUR browser");
+            println!("  browser:  {} ({})", spec.name, spec.brand.as_str());
+            println!("  profile:  \"{}\" ({})", profile.name, profile.path.display());
+            println!("  mechanism: {}", mode.as_str());
+            println!("  lane:     zero page patches — your real environment IS the stealth");
+            println!("  WARNING:  the agent browses AS YOU — anything it does is attributable");
+            println!("            to your identity (accounts, sessions, reputation).");
+            println!("  revert:   `bladebro rb off`    wipe the imported copy: `rb forget`");
+            println!("  control:  `rb pause` / `rb resume` hand the browser to you");
+            println!("  note:     MCP/agent processes pick this up at their next browser launch");
+            println!("            (restart the agent session, or wait for the idle timeout)");
+            Ok(())
+        }
+
+        "off" => {
+            if !cfg.enabled {
+                if json_mode {
+                    println!("{}", serde_json::json!({"ok": true, "enabled": false, "note": "already off"}));
+                } else {
+                    println!("real browser already off");
+                }
+                return Ok(());
+            }
+            cfg.enabled = false;
+            rb::save_config(&cfg)?;
+            let _ = rb::set_paused(false);
+            restart_daemon_for_lane().await;
+            if json_mode {
+                println!("{}", serde_json::json!({"ok": true, "enabled": false}));
+            } else {
+                println!("real browser: off — the isolated agent browser is the default again");
+            }
+            Ok(())
+        }
+
+        "mode" => {
+            let m = rest.first().ok_or_else(|| {
+                crate::error::BladeError::Usage(
+                    "usage: bladebro rb mode <auto|clone|profile|attach>".into(),
+                )
+            })?;
+            let mode = match m.as_str() {
+                "auto" => rb::Mode::Auto,
+                "clone" => rb::Mode::Clone,
+                "profile" => rb::Mode::Profile,
+                "attach" => rb::Mode::Attach,
+                other => {
+                    return Err(crate::error::BladeError::Usage(format!(
+                        "unknown mode `{other}` — use auto|clone|profile|attach"
+                    )))
+                }
+            };
+            cfg.mode = mode;
+            rb::save_config(&cfg)?;
+            if json_mode {
+                println!("{}", serde_json::json!({"ok": true, "mode": mode.as_str()}));
+            } else {
+                println!("mechanism set to {}", mode.as_str());
+                if cfg.enabled {
+                    println!("  applies on the next browser launch (running sessions keep theirs)");
+                }
+            }
+            Ok(())
+        }
+
+        "use" => {
+            match rest.first() {
+                None => {
+                    let browsers = rb::discover();
+                    if browsers.is_empty() {
+                        println!("no Chromium-family browsers found");
+                    }
+                    let selected = rb::resolve_selection(&cfg).ok().map(|(s, _)| s.id);
+                    for b in browsers {
+                        let missing = if b.binary.as_os_str().is_empty() {
+                            " [binary missing]"
+                        } else {
+                            ""
+                        };
+                        println!(
+                            "{}{} — {} ({}){missing}",
+                            if selected.as_deref() == Some(b.id.as_str()) { "* " } else { "  " },
+                            b.id,
+                            b.name,
+                            b.profile_root.display()
+                        );
+                    }
+                    println!("hint: `bladebro rb use <id>` selects one (CHROME_PATH does not apply here)");
+                }
+                Some(id) => {
+                    let spec = rb::find_browser(id).ok_or_else(|| {
+                        let avail: Vec<String> = rb::discover().iter().map(|b| b.id.clone()).collect();
+                        crate::error::BladeError::Other(format!(
+                            "browser `{id}` not found. Available: {}",
+                            avail.join(", ")
+                        ))
+                    })?;
+                    cfg.browser = Some(id.clone());
+                    rb::save_config(&cfg)?;
+                    if !json_mode {
+                        println!("browser set to {} ({})", spec.name, spec.binary.display());
+                        if !rb::has_template(&spec.id) && cfg.enabled {
+                            println!("  note: no clone for `{id}` yet — the first launch imports it");
+                        }
+                    }
+                }
+            }
+            if json_mode {
+                println!("{}", serde_json::json!({"ok": true, "browser": cfg.browser}));
+            }
+            Ok(())
+        }
+
+        "profile" => {
+            match rest.first().map(|s| s.as_str()) {
+                None => {
+                    let (spec, _) = rb::resolve_selection(&cfg)?;
+                    let profiles = rb::list_profiles(&spec.profile_root);
+                    for p in &profiles {
+                        println!(
+                            "{}{} — \"{}\" ({})",
+                            if cfg.profile.as_deref() == Some(p.key.as_str()) { "* " } else { "  " },
+                            p.key,
+                            p.name,
+                            p.path.display()
+                        );
+                    }
+                    println!("hint: `bladebro rb profile <key>` selects one (`rb profile auto` resets)");
+                }
+                Some("auto") => {
+                    cfg.profile = None;
+                    rb::save_config(&cfg)?;
+                    if !json_mode {
+                        println!("profile set to auto (most recently used)");
+                    }
+                }
+                Some(key) => {
+                    cfg.profile = Some(key.to_string());
+                    rb::save_config(&cfg)?;
+                    if !json_mode {
+                        println!("profile set to `{key}`");
+                    }
+                }
+            }
+            if json_mode {
+                println!("{}", serde_json::json!({"ok": true, "profile": cfg.profile}));
+            }
+            Ok(())
+        }
+
+        "refresh" => {
+            let (spec, profile) = rb::resolve_selection(&cfg)?;
+            if rb::profile_owner_pid(&profile.root).is_some() {
+                eprintln!(
+                    "[realbrowser] note: `{}` is open — the copy may miss the last writes \
+                     (the source is never touched).",
+                    profile.path.display()
+                );
+            }
+            // A live clone session syncs back over the template on exit —
+            // that would clobber the fresh import.
+            restart_daemon_for_lane().await;
+            rb::ensure_import(&spec, &profile)?;
+            if json_mode {
+                println!("{}", serde_json::json!({"ok": true, "refreshed_from": profile.path.display().to_string()}));
+            } else {
+                println!("clone refreshed from {}", profile.path.display());
+            }
+            Ok(())
+        }
+
+        "forget" => {
+            let id = match cfg.browser.clone() {
+                Some(id) => id,
+                None => rb::resolve_selection(&cfg).map(|(s, _)| s.id)?,
+            };
+            let removed = rb::forget(&id)?;
+            if json_mode {
+                println!("{}", serde_json::json!({"ok": true, "removed": removed}));
+            } else if removed {
+                println!("clone for `{id}` wiped (template + session dirs)");
+            } else {
+                println!("nothing to wipe for `{id}`");
+            }
+            Ok(())
+        }
+
+        "pause" => {
+            rb::set_paused(true)?;
+            if json_mode {
+                println!("{}", serde_json::json!({"ok": true, "paused": true}));
+            } else {
+                println!("paused — input actions refuse; the browser is yours (`rb resume` hands back)");
+            }
+            Ok(())
+        }
+
+        "resume" => {
+            rb::set_paused(false)?;
+            if json_mode {
+                println!("{}", serde_json::json!({"ok": true, "paused": false}));
+            } else {
+                println!("resumed — the agent has the wheel again");
+            }
+            Ok(())
+        }
+
+        other => Err(crate::error::BladeError::Usage(format!(
+            "unknown rb subcommand `{other}` — use on|off|status|mode|use|profile|refresh|forget|pause|resume"
+        ))),
+    }
+}
+
 /// Start the CLI daemon: persistent Chrome + Unix socket server.
 /// Same lifecycle as MCP (lazy launch, self-healing, idle timeout, reaper).
 #[cfg(unix)]
@@ -1724,7 +2070,11 @@ pub async fn run_daemon() -> Result<()> {
                             if let Some(ref mut p) = page {
                                 p.set_knowledge(knowledge.clone());
                             }
-                            if crate::session_profile::SessionProfile::claim_warming() {
+                            // Never warm the real lane: it would navigate the
+                            // user's own browser to seed sites.
+                            if !crate::realbrowser::real_lane()
+                                && crate::session_profile::SessionProfile::claim_warming()
+                            {
                                 if let Some(ref mut p) = page {
                                     warm_profile(p).await;
                                 }
@@ -1793,11 +2143,19 @@ pub async fn run_daemon() -> Result<()> {
                 last_activity = std::time::Instant::now();
             }
             _ = idle_check.tick() => {
-                if idle_secs > 0 && browser.is_some() && last_activity.elapsed().as_secs() > idle_secs {
+                // Real lane: the browser is the user's — never yanked by the
+                // idle timer unless `idle_shutdown` opts in.
+                if idle_secs > 0
+                    && browser.is_some()
+                    && last_activity.elapsed().as_secs() > idle_secs
+                    && crate::realbrowser::should_idle_shutdown()
+                {
                     eprintln!("[bladebro] idle timeout ({idle_secs}s), shutting down Chrome");
                     if let Some(b) = browser.take() {
                         if let Some(ref p) = page {
-                            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                            if !crate::realbrowser::real_lane() {
+                                let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                            }
                         }
                         let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
                     }
@@ -1807,9 +2165,13 @@ pub async fn run_daemon() -> Result<()> {
                 // authoritative live cookie store, never a hot profile copy.
                 if browser.is_some() && last_sync.elapsed() > sync_interval {
                     last_sync = std::time::Instant::now();
-                    if let Some(ref p) = page {
-                        if !p.cdp_ref().is_closed() {
-                            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                    // Never snapshot on the real lane: the user's live cookie
+                    // store is not ours to hoard into the data dir.
+                    if !crate::realbrowser::real_lane() {
+                        if let Some(ref p) = page {
+                            if !p.cdp_ref().is_closed() {
+                                let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                            }
                         }
                     }
                     // Sync the knowledge base to disk (prune + write) —
@@ -1827,8 +2189,11 @@ pub async fn run_daemon() -> Result<()> {
     }
 
     // Cleanup: persist live logins, then kill Chrome gracefully.
+    // (Never on the real lane — not our cookie store.)
     if let Some(ref p) = page {
-        let _ = crate::logins::snapshot(p.cdp_ref()).await;
+        if !crate::realbrowser::real_lane() {
+            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+        }
     }
     if let Some(b) = browser {
         let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
@@ -1855,12 +2220,11 @@ pub async fn run_daemon() -> Result<()> {
     Err(BladeError::Other("daemon mode is Unix-only (requires Unix sockets)".into()))
 }
 
-/// Launch Chrome and create a Page for the daemon.
+/// Launch the lane's browser and create a Page for the daemon.
 /// Cleans up the browser if any step after launch fails.
 #[cfg(unix)]
 async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
-    let browser = crate::browser::Browser::launch(0).await?;
-    let base = browser.base();
+    let (browser, base) = crate::browser::launch_lane().await?;
     let result = async {
         let target = crate::cdp::first_page_target(&base).await?;
         let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
@@ -1874,13 +2238,18 @@ async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
 
     match result {
         Ok(page) => {
-            // Re-inject saved logins before anything navigates.
-            let _ = crate::logins::restore(page.cdp_ref()).await;
-            Ok((page, Some(browser)))
+            // Re-inject saved logins before anything navigates. Never on the
+            // real lane: the user's own cookies are not ours to write.
+            if !crate::realbrowser::real_lane() {
+                let _ = crate::logins::restore(page.cdp_ref()).await;
+            }
+            Ok((page, browser))
         }
         Err(e) => {
-            // Clean up the browser we just launched.
-            let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+            // Clean up a browser we launched (attach lane: never ours).
+            if let Some(b) = browser {
+                let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+            }
             Err(e)
         }
     }
@@ -2034,6 +2403,7 @@ COMMANDS
   vision [--marks]                screenshot (saved to a file; path printed)
   daemon | stop                   manage the persistent Chrome session
   mcp                             MCP server on stdio — add to your agent's client config
+  rb on|off [sub]                 real-browser lane: drive YOUR browser (see 'help rb')
   audit                           stealth audit — 61-check suite + boot self-check + drift stamp
   update | -u [--check] [--force]  self-update; --rollback restores the previous binary
   doctor | -doc                   system diagnostics (13 checks)
@@ -2069,6 +2439,8 @@ ENVIRONMENT
   BLADE_CMD_TIMEOUT    client wait for a daemon response, seconds (default 300)
   BLADE_IDLE_TIMEOUT   daemon idle before Chrome shuts down, seconds (default 600)
   BLADE_NO_COMPRESS=1  disable response compression
+  BLADE_LANE           real|agent — force the real-browser lane for this process
+  BLADE_RB_DEBUG=1     real lane: surface the browser's own stderr on launch failures
   CHROME_PATH          override the Chrome/Chromium binary
 
 Agents: `bladebro help --json` returns the machine version of this manual —
@@ -2228,6 +2600,22 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             "examples": ["bladebro help --json", "bladebro help act"],
             "notes": ["the single self-teaching surface — fetch 'help --json' once"]
         }),
+        "rb" | "realbrowser" => json!({
+            "usage": "bladebro rb [on|off|status|mode <m>|use [id]|profile [key]|refresh|forget|pause|resume]",
+            "tool": null,
+            "examples": [
+                "bladebro rb on",
+                "bladebro rb status --json",
+                "bladebro rb mode attach",
+                "bladebro rb pause"
+            ],
+            "notes": [
+                "real-browser lane: the agent drives YOUR Chromium-family browser (your profile data, your display) with zero page patches; the driver-side stack (perception, LPM, refs, adapters, token efficiency, biometrics) is unchanged",
+                "mechanisms: clone (default — imported copy; your browser may stay open), profile (your live profile — close the browser first), attach (a running browser exposing a debug endpoint, incl. Chrome 144+ chrome://inspect#remote-debugging); auto = attach if one is live, else clone",
+                "applies to daemon + MCP browser launches; restart a long-lived agent session (or wait for its idle timeout) to switch immediately",
+                "`rb pause`/`rb resume` hand manual control over; `rb forget` wipes the imported copy; `rb refresh` re-imports"
+            ]
+        }),
         "mcp" => json!({
             "usage": "bladebro mcp",
             "tool": null,
@@ -2322,7 +2710,7 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
     let mut commands = serde_json::Map::new();
     for c in [
         "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help",
-        "mcp", "audit", "update", "doctor", "rollback", "version",
+        "rb", "mcp", "audit", "update", "doctor", "rollback", "version",
     ] {
         if let Some(d) = command_help_json(c) {
             commands.insert(c.to_string(), d);
@@ -2361,6 +2749,8 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
             "BLADE_CMD_TIMEOUT": "client wait for a daemon response, seconds (default 300)",
             "BLADE_IDLE_TIMEOUT": "daemon idle before Chrome shuts down, seconds (default 600)",
             "BLADE_NO_COMPRESS": "set 1 to disable response compression",
+            "BLADE_LANE": "real|agent — force the real-browser lane for this process",
+            "BLADE_RB_DEBUG": "real lane: set 1 to surface the browser's own stderr on launch failures",
             "BLADE_TRANSPORT": "mcp: 'ws' forces the WebSocket transport",
             "CHROME_PATH": "override the Chrome/Chromium binary",
             "RUST_LOG": "log filter (default warn,bladebro=info)"
@@ -2537,6 +2927,35 @@ Auto-starts on the first command — run it manually only to watch startup
 errors. One Chrome instance serves every later command (Unix socket under the
 data dir; socket + pid file are 0600). Idle timeout: BLADE_IDLE_TIMEOUT
 seconds (default 600), then Chrome shuts down; the next command relaunches it.
+"#,
+        "rb" | "realbrowser" => r#"bladebro rb — the real-browser lane
+
+USAGE
+  bladebro rb                 status (same as `rb status`)
+  bladebro rb on | off        switch the lane (true/false also accepted)
+  bladebro rb mode <m>        auto | clone | profile | attach
+  bladebro rb use [id]        list / choose the browser
+  bladebro rb profile [key]   list / choose the profile
+  bladebro rb refresh         re-import the profile into the clone
+  bladebro rb forget          wipe the imported copy
+  bladebro rb pause | resume  hand the browser to yourself / back
+
+The lane: instead of Bladebro's isolated browser, the agent drives YOUR
+Chromium-family browser with YOUR profile data on YOUR display — and the
+page-injection layer switches OFF entirely (a real environment needs no
+masks; truth has no tells to catch). Everything driver-side still runs:
+perception, refs, adapters, token efficiency, biometrics + idle hum.
+
+Mechanisms: clone (default — imports your profile once; your browser may
+stay open; the source is never written to), profile (launches on your live
+profile — close the browser first; branded Google Chrome 136+ refuses CDP
+on the default dir, so use clone/attach there), attach (drives a running
+browser that already exposes a debug endpoint — classic
+--remote-debugging-port, or Chrome 144+ chrome://inspect#remote-debugging
+with per-connection approval).
+
+The switch applies to the CLI daemon and to MCP launches; restart a
+long-lived agent session (or wait for its idle timeout) to switch now.
 "#,
         "stop" => r#"bladebro stop — shut the daemon down
 
@@ -3022,6 +3441,7 @@ mod tests {
         assert!(v["commands"]["act"]["usage"].as_str().is_some());
         assert!(v["commands"]["nav"].is_object());
         assert!(v["commands"]["mcp"].is_object(), "help --json must cover mcp");
+        assert!(v["commands"]["rb"].is_object(), "help --json must cover rb");
         assert!(v["commands"]["doctor"].is_object());
         assert!(v["exit_codes"]["2"].as_str().unwrap().contains("usage"));
         assert!(v["output"]["payloads"]["@file"].as_str().is_some());
@@ -3037,7 +3457,7 @@ mod tests {
     fn every_command_has_help_text_and_json() {
         for c in [
             "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help",
-            "mcp", "audit", "update", "doctor", "rollback", "version",
+            "rb", "mcp", "audit", "update", "doctor", "rollback", "version",
         ] {
             let text = command_help_text(c).unwrap_or_else(|| panic!("{c} human help"));
             assert!(text.contains("USAGE"), "{c} help lacks USAGE");

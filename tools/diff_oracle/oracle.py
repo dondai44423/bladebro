@@ -7,7 +7,7 @@ The anti-drift gate: run after any stealth-affecting change, before releases,
 and after every Chrome upgrade. DIVERGENT must be 0.
 
 Usage:
-  python3 oracle.py [--chrome PATH] [--url URL] [--report FILE.md] [--keep]
+  python3 oracle.py [--chrome PATH] [--url URL] [--lane agent|real] [--report FILE.md] [--keep]
 
 Requirements: Linux + Xvfb (the stock baseline runs on its own Xvfb display so
 the comparison mirrors bladebro's isolated environment), python3, `websockets`,
@@ -145,28 +145,50 @@ def setup_display_session(display):
     return proc
 
 
-def pristine_probe(chrome, port, display, url, battery):
-    """Launch stock Chrome on the given display and run the battery."""
+def pristine_probe(chrome, port, display, url, battery, lane="agent"):
+    """Launch stock Chrome on the given display and run the battery.
+    In real-lane mode the stock flags mirror the real lane's own launch set
+    (plus the same functional GL enablers bladebro receives), so the only
+    thing under test is bladebro's own behavior."""
     tmp = tempfile.mkdtemp(prefix="blade-oracle-")
     env = dict(os.environ)
     if display is not None:
         env["DISPLAY"] = f":{display}"
         env.pop("WAYLAND_DISPLAY", None)
         env.pop("XDG_SESSION_TYPE", None)
-    args = [
-        chrome, "--no-first-run", "--no-default-browser-check",
-        f"--user-data-dir={tmp}", f"--remote-debugging-port={port}",
-        "--window-size=1920,1080",
-        # GL-enabling launch flags — environment enablers (identical to
-        # bladebro's), NOT stealth: without them Chrome 139+ on a GPU-less
-        # display refuses software WebGL and this baseline has no context at
-        # all, which would make every GL comparison meaningless. The stealth
-        # injection layer is the only difference being tested.
+    gl_enablers = [
+        # Environment enablers (identical to bladebro's), NOT stealth:
+        # without them Chrome 139+ on a GPU-less display refuses software
+        # WebGL and the baseline has no context at all. In agent mode the
+        # stealth injection layer is the only difference under test; in
+        # real mode there is no injection on either side.
         "--enable-unsafe-swiftshader",
         "--ignore-gpu-blocklist",
         "--use-angle=gl",
-        "--ozone-platform=x11",
     ]
+    if lane == "real":
+        args = [
+            chrome, "--no-first-run", "--no-default-browser-check",
+            "--disable-dev-shm-usage", "--disable-popup-blocking",
+            "--disable-features=PdfPlugin",
+            f"--user-data-dir={tmp}", f"--remote-debugging-port={port}",
+            "--profile-directory=Default",
+            # Geometry pinned on BOTH sides (bladebro gets the same two flags
+            # via BLADE_CHROME_FLAGS): window-manager placement jitter is not
+            # a fingerprint surface, and it must not masquerade as one —
+            # everything else stays strict (zero expected).
+            "--window-size=1600,900", "--window-position=0,0",
+            *gl_enablers,
+            "--ozone-platform=x11",
+        ]
+    else:
+        args = [
+            chrome, "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={tmp}", f"--remote-debugging-port={port}",
+            "--window-size=1920,1080",
+            *gl_enablers,
+            "--ozone-platform=x11",
+        ]
     proc = subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         if not wait_http(port):
@@ -227,12 +249,12 @@ def parse_bladebro_eval(out):
     fail("no `result:` line in bladebro output")
 
 
-def bladebro_probe(bladebro, url, battery):
-    subprocess.run([bladebro, "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-    r = subprocess.run([bladebro, "nav", url], capture_output=True, text=True, timeout=240)
+def bladebro_probe(bladebro, url, battery, env=None):
+    subprocess.run([bladebro, "stop"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    r = subprocess.run([bladebro, "nav", url], env=env, capture_output=True, text=True, timeout=240)
     if r.returncode != 0:
         fail(f"bladebro nav failed: {r.stdout[-300:]} {r.stderr[-300:]}")
-    r = subprocess.run([bladebro, "act", "eval", battery], capture_output=True, text=True, timeout=240)
+    r = subprocess.run([bladebro, "act", "eval", battery], env=env, capture_output=True, text=True, timeout=240)
     if r.returncode != 0:
         fail(f"bladebro act eval failed: {r.stdout[-300:]} {r.stderr[-300:]}")
     return parse_bladebro_eval(r.stdout)
@@ -249,6 +271,9 @@ def main():
     ap = argparse.ArgumentParser(description="bladebro differential oracle")
     ap.add_argument("--chrome", help="stock Chrome/Chromium path (default: CHROME_PATH or PATH)")
     ap.add_argument("--url", default="https://example.com", help="page both browsers load")
+    ap.add_argument("--lane", choices=("agent", "real"), default="agent",
+                    help="agent lane (masked — classified EXPECTED surface) or the real-browser lane "
+                         "(zero patches — every diff is DIVERGENT, and nothing is expected)")
     ap.add_argument("--report", help="write the report to this file as well")
     ap.add_argument("--keep", action="store_true", help="keep temp files/processes (debug)")
     args = ap.parse_args()
@@ -276,12 +301,45 @@ def main():
             time.sleep(0.2)
         wm_proc = setup_display_session(display)
 
+    real_home, real_src, real_env = None, None, None
+    if args.lane == "real":
+        # Isolated home + a synthetic source profile; the clone lane imports
+        # it and runs the real-browser path with zero patches. Forced via
+        # BLADE_LANE so a persisted config can never skew the run.
+        real_home = tempfile.mkdtemp(prefix="blade-oracle-home-")
+        real_src = tempfile.mkdtemp(prefix="blade-oracle-src-")
+        os.makedirs(os.path.join(real_src, "Default"), exist_ok=True)
+        with open(os.path.join(real_src, "Default", "Preferences"), "w") as f:
+            f.write("{}")
+        browser_id = "chromium"
+        base = os.path.basename(chrome).lower()
+        if "brave" in base:
+            browser_id = "brave"
+        elif "edge" in base:
+            browser_id = "edge"
+        elif "chrome" in base and "chromium" not in base:
+            browser_id = "chrome"
+        with open(os.path.join(real_home, "realbrowser.json"), "w") as f:
+            json.dump({"enabled": True, "mode": "clone", "browser": browser_id,
+                       "profile": real_src, "visible": True}, f)
+        real_env = dict(os.environ)
+        real_env["BLADE_HOME"] = real_home
+        real_env["BLADE_LANE"] = "real"
+        # Same functional GL enablers as the stock baseline.
+        real_env["BLADE_CHROME_FLAGS"] = \
+            "--enable-unsafe-swiftshader --ignore-gpu-blocklist --use-angle=gl " \
+            "--window-size=1600,900 --window-position=0,0"
+        if display is not None:
+            real_env["DISPLAY"] = f":{display}"
+            real_env.pop("WAYLAND_DISPLAY", None)
+            real_env.pop("XDG_SESSION_TYPE", None)
+
     try:
         print(f"[oracle] baseline: stock {chrome} on :{display}")
-        stock = pristine_probe(chrome, free_port(), display, args.url, battery)
+        stock = pristine_probe(chrome, free_port(), display, args.url, battery, lane=args.lane)
 
-        print(f"[oracle] subject: {bladebro} (fresh daemon browser)")
-        subject = bladebro_probe(bladebro, args.url, battery)
+        print(f"[oracle] subject: {bladebro} (lane={args.lane})")
+        subject = bladebro_probe(bladebro, args.url, battery, env=real_env)
     finally:
         if wm_proc:
             wm_proc.terminate()
@@ -295,6 +353,14 @@ def main():
                 xvfb_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 xvfb_proc.kill()
+        if real_env is not None:
+            subprocess.run([bladebro, "stop"], env=real_env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if not args.keep:
+            if real_home:
+                shutil.rmtree(real_home, ignore_errors=True)
+            if real_src:
+                shutil.rmtree(real_src, ignore_errors=True)
 
     keys = sorted(set(stock) | set(subject))
     ok, expected, divergent = [], [], []
@@ -303,15 +369,25 @@ def main():
         if a == b:
             ok.append(k)
         else:
-            reason = classify(k)
+            # Real lane: nothing is expected — the lane's whole contract is
+            # that its page-visible surface equals a stock browser's.
+            reason = classify(k) if args.lane == "agent" else None
             if reason:
                 expected.append((k, a, b, reason))
             else:
                 divergent.append((k, a, b))
+    if args.lane == "real":
+        # battery.js emits String(navigator.webdriver) — accept the string
+        # (or a real bool) but never true.
+        wd = subject.get("webdriver")
+        wd_false = wd is False or (isinstance(wd, str) and wd.lower() == "false")
+        if not wd_false:
+            divergent.append(("webdriver-not-false", "false", wd))
 
     lines = []
     lines.append("== bladebro differential oracle ==")
     lines.append(f"baseline: stock {chrome} on :{display}  |  subject: {bladebro}")
+    lines.append(f"lane: {args.lane}")
     lines.append(f"url: {args.url}")
     lines.append(f"keys: {len(keys)}   ok: {len(ok)}   expected: {len(expected)}   divergent: {len(divergent)}")
     if expected:

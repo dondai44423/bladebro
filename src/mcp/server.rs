@@ -162,6 +162,28 @@ async fn launch_browser(
     host: &str,
     port: u16,
 ) -> Result<(Page, Option<crate::browser::Browser>)> {
+    // Real-browser lane (S18): never the pipe transport (it flips
+    // navigator.webdriver) and never the isolated agent browser — this lane
+    // launches or attaches the user's own browser (see `launch_lane`).
+    if crate::realbrowser::real_lane() && port == 0 {
+        let (browser, base) = crate::browser::launch_lane().await?;
+        let result = async {
+            let target = cdp::first_page_target(&base).await?;
+            let client = CdpClient::connect(target.ws_url()?).await?;
+            let page = Page::attach(CdpSession::root(client), &base, None).await?;
+            Ok(page)
+        }
+        .await;
+        return match result {
+            Ok(page) => Ok((page, browser)),
+            Err(e) => {
+                if let Some(b) = browser {
+                    let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+                }
+                Err(e)
+            }
+        };
+    }
     if use_pipe {
         #[cfg(unix)]
         {
@@ -220,8 +242,11 @@ async fn launch_browser(
         let target = cdp::first_page_target(&base).await?;
         let client = CdpClient::connect(target.ws_url()?).await?;
         let page = Page::attach(CdpSession::root(client), &base, None).await?;
-        // Re-inject saved logins before anything navigates.
-        let _ = crate::logins::restore(page.cdp_ref()).await;
+        // Re-inject saved logins before anything navigates. Never on the
+        // real lane: those are the user's own cookies in there.
+        if !crate::realbrowser::real_lane() {
+            let _ = crate::logins::restore(page.cdp_ref()).await;
+        }
         Ok((page, None))
     }
 }
@@ -475,7 +500,9 @@ async fn serve(
                                     // by visiting a few top sites. Only runs once.
                                     // The note explains WHY the first tool call
                                     // took ~10s before the agent's request ran.
-                                    if crate::session_profile::SessionProfile::claim_warming() {
+                                    if !crate::realbrowser::real_lane()
+                                        && crate::session_profile::SessionProfile::claim_warming()
+                                    {
                                         if let Some(ref mut p) = page {
                                             warm_profile(p).await;
                                         }
@@ -722,7 +749,7 @@ async fn serve(
                 // profile tears its SQLite and you come back logged out.
                 if browser.is_some() && last_sync.elapsed() >= sync_interval {
                     if let Some(ref p) = page {
-                        if !p.cdp_ref().is_closed() {
+                        if !p.cdp_ref().is_closed() && !crate::realbrowser::real_lane() {
                             let _ = crate::logins::snapshot(p.cdp_ref()).await;
                         }
                     }
@@ -741,6 +768,7 @@ async fn serve(
                 if idle_secs > 0
                     && browser.is_some()
                     && last_activity.elapsed().as_secs() > idle_secs
+                    && crate::realbrowser::should_idle_shutdown()
                 {
                     eprintln!(
                         "[bladebro] idle timeout ({}s), shutting down Chrome to save memory",
@@ -749,8 +777,11 @@ async fn serve(
                     if let Some(b) = browser.take() {
                         // Persist live logins before killing Chrome so nothing
                         // is lost between the last periodic snapshot and exit.
+                        // (Never on the real lane — not our cookie store.)
                         if let Some(ref p) = page {
-                            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                            if !crate::realbrowser::real_lane() {
+                                let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                            }
                         }
                         shutdown_browser(b).await;
                     }
@@ -764,8 +795,11 @@ async fn serve(
     // (flushes the session profile back to the template), abort page tasks.
     if let Some(b) = browser.take() {
         // Persist live logins before killing Chrome.
+        // (Never on the real lane — not our cookie store.)
         if let Some(ref p) = page {
-            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+            if !crate::realbrowser::real_lane() {
+                let _ = crate::logins::snapshot(p.cdp_ref()).await;
+            }
         }
         shutdown_browser(b).await;
     }

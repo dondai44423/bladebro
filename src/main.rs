@@ -105,6 +105,10 @@ fn run() -> Result<()> {
     }
     let cmd = cmd.unwrap_or_else(|| "help".to_string());
 
+    // S18: pick this process's lane (config + BLADE_LANE env override). Every
+    // surface — one-shot CLI, daemon, MCP — reads the same switch.
+    bladebro::realbrowser::init_lane();
+
     // Restore the default SIGPIPE for CLI-output commands so an early pipe
     // reader (`bladebro ... | head -1`) exits quietly instead of panicking —
     // Rust std ignores SIGPIPE, which turns EPIPE into a println! panic.
@@ -139,7 +143,8 @@ fn run() -> Result<()> {
     // CLI commands go through the new CLI module (own Chrome management).
     let is_cli_cmd = matches!(
         cmd.as_str(),
-        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help"
+        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help" | "rb"
+            | "realbrowser"
     );
 
     // Legacy debug commands that need a launched browser. They share the
@@ -198,7 +203,8 @@ fn run() -> Result<()> {
             Ok(())
         }
         // CLI commands go through the new CLI module.
-        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help" => {
+        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help"
+        | "rb" | "realbrowser" => {
             let mut cli_args: Vec<String> = std::iter::once(cmd.clone())
                 .chain(positional.iter().cloned())
                 .collect();

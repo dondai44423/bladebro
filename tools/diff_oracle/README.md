@@ -15,6 +15,14 @@ exact machine" and compares it against what bladebro shows. It catches the
 whole class of "stealth is fine but the tool mislaunches / misprobes /
 drifts" bugs.
 
+Lanes: `--lane agent` (default) compares the masked agent lane against stock
+and classifies the documented mask surface as EXPECTED. `--lane real`
+compares the real-browser lane (clone mechanism, isolated BLADE_HOME, forced
+via `BLADE_LANE=real`) and **disables the EXPECTED table entirely** — the
+lane's contract is that its page-visible surface equals a stock browser's, so
+every diff is DIVERGENT. Window geometry is pinned on both sides (WM placement
+jitter is not a fingerprint surface and must not masquerade as one).
+
 ## Requirements
 
 - Linux + Xvfb (the stock baseline runs on its own Xvfb display so the
@@ -27,6 +35,7 @@ drifts" bugs.
 
 ```bash
 python3 tools/diff_oracle/oracle.py                 # default URL https://example.com
+python3 tools/diff_oracle/oracle.py --lane real     # real-browser lane: ZERO expected; every diff diverges
 python3 tools/diff_oracle/oracle.py --report /tmp/oracle.md
 python3 tools/diff_oracle/oracle.py --url https://github.com --keep   # debug
 ```

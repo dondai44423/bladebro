@@ -55,6 +55,11 @@ async fn hum_loop(
             continue;
         }
 
+        // Manual-control pause / lane config: stay silent.
+        if !crate::realbrowser::hum_enabled() {
+            continue;
+        }
+
         // Check idle duration.
         let last = last_epoch.load(Ordering::Relaxed);
         if last == 0 {

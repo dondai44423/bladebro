@@ -331,6 +331,7 @@ Six layers, all on by default, no config needed:
 |---|---|
 | 61-check local suite + boot self-check + drift stamp (`bladebro audit`) | 61/61 pass, stamps stable |
 | Differential oracle vs stock Chrome on the same display (`tools/diff_oracle`) | 67 probes: 49 identical, 18 documented mask surface, **0 divergent** |
+| Real-browser lane vs stock Chrome (`oracle.py --lane real`) | 67 probes: **all identical, 0 expected, 0 divergent** — the lane carries no page patches |
 | CreepJS | **headless: 0%, stealth: 0%** (stock Chrome on the same lane: 0%/0%) |
 | bot.sannysoft.com | All pass |
 | incolumitas.com | All OK (webdriver=false, no UA leak) |
@@ -338,6 +339,37 @@ Six layers, all on by default, no config needed:
 | PerimeterX/HUMAN (Zillow, Fiverr) | Full page load, no block |
 
 Run `bladebro audit` to verify your own setup; run `python3 tools/diff_oracle/oracle.py` before any release.
+
+## 🌐 Real-browser mode
+
+The stealth layers above manufacture coherence inside an isolated browser. The
+real-browser lane deletes the problem instead: it drives **your own**
+Chromium-family browser — your profile data, your display — and switches the
+page-injection layer **off entirely**. Truth has no tells to catch, so on this
+lane the amount of page patching is zero. Everything driver-side still runs:
+perception, Live Page Model, refs, adapters, token efficiency, resource
+blocking, biometrics + idle hum.
+
+```bash
+bladebro rb on        # switch every surface (CLI, daemon, MCP) to your browser
+bladebro rb status    # what is configured / live (--json for agents)
+bladebro rb pause     # take manual control; input actions refuse until `rb resume`
+bladebro rb off       # back to the isolated agent browser
+```
+
+| Mechanism | How it works | When it fits |
+|---|---|---|
+| `clone` (default) | Imports your profile once into a blade-owned copy (browser may stay open; the source is never written to); runs your real binary on the copy, which ages through use | Everyday use; works on branded Google Chrome |
+| `profile` | Launches your binary on your live profile | Purists — close the browser first; Google Chrome 136+ refuses CDP on the default profile dir |
+| `attach` | Drives a browser that already exposes a debug endpoint (`--remote-debugging-port=0`, or Chrome 144+ `chrome://inspect#remote-debugging`) | Zero disruption; never owned, never shut down |
+
+`rb mode auto` (default) attaches when a live endpoint exists, else clones.
+Browser override: `rb use <id>` · profile pick: `rb profile <key>` · re-import:
+`rb refresh` · wipe the imported copy: `rb forget`. Switching restarts the
+daemon; long-lived MCP sessions pick the lane up at their next browser launch.
+
+> ⚠️ The agent browses **as you**: anything it does is attributable to your
+> identity. `rb on` prints exactly what it will use and how to revert.
 
 ## 🧩 Site adapters
 
@@ -462,6 +494,8 @@ Everything optional; configuration is environment variables.
 | `BLADE_IDLE_TIMEOUT` | `600` | Daemon idle time before Chrome shuts down, seconds |
 | `BLADE_TRANSPORT` | auto | MCP: `ws` forces the WebSocket transport |
 | `BLADE_CHROME_FLAGS` | none | Extra Chrome launch flags |
+| `BLADE_LANE` | auto | `real` forces the real-browser lane for this process (same as `rb on`) |
+| `BLADE_RB_DEBUG` | — | `1` surfaces the browser's own stderr on real-lane launches |
 
 Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME/.local/state/blade` → `$HOME/.blade` (legacy). Existing installs keep their tree — nothing is ever split across two directories. Windows: `%USERPROFILE%\.blade` (plus `BLADE_HOME`). `bladebro doctor` prints the resolved data root.
 

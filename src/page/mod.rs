@@ -230,7 +230,10 @@ impl Page {
             .map(|ua| ua.contains("HeadlessChrome"))
             .unwrap_or(true);
 
-        if need_override {
+        // Real-browser lane: no UA rewriting — if the lane runs headless it
+        // honestly reports HeadlessChrome. Masks are exactly what this lane
+        // deletes.
+        if need_override && !crate::realbrowser::real_lane() {
             let real_ua = ua_info.as_ref()
                 .and_then(|v| v.get("ua").and_then(|u| u.as_str()))
                 .unwrap_or({
@@ -266,29 +269,33 @@ impl Page {
         // S6: geo-consistent identity — timezone and locale must match the
         // proxy's geographic location. Without a proxy, the system timezone
         // is already correct. BLADE_TZ and BLADE_LOCALE override explicitly.
-        if let Ok(tz) = std::env::var("BLADE_TZ") {
-            if !tz.is_empty() {
-                if let Err(e) = cdp.send("Emulation.setTimezoneOverride",
-                    Some(serde_json::json!({ "timezoneId": tz }))).await
-                {
-                    eprintln!["[bladebro] WARNING: timezone override failed: {e}"];
-                } else {
-                    eprintln!["[bladebro] timezone override: {tz}"];
+        // Real-browser lane: skipped — both are page-visible masks, and this
+        // lane's contract is that nothing page-visible is manufactured.
+        if !crate::realbrowser::real_lane() {
+            if let Ok(tz) = std::env::var("BLADE_TZ") {
+                if !tz.is_empty() {
+                    if let Err(e) = cdp.send("Emulation.setTimezoneOverride",
+                        Some(serde_json::json!({ "timezoneId": tz }))).await
+                    {
+                        eprintln!["[bladebro] WARNING: timezone override failed: {e}"];
+                    } else {
+                        eprintln!["[bladebro] timezone override: {tz}"];
+                    }
                 }
+            } else if std::env::var("BLADE_PROXY").is_ok() {
+                eprintln!["[bladebro] WARNING: BLADE_PROXY set but BLADE_TZ not set — timezone/IP mismatch will be detected"];
             }
-        } else if std::env::var("BLADE_PROXY").is_ok() {
-            eprintln!["[bladebro] WARNING: BLADE_PROXY set but BLADE_TZ not set — timezone/IP mismatch will be detected"];
-        }
-        if let Ok(locale) = std::env::var("BLADE_LOCALE") {
-            if !locale.is_empty() {
-                let base = locale.split('-').next().unwrap_or(&locale).to_string();
-                let _ = cdp.send("Emulation.setLocaleOverride",
-                    Some(serde_json::json!({ "locale": locale }))).await;
-                let _ = cdp.send("Network.setExtraHTTPHeaders",
-                    Some(serde_json::json!({
-                        "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
-                    }))).await;
-                eprintln!["[bladebro] locale override: {locale}"];
+            if let Ok(locale) = std::env::var("BLADE_LOCALE") {
+                if !locale.is_empty() {
+                    let base = locale.split('-').next().unwrap_or(&locale).to_string();
+                    let _ = cdp.send("Emulation.setLocaleOverride",
+                        Some(serde_json::json!({ "locale": locale }))).await;
+                    let _ = cdp.send("Network.setExtraHTTPHeaders",
+                        Some(serde_json::json!({
+                            "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
+                        }))).await;
+                    eprintln!["[bladebro] locale override: {locale}"];
+                }
             }
         }
         // Inject the stealth script before any page loads. This runs at
@@ -1173,6 +1180,14 @@ impl Page {
     /// in the verdict. If the element is truly gone, the error says what
     /// the ref used to be.
     pub async fn act(&mut self, action: crate::action::Action) -> Result<(PageDelta, String)> {
+        // Manual-control pause (`rb pause`): the person has the browser.
+        // Refuse input-dispatching actions so agent and human never fight
+        // over clicks/keys; reads and waits still work.
+        if crate::realbrowser::input_paused() && action.injects_input() {
+            return Err(crate::error::BladeError::Other(
+                "paused — manual control is claimed (`bladebro rb resume` to hand it back)".into(),
+            ));
+        }
         let mut heal_note = if let Some(ref_id) = action.ref_id() {
             self.ensure_ref(ref_id).await?
         } else {

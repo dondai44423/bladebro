@@ -1,0 +1,1115 @@
+//! Real-browser lane (`bladebro rb`).
+//!
+//! Bladebro's default lane owns an isolated Chromium + seasoned profile on a
+//! virtual display, and manufactures coherence with a page-injection layer.
+//! The real-browser lane is the opposite trade, and for protected sites the
+//! stronger one: the agent drives the user's OWN Chromium-family browser —
+//! their binary, their real profile data, the real display — and the
+//! injection layer is switched OFF entirely. Truth has no lies to catch:
+//! every mask this crate maintains is a measurable risk (the S10 `toString`
+//! episode is the receipt), so on this lane the correct amount of page
+//! patching is zero.
+//!
+//! What still runs on the real lane: everything driver-side — perception,
+//! the Live Page Model, refs, adapters, token-efficiency compression,
+//! interception, the biometrics/hum behavior layer. None of it is
+//! page-visible.
+//!
+//! Three mechanisms, chosen by [`Mode`]:
+//! - **Clone** (default): the user's profile is imported once into a
+//!   blade-owned template and per-process session dirs (the exact machinery
+//!   the agent lane already uses for seasoning), then launched with the
+//!   user's real browser binary. Works while their browser is running,
+//!   works for Google-Chrome-branded builds (whose 136+ CDP hardening
+//!   refuses remote debugging on the *default* profile dir — a non-default
+//!   clone dir sidesteps it), and never touches their live profile.
+//! - **Profile**: launch their binary directly on their real profile dir.
+//!   Full fidelity, writes persist into their profile — requires their
+//!   browser to be closed, and branded Chrome requires a non-default dir.
+//! - **Attach**: drive an already-running browser (classic pre-armed
+//!   `--remote-debugging-port`, or Chrome >=144's official
+//!   `chrome://inspect#remote-debugging` approval flow). No ownership: no
+//!   launch, no shutdown.
+//!
+//! Ground truth this design obeys (verified on the dev machine, Chrome 151):
+//! the `default_user_data_dir` CDP refusal is compiled in only for
+//! `GOOGLE_CHROME_BRANDING` (chromium source), so plain Chromium accepts a
+//! debug port on any dir; a WS-attached browser reports `webdriver=false`
+//! natively; `--remote-debugging-pipe` reports `true` (so the real lane uses
+//! WS — masking would be a lie, and a lie is exactly what this lane exists
+//! to delete).
+
+use crate::error::{BladeError, Result};
+use crate::platform;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ── Lane switch ─────────────────────────────────────────────────────────
+
+static REAL_LANE: AtomicBool = AtomicBool::new(false);
+
+/// Force the lane for this process (tests, harnesses).
+pub fn set_real_lane(on: bool) {
+    REAL_LANE.store(on, Ordering::Relaxed);
+}
+
+/// True when this process must drive the user's real browser instead of
+/// launching the isolated agent browser.
+pub fn real_lane() -> bool {
+    REAL_LANE.load(Ordering::Relaxed)
+}
+
+/// Initialise the lane for this process: `BLADE_LANE=real|agent` overrides,
+/// otherwise the persisted config decides. Called once at process start.
+pub fn init_lane() {
+    let on = match std::env::var("BLADE_LANE").ok().as_deref() {
+        Some("real") => true,
+        Some("agent") => false,
+        _ => config().enabled,
+    };
+    set_real_lane(on);
+}
+
+// ── Config ──────────────────────────────────────────────────────────────
+
+/// How the real lane obtains its browser.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Clone when nothing else is possible; attach when a debuggable
+    /// browser is already running; profile-launch is never picked silently
+    /// (it needs the user's browser closed — explicit only).
+    #[default]
+    Auto,
+    /// Import the profile once, run the user's binary on the copy.
+    Clone,
+    /// Launch the user's binary on their live profile dir (needs it closed).
+    Profile,
+    /// Drive an already-running, debuggable browser; never own it.
+    Attach,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Auto => "auto",
+            Mode::Clone => "clone",
+            Mode::Profile => "profile",
+            Mode::Attach => "attach",
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Persisted real-browser configuration (`<data-dir>/realbrowser.json`).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Config {
+    /// Master switch (`bladebro rb on|off`).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Mechanism selection.
+    #[serde(default)]
+    pub mode: Mode,
+    /// Browser id from [`discover`] (`chromium`, `chrome`, `brave`, ...),
+    /// or `None` = most recently used.
+    #[serde(default)]
+    pub browser: Option<String>,
+    /// Profile key within the browser's profile root, or an absolute path
+    /// to a profile dir. `None` = most recently used.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Launch a visible window (the point of the feature on a desktop). An
+    /// invisible lane falls back to `--headless=new` — honest, but a
+    /// degraded environment; only for servers.
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    /// Allow the daemon idle timeout to close a real-lane browser. Default
+    /// off: the browser is the user's — yanking it away while they might be
+    /// using it is exactly what this feature must never do.
+    #[serde(default)]
+    pub idle_shutdown: bool,
+    /// Keep the idle-hum behavior on the real lane (it is driver-side and
+    /// page-invisible; it pauses automatically with `rb pause`).
+    #[serde(default = "default_true")]
+    pub idle_hum: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: Mode::Auto,
+            browser: None,
+            profile: None,
+            visible: true,
+            idle_shutdown: false,
+            idle_hum: true,
+        }
+    }
+}
+
+/// `<data-dir>/realbrowser.json`.
+pub fn config_path() -> PathBuf {
+    platform::blade_dir().join("realbrowser.json")
+}
+
+/// Load the persisted config; a missing or malformed file is the default
+/// (switch off). Malformed is deliberately NOT fatal: every command reads
+/// this, and a corrupted byte must never brick the CLI.
+pub fn config() -> Config {
+    config_from(&config_path())
+}
+
+/// Load from an explicit path (unit-testable).
+pub fn config_from(path: &Path) -> Config {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the config (0600 — it names the user's browser and profile).
+pub fn save_config(cfg: &Config) -> Result<()> {
+    save_config_to(&config_path(), cfg)
+}
+
+pub fn save_config_to(path: &Path, cfg: &Config) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        platform::secure_create_dir_all(parent)
+            .map_err(|e| BladeError::Other(format!("cannot create data dir: {e}")))?;
+    }
+    let body = serde_json::to_string_pretty(cfg)
+        .map_err(|e| BladeError::Other(format!("cannot serialize config: {e}")))?;
+    platform::secure_write_file(path, body.as_bytes())
+        .map_err(|e| BladeError::Other(format!("cannot write realbrowser.json: {e}")))
+}
+
+// ── Browser discovery ───────────────────────────────────────────────────
+
+/// Browser family — drives the CDP-hardening gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Brand {
+    /// Google Chrome (branded): refuses CDP on the default profile dir (M136+).
+    Chrome,
+    Chromium,
+    Brave,
+    Edge,
+    Vivaldi,
+    Opera,
+}
+
+impl Brand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Brand::Chrome => "Chrome",
+            Brand::Chromium => "Chromium",
+            Brand::Brave => "Brave",
+            Brand::Edge => "Edge",
+            Brand::Vivaldi => "Vivaldi",
+            Brand::Opera => "Opera",
+        }
+    }
+}
+
+/// True when this brand is known to refuse `--remote-debugging-*` on the
+/// default user-data dir — i.e. profile-mode on the default dir cannot work
+/// and clone/attach are the only routes. Compiled in for
+/// `GOOGLE_CHROME_BRANDING` only (chromium `remote_debugging_server.cc`),
+/// so everything else must NOT be gated by default.
+pub fn requires_non_default_dir(brand: Brand) -> bool {
+    matches!(brand, Brand::Chrome)
+}
+
+/// Infer the brand from a `--version` output line
+/// (e.g. "Google Chrome 151.0.…", "Chromium 151.0.…", "Brave Browser 1.7…").
+pub fn brand_from_version(out: &str) -> Option<Brand> {
+    let l = out.to_lowercase();
+    if l.contains("google chrome") {
+        Some(Brand::Chrome)
+    } else if l.contains("brave") {
+        Some(Brand::Brave)
+    } else if l.contains("microsoft edge") || l.contains("msedge") {
+        Some(Brand::Edge)
+    } else if l.contains("vivaldi") {
+        Some(Brand::Vivaldi)
+    } else if l.contains("opera") {
+        Some(Brand::Opera)
+    } else if l.contains("chromium") {
+        Some(Brand::Chromium)
+    } else {
+        None
+    }
+}
+
+/// One installed browser.
+#[derive(Clone, Debug)]
+pub struct BrowserSpec {
+    pub id: String,
+    pub name: String,
+    pub brand: Brand,
+    /// Resolved binary (first existing candidate).
+    pub binary: PathBuf,
+    /// Profile root (first existing candidate; if none exists yet, the
+    /// canonical first candidate for display).
+    pub profile_root: PathBuf,
+}
+
+/// Candidate browser installs for this OS. Pure-ish (paths only); the
+/// caller filters by existence.
+#[allow(clippy::type_complexity)]
+fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<PathBuf>)> {
+    let home = platform::home_dir();
+    let mut out: Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<PathBuf>)> = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        let xdg = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".config"));
+        let mut push = |id: &'static str, name: &'static str, brand: Brand,
+                        bins: Vec<PathBuf>, roots: Vec<PathBuf>| {
+            out.push((id, name, brand, bins, roots));
+        };
+        push(
+            "chromium",
+            "Chromium",
+            Brand::Chromium,
+            vec![
+                PathBuf::from("/usr/sbin/chromium"),
+                PathBuf::from("/usr/bin/chromium"),
+                PathBuf::from("/usr/bin/chromium-browser"),
+                PathBuf::from("/snap/bin/chromium"),
+                PathBuf::from("/usr/bin/flatpak"),
+            ],
+            vec![
+                xdg.join("chromium"),
+                home.join("snap/chromium/common/chromium"),
+                home.join(".var/app/org.chromium.Chromium/config/chromium"),
+            ],
+        );
+        push(
+            "chrome",
+            "Google Chrome",
+            Brand::Chrome,
+            vec![
+                PathBuf::from("/usr/bin/google-chrome"),
+                PathBuf::from("/usr/bin/google-chrome-stable"),
+                PathBuf::from("/opt/google/chrome/chrome"),
+                PathBuf::from("/usr/bin/flatpak"),
+            ],
+            vec![
+                xdg.join("google-chrome"),
+                home.join(".var/app/com.google.Chrome/config/google-chrome"),
+            ],
+        );
+        push(
+            "brave",
+            "Brave",
+            Brand::Brave,
+            vec![
+                PathBuf::from("/usr/bin/brave"),
+                PathBuf::from("/usr/bin/brave-browser"),
+                PathBuf::from("/opt/brave.com/brave/brave"),
+                PathBuf::from("/usr/bin/flatpak"),
+            ],
+            vec![
+                xdg.join("BraveSoftware/Brave-Browser"),
+                home.join(".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
+            ],
+        );
+        push(
+            "edge",
+            "Microsoft Edge",
+            Brand::Edge,
+            vec![
+                PathBuf::from("/usr/bin/microsoft-edge"),
+                PathBuf::from("/usr/bin/microsoft-edge-stable"),
+                PathBuf::from("/opt/microsoft/msedge/msedge"),
+                PathBuf::from("/usr/bin/flatpak"),
+            ],
+            vec![
+                xdg.join("microsoft-edge"),
+                home.join(".var/app/com.microsoft.Edge/config/microsoft-edge"),
+            ],
+        );
+        push(
+            "vivaldi",
+            "Vivaldi",
+            Brand::Vivaldi,
+            vec![
+                PathBuf::from("/usr/bin/vivaldi"),
+                PathBuf::from("/usr/bin/vivaldi-stable"),
+                PathBuf::from("/usr/bin/flatpak"),
+            ],
+            vec![xdg.join("vivaldi")],
+        );
+        push(
+            "opera",
+            "Opera",
+            Brand::Opera,
+            vec![
+                PathBuf::from("/usr/bin/opera"),
+                PathBuf::from("/usr/bin/flatpak"),
+            ],
+            vec![xdg.join("opera")],
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let apps = PathBuf::from("/Applications");
+        let user_apps = home.join("Applications");
+        let sup = home.join("Library/Application Support");
+        let mut push = |id: &'static str, name: &'static str, brand: Brand,
+                        bins: Vec<PathBuf>, roots: Vec<PathBuf>| {
+            out.push((id, name, brand, bins, roots));
+        };
+        push(
+            "chrome",
+            "Google Chrome",
+            Brand::Chrome,
+            vec![
+                apps.join("Google Chrome.app/Contents/MacOS/Google Chrome"),
+                user_apps.join("Google Chrome.app/Contents/MacOS/Google Chrome"),
+            ],
+            vec![sup.join("Google/Chrome")],
+        );
+        push(
+            "chromium",
+            "Chromium",
+            Brand::Chromium,
+            vec![
+                apps.join("Chromium.app/Contents/MacOS/Chromium"),
+                user_apps.join("Chromium.app/Contents/MacOS/Chromium"),
+            ],
+            vec![sup.join("Chromium")],
+        );
+        push(
+            "brave",
+            "Brave",
+            Brand::Brave,
+            vec![
+                apps.join("Brave Browser.app/Contents/MacOS/Brave Browser"),
+                user_apps.join("Brave Browser.app/Contents/MacOS/Brave Browser"),
+            ],
+            vec![sup.join("BraveSoftware/Brave-Browser")],
+        );
+        push(
+            "edge",
+            "Microsoft Edge",
+            Brand::Edge,
+            vec![
+                apps.join("Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+                user_apps.join("Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+            ],
+            vec![sup.join("Microsoft Edge")],
+        );
+        push(
+            "vivaldi",
+            "Vivaldi",
+            Brand::Vivaldi,
+            vec![
+                apps.join("Vivaldi.app/Contents/MacOS/Vivaldi"),
+                user_apps.join("Vivaldi.app/Contents/MacOS/Vivaldi"),
+            ],
+            vec![sup.join("Vivaldi")],
+        );
+        push(
+            "opera",
+            "Opera",
+            Brand::Opera,
+            vec![
+                apps.join("Opera.app/Contents/MacOS/Opera"),
+                user_apps.join("Opera.app/Contents/MacOS/Opera"),
+            ],
+            vec![sup.join("com.operasoftware.Opera")],
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let local = std::env::var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default();
+        let pf = std::env::var("PROGRAMFILES").map(PathBuf::from).unwrap_or_default();
+        let pf86 = std::env::var("PROGRAMFILES(X86)").map(PathBuf::from).unwrap_or_default();
+        let mut push = |id: &'static str, name: &'static str, brand: Brand,
+                        bins: Vec<PathBuf>, roots: Vec<PathBuf>| {
+            out.push((id, name, brand, bins, roots));
+        };
+        push(
+            "chrome",
+            "Google Chrome",
+            Brand::Chrome,
+            vec![
+                local.join("Google/Chrome/Application/chrome.exe"),
+                pf.join("Google/Chrome/Application/chrome.exe"),
+                pf86.join("Google/Chrome/Application/chrome.exe"),
+            ],
+            vec![local.join("Google/Chrome/User Data")],
+        );
+        push(
+            "chromium",
+            "Chromium",
+            Brand::Chromium,
+            vec![local.join("Chromium/Application/chrome.exe")],
+            vec![local.join("Chromium/User Data")],
+        );
+        push(
+            "brave",
+            "Brave",
+            Brand::Brave,
+            vec![
+                local.join("BraveSoftware/Brave-Browser/Application/brave.exe"),
+                pf.join("BraveSoftware/Brave-Browser/Application/brave.exe"),
+            ],
+            vec![local.join("BraveSoftware/Brave-Browser/User Data")],
+        );
+        push(
+            "edge",
+            "Microsoft Edge",
+            Brand::Edge,
+            vec![
+                pf86.join("Microsoft/Edge/Application/msedge.exe"),
+                pf.join("Microsoft/Edge/Application/msedge.exe"),
+            ],
+            vec![local.join("Microsoft/Edge/User Data")],
+        );
+        push(
+            "vivaldi",
+            "Vivaldi",
+            Brand::Vivaldi,
+            vec![local.join("Vivaldi/Application/vivaldi.exe")],
+            vec![local.join("Vivaldi/User Data")],
+        );
+        push(
+            "opera",
+            "Opera",
+            Brand::Opera,
+            vec![local.join("Programs/Opera/opera.exe")],
+            vec![local.join("Opera Software/Opera Stable")],
+        );
+    }
+
+    out
+}
+
+/// Installed browsers (binary OR profile root present), in table order.
+pub fn discover() -> Vec<BrowserSpec> {
+    let mut found = Vec::new();
+    for (id, name, brand, bins, roots) in candidates() {
+        let binary = bins.iter().find(|p| p.exists()).cloned();
+        let root = roots.iter().find(|p| p.exists()).cloned();
+        let root = match (root, binary.as_ref()) {
+            (Some(r), _) => r,
+            (None, Some(_)) => roots[0].clone(),
+            (None, None) => continue,
+        };
+        found.push(BrowserSpec {
+            id: id.to_string(),
+            name: name.to_string(),
+            brand,
+            binary: binary.unwrap_or_default(),
+            profile_root: root,
+        });
+    }
+    found
+}
+
+/// Find one browser by id.
+pub fn find_browser(id: &str) -> Option<BrowserSpec> {
+    discover().into_iter().find(|b| b.id == id)
+}
+
+// ── Profiles ────────────────────────────────────────────────────────────
+
+/// One profile inside a browser's profile root.
+#[derive(Clone, Debug)]
+pub struct ProfileInfo {
+    /// Dir name key (`Default`, `Profile 1`, ...).
+    pub key: String,
+    /// Human name from `Local State` (`profile.info_cache`), or the key.
+    pub name: String,
+    /// The profile subdir (`<root>/<key>`) — where Preferences/Cookies live.
+    pub path: PathBuf,
+    /// The Chrome user-data-dir ROOT that contains this profile: what
+    /// `--user-data-dir` and the clone import actually operate on. A profile
+    /// subdir passed as the root would silently produce a fresh empty
+    /// profile — cookies live under `<root>/<key>/`, never at the root.
+    pub root: PathBuf,
+    /// mtime of the profile's `Preferences` file (recency proxy).
+    pub last_used: u64,
+}
+
+/// Enumerate profiles under a root: `Local State`'s `info_cache` names,
+/// unioned with any dir that holds a `Preferences` file (covers odd
+/// installs). Sorted most-recently-used first.
+pub fn list_profiles(root: &Path) -> Vec<ProfileInfo> {
+    use std::collections::BTreeMap;
+
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    if let Ok(txt) = std::fs::read_to_string(root.join("Local State")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+            if let Some(cache) = v
+                .get("profile")
+                .and_then(|p| p.get("info_cache"))
+                .and_then(|c| c.as_object())
+            {
+                for (key, entry) in cache {
+                    let name = entry
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(key.as_str());
+                    names.insert(key.clone(), name.to_string());
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let key = e.file_name().to_string_lossy().to_string();
+            // A profile dir always carries a Preferences JSON.
+            if p.join("Preferences").is_file() {
+                names.entry(key).or_default();
+            }
+        }
+    }
+
+    let mut out: Vec<ProfileInfo> = names
+        .into_iter()
+        .map(|(key, name)| {
+            let path = root.join(&key);
+            let last_used = std::fs::metadata(path.join("Preferences"))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            ProfileInfo {
+                name: if name.is_empty() { key.clone() } else { name },
+                key,
+                path,
+                root: root.to_path_buf(),
+                last_used,
+            }
+        })
+        .collect();
+    out.sort_by_key(|p| std::cmp::Reverse(p.last_used));
+    out
+}
+
+// ── Live-browser probes (attach + safety checks) ────────────────────────
+
+/// Parse a `DevToolsActivePort` file body: line 1 = port, line 2 = browser
+/// ws path. Chrome writes this into the profile dir whenever a debug
+/// endpoint is live (launch flag or the chrome://inspect approval flow).
+pub fn parse_devtools_active_port(body: &str) -> Option<u16> {
+    body.lines().next()?.trim().parse::<u16>().ok().filter(|p| *p > 0)
+}
+
+/// The live debug port of a user-data root, if one is exposed right now
+/// (Chrome writes `DevToolsActivePort` into the root).
+pub fn devtools_port(root: &Path) -> Option<u16> {
+    // Nuance (measured, Chrome 151): the file is written when the browser
+    // was started with `--remote-debugging-port=0` (auto-assigned port) or
+    // via the chrome://inspect approval flow — NOT for fixed-port launches.
+    std::fs::read_to_string(root.join("DevToolsActivePort"))
+        .ok()
+        .and_then(|b| parse_devtools_active_port(&b))
+}
+
+/// Parse a Chrome `SingletonLock` symlink target (`<hostname>-<pid>`).
+pub fn parse_singleton_owner(target: &str) -> Option<u32> {
+    target.rsplit('-').next()?.parse::<u32>().ok()
+}
+
+/// The pid holding this profile, if a live process does (stale locks —
+/// dead pids — read as not running). `SingletonLock` lives in the root.
+pub fn profile_owner_pid(root: &Path) -> Option<u32> {
+    let target = std::fs::read_link(root.join("SingletonLock")).ok()?;
+    let pid = parse_singleton_owner(&target.to_string_lossy())?;
+    if platform::process_alive(pid) {
+        Some(pid)
+    } else {
+        None
+    }
+}
+
+// ── Template management (clone lane) ────────────────────────────────────
+
+/// `<data-dir>/realbrowser/<browser-id>/`.
+pub fn root_for(id: &str) -> PathBuf {
+    platform::blade_dir().join("realbrowser").join(id)
+}
+
+/// The imported profile template for a browser id.
+pub fn template_dir(id: &str) -> PathBuf {
+    root_for(id).join("template")
+}
+
+pub fn has_template(id: &str) -> bool {
+    template_dir(id).is_dir()
+}
+
+/// `<root>/profile-source.json` — where a template came from (provenance).
+pub fn source_meta_path(id: &str) -> PathBuf {
+    root_for(id).join("profile-source.json")
+}
+
+/// Import stats for user feedback.
+#[derive(Clone, Debug)]
+pub struct ImportStats {
+    pub files: u64,
+    pub bytes: u64,
+    pub ms: u128,
+}
+
+/// Copy a live user-data-dir ROOT into the template for `id`, atomically:
+/// the copy lands in `<root>/template.tmp`, then swaps in. Session-restore
+/// files are excluded — the clone must open a fresh window, not the user's
+/// tab set. The SOURCE is only ever read.
+pub fn import_template(id: &str, src: &Path) -> Result<ImportStats> {
+    if !src.is_dir() {
+        return Err(BladeError::Other(format!(
+            "profile dir not found: {}",
+            src.display()
+        )));
+    }
+    let root = root_for(id);
+    platform::secure_create_dir_all(&root)
+        .map_err(|e| BladeError::Other(format!("cannot create {}: {e}", root.display())))?;
+    let tmp = root.join("template.tmp");
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let started = std::time::Instant::now();
+    crate::session_profile::copy_profile_ex(
+        src,
+        &tmp,
+        &["Current Session", "Current Tabs", "Last Session", "Last Tabs"],
+    );
+    if !tmp.is_dir() {
+        return Err(BladeError::Other("profile copy produced no directory".into()));
+    }
+
+    // Atomic-ish swap (same discipline as the agent-lane template).
+    let template = template_dir(id);
+    let old = root.join("template.old");
+    let _ = std::fs::remove_dir_all(&old);
+    if template.exists() {
+        std::fs::rename(&template, &old)
+            .map_err(|e| BladeError::Other(format!("cannot move old template aside: {e}")))?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &template) {
+        if old.exists() {
+            let _ = std::fs::rename(&old, &template);
+        }
+        return Err(BladeError::Other(format!("cannot install template: {e}")));
+    }
+    let _ = std::fs::remove_dir_all(&old);
+
+    let (files, bytes) = dir_stats(&template);
+    let meta = serde_json::json!({
+        "source": src.display().to_string(),
+        "imported_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "files": files,
+        "bytes": bytes,
+    });
+    let _ = platform::secure_write_file(&source_meta_path(id), meta.to_string().as_bytes());
+
+    Ok(ImportStats {
+        files,
+        bytes,
+        ms: started.elapsed().as_millis(),
+    })
+}
+
+/// Name this import's source path, for `rb status`/diagnostics.
+pub fn template_source(id: &str) -> Option<String> {
+    let txt = std::fs::read_to_string(source_meta_path(id)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    v.get("source").and_then(|s| s.as_str()).map(String::from)
+}
+
+/// Wipe a browser's template + any leftover session dirs.
+pub fn forget(id: &str) -> Result<bool> {
+    let root = root_for(id);
+    if !root.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(&root)
+        .map_err(|e| BladeError::Other(format!("cannot remove {}: {e}", root.display())))?;
+    Ok(true)
+}
+
+fn dir_stats(dir: &Path) -> (u64, u64) {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    files += 1;
+                    bytes += std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+    }
+    (files, bytes)
+}
+
+/// File count + byte size of a browser's template (for `rb status`).
+pub fn template_stats(id: &str) -> Option<(u64, u64)> {
+    let t = template_dir(id);
+    if !t.is_dir() {
+        return None;
+    }
+    Some(dir_stats(&t))
+}
+
+/// Human size for status output.
+pub fn human_bytes(b: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut v = b as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+// ── Selection (which browser + which profile the lane uses) ─────────────
+
+/// Resolve an absolute profile override. Accepts either a Chrome
+/// user-data-dir ROOT (contains `Default/` etc.) or a profile subdir that
+/// contains `Preferences` directly — the latter is reinterpreted as its
+/// parent root + dir name, because `--user-data-dir` and the clone must
+/// operate on the root.
+fn resolve_abs_profile(path: &Path) -> Result<ProfileInfo> {
+    if !path.is_dir() {
+        return Err(BladeError::Other(format!(
+            "profile dir not found: {}",
+            path.display()
+        )));
+    }
+    if path.join("Preferences").is_file() {
+        let root = path.parent().unwrap_or(path).to_path_buf();
+        let key = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Default".into());
+        return Ok(ProfileInfo {
+            name: key.clone(),
+            key,
+            path: path.to_path_buf(),
+            root,
+            last_used: 0,
+        });
+    }
+    let mut profiles = list_profiles(path);
+    if let Some(first) = profiles.drain(..).next() {
+        return Ok(ProfileInfo {
+            key: first.key,
+            name: first.name,
+            path: first.path,
+            root: path.to_path_buf(),
+            last_used: first.last_used,
+        });
+    }
+    // Empty/foreign dir: treat as a root with Chrome's default profile name.
+    Ok(ProfileInfo {
+        key: "Default".into(),
+        name: "Default".into(),
+        path: path.join("Default"),
+        root: path.to_path_buf(),
+        last_used: 0,
+    })
+}
+
+/// Resolve the configured (or best) browser + profile.
+pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
+    let browsers = discover();
+    if browsers.is_empty() {
+        return Err(BladeError::Other(
+            "no Chromium-family browser found. Install one (Chromium, Chrome, Brave, Edge, Vivaldi, Opera) or set a custom binary via `bladebro rb use --binary <path>`.".into(),
+        ));
+    }
+
+    let spec = match cfg.browser.as_deref() {
+        Some(id) => browsers
+            .iter()
+            .find(|b| b.id == id)
+            .cloned()
+            .ok_or_else(|| {
+                let avail: Vec<&str> = browsers.iter().map(|b| b.id.as_str()).collect();
+                BladeError::Other(format!(
+                    "browser `{id}` not found. Available: {}",
+                    avail.join(", ")
+                ))
+            })?,
+        None => browsers
+            .iter()
+            .max_by_key(|b| {
+                list_profiles(&b.profile_root)
+                    .first()
+                    .map(|p| p.last_used)
+                    .unwrap_or(0)
+            })
+            .cloned()
+            .expect("non-empty"),
+    };
+
+    // Profile: absolute path override → use as-is; key → lookup; else most
+    // recently used.
+    let profiles = list_profiles(&spec.profile_root);
+    let profile = match cfg.profile.as_deref() {
+        Some(p) if Path::new(p).is_absolute() => resolve_abs_profile(Path::new(p))?,
+        Some(key) => profiles
+            .iter()
+            .find(|p| p.key == key)
+            .cloned()
+            .ok_or_else(|| {
+                let avail: Vec<&str> = profiles.iter().map(|p| p.key.as_str()).collect();
+                BladeError::Other(format!(
+                    "profile `{key}` not found in {}. Available: {}",
+                    spec.profile_root.display(),
+                    if avail.is_empty() { "(none)".to_string() } else { avail.join(", ") }
+                ))
+            })?,
+        None => profiles.first().cloned().ok_or_else(|| {
+            BladeError::Other(format!(
+                "no profiles found under {}",
+                spec.profile_root.display()
+            ))
+        })?,
+    };
+
+    Ok((spec, profile))
+}
+
+/// Resolve `auto`: attach when a live debug endpoint already exists on the
+/// selected profile's user-data root (best fidelity, zero disruption, never
+/// owned), else clone. Profile mode is never picked silently — it needs the
+/// user's browser closed, so it stays an explicit choice.
+pub fn effective_mode(cfg: &Config, user_data_root: &Path) -> Mode {
+    match cfg.mode {
+        Mode::Auto => {
+            if devtools_port(user_data_root).is_some() {
+                Mode::Attach
+            } else {
+                Mode::Clone
+            }
+        }
+        m => m,
+    }
+}
+
+/// Import-on-first-use for the clone lane — shared by `rb on` and the
+/// launch path so their behavior cannot drift apart.
+pub fn ensure_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<ImportStats> {
+    if let Some(pid) = profile_owner_pid(&profile.path) {
+        eprintln!(
+            "[realbrowser] your browser (pid {pid}) is open — importing its profile now. The \
+             copy may miss the last few writes (SQLite snapshot); the source is never written \
+             to. `bladebro rb refresh` with the browser closed gives a clean copy."
+        );
+    }
+    eprintln!(
+        "[realbrowser] importing {} profile `{}` ({})...",
+        spec.name,
+        profile.name,
+        profile.path.display()
+    );
+    let stats = import_template(&spec.id, &profile.root)?;
+    eprintln!(
+        "[realbrowser] imported {} files ({}) in {}ms",
+        stats.files,
+        human_bytes(stats.bytes),
+        stats.ms
+    );
+    Ok(stats)
+}
+
+// ── Pause (manual control handover) ─────────────────────────────────────
+
+/// `<data-dir>/realbrowser-pause` — while this file exists, input-
+/// dispatching actions refuse to run and the idle hum stays silent, so the
+/// user can use the browser without the agent fighting them.
+pub fn pause_path() -> PathBuf {
+    platform::blade_dir().join("realbrowser-pause")
+}
+
+/// True while manual control is claimed. Honored on every lane (harmless
+/// on the agent lane; the point is the real one).
+pub fn input_paused() -> bool {
+    pause_path().exists()
+}
+
+pub fn set_paused(paused: bool) -> Result<()> {
+    let path = pause_path();
+    if paused {
+        if let Some(parent) = path.parent() {
+            platform::secure_create_dir_all(parent)
+                .map_err(|e| BladeError::Other(format!("cannot create data dir: {e}")))?;
+        }
+        platform::secure_write_file(&path, b"paused")
+            .map_err(|e| BladeError::Other(format!("cannot write pause marker: {e}")))?;
+    } else {
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(())
+}
+
+// ── Idle policy ─────────────────────────────────────────────────────────
+
+/// Whether the daemon/MCP idle timeout may close the lane's browser. On the
+/// real lane the browser is the user's — default no, opt-in via config.
+pub fn should_idle_shutdown() -> bool {
+    if !real_lane() {
+        return true;
+    }
+    config().idle_shutdown
+}
+
+/// Whether the idle-hum behavior layer runs on this lane.
+pub fn hum_enabled() -> bool {
+    if !real_lane() {
+        return true;
+    }
+    config().idle_hum && !input_paused()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brand_from_version_parses_every_family() {
+        assert_eq!(
+            brand_from_version("Google Chrome 151.0.7922.108"),
+            Some(Brand::Chrome)
+        );
+        assert_eq!(brand_from_version("Chromium 151.0.7922.108"), Some(Brand::Chromium));
+        assert_eq!(brand_from_version("Brave Browser 1.79.126"), Some(Brand::Brave));
+        assert_eq!(brand_from_version("Microsoft Edge 151.0.0.0"), Some(Brand::Edge));
+        assert_eq!(brand_from_version("Vivaldi 7.5.3735.58"), Some(Brand::Vivaldi));
+        assert_eq!(brand_from_version("Opera 118.0.0.0"), Some(Brand::Opera));
+        assert_eq!(brand_from_version("Mozilla Firefox 141"), None);
+    }
+
+    #[test]
+    fn only_branded_chrome_requires_a_non_default_dir() {
+        assert!(requires_non_default_dir(Brand::Chrome));
+        for b in [
+            Brand::Chromium,
+            Brand::Brave,
+            Brand::Edge,
+            Brand::Vivaldi,
+            Brand::Opera,
+        ] {
+            assert!(!requires_non_default_dir(b), "{b:?} must not be gated");
+        }
+    }
+
+    #[test]
+    fn devtools_active_port_parses_first_line_only() {
+        assert_eq!(parse_devtools_active_port("9222\n/devtools/browser/abc\n"), Some(9222));
+        assert_eq!(parse_devtools_active_port("0\n"), None);
+        assert_eq!(parse_devtools_active_port(""), None);
+        assert_eq!(parse_devtools_active_port("not-a-port\n"), None);
+    }
+
+    #[test]
+    fn singleton_owner_parses_hostname_pid() {
+        assert_eq!(parse_singleton_owner("myhost-4242"), Some(4242));
+        assert_eq!(parse_singleton_owner("host-with-dashes-7"), Some(7));
+        assert_eq!(parse_singleton_owner("nopid"), None);
+    }
+
+    #[test]
+    fn config_round_trips_and_survives_corruption() {
+        let dir = std::env::temp_dir().join(format!("blade-rb-cfg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("realbrowser.json");
+
+        let mut cfg = Config::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.mode, Mode::Auto);
+        assert!(cfg.visible, "visible must default on");
+        assert!(!cfg.idle_shutdown, "idle shutdown must default off");
+        cfg.enabled = true;
+        cfg.mode = Mode::Clone;
+        cfg.browser = Some("brave".into());
+        save_config_to(&path, &cfg).expect("save");
+        let back = config_from(&path);
+        assert!(back.enabled && back.mode == Mode::Clone && back.browser.as_deref() == Some("brave"));
+
+        std::fs::write(&path, b"{ not json").unwrap();
+        let corrupt = config_from(&path);
+        assert!(!corrupt.enabled, "corruption reads as default-off, never a crash");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_profiles_reads_local_state_and_scans_dirs() {
+        let root = std::env::temp_dir().join(format!("blade-rb-prof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Default")).unwrap();
+        std::fs::create_dir_all(root.join("Profile 1")).unwrap();
+        std::fs::write(root.join("Default/Preferences"), "{}").unwrap();
+        std::fs::write(root.join("Profile 1/Preferences"), "{}").unwrap();
+        std::fs::write(
+            root.join("Local State"),
+            r#"{"profile":{"info_cache":{"Default":{"name":"Main"},"Profile 1":{"name":"Work"}}}}"#,
+        )
+        .unwrap();
+
+        let got = list_profiles(&root);
+        let keys: Vec<(&str, &str)> = got.iter().map(|p| (p.key.as_str(), p.name.as_str())).collect();
+        assert!(keys.contains(&("Default", "Main")), "got {keys:?}");
+        assert!(keys.contains(&("Profile 1", "Work")), "got {keys:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pause_marker_round_trips_via_env_home() {
+        // blade_dir() is env-driven; point it at a scratch home so the test
+        // never touches a real install. (set_var is process-global — same
+        // pattern the platform tests use, and this test owns the name.)
+        let home = std::env::temp_dir().join(format!("blade-rb-pause-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let key = "BLADE_HOME";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, &home);
+        assert!(!input_paused());
+        set_paused(true).expect("pause");
+        assert!(input_paused());
+        set_paused(false).expect("resume");
+        assert!(!input_paused());
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}

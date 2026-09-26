@@ -21,3 +21,4 @@ npm/bladebro-darwin-arm64/bladebro
 npm/bladebro-linux-arm64/bladebro
 bench/stealthbench_run/
 speed/
+__pycache__/
