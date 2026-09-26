@@ -334,10 +334,14 @@ pub async fn fetch_comments(
         }
     }
 
-    // Phase B — parent-subtree recovery for regions whose id lists are only
-    // partial (a region can claim N comments but expose fewer ids). One
-    // comment-permalink listing returns the parent's entire subtree, so
-    // regions with a real shortfall get a dedicated fetch.
+    // Phase B — parent-subtree recovery for regions the listing collapsed.
+    // Two shapes: (a) a region that claims N comments but exposes fewer ids,
+    // and (b) an EMPTY stub (count 0, no ids) — reddit truncates deep
+    // subtrees like that, but the parent's own permalink listing still
+    // serves the whole subtree (verified live: an 81-comment thread exposed
+    // 60 inline + 2 empty stubs whose parents held 9 more retrievable
+    // comments). Both get a dedicated fetch; one listing returns the
+    // parent's entire subtree.
     let mut residue_regions = 0usize;
     let mut residue_comments: i64 = 0;
     if !capped && !budget_hit && !rate_limited && !security_blocked {
@@ -345,11 +349,12 @@ pub async fn fetch_comments(
         // Snapshot: the loop merges into `tree` while reading the stub list.
         let stubs_snapshot = tree.stubs.clone();
         for s in &stubs_snapshot {
-            if s.count <= s.ids.len() as i64 {
+            let empty = s.count == 0 && s.ids.is_empty();
+            if !empty && s.count <= s.ids.len() as i64 {
                 continue;
             }
-            let shortfall = s.count - s.ids.len() as i64;
-            if !s.top_level && shortfall >= RECOVERY_MIN_SHORTFALL && recovered < MAX_RECOVERY_FETCHES {
+            let shortfall = (s.count - s.ids.len() as i64).max(0);
+            if stub_hides_comments(s) && recovered < MAX_RECOVERY_FETCHES {
                 if tree.nodes.len() >= cap {
                     capped = true;
                     break;
@@ -375,7 +380,16 @@ pub async fn fetch_comments(
                                 s.parent
                             ));
                         }
-                        Err(e) => gaps.push(e.to_string()),
+                        Err(e) => {
+                            if empty {
+                                gaps.push(format!(
+                                    "a collapsed region under {} could not be expanded ({e})",
+                                    s.parent
+                                ));
+                            } else {
+                                gaps.push(e.to_string());
+                            }
+                        }
                     },
                     Err(e) => {
                         if is_rate_limit(&e) {
@@ -390,8 +404,12 @@ pub async fn fetch_comments(
                     }
                 }
             }
-            residue_regions += 1;
-            residue_comments += shortfall;
+            // Only counted shortfalls read as "incomplete regions"; a failed
+            // empty-stub expansion already reported itself above.
+            if !empty {
+                residue_regions += 1;
+                residue_comments += shortfall;
+            }
         }
     }
     if residue_regions > 0 && !capped && !budget_hit && !rate_limited && !security_blocked {
@@ -414,6 +432,15 @@ pub async fn fetch_comments(
     Ok(assemble(
         post, items, capped || dfs_capped, budget_hit, rate_limited, security_blocked, gaps,
     ))
+}
+
+/// Does this stub hide comments worth a dedicated parent-subtree fetch?
+/// Two shapes: an EMPTY stub (count 0, no ids — reddit's collapsed-region
+/// marker; the parent's own permalink listing still serves the subtree) and
+/// a partial region (count exceeds the id list) with a real shortfall.
+fn stub_hides_comments(s: &Stub) -> bool {
+    let empty = s.count == 0 && s.ids.is_empty();
+    !s.top_level && (empty || s.count - s.ids.len() as i64 >= RECOVERY_MIN_SHORTFALL)
 }
 
 /// Assemble the payload: honest counts, deduplicated notes, completion flag.
@@ -444,7 +471,12 @@ fn assemble(
     } else if budget_hit {
         status = Some(format!("fetch budget exhausted: {count} of {total_s} comments loaded"));
     } else if total.is_some_and(|t| (count as i64) < t) {
-        status = Some(format!("loaded {count} of {total_s} comments (some are deleted or restricted)"));
+        // Every sweep-side cause is excluded above, and every region the API
+        // exposed was resolved (Phase A + B) — the leftover is comments
+        // reddit counts but does not serve to this account.
+        status = Some(format!(
+            "loaded {count} of {total_s} comments — every region reddit exposed was resolved; the remainder are deleted/removed comments reddit still counts (not retrievable)"
+        ));
     }
     if let Some(s) = status {
         notes.push(s);
@@ -1107,6 +1139,25 @@ mod tests {
         assert_eq!(ids, vec!["a", "b", "c", "d"], "resolved top-level comments appended in order");
         let payload = assemble(post, items, false, false, false, false, vec![]);
         assert!(payload.complete);
+    }
+
+    #[test]
+    fn empty_stubs_and_partial_regions_are_recovery_targets() {
+        let mk = |parent: &str, top: bool, count: i64, ids: usize| Stub {
+            parent: parent.into(),
+            top_level: top,
+            count,
+            ids: (0..ids).map(|i| format!("id{i}")).collect(),
+        };
+        // Reddit's collapsed-region shape: count 0, no ids — still worth a
+        // parent-subtree fetch (the live 60→69 recovery).
+        assert!(stub_hides_comments(&mk("p1", false, 0, 0)));
+        // A partial region with a real shortfall.
+        assert!(stub_hides_comments(&mk("p2", false, 10, 4)));
+        // Complete regions, tiny shortfalls and top-level stubs are not.
+        assert!(!stub_hides_comments(&mk("p3", false, 4, 4)));
+        assert!(!stub_hides_comments(&mk("p4", false, 5, 4)));
+        assert!(!stub_hides_comments(&mk("p5", true, 0, 0)));
     }
 
     #[test]

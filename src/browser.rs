@@ -171,8 +171,12 @@ fn stage_label(stage: GlStage) -> &'static str {
 }
 
 /// The GL ladder, in attempt order. Both transports walk the same list.
+/// NativeGl is retried once: a first-launch GL miss is usually a transient
+/// init race under load (observed live), while the SwiftShader stage is a
+/// dead end on boxes whose Vulkan init is broken — retrying the real backend
+/// beats escalating straight into a known-broken one.
 fn gl_stages() -> &'static [GlStage] {
-    &[GlStage::NativeGl, GlStage::SwiftShader]
+    &[GlStage::NativeGl, GlStage::NativeGl, GlStage::SwiftShader]
 }
 
 /// Everything a Chrome command line depends on. Both transports build from
@@ -809,16 +813,25 @@ impl Browser {
                 }
                 None => {
                     if i + 1 < stages.len() {
-                        eprintln!(
-                            "[bladebro] GL healthcheck: no WebGL context via {} — escalating to {}",
-                            stage_label(*stage),
-                            stage_label(stages[i + 1])
-                        );
+                        let next = stages[i + 1];
+                        if next == *stage {
+                            eprintln!(
+                                "[bladebro] GL healthcheck: no WebGL context via {} — retrying it once (fresh launch)",
+                                stage_label(*stage)
+                            );
+                        } else {
+                            eprintln!(
+                                "[bladebro] GL healthcheck: no WebGL context via {} — escalating to {}",
+                                stage_label(*stage),
+                                stage_label(next)
+                            );
+                        }
                         last = Some(browser);
                     } else {
                         eprintln!(
                             "[bladebro] WARNING: no WebGL context after the full GL ladder — \
-                             pages will see `getContext('webgl') === null`. Run `bladebro audit`."
+                             pages will see `getContext('webgl') === null` (stock Chrome on a \
+                             GL-less host behaves identically; no GL mask is applied). Run `bladebro audit`."
                         );
                         set_gpu_state(Some(GpuState::Missing));
                         return Ok(browser);
@@ -1394,16 +1407,25 @@ impl Browser {
                 }
                 None => {
                     if i + 1 < stages.len() {
-                        eprintln!(
-                            "[bladebro] GL healthcheck: no WebGL context via {} — escalating to {}",
-                            stage_label(*stage),
-                            stage_label(stages[i + 1])
-                        );
+                        let next = stages[i + 1];
+                        if next == *stage {
+                            eprintln!(
+                                "[bladebro] GL healthcheck: no WebGL context via {} — retrying it once (fresh launch)",
+                                stage_label(*stage)
+                            );
+                        } else {
+                            eprintln!(
+                                "[bladebro] GL healthcheck: no WebGL context via {} — escalating to {}",
+                                stage_label(*stage),
+                                stage_label(next)
+                            );
+                        }
                         last = Some((browser, client));
                     } else {
                         eprintln!(
                             "[bladebro] WARNING: no WebGL context after the full GL ladder — \
-                             pages will see `getContext('webgl') === null`. Run `bladebro audit`."
+                             pages will see `getContext('webgl') === null` (stock Chrome on a \
+                             GL-less host behaves identically; no GL mask is applied). Run `bladebro audit`."
                         );
                         set_gpu_state(Some(GpuState::Missing));
                         return Ok((browser, client));
@@ -1841,7 +1863,10 @@ mod launch_flag_tests {
     #[test]
     fn ladder_order_is_native_first() {
         assert_eq!(gl_stages()[0], GlStage::NativeGl);
-        assert!(gl_stages().len() >= 2);
+        // NativeGl is retried once before the SwiftShader escalation.
+        assert_eq!(gl_stages()[1], GlStage::NativeGl);
+        assert_eq!(*gl_stages().last().unwrap(), GlStage::SwiftShader);
+        assert!(gl_stages().len() >= 3);
     }
 
     #[test]

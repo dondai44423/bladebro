@@ -23,6 +23,12 @@ Asserted behaviors (the contract):
      the action still lands in the live editor
   6. press takes chords: Control+a + Backspace clears a field (the recipe
      the old build made impossible)
+  7. fill works as a batch step and as a run step (act-parity; both surfaces
+     used to reject it — the schema/runtime enum-drift class)
+  8. wait steps report condition match vs timeout→else; 'else' on a settle
+     condition errors by name instead of being silently ignored
+  9. extract=auto picks substance over unit-count fragments (extract.html:
+     clean titles/urls/prices, no "2 units" garbage)
 
 Environment is isolated (own BLADE_HOME, own fixture port, no display leak).
 Run:  python3 tools/qol_probe/run.py            (uses target/release/bladebro)
@@ -183,6 +189,32 @@ def main():
         val = ev('(document.getElementById("plain-text")||{}).value||""')
         check("plain input type verified", 'value="plain"' in v1, v1)
         check("plain input clear verified", "(verified empty)" in v2 and val == "", f"{v2} | {val!r}")
+
+        # S9: fill as a BATCH step (the schema used to reject it outright).
+        out = cli("act", "batch", '[{"action":"fill","fields":[{"label":"Plain text input","text":"batch-fill"}]}]')
+        check("batch accepts a fill step", "step1[fill]:" in out and "HALT" not in out, first_line(out))
+        val = ev('(document.getElementById("plain-text")||{}).value||""')
+        check("batch fill landed", val == "batch-fill", repr(val))
+
+        # S10: fill as a RUN step (used to be "unknown action: fill").
+        out = cli("run", '[{"action":"fill","fields":[{"label":"Plain text input","text":"run-fill"}]}]')
+        check("run accepts a fill step", "filled 1 fields" in out, first_line(out))
+        val = ev('(document.getElementById("plain-text")||{}).value||""')
+        check("run fill landed", val == "run-fill", repr(val))
+
+        # S11: wait steps report match vs timeout→else; settle+else errors.
+        out = cli("run", '[{"action":"wait","text":"no-such-text-xyz","timeout":2,"else":[{"action":"scroll","dx":0,"dy":5}]}]')
+        check("wait else branch fires and is reported", "→ else" in out and "step 1.0" in out, first_line(out))
+        out = cli("run", '[{"action":"wait","condition":"title","text":"QoL Probe Fixture","timeout":5}]')
+        check("wait match is reported", "outcome: waited (title)" in out, first_line(out))
+        out = cli("run", '[{"action":"wait","condition":"settle","else":[{"action":"back"}]}]')
+        check("wait else on settle errors by name", "'else' needs a real condition" in out, first_line(out))
+
+        # S12: extract=auto picks substance over unit-count fragments.
+        cli("nav", f"http://127.0.0.1:{PORT}/extract.html")
+        out = cli("see", "extract", "auto")
+        check("extract picks the listing cards",
+              '"price":' in out and '"url":' in out and "units" not in out, first_line(out))
     finally:
         try:
             cli("stop", timeout=30)

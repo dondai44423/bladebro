@@ -30,6 +30,12 @@ no display leakage. Exit 0 = all passed. Takes ~10s.
    still lands in the live editor.
 6. `press` accepts chords: `Control+a` + `Backspace` clears a field — the
    manual recipe the old build made impossible.
+7. `fill` works as a **batch step** and as a **run step** (both surfaces used
+   to reject it — schema enum drift plus a missing runtime arm).
+8. `wait` steps report condition match vs `→ else` on timeout; `else` on a
+   `settle` condition errors by name instead of being silently ignored.
+9. `extract=auto` picks substance over unit-count fragments (`extract.html`):
+   clean titles, urls and prices — no `"2 units"` garbage.
 
 ## The fixture models
 
@@ -43,6 +49,9 @@ no display leakage. Exit 0 = all passed. Takes ~10s.
   contract of Lexical-class editors.
 - **Remount stress**: an editor that replaces its node once on first input
   (ref churn).
+- **Extract fixture** (`extract.html`): a unit-count widget group (the
+  "2 units" garbage class) next to a real listing-card group — auto-extract
+  must pick the cards (url + price + clean title) and drop the fragments.
 
 ## Notes
 

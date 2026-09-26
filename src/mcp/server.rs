@@ -371,6 +371,8 @@ async fn serve(
     let mut launched = 0u64;
     // One-shot latch: has the stale-binary advisory been delivered?
     let mut stale_warned = false;
+    // One-shot latch: has the GL-less advisory been delivered?
+    let mut gl_warned = false;
     // Track resource-blocking config so it survives idle shutdown/relaunch.
     let mut block_classes: Option<String> = None;
     // Domain knowledge base: consent selectors, visit tracking, stats.
@@ -733,6 +735,20 @@ async fn serve(
                             // block: a relaunch reset the page state, and/or
                             // this process runs a replaced binary (the fix is
                             // in the file on disk, not in the running process).
+                            // One-time WebGL advisory: a GL-less browser is
+                            // stock-equivalent, but the agent must know the GL
+                            // mask is off (nothing to mask) instead of assuming
+                            // the environment was spoofed.
+                            if !gl_warned {
+                                if let Some(crate::browser::GpuState::Missing) = crate::browser::gpu_state() {
+                                    gl_warned = true;
+                                    if relaunch_note.is_none() {
+                                        relaunch_note = Some(
+                                            "note: this browser has no WebGL (getContext('webgl') returns null — the same as stock Chrome on this host); no GL mask is applied.".into()
+                                        );
+                                    }
+                                }
+                            }
                             if !stale_warned && crate::platform::stale_binary() {
                                 stale_warned = true;
                                 if relaunch_note.is_none() {
@@ -1208,6 +1224,107 @@ async fn resolve_text_target(
     Ok(id)
 }
 
+/// `fill` — multi-field forms in ONE call (type/select/checkbox-aware, with
+/// submit + JS-click fallback). Shared by `act`, `act batch` steps, and `run`
+/// steps: the step vocabulary and the act schema had drifted, which is why
+/// `fill` used to be "unknown action" inside run and schema-rejected in batch.
+pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
+    let fields = args.get("fields").and_then(|f| f.as_array())
+        .ok_or_else(|| BladeError::Other("fill requires 'fields' array".into()))?;
+    let submit = args.get("submit").and_then(|s| s.as_str()).unwrap_or("");
+    let mut last_verdict = String::new();
+    let mut count = 0usize;
+    for field in fields {
+        let f_ref = field.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+        let f_label = field.get("label").and_then(|l| l.as_str()).unwrap_or("");
+        let f_text = field.get("text").and_then(|t| t.as_str())
+            .or_else(|| field.get("option").and_then(|o| o.as_str()))
+            .unwrap_or("");
+        let f_check = field.get("check").and_then(|c| c.as_bool());
+
+        // Resolve the ref — try as-is first, then by label.
+        let resolved = if !f_ref.is_empty() {
+            f_ref.to_string()
+        } else if !f_label.is_empty() {
+            // Don't restrict to textbox — the field could be a
+            // checkbox or select. Search all actionable elements.
+            resolve_text_target(page, f_label, None, None).await?
+        } else {
+            continue;
+        };
+
+        // Dispatch the right action based on element type.
+        let role = page.model().element(&resolved)
+            .map(|e| e.raw.role.clone())
+            .unwrap_or_default();
+        let action = match role.as_str() {
+            "checkbox" | "radio" => {
+                // For checkboxes/radios: click to toggle.
+                // If 'check' is specified, only click if current
+                // state doesn't match desired state.
+                let should_click = match f_check {
+                    Some(want_checked) => {
+                        let is_checked = page.model().element(&resolved)
+                            .and_then(|e| e.raw.checked)
+                            .unwrap_or(false);
+                        is_checked != want_checked
+                    }
+                    None => true, // no 'check' param → just click
+                };
+                if should_click {
+                    Action::Click { ref_id: resolved }
+                } else {
+                    count += 1;
+                    continue; // already in desired state
+                }
+            }
+            "combobox" => {
+                Action::Select { ref_id: resolved, option: f_text.into() }
+            }
+            _ => {
+                // Default: type into text-like fields.
+                Action::Type { ref_id: resolved, text: f_text.into() }
+            }
+        };
+        let (_, verdict) = page.act(action).await?;
+        last_verdict = verdict;
+        count += 1;
+    }
+    let last_delta = if !submit.is_empty() {
+        // Refs are 'e' followed by digits (e1, e2, ...).
+        // 'Edit', 'Enter', 'Email' start with 'e' but are text, not refs.
+        let is_ref = submit.starts_with('e') && submit[1..].chars().all(|c| c.is_ascii_digit());
+        let resolved = if is_ref {
+            submit.to_string()
+        } else {
+            resolve_text_target(page, submit, None, None).await?
+        };
+        // Wait briefly for field validation to settle before clicking submit.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (delta, verdict) = page.act(Action::Click { ref_id: resolved.clone() }).await?;
+        last_verdict = verdict.clone();
+        // If the mouse click had no effect (no navigation, no DOM change),
+        // the submit button may be a div styled as a button or require
+        // JS dispatch. Try el.click() as a fallback.
+        if !delta.navigated && delta.is_empty() {
+            match handle_eval(page, "el ? (el.click(), true) : false", &resolved).await {
+                Ok(_) => {
+                    last_verdict = format!("{verdict} (submit via JS click fallback)");
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    page.recapture().await?
+                }
+                Err(_) => delta,
+            }
+        } else {
+            delta
+        }
+    } else {
+        page.recapture().await?
+    };
+    Ok(format!("filled {count} fields\n{last_verdict}\n{}",
+        page.delta_view(&last_delta, 8000)))
+}
+
 pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     let action_str = args.get("action").and_then(|a| a.as_str()).unwrap_or("");
     let ref_id = args.get("ref").and_then(|r| r.as_str()).unwrap_or("");
@@ -1365,108 +1482,16 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 ref_id, role, name, note, text_content
             ));
         }
-        "fill" => {
-            let fields = args.get("fields").and_then(|f| f.as_array())
-                .ok_or_else(|| BladeError::Other("fill requires 'fields' array".into()))?;
-            let submit = args.get("submit").and_then(|s| s.as_str()).unwrap_or("");
-            let mut last_verdict = String::new();
-            let mut count = 0usize;
-            for field in fields {
-                let f_ref = field.get("ref").and_then(|r| r.as_str()).unwrap_or("");
-                let f_label = field.get("label").and_then(|l| l.as_str()).unwrap_or("");
-                let f_text = field.get("text").and_then(|t| t.as_str())
-                    .or_else(|| field.get("option").and_then(|o| o.as_str()))
-                    .unwrap_or("");
-                let f_check = field.get("check").and_then(|c| c.as_bool());
-
-                // Resolve the ref — try as-is first, then by label.
-                let resolved = if !f_ref.is_empty() {
-                    f_ref.to_string()
-                } else if !f_label.is_empty() {
-                    // Don't restrict to textbox — the field could be a
-                    // checkbox or select. Search all actionable elements.
-                    resolve_text_target(page, f_label, None, None).await?
-                } else {
-                    continue;
-                };
-
-                // Dispatch the right action based on element type.
-                let role = page.model().element(&resolved)
-                    .map(|e| e.raw.role.clone())
-                    .unwrap_or_default();
-                let action = match role.as_str() {
-                    "checkbox" | "radio" => {
-                        // For checkboxes/radios: click to toggle.
-                        // If 'check' is specified, only click if current
-                        // state doesn't match desired state.
-                        let should_click = match f_check {
-                            Some(want_checked) => {
-                                let is_checked = page.model().element(&resolved)
-                                    .and_then(|e| e.raw.checked)
-                                    .unwrap_or(false);
-                                is_checked != want_checked
-                            }
-                            None => true, // no 'check' param → just click
-                        };
-                        if should_click {
-                            Action::Click { ref_id: resolved }
-                        } else {
-                            count += 1;
-                            continue; // already in desired state
-                        }
-                    }
-                    "combobox" => {
-                        Action::Select { ref_id: resolved, option: f_text.into() }
-                    }
-                    _ => {
-                        // Default: type into text-like fields.
-                        Action::Type { ref_id: resolved, text: f_text.into() }
-                    }
-                };
-                let (_, verdict) = page.act(action).await?;
-                last_verdict = verdict;
-                count += 1;
-            }
-            let last_delta = if !submit.is_empty() {
-                // Refs are 'e' followed by digits (e1, e2, ...).
-                // 'Edit', 'Enter', 'Email' start with 'e' but are text, not refs.
-                let is_ref = submit.starts_with('e') && submit[1..].chars().all(|c| c.is_ascii_digit());
-                let resolved = if is_ref {
-                    submit.to_string()
-                } else {
-                    resolve_text_target(page, submit, None, None).await?
-                };
-                // Wait briefly for field validation to settle before clicking submit.
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let (delta, verdict) = page.act(Action::Click { ref_id: resolved.clone() }).await?;
-                last_verdict = verdict.clone();
-                // If the mouse click had no effect (no navigation, no DOM change),
-                // the submit button may be a div styled as a button or require
-                // JS dispatch. Try el.click() as a fallback.
-                if !delta.navigated && delta.is_empty() {
-                    match handle_eval(page, "el ? (el.click(), true) : false", &resolved).await {
-                        Ok(_) => {
-                            last_verdict = format!("{verdict} (submit via JS click fallback)");
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            page.recapture().await?
-                        }
-                        Err(_) => delta,
-                    }
-                } else {
-                    delta
-                }
-            } else {
-                page.recapture().await?
-            };
-            return Ok(format!("filled {count} fields\n{last_verdict}\n{}",
-                page.delta_view(&last_delta, 8000)));
-        }
+        "fill" => return handle_fill(args, page).await,
         "wait" => {
-            let condition = args.get("condition").and_then(|c| c.as_str()).unwrap_or("settle");
             let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
             let match_text = args.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            let condition = wait_condition(
+                args.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
+                match_text,
+            );
             Action::Wait {
-                condition: condition.into(),
+                condition,
                 text: match_text.into(),
                 timeout: std::time::Duration::from_secs(timeout_secs),
             }
@@ -1541,6 +1566,11 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                         prev_url = curr_url;
                     }
                     Err(e) => {
+                        if step.get("optional").and_then(|o| o.as_bool()).unwrap_or(false) {
+                            verdicts.push(format!("step{}[{}]: failed (optional): {}", i+1, step_action, e));
+                            prev_url = page.model().url().to_string();
+                            continue;
+                        }
                         halted = Some(i+1);
                         verdicts.push(format!("step{}[{}]: HALT: {}", i+1, step_action, e));
                         break;
@@ -1744,6 +1774,16 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     let limit_explicit = args.get("limit").is_some();
     let mode = args.get("mode").and_then(|m| m.as_str()).unwrap_or("");
 
+    // Artifact read-back: paged access to an offloaded payload for clients
+    // without filesystem access. Paths are restricted to the artifacts dir;
+    // binary artifacts (png/pdf) are refused with a pointer instead.
+    let artifact = args.get("artifact").and_then(|a| a.as_str()).unwrap_or("");
+    if !artifact.is_empty() {
+        let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+        let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(20000) as usize;
+        return crate::artifacts::read_artifact(artifact, offset, limit);
+    }
+
     // mode=content: clean markdown extraction for reading. No refs, no
     // actionability markers — just the page text as structured markdown.
     // Headings, links, lists, code blocks, tables preserved.
@@ -1848,9 +1888,10 @@ return JSON.stringify(allForms);
             let path = crate::artifacts::write_artifact(json_str, "json")?;
             let count = json_str.matches("href").count();
             return Ok(format!(
-                "extract {extract} (~{count} items, {} bytes) → {path}\npreview: {}…\nread the file for the full data",
+                "extract {extract} (~{count} items, {} bytes)\npreview: {}…\n{}",
                 json_str.len(),
-                json_str.chars().take(600).collect::<String>()
+                json_str.chars().take(600).collect::<String>(),
+                artifact_hint(&path)
             ));
         }
         return Ok(format!("extract {extract}:\n{json_str}"));
@@ -2045,8 +2086,9 @@ pub async fn handle_template_extract(
         let path = crate::artifacts::write_artifact(&json_str, "json")?;
         let preview: String = json_str.chars().take(600).collect();
         return Ok(format!(
-            "extract json ({total} items, {} bytes) → {path}\npreview: {preview}…\nread the file for the full data",
-            json_str.len()
+            "extract json ({total} items, {} bytes)\npreview: {preview}…\n{}",
+            json_str.len(),
+            artifact_hint(&path)
         ));
     }
     Ok(format!("extract json ({total} items):\n{json_str}"))
@@ -2069,7 +2111,7 @@ const ACT_HREF=/\/vote|\/comment|\/reply|\/action|javascript:|#comment|#respond|
 function sig(el){const k=[...el.children].map(c=>c.tagName).join(',');return el.tagName+'['+k+']';}
 function txt(el){return(el.innerText||el.textContent||'').replace(/\s+/g,' ').trim();}
 function vtxt(el){return(el.innerText||'').replace(/\s+/g,' ').trim();}
-function links(el){return[...el.querySelectorAll('a[href]')];}
+function links(el){const r=[...el.querySelectorAll('a[href]')];if(el.matches&&el.matches('a[href]'))r.unshift(el);return r;}
 function extLink(el){return links(el).find(a=>a.hostname&&a.hostname!==HOST);}
 function norm(s){return s.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();}
 function isActionLink(a){
@@ -2134,6 +2176,25 @@ const SKIP_TAGS=new Set(['STYLE','SCRIPT','HEAD','NOSCRIPT','SVG','TEMPLATE','LI
  if(items.length>0)return JSON.stringify({container:'reddit-feed',count:items.length,items});
  }
  }
+ // Hacker News: server-rendered rows — the subtext line carries points,
+ // author, age and the comment count; the generic path dropped them all.
+ const IS_HN=HOST==='news.ycombinator.com';
+ if(IS_HN){
+ const rows=[...document.querySelectorAll('tr.athing')];
+ if(rows.length>=3){
+ const items=rows.slice(0,__LIMIT__).map(tr=>{const o={};
+ const ta=tr.querySelector('span.titleline>a')||tr.querySelector('a.titlelink');
+ if(ta){const t=vtxt(ta);if(t)o.title=t.slice(0,200);const h=ta.getAttribute('href')||'';if(h)o.url=/^https?:/.test(h)?h:location.origin+'/'+(h.charAt(0)==='/'?h.slice(1):h);}
+ const st=tr.nextElementSibling?tr.nextElementSibling.querySelector('.subtext'):null;
+ if(st){const sc=st.querySelector('.score');if(sc){const m=vtxt(sc).replace(/\u00a0/g,' ').match(/(\d[\d,]*)\s*point/i);if(m)o.points=parseInt(m[1].replace(/,/g,''),10);}
+ const au=st.querySelector('a.hnuser');if(au){const a=vtxt(au);if(a)o.author=a;}
+ const ag=st.querySelector('span.age a');if(ag){const a=vtxt(ag);if(a)o.age=a;}
+ const cl=[...st.querySelectorAll('a')].find(a=>/comment|discuss/i.test(vtxt(a)));
+ if(cl){const m=vtxt(cl).replace(/\u00a0/g,' ').match(/(\d[\d,]*)/);o.comments=m?parseInt(m[1].replace(/,/g,''),10):0;}}
+ return o;}).filter(o=>o.title);
+ if(items.length>0)return JSON.stringify({container:'hn-items',count:items.length,items});
+ }
+ }
  const IS_X=HOST==='x.com'||HOST==='twitter.com';
  // X: hand off to the Rust graphql fast path (x.rs) — the virtualized DOM
  // only holds a few mounted cells; the page's own API traffic is complete.
@@ -2172,12 +2233,16 @@ if(items[0]&&SKIP_TAGS.has(items[0].tagName))continue;
 // Quality gate: a real list item is VISIBLE — it has rendered text, a link,
 // or an image. Script bundles and hidden containers have textContent only;
 // they used to win with raw JS source as the "title".
-items=items.filter(it=>vtxt(it).length>=2||it.querySelector('img[src]')||links(it).length>0);
+// Quality floor: a real list item carries substance — speaking-length
+// text, a link, an image, or a price. Unit-count fragments like
+// "2 units" used to win as item "titles" on listing sites.
+const isItem=it=>{const t=vtxt(it);return t.length>=12||it.querySelector('img[src]')||links(it).length>0||PRICE.test(t);};
+items=items.filter(isItem);
 if(items.length<3)continue;
 let totalText=0,extCount=0,hCount=0,imgCount=0,linkCount=0;
 for(const it of items){totalText+=vtxt(it).length;if(extLink(it))extCount++;if(it.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]'))hCount++;if(it.querySelector('img[src]'))imgCount++;if(links(it).length>0)linkCount++;}
 const count=items.length;const avgText=totalText/count;
-if(avgText<5)continue;
+if(avgText<12)continue;
 const tf=Math.min(Math.max(avgText/50,0.5),4);
 const score=count*tf*(1+(extCount/count)*2+(hCount/count)+(imgCount/count)*0.5+(linkCount/count)*0.3);
 if(score>bestScore){bestScore=score;best=c;bestSig=s;}
@@ -2194,14 +2259,19 @@ let title=h?vtxt(h):'';
 const link=bestLink(item,title);
 if(link){const lt=vtxt(link);if(lt&&(!title||title.length<10||lt.length>title.length*1.5))title=lt.slice(0,200);}
 if(!title){const sentence=fullText.split(/\.|!|\?/)[0];title=(sentence&&sentence.length>10?sentence:fullText).slice(0,200);}
+// Numeric/unit-like fragments ("2 units", "3 beds") are not titles.
+if(title&&/^\s*[\d.,]+\s*(units?|beds?|baths?|ba|bd|mi|miles?|sq\.?\s?ft|sqft|acres?)?\s*$/i.test(title)){const lt2=fullText.replace(/\s+/g,' ').trim();if(lt2.length>title.length+6)title=lt2.slice(0,200);}
+// A price glued into the title (listing-card text) is a field, not a name.
+if(title){const pi=title.search(PRICE);if(pi>=10)title=title.slice(0,pi).trim();}
 if(title)o.title=title.slice(0,200);
 if(link)o.url=link.href;
 // Image.
 const img=item.querySelector('img[src]');
 if(img){o.image=img.src;if(img.alt)o.image_alt=img.alt.slice(0,100);}
-// Price: currency symbol required, not in title.
+// Price: currency symbol required. Emitted even when the title carries it —
+// structured fields are the point (listing cards glue address+price).
 const pr=(fullText.match(PRICE)||[])[0];
-if(pr&&!title.includes(pr))o.price=pr;
+if(pr)o.price=pr;
 // Date: only in non-title text.
 const nonTitle=fullText.slice((title||'').length);
 const dt=(nonTitle.match(DATE)||[])[0];
@@ -2219,7 +2289,8 @@ else if(IS_GITHUB){const st=ghStars(item);if(st!==null)o.stars=st;const fk=ghFor
 else{const rt=rating(item);if(rt!==null)o.rating=rt;const rv=reviews(item);if(rv!==null)o.reviews=rv;const av=avail(item);if(av)o.availability=av;const op=origPrice(item);if(op)o.original_price=op;if(isSponsored(item))o.sponsored=true;}
 return o;
 }).filter(o=>Object.keys(o).length>0).slice(0,__LIMIT__);
-return JSON.stringify({container:best.tagName.toLowerCase(),count:items.length,items});
+const lowConf=items.length>0&&items.every(o=>!o.url)&&(items.reduce((a,o)=>a+(o.title||'').length,0)/items.length)<25;
+return JSON.stringify(lowConf?{container:best.tagName.toLowerCase(),count:items.length,items,confidence:'low',note:'no clear list found — items may be page fragments; verify before relying on them'}:{container:best.tagName.toLowerCase(),count:items.length,items});
 })()"#
     .replace("__LIMIT__", &lim.to_string())
     .replace("__POST_MARKER__", if post_marker { "true" } else { "false" })
@@ -2265,14 +2336,23 @@ async fn auto_extract_eval(page: &Page, expr: &str) -> Result<serde_json::Value>
     Ok(serde_json::from_str(json_str).unwrap_or_else(|_| serde_json::json!({"error": "parse failed", "items": []})))
 }
 
+/// Standard hint for offloaded payloads: the inline text is a truncated
+/// prefix of the payload; the full data lives in the artifact file and reads
+/// back through `see artifact="…"` (paged) — the path for pure-MCP clients
+/// with no shell/file access.
+fn artifact_hint(path: &str) -> String {
+    format!("full payload: {path} — read it back in pages with see artifact=\"{path}\" (offset/limit) or any file tool")
+}
+
 /// Offload big extract payloads to an artifact; render inline otherwise.
 fn auto_extract_output(json_str: &str) -> Result<String> {
     if json_str.len() > 12000 {
         let path = crate::artifacts::write_artifact(json_str, "json")?;
         let preview: String = json_str.chars().take(1000).collect();
         return Ok(format!(
-            "extract auto ({} bytes) → {path}\npreview: {preview}…\nread the file for the full data",
+            "extract auto ({} bytes)\npreview: {preview}…\n{}",
             json_str.len(),
+            artifact_hint(&path)
         ));
     }
     Ok(format!("extract auto:\n{json_str}"))
@@ -2355,7 +2435,9 @@ pub async fn handle_auto_extract(page: &mut Page, limit: usize, limit_explicit: 
 }
 
 /// V22: collect — auto-extract + scroll + dedupe loop. ONE call collects
-/// an entire infinite-scroll feed into a single artifact.
+/// an entire infinite-scroll feed into a single artifact. The result names
+/// WHY collection stopped (feed exhausted vs. max vs. timeout) so the agent
+/// knows whether re-running can get more.
 pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(100) as usize;
@@ -2371,6 +2453,9 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
     let mut all_items: Vec<serde_json::Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut no_new_streak = 0u32;
+    // Set on every break path below; declared uninitialized so the compiler
+    // proves it (an initial value would be dead).
+    let stop: String;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     loop {
@@ -2378,22 +2463,34 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
         let items = val.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default();
         let mut new_count = 0usize;
         for item in items {
+            // Keyless items dedupe by their JSON — the old empty-key branch
+            // re-pushed them every scroll iteration.
             let key = item.get("url").or_else(|| item.get("title"))
-                .and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if key.is_empty() || seen.insert(key) {
+                .and_then(|v| v.as_str()).map(String::from)
+                .unwrap_or_else(|| item.to_string());
+            if seen.insert(key) {
                 all_items.push(item);
                 new_count += 1;
             }
         }
 
-        if all_items.len() >= max { break; }
+        if all_items.len() >= max {
+            stop = format!("max={max} reached — raise max to collect more");
+            break;
+        }
         if new_count == 0 {
             no_new_streak += 1;
-            if no_new_streak >= 2 { break; }
+            if no_new_streak >= 2 {
+                stop = "feed exhausted (no new items after 2 scrolls)".to_string();
+                break;
+            }
         } else {
             no_new_streak = 0;
         }
-        if std::time::Instant::now() > deadline { break; }
+        if std::time::Instant::now() > deadline {
+            stop = format!("timeout {timeout_secs}s — the feed may have more; raise timeout or re-run");
+            break;
+        }
 
         let _ = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
             "expression": "window.scrollBy(0, Math.floor(window.innerHeight*0.9))",
@@ -2403,13 +2500,14 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     }
 
+    let status = format!("collected {} items — {stop}", all_items.len());
     let json = serde_json::to_string_pretty(&all_items)?;
     if json.len() <= 12000 {
-        return Ok(format!("collected {} items:\n{json}", all_items.len()));
+        return Ok(format!("{status}:\n{json}"));
     }
     let path = crate::artifacts::write_artifact(&json, "json")?;
     let preview: String = json.chars().take(1000).collect();
-    Ok(format!("collected {} items ({} bytes) → {path}\npreview: {preview}…", all_items.len(), json.len()))
+    Ok(format!("{status}\n{}\npreview: {preview}…", artifact_hint(&path)))
 }
 
 pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
@@ -2565,15 +2663,60 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
     })?;
 
     let mut observations = Vec::new();
+    // Track page moves: a navigation mid-run can consume a later step's
+    // target (an auto-applying filter click, an SPA route change). The
+    // failing step's error names the navigation so the agent can tell
+    // "obsolete step" from "wrong step" — and `optional:true` continues
+    // past steps whose goal is already met.
+    let mut prev_url = page.model().url().to_string();
+    let mut last_nav: Option<(usize, String)> = None;
     for (i, step) in steps.iter().enumerate() {
         let step_num = i + 1; // 1-based for human-readable error messages
-        execute_step(page, step, &step_num.to_string(), &mut observations)
-            .await
-            .map_err(|e| crate::error::BladeError::Other(format!(
-                "step {step_num} failed: {e}"
-            )))?;
+        let optional = step.get("optional").and_then(|o| o.as_bool()).unwrap_or(false);
+        match execute_step(page, step, &step_num.to_string(), &mut observations).await {
+            Ok(()) => {
+                let curr_url = page.model().url().to_string();
+                if curr_url != prev_url {
+                    last_nav = Some((step_num, curr_url.clone()));
+                }
+                prev_url = curr_url;
+            }
+            // Closed propagates unwrapped so serve() self-heals.
+            Err(BladeError::Closed) => return Err(BladeError::Closed),
+            Err(e) => {
+                if optional {
+                    observations.push(format!(
+                        "step {step_num} (optional): failed — {e} (continued)"
+                    ));
+                    prev_url = page.model().url().to_string();
+                    continue;
+                }
+                let nav_ctx = match &last_nav {
+                    Some((n, url)) if *n < step_num => format!(
+                        "\nnote: step {n} navigated the page ({url}) — if the run's goal is already met, this failing step may be obsolete; mark it optional:true to continue past such failures."
+                    ),
+                    _ => String::new(),
+                };
+                return Err(crate::error::BladeError::Other(format!(
+                    "step {step_num} failed: {e}{nav_ctx}"
+                )));
+            }
+        }
     }
     Ok(observations.join("\n"))
+}
+
+/// A `wait` with `text` but no explicit condition means "wait for this text".
+/// The old default (condition=settle with `text` silently ignored) made
+/// `wait text:"X"` a no-op that reported success without waiting for anything.
+fn wait_condition(cond: &str, text: &str) -> String {
+    if !cond.is_empty() {
+        cond.to_string()
+    } else if !text.is_empty() {
+        "text".to_string()
+    } else {
+        "settle".to_string()
+    }
 }
 
 /// Build an Action from a step's JSON fields. Used by `execute_step` for
@@ -2659,11 +2802,14 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
         }
         "upload" => Ok(Action::Upload { ref_id: ref_id.into(), path: text.into() }),
         "wait" => {
-            let condition = step.get("condition").and_then(|c| c.as_str()).unwrap_or("settle");
             let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
             let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            let condition = wait_condition(
+                step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
+                match_text,
+            );
             Ok(Action::Wait {
-                condition: condition.into(),
+                condition,
                 text: match_text.into(),
                 timeout: std::time::Duration::from_secs(timeout_secs),
             })
@@ -2862,8 +3008,9 @@ async fn format_eval_result(json_str: &str) -> Result<String> {
         let path = crate::artifacts::write_artifact(json_str, "json")?;
         let preview: String = json_str.chars().take(1000).collect();
         Ok(format!(
-            "result ({} bytes) → {path}\npreview: {preview}…\nread the file for the full result",
-            json_str.len()
+            "result ({} bytes)\npreview: {preview}…\n{}",
+            json_str.len(),
+            artifact_hint(&path)
         ))
     }
 }
@@ -3368,6 +3515,110 @@ async fn execute_step(
                 }
             }
         }
+        "wait" => {
+            let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
+            let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            let condition = wait_condition(
+                step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
+                match_text,
+            );
+            let else_steps = step.get("else").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+            if else_steps.is_empty() {
+                // Gate semantics (unchanged): a timeout is a real error that
+                // carries the page state, so the agent can recover.
+                let action = Action::Wait {
+                    condition,
+                    text: match_text.into(),
+                    timeout: std::time::Duration::from_secs(timeout_secs),
+                };
+                match page.act(action).await {
+                    Ok((delta, verdict)) => {
+                        observations.push(format!("step {path}: {verdict}\n{}", page.delta_view(&delta, 4000)));
+                    }
+                    Err(BladeError::Closed) => return Err(BladeError::Closed),
+                    Err(e) => {
+                        let _ = page.recapture().await;
+                        let view = page.view(3000);
+                        return Err(crate::error::BladeError::Other(format!(
+                            "step {path} wait failed: {e}\n\n--- current page state ---\n{view}"
+                        )));
+                    }
+                }
+            } else {
+                // wait + else: a gate with a fallback branch — the branch runs
+                // only when the condition times out, and the outcome line says
+                // which path was taken.
+                if condition == "settle" || condition == "network" {
+                    return Err(crate::error::BladeError::Other(
+                        "wait else: 'else' needs a real condition (element/text/title/url/js) — 'settle' always succeeds; use an 'if' step for plain branching".into(),
+                    ));
+                }
+                let met = crate::action::check_condition(
+                    page.cdp_ref(),
+                    &condition,
+                    match_text,
+                    std::time::Duration::from_secs(timeout_secs),
+                    Some(page.in_flight_ref()),
+                )
+                .await;
+                if met {
+                    observations.push(format!("step {path}: wait({condition} \"{match_text}\") → matched"));
+                    let _ = crate::page::wait_for_settle_with_network(
+                        page.cdp_ref(),
+                        std::time::Duration::from_secs(1),
+                        Some(page.in_flight_ref()),
+                    )
+                    .await;
+                    let _ = page.recapture().await?;
+                } else {
+                    observations.push(format!("step {path}: wait({condition} \"{match_text}\") → timeout {timeout_secs}s → else"));
+                    let _ = page.recapture().await?;
+                    for (j, sub_step) in else_steps.iter().enumerate() {
+                        let sub_path = format!("{path}.{j}");
+                        Box::pin(execute_step(page, sub_step, &sub_path, observations)).await?;
+                    }
+                }
+            }
+        }
+        "fill" => {
+            let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if !step_url.is_empty() {
+                page.navigate(step_url).await?;
+            }
+            match handle_fill(step, page).await {
+                Ok(result) => {
+                    let capped: String = result.chars().take(2000).collect();
+                    observations.push(format!("step {path}: {capped}"));
+                }
+                Err(BladeError::Closed) => return Err(BladeError::Closed),
+                Err(e) => {
+                    let _ = page.recapture().await;
+                    let view = page.view(3000);
+                    return Err(crate::error::BladeError::Other(format!(
+                        "step {path} fill failed: {e}\n\n--- current page state ---\n{view}"
+                    )));
+                }
+            }
+        }
+        "pdf" => {
+            let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if !step_url.is_empty() {
+                page.navigate(step_url).await?;
+            }
+            match handle_pdf(page, step).await {
+                Ok(result) => {
+                    observations.push(format!("step {path}: {result}"));
+                }
+                Err(BladeError::Closed) => return Err(BladeError::Closed),
+                Err(e) => {
+                    let _ = page.recapture().await;
+                    let view = page.view(3000);
+                    return Err(crate::error::BladeError::Other(format!(
+                        "step {path} pdf failed: {e}\n\n--- current page state ---\n{view}"
+                    )));
+                }
+            }
+        }
         "collect" => {
             match handle_collect(page, step).await {
                 Ok(result) => {
@@ -3393,7 +3644,14 @@ async fn execute_step(
             match page.act(action).await {
                 Ok((delta, verdict)) => {
                     if delta.navigated {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        // Settle-based (content-aware, typically faster than
+                        // the old blind 500ms) — same wait the batch loop uses.
+                        let _ = crate::page::wait_for_settle_with_network(
+                            page.cdp_ref(),
+                            std::time::Duration::from_millis(1200),
+                            Some(page.in_flight_ref()),
+                        )
+                        .await;
                         let _ = page.recapture().await;
                     }
                     observations.push(format!("step {path}: {verdict}\n{}", page.delta_view(&delta, 4000)));

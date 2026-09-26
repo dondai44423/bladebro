@@ -142,8 +142,8 @@ Every call returns an **outcome verdict + page delta**. Click auto-escalates mou
 | `see logs="console"` / `"network"` | JS errors / requests, failures first |
 
 - **Truncation is deterministic:** output ends with `…(N more: X link, Y button)` — roles sorted by count desc, then alphabetically; the full set stays available via `see filter=`.
-- **Big data goes to files.** Payloads over 12KB are written to `artifacts/` and returned as a path + preview.
-- **Site-aware:** on Reddit post pages and X.com status pages, `extract=auto` returns the full comment tree / thread in ONE call.
+- **Big data goes to files.** Payloads over 12KB are written to `artifacts/` and returned as a path + preview; read any artifact back in pages with `see artifact="<path>"` (+`offset`/`limit`) — no filesystem access needed.
+- **Site-aware:** on Reddit post pages and X.com status pages, `extract=auto` returns the full comment tree / thread in ONE call; Hacker News rows carry points, author, age and comment count.
 
 ### `state` — cookies, storage, tabs, sessions
 
@@ -451,7 +451,7 @@ Honest boundaries: what surprises people, and what Bladebro deliberately does no
 | Situation | What happens — and why |
 |---|---|
 | **CAPTCHA / Turnstile challenges** | Not solved, deliberately. You get a `blocked:` verdict with a remediation ladder — hand off to a solver if needed. |
-| **Datacenter / VPS IPs** | Flagged regardless of fingerprint. Use `BLADE_PROXY` with a residential proxy. |
+| **Datacenter / VPS IPs** | Flagged regardless of fingerprint. Use `BLADE_PROXY` with a residential proxy — with a proxy set, WebRTC ICE candidates are filtered (no srflx / raw-IP host candidates reach the page) so the real IP cannot leak around it. |
 | **Cross-origin iframe content** | Invisible (`SecurityError`). Deliberate: access would need `Runtime.enable`, which defuses the protocol stealth layer. |
 | **Browser extensions** | Not supported — CDP cannot load them, and they would break the stealth profile. |
 | **Session video recording** | Not supported. Use `vision` screenshots. |
@@ -484,7 +484,7 @@ Everything optional; configuration is environment variables.
 | `BLADE_WEBGL` | `auto` | `spoof` / `real` / `auto` |
 | `BLADE_MEDIA` | `auto` | `patch` / `real` / `auto` |
 | `BLADE_NOISE` | unset | `1` = canvas/audio fingerprint noise (see gotchas) |
-| `BLADE_PROXY` | none | Proxy URL |
+| `BLADE_PROXY` | none | Proxy URL — also enables WebRTC ICE filtering + the non-proxied-UDP launch policy, so the real IP stays out of ICE candidates |
 | `BLADE_CONSENT` | `reject` | Consent banners: `accept` / `reject` / `off` |
 
 **Behavior & ops**

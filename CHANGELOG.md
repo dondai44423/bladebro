@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Agent-report unit — input parity, paged artifact read-back, ICE filtering,
+  honest stop reasons.** Every item below came from a live report by an agent
+  that drove the MCP lane through ~70 calls across three sessions; each one
+  was reproduced, fixed and re-verified live on this machine.
+- **`fill` works as a batch step and as a run step.** The act schema, the
+  batch-step schema and the run runtime each carried their own action list —
+  and they had drifted: `fill` was schema-rejected inside `act batch` and
+  "unknown action: fill" inside `run` (as were eval/pdf/download/collect/
+  save/load in batch). The step enum is now DERIVED from one `ACT_ACTIONS`
+  list (a unit test locks the derivation), `handle_fill`/`handle_pdf` are
+  shared by all three surfaces, and the descriptions say what actually
+  works. Verified live: batch fill and run fill against the input fixture.
+- **`see artifact="<path>"` — paged read-back of offloaded payloads.** Big
+  results go to `artifacts/`; a pure-MCP client with no filesystem access can
+  now read the full payload back in char pages (`offset`/`limit`, defaults
+  0/20000). Restricted to the artifacts directory (binary artifacts refused
+  with a pointer). Every offload message now names the read-back form.
+- **Hacker News extraction with the fields that matter:** `extract=auto` on
+  news.ycombinator.com returns items with `points`, `author`, `age` and
+  `comments` — previously title+url only. Verified live: 30 front-page items.
+- **`run`/`batch` steps: `optional: true`** — a step whose failure should not
+  halt the sequence (the click that already achieved the goal) reports
+  `failed (optional)` and the run continues.
+- **`wait` gains a fallback branch and honest condition reporting.** A bare
+  `wait text:"X"` now means "wait for this text" (it used to silently fall
+  back to a settle wait that always "succeeded"); `else:[...]` runs when the
+  condition times out, and the outcome says `→ matched` or `→ timeout Ns →
+  else` (`else` on a settle condition errors by name).
+- **`collect` names why it stopped:** `feed exhausted (no new items after 2
+  scrolls)` / `max=N reached` / `timeout Ns` — the agent can tell whether a
+  re-run can get more. Keyless items dedupe by content now instead of being
+  re-pushed every scroll.
 - **Key chords in `press` — `Control+a`, `Meta+Enter`, `Shift+Tab`.** Full
   modifier sequences: modifier keydowns carry a running bitmask, releases run
   in reverse; shortcut chords carry no text, `Shift+a` types the shifted
@@ -18,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   models façade composers (a wrapper textarea + an editor that mounts on
   focus and hides the wrapper), a localStorage draft hydrating 600ms AFTER
   the mount, dead `execCommand` (Lexical-class editors ignore programmatic
-  edits), and node churn — plus a runner (18 assertions) that drives the
+  edits), and node churn — plus a runner (26 assertions: the editor contract,
+  batch/run fill parity, wait semantics, extract quality) that drives the
   real CLI end to end. Wired into the gate battery.
 - **Real-browser lane — `bladebro rb on|off`.** The agent can now drive *your*
   own Chromium-family browser (Chrome, Chromium, Brave, Edge, Vivaldi, Opera)
@@ -92,6 +125,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     zero-port transport covered.
 
 ### Fixed
+- **Reddit comment trees no longer lose collapsed regions silently.** Empty
+  `more` stubs (count 0, no ids — reddit's collapsed-subtree marker) were
+  skipped by the recovery pass, yet their parent's own permalink listing
+  still serves the whole subtree. Verified live on a thread that returned
+  60/81: now 69/81 (the remaining 12 are comments reddit counts but does not
+  serve — confirmed across all 7 sorts). The shortfall note now says exactly
+  that instead of the ambiguous "(some are deleted or restricted)".
+- **`extract=auto` on non-enumerated layouts no longer returns garbage.**
+  The structural fallback picked unit-count fragments ("2 units") as item
+  titles on listing sites. Item selection now has a substance floor
+  (speaking-length text, link, image or price), a card that IS its own
+  anchor contributes its href, a price glued into the card text becomes a
+  structured `price` field, and a `confidence: "low"` flag + note marks
+  fragment-shaped results instead of presenting them as data. Verified on a
+  Zillow-shaped fixture (clean titles/urls/prices; the "2 units" group
+  loses).
+- **The run-abort error now names a mid-run navigation.** A step failing
+  after the page navigated (an auto-applying filter click that consumed the
+  next step's target) reports the navigation in the error and points at
+  `optional: true` — no more bare "step N failed" when the goal was met.
+- **`BLADE_PROXY` no longer leaks the real IP through WebRTC.** The launch
+  flag and the SDP filter were in place, but a page enumerating its own ICE
+  candidates still read the srflx address (verified live: real IP in
+  `onicecandidate` with the proxy set). The injection now filters local
+  candidate events too — proxy lanes see only mDNS `.local` hosts / relay /
+  prflx; without a proxy nothing changes (stock-equivalent, re-verified).
+  Residual documented: `getStats()` local-candidate entries.
+- **A GL-less host is announced, not silent.** With no WebGL context after
+  the ladder, the MCP lane and the daemon prepend a one-time advisory ("no
+  WebGL — stock-equivalent on this host; no GL mask is applied"), the launch
+  warning says the same, and the ladder retries the native-GL stage once
+  before escalating to SwiftShader (broken on boxes whose Vulkan init
+  fails) — the one-off `GL-BAD(NULL)` cold start had no retry before.
+  Verified live with `--disable-webgl` forcing the full ladder.
 - **The composer cascade is gone — type/clear on framework editors are
   verified, honest, and land in the right node.** From a live report on
   Reddit's Lexical composer: `type` "succeeded" while the text piled up in a
@@ -250,6 +317,12 @@ detectors flag exactly that (measured live: CreepJS `webDriverIsOn: true` →
   agree with each other and with the worker context.
 
 ### Changed
+- **Batch/run step vocabulary is derived, not hand-maintained** (`ACT_ACTIONS`
+  in the tool defs; `handle_fill`/`handle_pdf` shared) — the enum drift that
+  made `fill` a confusing validation error cannot come back. Tool
+  descriptions updated for wait conditions, `optional`, and artifact paging;
+  `run` steps navigate with the settle-based wait (same as the batch loop)
+  instead of the old blind 500 ms.
 - **Tool defs and help teach chords and editor semantics.** The `key` param
   documents chords (`Control+a`, `Meta+Enter`, `Shift+Tab`); the `act`
   description gained an EDITORS line (verified replace, landing notes,

@@ -811,11 +811,11 @@ fn parse_see_args(args: &[String]) -> Result<Value> {
         };
         if let Some(flag) = long.strip_prefix("--") {
             match flag {
-                "filter" | "find" | "logs" | "scope" => {
+                "filter" | "find" | "logs" | "scope" | "artifact" => {
                     let v = take_value(args, &mut i, flag)?;
                     j[flag] = json!(v);
                 }
-                "budget" | "limit" => {
+                "budget" | "limit" | "offset" => {
                     let v: u64 = take_num(args, &mut i, flag)?;
                     j[flag] = json!(v);
                 }
@@ -2217,6 +2217,8 @@ pub async fn run_daemon() -> Result<()> {
     // latch (see the per-command drift check below).
     let mut launched = 0u64;
     let mut stale_warned = false;
+    // One-shot latch: has the GL-less advisory been delivered?
+    let mut gl_warned = false;
     let mut last_activity = std::time::Instant::now();
     let idle_secs: u64 = std::env::var("BLADE_IDLE_TIMEOUT")
         .ok()
@@ -2353,6 +2355,14 @@ pub async fn run_daemon() -> Result<()> {
                     advisories.push(
                         "note: this daemon runs a binary that was replaced on disk — `bladebro stop` to pick up the new build".into(),
                     );
+                }
+                if !gl_warned {
+                    if let Some(crate::browser::GpuState::Missing) = crate::browser::gpu_state() {
+                        gl_warned = true;
+                        advisories.push(
+                            "note: this browser has no WebGL (getContext('webgl') returns null — stock-equivalent on this host); no GL mask is applied".into(),
+                        );
+                    }
                 }
                 let with_notes = |text: String| -> String {
                     if advisories.is_empty() {
@@ -2811,7 +2821,8 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--budget": "max chars (default 8000)",
                 "--limit": "max extract items (default 50; Reddit post comments: all up to 1000 unless set)",
                 "--logs": "console | network",
-                "--template": "JSON or @file — for extract=json"
+                "--template": "JSON or @file — for extract=json",
+                "--artifact": "read an offloaded payload from disk, paged: --artifact <path> [--offset N] [--limit N]"
             },
             "examples": [
                 "bladebro see model",
@@ -3635,6 +3646,17 @@ mod tests {
         let v = parse_see_args(&a(&["--extract", "links", "--limit", "5"])).unwrap();
         assert_eq!(v["extract"], "links");
         assert_eq!(v["limit"], 5);
+    }
+
+    #[test]
+    fn see_artifact_readback_flags_parse() {
+        let v = parse_see_args(&a(&[
+            "--artifact", "/x/y.json", "--offset", "100", "--limit", "500",
+        ]))
+        .unwrap();
+        assert_eq!(v["artifact"], "/x/y.json");
+        assert_eq!(v["offset"], 100);
+        assert_eq!(v["limit"], 500);
     }
 
     #[test]

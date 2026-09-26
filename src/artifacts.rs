@@ -79,6 +79,56 @@ fn rotate_artifacts(dir: &std::path::Path) {
     }
 }
 
+/// Read a slice of an artifact file — char-addressed (offset/limit in chars).
+/// The read-back surface for pure-MCP clients with no filesystem access:
+/// `see artifact="<path>"`. Restricted to the artifacts directory (this must
+/// not become an arbitrary file reader) and to text-ish files; binary
+/// artifacts (png/pdf) are refused with a pointer to the file.
+pub fn read_artifact(path: &str, offset: usize, limit: usize) -> Result<String> {
+    let dir = artifact_dir();
+    let dir_canon = dir
+        .canonicalize()
+        .map_err(|e| crate::error::BladeError::Other(format!("artifact dir: {e}")))?;
+    let canon = std::path::Path::new(path)
+        .canonicalize()
+        .map_err(|e| crate::error::BladeError::Other(format!("artifact not found: {path} ({e})")))?;
+    if !canon.starts_with(&dir_canon) {
+        return Err(crate::error::BladeError::Other(format!(
+            "artifact read refused: {path} is outside the artifacts directory ({}) — use the CLI or any file tool for arbitrary paths",
+            dir_canon.display()
+        )));
+    }
+    let ext = canon
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "json" | "txt" | "log" | "csv" | "md" | "html") {
+        let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
+        return Err(crate::error::BladeError::Other(format!(
+            "artifact is binary ({ext}, {size} bytes) — not text: {}",
+            canon.display()
+        )));
+    }
+    let bytes = std::fs::read(&canon)
+        .map_err(|e| crate::error::BladeError::Other(format!("artifact read: {e}")))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let total = text.chars().count();
+    let limit = limit.clamp(1, 200_000);
+    let offset = offset.min(total);
+    let chunk: String = text.chars().skip(offset).take(limit).collect();
+    let next = offset + chunk.chars().count();
+    let tail = if next >= total {
+        "end of artifact".to_string()
+    } else {
+        format!("read more with offset={next}")
+    };
+    Ok(format!(
+        "artifact {} — chars {offset}..{next} of {total} ({tail})\n{chunk}",
+        canon.display()
+    ))
+}
+
 /// The artifact directory: `~/.blade/artifacts/`.
 pub fn artifact_dir() -> std::path::PathBuf {
     crate::platform::blade_dir().join("artifacts")
