@@ -22,6 +22,9 @@ via `BLADE_LANE=real`) and **disables the EXPECTED table entirely** — the
 lane's contract is that its page-visible surface equals a stock browser's, so
 every diff is DIVERGENT. Window geometry is pinned on both sides (WM placement
 jitter is not a fingerprint surface and must not masquerade as one).
+Both lanes run on scratch `BLADE_HOME`s — every run gets its own temp home (the
+agent lane also sets `BLADE_NO_WARMING=1`) and never touches the user's real
+data dir.
 
 ## Requirements
 

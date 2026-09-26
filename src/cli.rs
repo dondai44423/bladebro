@@ -1811,7 +1811,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             println!();
             println!("{}", rb_row("revert", "`bladebro rb off` · wipe the imported copy: `rb forget`"));
             println!("{}", rb_row("control", "`rb pause` / `rb resume` hand the browser to you"));
-            println!("{}", rb_row("note", "running surfaces (daemon, MCP) switch at their next action — a live browser is relaunched automatically"));
+            println!("{}", rb_row("note", "running surfaces (daemon, MCP) switch at their next action — an owned browser relaunches; an attached browser is left running"));
             Ok(())
         }
 
@@ -1838,7 +1838,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 );
                 println!(
                     "{}",
-                    rb_row("note", "a running browser is relaunched at its next use — no restart needed")
+                    rb_row("note", "a running browser is switched at its next use — relaunched if owned, left running if attached; no restart needed")
                 );
             }
             Ok(())
@@ -1868,7 +1868,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             } else {
                 println!("mechanism set to {}", ui::bold(mode.as_str()));
                 if cfg.enabled {
-                    println!("  {}", ui::dim("applies at a running browser's next action — it is relaunched automatically"));
+                    println!("  {}", ui::dim("applies at the running session's next action — owned browsers relaunch; attach sessions detach"));
                 }
             }
             Ok(())
@@ -2973,7 +2973,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "real-browser lane: the agent drives YOUR Chromium-family browser (your profile data, your display) with zero page patches; the driver-side stack (perception, LPM, refs, adapters, token efficiency, biometrics) is unchanged",
                 "mechanisms: clone (default — imported copy; your browser may stay open), profile (your live profile — close the browser first), attach (a running browser exposing a debug endpoint, incl. Chrome 144+ chrome://inspect#remote-debugging); auto = attach if one is live, else clone",
                 "attach caveat (measured, Chrome 151): an ephemeral `--remote-debugging-port=0` arm — and Chrome's approval flow — makes Chrome itself report navigator.webdriver=true; arm a FIXED port for a false reading (the lane never masks Chrome's own value)",
-                "every surface picks a switch up at its next action — the CLI daemon restarts immediately; a running MCP session relaunches its browser on the next call",
+                "every surface picks a switch up at its next action — the CLI daemon restarts immediately; a running MCP session switches its browser on the next call (owned browsers relaunch; an attached browser is detached, not closed)",
                 "`rb pause` refuses input, navigation, history, downloads, collecting and tab operations (reads, waits and eval stay available); `rb forget` wipes the imported copy; `rb refresh` re-imports; `rb use --binary` supports custom/nix/flatpak-wrapper binaries"
             ]
         }),

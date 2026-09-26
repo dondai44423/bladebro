@@ -10,6 +10,10 @@ Real lane: real-clone (isolated BLADE_HOME, BLADE_LANE=real, invisible) —
 the probe checks the REAL-lane contract instead of the mask: navigator.webdriver
 false, and NO GL mask (the browser's own renderer string, reported as-is).
 
+Every lane runs on its own scratch BLADE_HOME (the agent lanes also pin
+BLADE_NO_WARMING=1) and cleans up its daemon/browsers afterwards — a run never
+touches the user's real data dir.
+
 Binary under test: `BLADEBRO` env -> the repo build (`target/release/bladebro`)
 -> `~/.local/bin/bladebro`; printed at startup. The real lane refuses a binary
 that predates `rb` (BLADE_LANE=real would be silently ignored).
