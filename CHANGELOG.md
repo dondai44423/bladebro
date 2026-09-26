@@ -204,6 +204,33 @@ detectors flag exactly that (measured live: CreepJS `webDriverIsOn: true` →
   agree with each other and with the worker context.
 
 ### Changed
+- **Launch is back to pre-stealth-v2 speed — with the GL truth check kept.**
+  The cold browser-up went 2.35–2.62s (before stealth v2) → 3.01–3.23s, a
+  regression Dondai felt as “a bit slower”. The safe half of that is now
+  recovered, measured old-vs-new interleaved: Xvfb readiness is event-driven
+  (X-socket connect + 25ms survival poll instead of a flat 300ms sleep), the
+  window-manager/work-area wait observes `_NET_SUPPORTING_WM_CHECK` + the
+  read-back (50ms poll) instead of a blind 400ms + 200ms loop, Chrome’s ready
+  poll is 50ms early / 300ms late instead of a flat 300ms, the GL probe polls
+  *in-page* (40ms) instead of host-side 200ms sleeps, and it skips a
+  redundant `about:blank` navigate when the startup tab is already blank.
+  **Cold browser-up: 2.36–2.68s — old-build parity.** The remaining ~1.0–1.2s
+  is the GPU stack’s own init (measured: first WebGL context ~1.1s from
+  Chrome spawn under this flag set; ~350–400ms in-page even warm) — a
+  cross-launch verdict cache was considered and rejected: a stale verdict
+  could silently un-mask a software renderer, which is the exact detection
+  class this project refuses. `NAV_TIMING=1` now also prints
+  `[launch-timing]` phases (profile/display/chrome-spawn/chrome-ready/
+  healthcheck).
+- **Per-call overhead trimmed and the speed picture re-measured honestly.**
+  `realbrowser::config()` caches by (mtime, size) — the `rb` drift check used
+  to read + parse `realbrowser.json` twice on every tool call. The frozen
+  bench suite (`speed/bench.py`), run old-vs-new interleaved on the same
+  minute: navigation/scroll/settle at parity (nav_index 286.5 vs 286.7ms,
+  nav_example 296.4 vs 304.5ms — an earlier “nav_example 188→1498ms” read
+  was the network: curl TTFB to example.com was 1.2s that hour), click_toggle
+  −48ms, flow_pages_run −128ms, real-time ops +1–3ms (the lane-drift checks).
+  Artifacts: `speed/results/{old-final,new-final,baseline-b34e0ca}.json`.
 - **CLI presentation pass — structure, color, and a hard switch.** All human
   output now flows through one gated style layer (`src/ui`): aligned
   label/value blocks for `rb` (`status`/`on`/`off`/`use`/`profile`), red error

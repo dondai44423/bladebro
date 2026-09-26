@@ -314,8 +314,13 @@ fn launch_args_real(cfg: &RealLaunchCfg<'_>) -> Vec<String> {
 
 /// The healthcheck expression — evaluated in a normal document (the probe
 /// navigates the target to about:blank first: the startup tab may be a
-/// WebUI where canvas access can be restricted).
-const GL_PROBE_EXPR: &str = "(function(){try{var c=document.createElement('canvas');var g=c.getContext('webgl');if(!g)return '';var e=g.getExtension('WEBGL_debug_renderer_info');return e?String(g.getParameter(e.UNMASKED_RENDERER_WEBGL)):String(g.getParameter(g.RENDERER));}catch(err){return ''}})()";
+/// WebUI where canvas access can be restricted). In-page warm-up poll:
+/// under software GL (Xvfb/llvmpipe) the GPU process needs around a second
+/// to serve its first context, and a host-side sleep loop quantizes that
+/// wait to its interval; this polls *inside* the page every 40ms and
+/// returns the moment a context exists — same verdict, one round trip,
+/// ~150-200ms sooner.
+const GL_PROBE_WARM_EXPR: &str = "(async()=>{for(let i=0;i<70;i++){try{var c=document.createElement('canvas');var g=c.getContext('webgl');if(g){var e=g.getExtension('WEBGL_debug_renderer_info');return e?String(g.getParameter(e.UNMASKED_RENDERER_WEBGL)):String(g.getParameter(g.RENDERER));}}catch(err){}await new Promise(r=>setTimeout(r,40));}return '';})()";
 
 /// Healthcheck the WS transport: evaluate the GL probe in the first page
 /// target with bounded retries. Returns the renderer string, or None when
@@ -334,14 +339,20 @@ async fn probe_gl_ws_once(base: &str) -> Option<String> {
     let target = crate::cdp::first_page_target(base).await.ok()?;
     let client = crate::cdp::CdpClient::connect(target.ws_url().ok()?).await.ok()?;
     let session = crate::cdp::CdpSession::root(client);
-    let _ = session
-        .send("Page.navigate", Some(json!({ "url": "about:blank" })))
-        .await;
-    for _ in 0..10 {
+    // The probe needs a normal document (the startup tab may be a WebUI where
+    // canvas access is restricted) — but when it is already blank, skip the
+    // navigate and the renderer swap it would force.
+    if target.url != "about:blank" {
+        let _ = session
+            .send("Page.navigate", Some(json!({ "url": "about:blank" })))
+            .await;
+    }
+    for _ in 0..3 {
         if let Ok(v) = session
-            .send(
+            .send_with_timeout(
                 "Runtime.evaluate",
-                Some(json!({ "expression": GL_PROBE_EXPR, "returnByValue": true })),
+                Some(json!({ "expression": GL_PROBE_WARM_EXPR, "returnByValue": true, "awaitPromise": true })),
+                Duration::from_secs(5),
             )
             .await
         {
@@ -351,7 +362,7 @@ async fn probe_gl_ws_once(base: &str) -> Option<String> {
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
     None
 }
@@ -396,11 +407,12 @@ async fn probe_gl_pipe_once(client: &crate::cdp::CdpClient) -> Option<String> {
         .send("Page.navigate", Some(json!({ "url": "about:blank" })))
         .await;
     let mut found = None;
-    for _ in 0..10 {
+    for _ in 0..3 {
         if let Ok(v) = session
-            .send(
+            .send_with_timeout(
                 "Runtime.evaluate",
-                Some(json!({ "expression": GL_PROBE_EXPR, "returnByValue": true })),
+                Some(json!({ "expression": GL_PROBE_WARM_EXPR, "returnByValue": true, "awaitPromise": true })),
+                Duration::from_secs(5),
             )
             .await
         {
@@ -411,7 +423,7 @@ async fn probe_gl_pipe_once(client: &crate::cdp::CdpClient) -> Option<String> {
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
     let _ = client
         .send(
@@ -490,25 +502,37 @@ impl VirtualDisplay {
                     continue;
                 }
             };
-            // Verify survival: Xvfb exits when the display is
-            // held by a FOREIGN X server (the user's real one).
-            // Our claim prevents bladebro-vs-bladebro races;
-            // this check catches foreign owners.
-            std::thread::sleep(Duration::from_millis(300));
-            match child.try_wait() {
-                Ok(None) => {
-                    let wm = spawn_session_chrome(display_num);
-                    eprintln!("[bladebro] Xvfb virtual display on :{display_num}");
-                    return Ok(Self { child, wm, display_num });
-                }
-                Ok(Some(status)) => {
-                    last_err = format!("Xvfb :{display_num} exited ({status})");
-                    eprintln!("[bladebro] Xvfb :{display_num} died ({status}), retrying");
-                    release_display_claim(display_num);
-                }
-                Err(e) => {
-                    release_display_claim(display_num);
-                    last_err = format!("poll: {e}");
+            // Readiness is observable: the X socket accepts connections as
+            // soon as the server is up (tens of ms). Poll it and check
+            // survival on a 25ms cadence — a foreign owner (Xvfb exits
+            // quickly) is caught just as well as with the old single 300ms
+            // check, and the normal start no longer pays a flat 300ms. Cap
+            // at 500ms so a pathological case still fails over.
+            let sock = format!("/tmp/.X11-unix/X{display_num}");
+            let ready_deadline = std::time::Instant::now() + Duration::from_millis(500);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        last_err = format!("Xvfb :{display_num} exited ({status})");
+                        eprintln!("[bladebro] Xvfb :{display_num} died ({status}), retrying");
+                        release_display_claim(display_num);
+                        break;
+                    }
+                    Ok(None) => {
+                        if std::os::unix::net::UnixStream::connect(&sock).is_ok()
+                            || std::time::Instant::now() >= ready_deadline
+                        {
+                            let wm = spawn_session_chrome(display_num);
+                            eprintln!("[bladebro] Xvfb virtual display on :{display_num}");
+                            return Ok(Self { child, wm, display_num });
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(e) => {
+                        release_display_claim(display_num);
+                        last_err = format!("poll: {e}");
+                        break;
+                    }
                 }
             }
         }
@@ -558,15 +582,45 @@ fn spawn_session_chrome(display_num: u16) -> Option<Child> {
     // settle and verify the read-back before the caller launches Chrome, whose
     // window caches this geometry at creation time.
     if wm.is_some() {
-        std::thread::sleep(Duration::from_millis(400));
-        for _ in 0..25 {
-            if set_work_area(display_num) {
+        // Wait for the WM to own the root instead of a blind 400ms sleep,
+        // then set the taskbar property and verify the read-back. xfwm4
+        // publishes the full screen at startup and stops touching
+        // _NET_WORKAREA once it is up — readiness is observable
+        // (_NET_SUPPORTING_WM_CHECK), so poll it tightly (50ms) up to 3s.
+        let mut done = false;
+        for _ in 0..60 {
+            if wm_ready(display_num) && set_work_area(display_num) {
+                done = true;
                 break;
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !done {
+            // A WM that never publishes the atom: try once blindly — the
+            // read-back inside set_work_area is still the instrument.
+            let _ = set_work_area(display_num);
         }
     }
     wm
+}
+
+/// True once a window manager owns the root window (`_NET_SUPPORTING_WM_CHECK`
+/// resolves to a window). True when `xprop` is unavailable — `set_work_area`'s
+/// own read-back is then the fallback instrument, as before.
+#[cfg(target_os = "linux")]
+fn wm_ready(display_num: u16) -> bool {
+    match Command::new("xprop")
+        .args(["-root", "-notype", "_NET_SUPPORTING_WM_CHECK"])
+        .env("DISPLAY", format!(":{display_num}"))
+        .output()
+    {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let s = s.trim();
+            !s.is_empty() && !s.contains("no such atom")
+        }
+        Err(_) => true,
+    }
 }
 
 /// Declare a 40px bottom taskbar on `_NET_WORKAREA` (x, y, w, h per desktop)
@@ -777,8 +831,13 @@ impl Browser {
 
     /// One launch attempt with a pinned GL stage (driven by `launch_inner`).
     async fn launch_inner_stage(port: u16, no_sandbox: bool, stage: GlStage) -> Result<(Self, Option<String>)> {
+        let timing = std::env::var("NAV_TIMING").is_ok();
+        let t0 = std::time::Instant::now();
         let chrome_path = find_chrome()?;
         let profile = crate::session_profile::SessionProfile::create()?;
+        if timing {
+            eprintln!("[launch-timing] profile: {:?}", t0.elapsed());
+        }
         let user_data_dir = profile.dir().to_path_buf();
         font_audit();
 
@@ -791,6 +850,10 @@ impl Browser {
             eprintln!(
                 "[bladebro] WARNING: Xvfb unavailable — falling back to headless mode (reduced stealth). Install xvfb for headful-on-virtual-display."
             );
+        }
+        #[cfg(target_os = "linux")]
+        if timing {
+            eprintln!("[launch-timing] display: {:?}", t0.elapsed());
         }
         #[cfg(target_os = "linux")]
         let headful = xvfb.is_some();
@@ -852,9 +915,13 @@ impl Browser {
             .map_err(|e| BladeError::Other(format!("failed to launch Chrome: {e}")))?;
 
         let base = format!("127.0.0.1:{port}");
+        if timing {
+            eprintln!("[launch-timing] chrome-spawn: {:?}", t0.elapsed());
+        }
 
         // Poll the debug endpoint until it responds or we time out.
         let deadline = Instant::now() + Duration::from_secs(20);
+        let started = Instant::now();
         loop {
             match crate::cdp::version(&base).await {
                 Ok(v) => {
@@ -862,7 +929,13 @@ impl Browser {
                         "[bladebro] Chrome ready: {} (protocol {})",
                         v.browser, v.protocol_version
                     );
+                    if timing {
+                        eprintln!("[launch-timing] chrome-ready: {:?}", t0.elapsed());
+                    }
                     let probe = probe_gl_ws(&base).await;
+                    if timing {
+                        eprintln!("[launch-timing] healthcheck: {:?}", t0.elapsed());
+                    }
                     return Ok((
                         Self {
                             child,
@@ -894,7 +967,14 @@ impl Browser {
                             "Chrome debug endpoint not responding after 20s".into(),
                         ));
                     }
-                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    // Adaptive poll: Chrome answers well under a second in the
+                    // normal case, so a flat 300ms interval quantized the
+                    // whole readiness wait up — go tight early, coarse late.
+                    if started.elapsed() < Duration::from_secs(2) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
                 }
             }
         }
