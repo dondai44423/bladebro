@@ -393,10 +393,68 @@ pub fn shutdown_child(child: &mut Child) {
     }
 }
 
+/// True when the binary backing this process was replaced on disk while the
+/// process kept running (self-update, or the rename-swap used when a live
+/// process holds the file). The process is serving old code; only a restart
+/// picks up the new build.
+///
+/// Two Linux tells: `/proc/self/exe` is ` (deleted)` (the old image was
+/// unlinked), or it no longer resolves to the same file the host invoked
+/// (`argv[0]` — a rename-swap that kept the old image under another name).
+/// Both sides must resolve for the second check; otherwise stay quiet rather
+/// than guess. Elsewhere there is no portable signal and this answers false.
+pub fn stale_binary() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::path::{Path, PathBuf};
+        let exe = match std::fs::read_link("/proc/self/exe") {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        if exe.to_string_lossy().ends_with(" (deleted)") {
+            return true;
+        }
+        let resolve = |p: &Path| -> Option<PathBuf> {
+            if p.components().count() > 1 {
+                std::fs::canonicalize(p).ok()
+            } else {
+                // Bare name: resolve via PATH the way the host's shell would.
+                std::env::var_os("PATH").and_then(|path| {
+                    std::env::split_paths(&path)
+                        .map(|d| d.join(p))
+                        .find(|c| c.exists())
+                        .and_then(|c| std::fs::canonicalize(c).ok())
+                })
+            }
+        };
+        let argv0 = std::env::args_os().next().map(PathBuf::from);
+        match (
+            argv0.as_deref().and_then(resolve),
+            std::fs::canonicalize(&exe).ok(),
+        ) {
+            (Some(invoked), Some(running)) => invoked != running,
+            _ => false,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn stale_binary_is_false_for_a_normally_launched_process() {
+        // The test process runs from the path that invoked it — the check must
+        // not fire (a false positive would nag every user after any unrelated
+        // file shuffle). The true cases are live-verified: a rename-swap or
+        // unlink under a running MCP produces the advisory exactly once.
+        assert!(!stale_binary(), "false positive in the ordinary launch case");
+    }
 
     fn env_of<'a>(map: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
         move |k: &str| map.get(k).map(|v| v.to_string())

@@ -370,7 +370,8 @@ an absolute profile path also works) · re-import: `rb refresh` · wipe the
 imported copy: `rb forget` · `rb visible on|off` (real window vs
 `--headless=new`) · `rb idle-hum on|off` · `rb idle-shutdown on|off` (may the
 idle timeout close the real browser — default off). Switching restarts the
-daemon; long-lived MCP sessions pick the lane up at their next browser launch.
+daemon, and a live MCP/daemon browser is detected as stale at its next use
+and relaunched automatically — no host restart anywhere.
 
 > ⚠️ The agent browses **as you**: anything it does is attributable to your
 > identity. `rb on` prints exactly what it will use and how to revert.

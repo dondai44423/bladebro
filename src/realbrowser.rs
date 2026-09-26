@@ -62,12 +62,67 @@ pub fn real_lane() -> bool {
 /// Initialise the lane for this process: `BLADE_LANE=real|agent` overrides,
 /// otherwise the persisted config decides. Called once at process start.
 pub fn init_lane() {
-    let on = match std::env::var("BLADE_LANE").ok().as_deref() {
+    set_real_lane(lane_from(
+        std::env::var("BLADE_LANE").ok().as_deref(),
+        config().enabled,
+    ));
+}
+
+/// Effective lane: the `BLADE_LANE=real|agent` env override wins, else the
+/// persisted config. Pure — the decision is unit-testable, and every reader
+/// of the lane (init, refresh, fingerprint) goes through it.
+pub fn lane_from(env_override: Option<&str>, cfg_enabled: bool) -> bool {
+    match env_override {
         Some("real") => true,
         Some("agent") => false,
-        _ => config().enabled,
-    };
-    set_real_lane(on);
+        _ => cfg_enabled,
+    }
+}
+
+/// Re-read the effective lane and switch this process when it moved.
+/// Returns true when the lane changed — the browser that is running belongs
+/// to the OLD lane, so the caller must relaunch it. Without that, `rb on`
+/// / `rb off` is silently ignored by a long-lived MCP or daemon session
+/// until its browser happens to die (the observed "rb on does nothing").
+pub fn refresh_lane() -> bool {
+    let want = lane_from(
+        std::env::var("BLADE_LANE").ok().as_deref(),
+        config().enabled,
+    );
+    let had = real_lane();
+    if want != had {
+        set_real_lane(want);
+        true
+    } else {
+        false
+    }
+}
+
+/// Fingerprint of everything that decides how the next launch behaves.
+/// Long-lived surfaces snapshot it after each launch and compare it on every
+/// call: a mismatch means the running browser no longer matches the config
+/// (`rb on|off`, `rb mode|use|profile|visible`) and must be relaunched.
+/// On the agent lane the real-browser fields cannot affect the browser, so
+/// the fingerprint is constant there — an agent session never pays a
+/// relaunch for config that does not concern it.
+pub fn launch_fingerprint() -> u64 {
+    launch_fingerprint_from(std::env::var("BLADE_LANE").ok().as_deref(), &config())
+}
+
+/// Testable core of [`launch_fingerprint`] (no env/disk reads).
+pub fn launch_fingerprint_from(env_override: Option<&str>, cfg: &Config) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let lane = lane_from(env_override, cfg.enabled);
+    lane.hash(&mut h);
+    if lane {
+        cfg.mode.as_str().hash(&mut h);
+        cfg.browser.hash(&mut h);
+        cfg.profile.hash(&mut h);
+        cfg.binary.hash(&mut h);
+        cfg.visible.hash(&mut h);
+    }
+    h.finish()
 }
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -1203,6 +1258,56 @@ mod tests {
         assert_eq!(profile_in_use(&root), None, "a dead pid is a stale lock");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lane_decision_prefers_env_over_config() {
+        assert!(lane_from(Some("real"), false), "env real beats a disabled config");
+        assert!(!lane_from(Some("agent"), true), "env agent beats an enabled config");
+        assert!(lane_from(None, true));
+        assert!(!lane_from(None, false));
+        // Anything that is not exactly real|agent falls through to the
+        // config — a typo must never silently flip the lane.
+        assert!(!lane_from(Some("Real"), false), "a typo does not force the real lane");
+        assert!(lane_from(Some("agentx"), true), "a typo does not force the agent lane either");
+    }
+
+    #[test]
+    fn fingerprint_tracks_launch_inputs_only_on_the_real_lane() {
+        let base = Config {
+            enabled: true,
+            ..Default::default()
+        };
+        let fp = launch_fingerprint_from(None, &base);
+        assert_eq!(fp, launch_fingerprint_from(None, &base), "stable across reads");
+
+        let mut other = base.clone();
+        other.visible = false;
+        assert_ne!(fp, launch_fingerprint_from(None, &other), "visible is a launch input");
+        let mut other = base.clone();
+        other.mode = Mode::Profile;
+        assert_ne!(fp, launch_fingerprint_from(None, &other), "mode is a launch input");
+        let mut other = base.clone();
+        other.profile = Some("Work".into());
+        assert_ne!(fp, launch_fingerprint_from(None, &other), "profile is a launch input");
+
+        // The lane itself is part of the fingerprint: on→off must drift.
+        let off = Config { enabled: false, ..base.clone() };
+        assert_ne!(fp, launch_fingerprint_from(None, &off));
+
+        // Agent lane (env override): the real-lane fields cannot affect an
+        // agent browser, so the fingerprint stays put — no pointless relaunch.
+        let a1 = Config { enabled: true, mode: Mode::Clone, visible: true, profile: Some("Work".into()), ..Default::default() };
+        let a2 = Config { enabled: true, mode: Mode::Profile, visible: false, profile: None, ..Default::default() };
+        assert_eq!(
+            launch_fingerprint_from(Some("agent"), &a1),
+            launch_fingerprint_from(Some("agent"), &a2)
+        );
+        // ...and the agent lane never equals the real lane.
+        assert_ne!(
+            launch_fingerprint_from(Some("agent"), &a1),
+            launch_fingerprint_from(None, &a1)
+        );
     }
 
     #[test]

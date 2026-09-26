@@ -31,8 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Commands:** `rb on|off|status|mode <m>|use [browser|--binary <path|auto>]|`
     `profile [key|auto]|visible on|off|idle-hum on|off|idle-shutdown on|off|`
     `refresh|forget|pause|resume` (+ `--json`, `help rb`). Switching restarts
-    the daemon; every surface re-reads the lane at its next browser launch
-    (a running MCP/agent session picks it up without a restart).
+    the daemon; a running MCP/daemon browser is detected as stale at its next
+    use and relaunched automatically — no host restart anywhere.
   - **Manual control is first-class:** `rb pause` refuses input dispatch
     (click, type, fill, select, press, scroll, hover, upload), navigation,
     history (back/forward/reload) and downloads, and silences the idle hum;
@@ -81,6 +81,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     zero-port transport covered.
 
 ### Fixed
+- **Lane switches now take effect on live surfaces — `rb on|off` under a
+  running browser actually switches it.** A long-lived MCP or daemon session
+  holds its browser, and that browser belongs to the lane it was launched on:
+  the old code only re-read the lane at the *next launch*, so `rb on` with a
+  live browser did nothing until the browser happened to die (the reported
+  "rb on is not working"). Both surfaces now re-check the lane and the launch
+  settings (`mode|use|profile|visible` too) on every call: a mismatch shuts
+  the old browser down and relaunches on the current lane, and the response
+  says so — the MCP prepends a one-line note the agent relays, the daemon
+  prefixes the command output. Agent-lane sessions never relaunch for
+  real-browser settings that cannot affect them. Live-verified end to end:
+  agent→real→agent under a scripted MCP session and under the CLI daemon
+  (browser cmdlines switch `/profiles/sess-N` ⇄
+  `/realbrowser/<id>/profiles/sess-N --profile-directory=<key>`).
+- **Stale-binary advisory.** A process whose binary was replaced on disk
+  (self-update, or the rename-swap done while a live process holds the file)
+  keeps serving old code, which made two rounds of live-test fixes look like
+  they "didn't work" (the process was never running the fixed build). The MCP
+  now detects it (Linux: `/proc/self/exe` unlinked, or no longer resolving to
+  the invoked `argv[0]`) and prepends a one-time note telling the host to
+  restart; the daemon warns once in its responses (`bladebro stop` picks the
+  new build up). No false positives — the check stays silent unless the file
+  actually moved.
 - **MCP now drives Chrome over WebSocket by default — `navigator.webdriver`
   is `false` natively.** The pipe transport (the previous default) makes
   Chrome enable its automation flag, so `navigator.webdriver` reads `true`

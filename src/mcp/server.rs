@@ -365,6 +365,12 @@ async fn serve(
     // Set when Chrome is relaunched after a crash/idle — the
     // next response tells the agent its page state was reset.
     let mut relaunch_note: Option<String> = None;
+    // Fingerprint of the launch inputs the live browser started with; the
+    // per-call drift check compares against it so `rb on|off` under a running
+    // browser relaunches instead of being silently ignored.
+    let mut launched = 0u64;
+    // One-shot latch: has the stale-binary advisory been delivered?
+    let mut stale_warned = false;
     // Track resource-blocking config so it survives idle shutdown/relaunch.
     let mut block_classes: Option<String> = None;
     // Domain knowledge base: consent selectors, visit tracking, stats.
@@ -462,21 +468,48 @@ async fn serve(
                     "tools/call" => {
                         // === LAZY LAUNCH + SELF-HEAL ===
                         // Ensure Chrome is running before any tool call.
-                        // Three cases: first call (page=None), idle shutdown
-                        // (page=None), or Chrome crashed (is_closed).
-                        let need_launch = page.is_none()
+                        // Four cases: first call (page=None), idle shutdown
+                        // (page=None), Chrome crashed (is_closed), or the
+                        // lane/launch settings changed under a live browser.
+                        //
+                        // The drift check re-reads the lane + config every
+                        // call: `rb on|off` (and `rb mode|use|profile|visible`)
+                        // must take effect on a long-lived MCP session, whose
+                        // browser would otherwise keep the old lane until it
+                        // happens to die — the observed "rb on does nothing".
+                        let lane_switched = crate::realbrowser::refresh_lane();
+                        let drifted = browser.is_some()
+                            && (lane_switched
+                                || crate::realbrowser::launch_fingerprint() != launched);
+                        let need_launch = drifted
+                            || page.is_none()
                             || page.as_ref().map(|p| p.is_closed()).unwrap_or(true);
                         if need_launch {
                             if browser.is_some() {
-                                // Chrome crashed or is dead, kill it first.
-                                eprintln!("[bladebro] browser connection lost, relaunching...");
-                                if let Some(b) = browser.take() {
-                                    shutdown_browser(b).await;
+                                if drifted {
+                                    eprintln!(
+                                        "[bladebro] lane/settings changed — relaunching Chrome"
+                                    );
+                                    if let Some(b) = browser.take() {
+                                        shutdown_browser(b).await;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    relaunch_note = Some(if crate::realbrowser::real_lane() {
+                                        "note: the real-browser lane is now ON — Chrome was relaunched as the user's own browser (their profile data; page patches off). Page state reset to about:blank; navigate to continue.".into()
+                                    } else {
+                                        "note: the real-browser lane is now OFF — Chrome was relaunched as the isolated agent browser. Page state reset to about:blank; navigate to continue.".into()
+                                    });
+                                } else {
+                                    // Chrome crashed or is dead, kill it first.
+                                    eprintln!("[bladebro] browser connection lost, relaunching...");
+                                    if let Some(b) = browser.take() {
+                                        shutdown_browser(b).await;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    relaunch_note = Some(
+                                        "note: Chrome was restarted (connection lost) — page state reset to about:blank. Navigate to continue.".into()
+                                    );
                                 }
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                relaunch_note = Some(
-                                    "note: Chrome was restarted (connection lost) — page state reset to about:blank. Navigate to continue.".into()
-                                );
                             } else if page.is_none() && relaunch_note.is_none() && last_activity.elapsed().as_secs() > idle_secs && idle_secs > 0 {
                                 // Post-idle relaunch: the agent's refs
                                 // are all gone. Say so explicitly.
@@ -490,6 +523,12 @@ async fn serve(
                                 Ok((new_page, new_browser)) => {
                                     browser = new_browser;
                                     page = Some(new_page);
+                                    launched = crate::realbrowser::launch_fingerprint();
+                                    if crate::realbrowser::real_lane() && relaunch_note.is_none() {
+                                        relaunch_note = Some(
+                                            "note: real-browser lane — this Chrome is the user's own browser (their profile data; page patches off).".into()
+                                        );
+                                    }
                                     // Set knowledge base on the new page.
                                     if let Some(ref mut p) = page {
                                         p.set_knowledge(knowledge.clone());
@@ -690,6 +729,18 @@ async fn serve(
                         };
                         let mut resp = resp;
                         if let Some(result) = resp.get_mut("result") {
+                            // Prepend advisory notes to the first text content
+                            // block: a relaunch reset the page state, and/or
+                            // this process runs a replaced binary (the fix is
+                            // in the file on disk, not in the running process).
+                            if !stale_warned && crate::platform::stale_binary() {
+                                stale_warned = true;
+                                if relaunch_note.is_none() {
+                                    relaunch_note = Some(
+                                        "note: this MCP process runs a binary that was replaced on disk — restart the app that spawned it (e.g. opencode) to pick up the new build; this session keeps working meanwhile.".into()
+                                    );
+                                }
+                            }
                             // Prepend the relaunch note to the first
                             // text content block so the agent knows
                             // its page state was reset.

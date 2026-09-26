@@ -1786,7 +1786,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 return Ok(());
             }
             println!(
-                "{} {} — the next browser launch uses YOUR browser",
+                "{} {} — running surfaces switch at their next action",
                 ui::bold("Real-browser lane:"),
                 ui::bold(&ui::green("ON"))
             );
@@ -1807,7 +1807,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             println!();
             println!("{}", rb_row("revert", "`bladebro rb off` · wipe the imported copy: `rb forget`"));
             println!("{}", rb_row("control", "`rb pause` / `rb resume` hand the browser to you"));
-            println!("{}", rb_row("note", "every surface switches at its next browser launch — no restart needed"));
+            println!("{}", rb_row("note", "running surfaces (daemon, MCP) switch at their next action — a live browser is relaunched automatically"));
             Ok(())
         }
 
@@ -1831,6 +1831,10 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                     "{} {} — the isolated agent browser is the default again",
                     ui::bold("Real-browser lane:"),
                     ui::dim("off")
+                );
+                println!(
+                    "{}",
+                    rb_row("note", "a running browser is relaunched at its next use — no restart needed")
                 );
             }
             Ok(())
@@ -1860,7 +1864,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             } else {
                 println!("mechanism set to {}", ui::bold(mode.as_str()));
                 if cfg.enabled {
-                    println!("  {}", ui::dim("applies on the next browser launch (running sessions keep theirs)"));
+                    println!("  {}", ui::dim("applies at a running browser's next action — it is relaunched automatically"));
                 }
             }
             Ok(())
@@ -2209,6 +2213,10 @@ pub async fn run_daemon() -> Result<()> {
 
     let mut browser: Option<crate::browser::Browser> = None;
     let mut page: Option<Page> = None;
+    // Launch-input fingerprint of the live browser + one-shot stale-binary
+    // latch (see the per-command drift check below).
+    let mut launched = 0u64;
+    let mut stale_warned = false;
     let mut last_activity = std::time::Instant::now();
     let idle_secs: u64 = std::env::var("BLADE_IDLE_TIMEOUT")
         .ok()
@@ -2273,12 +2281,22 @@ pub async fn run_daemon() -> Result<()> {
                     break;
                 }
 
-                // Lazy launch + self-heal (same as MCP server).
-                let need_launch = page.is_none()
+                // Lazy launch + self-heal + lane/settings drift (same as the
+                // MCP server): a running browser belongs to the lane it was
+                // launched on, so `rb on|off` (or a hand-edited config) must
+                // relaunch it — otherwise the switch is silently ignored.
+                let lane_switched = crate::realbrowser::refresh_lane();
+                let drifted = browser.is_some()
+                    && (lane_switched || crate::realbrowser::launch_fingerprint() != launched);
+                let need_launch = drifted
+                    || page.is_none()
                     || page.as_ref().map(|p| p.is_closed()).unwrap_or(true);
                 if need_launch {
                     if browser.is_some() {
-                        eprintln!("[bladebro] browser connection lost, relaunching...");
+                        eprintln!(
+                            "[bladebro] browser relaunch: {}",
+                            if drifted { "lane/settings changed" } else { "connection lost" }
+                        );
                         if let Some(b) = browser.take() {
                             let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
                         }
@@ -2288,6 +2306,7 @@ pub async fn run_daemon() -> Result<()> {
                         Ok((new_page, new_browser)) => {
                             browser = new_browser;
                             page = Some(new_page);
+                            launched = crate::realbrowser::launch_fingerprint();
                             if let Some(ref mut p) = page {
                                 p.set_knowledge(knowledge.clone());
                             }
@@ -2318,10 +2337,35 @@ pub async fn run_daemon() -> Result<()> {
                     dispatch(tool, &args, p).await
                 };
 
+                // One-line advisories for the human: a mid-session lane switch
+                // actually landed, or this daemon runs a binary that was
+                // replaced on disk (a restart is one `bladebro stop` away).
+                let mut advisories: Vec<String> = Vec::new();
+                if drifted {
+                    advisories.push(if crate::realbrowser::real_lane() {
+                        "note: real-browser lane ON — relaunched as your own browser (page state reset)".into()
+                    } else {
+                        "note: real-browser lane OFF — relaunched as the isolated agent browser (page state reset)".into()
+                    });
+                }
+                if !stale_warned && crate::platform::stale_binary() {
+                    stale_warned = true;
+                    advisories.push(
+                        "note: this daemon runs a binary that was replaced on disk — `bladebro stop` to pick up the new build".into(),
+                    );
+                }
+                let with_notes = |text: String| -> String {
+                    if advisories.is_empty() {
+                        text
+                    } else {
+                        format!("{}\n{}", advisories.join("\n"), text)
+                    }
+                };
+
                 let resp = match result {
                     Ok(r) => json!({
                         "ok": true,
-                        "text": r.text,
+                        "text": with_notes(r.text),
                         "image": r.image,
                         "is_error": r.is_error,
                     }),
@@ -2344,7 +2388,7 @@ pub async fn run_daemon() -> Result<()> {
                                 match dispatch(tool, &args, p).await {
                                     Ok(r) => json!({
                                         "ok": true,
-                                        "text": r.text,
+                                        "text": with_notes(r.text),
                                         "image": r.image,
                                         "is_error": r.is_error,
                                     }),
@@ -2447,7 +2491,8 @@ pub async fn run_daemon() -> Result<()> {
 async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
     // Re-read the lane at every launch: `rb on|off` (or a hand-edited
     // config) takes effect on the next launch, even inside a long-lived
-    // daemon or MCP process.
+    // daemon or MCP process. The daemon/MCP loops additionally detect the
+    // change mid-session and relaunch a live browser (see run_daemon).
     crate::realbrowser::init_lane();
     let (browser, base) = crate::browser::launch_lane().await?;
     let result = async {
@@ -2890,7 +2935,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "real-browser lane: the agent drives YOUR Chromium-family browser (your profile data, your display) with zero page patches; the driver-side stack (perception, LPM, refs, adapters, token efficiency, biometrics) is unchanged",
                 "mechanisms: clone (default — imported copy; your browser may stay open), profile (your live profile — close the browser first), attach (a running browser exposing a debug endpoint, incl. Chrome 144+ chrome://inspect#remote-debugging); auto = attach if one is live, else clone",
                 "attach caveat (measured, Chrome 151): an ephemeral `--remote-debugging-port=0` arm — and Chrome's approval flow — makes Chrome itself report navigator.webdriver=true; arm a FIXED port for a false reading (the lane never masks Chrome's own value)",
-                "every surface picks a switch up at its next browser launch — the CLI daemon restarts immediately; a running MCP/agent session switches on its next launch",
+                "every surface picks a switch up at its next action — the CLI daemon restarts immediately; a running MCP session relaunches its browser on the next call",
                 "`rb pause` refuses input, navigation, history and downloads (reads, waits and eval stay available); `rb forget` wipes the imported copy; `rb refresh` re-imports; `rb use --binary` supports custom/nix/flatpak-wrapper binaries"
             ]
         }),
@@ -3247,8 +3292,9 @@ ephemeral `--remote-debugging-port=0` arm — and the approval flow — makes
 Chrome itself report navigator.webdriver=true on every page; arm a FIXED
 port for a false reading. The lane never masks Chrome's own value.
 
-The switch applies to the CLI daemon and to MCP launches — each surface
-picks it up at its next browser launch; the daemon restarts immediately.
+The switch applies to the CLI daemon and to MCP sessions — the daemon
+restarts immediately, and a running MCP relaunches its browser at the next
+call; no host restart is ever needed.
 "#,
         "stop" => r#"bladebro stop — shut the daemon down
 
