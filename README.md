@@ -353,7 +353,7 @@ blocking, biometrics + idle hum.
 ```bash
 bladebro rb on        # switch every surface (CLI, daemon, MCP) to your browser
 bladebro rb status    # what is configured / live (--json for agents)
-bladebro rb pause     # manual control: input, navigation and downloads refuse until `rb resume`
+bladebro rb pause     # manual control: input, navigation, history, downloads, collecting and tab ops refuse until `rb resume`
 bladebro rb off       # back to the isolated agent browser
 ```
 
@@ -371,7 +371,8 @@ imported copy: `rb forget` · `rb visible on|off` (real window vs
 `--headless=new`) · `rb idle-hum on|off` · `rb idle-shutdown on|off` (may the
 idle timeout close the real browser — default off). Switching restarts the
 daemon, and a live MCP/daemon browser is detected as stale at its next use
-and relaunched automatically — no host restart anywhere.
+and relaunched automatically; an attach session **detaches** instead — your
+browser is left running, untouched. No host restart anywhere.
 
 > ⚠️ The agent browses **as you**: anything it does is attributable to your
 > identity. `rb on` prints exactly what it will use and how to revert.

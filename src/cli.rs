@@ -51,6 +51,10 @@ pub async fn dispatch(tool: &str, args: &Value, page: &mut Page) -> std::result:
     if tool == "see" {
         if let Some(url) = args.get("url").and_then(|u| u.as_str()) {
             if !url.is_empty() && !url.starts_with("--") {
+                // Manual-control pause: a see with a url navigates first.
+                if crate::realbrowser::input_paused() {
+                    return Err(crate::realbrowser::paused_error());
+                }
                 page.navigate(url).await?;
             }
         }
@@ -1731,7 +1735,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             if paused {
                 println!(
                     "{}",
-                    rb_row("paused", &ui::yellow("yes — agent input and navigation refuse until `rb resume`"))
+                    rb_row("paused", &ui::yellow("yes — input, navigation, downloads, collecting and tab ops refuse until `rb resume`"))
                 );
             }
             println!();
@@ -2145,8 +2149,9 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 println!("{}", serde_json::json!({"ok": true, "paused": true}));
             } else {
                 println!(
-                    "{} — input, navigation, history and downloads refuse; the browser is \
-                     yours (reads, waits and eval stay available; `rb resume` hands it back)",
+                    "{} — input, navigation, history, downloads, collecting and tab \
+                     operations refuse; the browser is yours (reads, waits and eval stay \
+                     available; `rb resume` hands it back)",
                     ui::yellow("paused")
                 );
             }
@@ -2287,12 +2292,23 @@ pub async fn run_daemon() -> Result<()> {
                 // MCP server): a running browser belongs to the lane it was
                 // launched on, so `rb on|off` (or a hand-edited config) must
                 // relaunch it — otherwise the switch is silently ignored.
+                // A live session can also be ATTACHED (page alive, browser
+                // None): the same switch must DETACH it — a lane-flag flip
+                // alone would keep steering the user's browser, and a tab
+                // opened after it would get agent-lane page patches.
                 let lane_switched = crate::realbrowser::refresh_lane();
-                let drifted = browser.is_some()
-                    && (lane_switched || crate::realbrowser::launch_fingerprint() != launched);
+                let session_live = browser.is_some()
+                    || page.as_ref().map(|p| !p.is_closed()).unwrap_or(false);
+                let drifted = crate::realbrowser::session_drifted(
+                    session_live,
+                    lane_switched,
+                    crate::realbrowser::launch_fingerprint(),
+                    launched,
+                );
                 let need_launch = drifted
                     || page.is_none()
                     || page.as_ref().map(|p| p.is_closed()).unwrap_or(true);
+                let mut detached_attach = false;
                 if need_launch {
                     if browser.is_some() {
                         eprintln!(
@@ -2303,6 +2319,16 @@ pub async fn run_daemon() -> Result<()> {
                             let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    } else if drifted {
+                        // Attach session (never owned): detach — drop the
+                        // attached page; the user's browser is not ours to
+                        // close. The launch below opens the browser the
+                        // current lane/settings call for.
+                        eprintln!(
+                            "[bladebro] lane/settings changed — detaching from the attached browser"
+                        );
+                        detached_attach = true;
+                        page = None;
                     }
                     match launch_browser().await {
                         Ok((new_page, new_browser)) => {
@@ -2344,10 +2370,11 @@ pub async fn run_daemon() -> Result<()> {
                 // replaced on disk (a restart is one `bladebro stop` away).
                 let mut advisories: Vec<String> = Vec::new();
                 if drifted {
-                    advisories.push(if crate::realbrowser::real_lane() {
-                        "note: real-browser lane ON — relaunched as your own browser (page state reset)".into()
-                    } else {
-                        "note: real-browser lane OFF — relaunched as the isolated agent browser (page state reset)".into()
+                    advisories.push(match (detached_attach, crate::realbrowser::real_lane()) {
+                        (false, true) => "note: real-browser lane ON — relaunched as your own browser (page state reset)".into(),
+                        (false, false) => "note: real-browser lane OFF — relaunched as the isolated agent browser (page state reset)".into(),
+                        (true, true) => "note: real-browser settings changed — detached from the attached browser and reopened per the current settings (page state reset)".into(),
+                        (true, false) => "note: real-browser lane OFF — detached from the attached browser (left running, untouched) and relaunched as the isolated agent browser (page state reset)".into(),
                     });
                 }
                 if !stale_warned && crate::platform::stale_binary() {
@@ -2947,7 +2974,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "mechanisms: clone (default — imported copy; your browser may stay open), profile (your live profile — close the browser first), attach (a running browser exposing a debug endpoint, incl. Chrome 144+ chrome://inspect#remote-debugging); auto = attach if one is live, else clone",
                 "attach caveat (measured, Chrome 151): an ephemeral `--remote-debugging-port=0` arm — and Chrome's approval flow — makes Chrome itself report navigator.webdriver=true; arm a FIXED port for a false reading (the lane never masks Chrome's own value)",
                 "every surface picks a switch up at its next action — the CLI daemon restarts immediately; a running MCP session relaunches its browser on the next call",
-                "`rb pause` refuses input, navigation, history and downloads (reads, waits and eval stay available); `rb forget` wipes the imported copy; `rb refresh` re-imports; `rb use --binary` supports custom/nix/flatpak-wrapper binaries"
+                "`rb pause` refuses input, navigation, history, downloads, collecting and tab operations (reads, waits and eval stay available); `rb forget` wipes the imported copy; `rb refresh` re-imports; `rb use --binary` supports custom/nix/flatpak-wrapper binaries"
             ]
         }),
         "mcp" => json!({
@@ -3283,8 +3310,9 @@ USAGE
   bladebro rb refresh             re-import the profile into the clone
   bladebro rb forget              wipe the imported copy
   bladebro rb pause | resume      hand the browser to yourself / back
-                                  (paused: input, navigation, history and
-                                  downloads refuse; reads/waits/eval stay)
+                                  (paused: input, navigation, history,
+                                  downloads, collecting and tab ops refuse;
+                                  reads/waits/eval stay)
 
 The lane: instead of Bladebro's isolated browser, the agent drives YOUR
 Chromium-family browser with YOUR profile data on YOUR display — and the

@@ -123,6 +123,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `BLADE_LANE=agent` — a live `rb on` config can no longer silently
     redirect them to the user's own browser — and a `mcp-pipe` lane keeps the
     zero-port transport covered.
+- **`tools/qol_probe/` now locks the pause contract (S13).** `rb pause` is
+  verified end to end: every disruptive path refuses (`act ... url=`
+  pre-navs, `see <url>`, `open-tab`/`switch-tab`/`close-tab`, `collect`), the
+  page never moves, reads (`see`, `eval`) stay available, and `rb resume`
+  restores navigation. Wired into the gate battery.
 
 ### Fixed
 - **Reddit comment trees no longer lose collapsed regions silently.** Empty
@@ -315,6 +320,41 @@ detectors flag exactly that (measured live: CreepJS `webDriverIsOn: true` →
   `MAX_SAMPLES` 16), HIGH-class precision remap and the hardware extension list
   — so `getParameter`, `getSupportedExtensions` and `getShaderPrecisionFormat`
   agree with each other and with the worker context.
+- **Lane switches now take effect on ATTACH sessions too — `rb off` / `rb mode`
+  under an attached browser detaches and relaunches.** The drift check only
+  considered owned browsers, so a lane switch under an attach session flipped
+  the process's lane flag and kept steering the user's browser (a tab opened
+  after the flip would even be treated as the agent lane). Now the session
+  detaches — the attached browser is never closed, it stays running, untouched
+  — and relaunches on the current lane; the response says what happened.
+  Verified live on both surfaces (MCP `rb off`, CLI daemon `rb mode clone`,
+  attached browser untouched in both). A `rb visible` toggle under attach
+  deliberately does not detach: it cannot affect a browser we never launch.
+- **`rb pause` now refuses every remaining navigation path.** url=
+  pre-navigation (`act ... url=`, run/batch fill/pdf/default steps),
+  `see <url>`, tab operations (`open-tab`/`switch-tab`/`close-tab`) and
+  `collect` (navigates + auto-scrolls) all bypassed the pause — each is gated
+  now, and the pause text lists the full contract. Verified live: five
+  bypasses reproduced pre-fix, all five refused post-fix, page untouched,
+  reads intact.
+- **A drift relaunch note can no longer be swallowed by first-run warming.**
+  The warming note overwrote any existing relaunch note, so a lane switch
+  onto a fresh home showed only "profile warmed" — the agent never learned
+  the lane changed. The notes compose now.
+- **Real-lane launches only retry genuine startup deaths.** An endpoint
+  timeout (browser running, not answering) was retried once with
+  `--no-sandbox` — 20 wasted seconds and a "died at startup" mislabel. The
+  retry is gated on a real startup exit now.
+- **`rb use --binary <relative path>` is stored absolute.** A later
+  daemon/MCP process runs with a different cwd and the relative path silently
+  broke there.
+- **`rb` browser auto-pick: equal profile recency keeps table order**
+  (chromium first) — `max_by_key` returned the last maximum, so a fresh
+  machine picked the last table browser; Chrome's internal "System
+  Profile"/"Guest Profile" are no longer listed as user profiles (the default
+  pick could import an empty, login-less profile).
+- **`rb pause` silences the idle hum on the agent lane too** (the pause check
+  now runs before the lane branch).
 
 ### Changed
 - **Batch/run step vocabulary is derived, not hand-maintained** (`ACT_ACTIONS`

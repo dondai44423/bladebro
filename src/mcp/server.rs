@@ -470,9 +470,11 @@ async fn serve(
                     "tools/call" => {
                         // === LAZY LAUNCH + SELF-HEAL ===
                         // Ensure Chrome is running before any tool call.
-                        // Four cases: first call (page=None), idle shutdown
+                        // Cases: first call (page=None), idle shutdown
                         // (page=None), Chrome crashed (is_closed), or the
-                        // lane/launch settings changed under a live browser.
+                        // lane/launch settings changed under a live session —
+                        // an owned browser (relaunch) or an ATTACH session
+                        // (page alive, no owned browser: detach + relaunch).
                         //
                         // The drift check re-reads the lane + config every
                         // call: `rb on|off` (and `rb mode|use|profile|visible`)
@@ -480,9 +482,14 @@ async fn serve(
                         // browser would otherwise keep the old lane until it
                         // happens to die — the observed "rb on does nothing".
                         let lane_switched = crate::realbrowser::refresh_lane();
-                        let drifted = browser.is_some()
-                            && (lane_switched
-                                || crate::realbrowser::launch_fingerprint() != launched);
+                        let session_live = browser.is_some()
+                            || page.as_ref().map(|p| !p.is_closed()).unwrap_or(false);
+                        let drifted = crate::realbrowser::session_drifted(
+                            session_live,
+                            lane_switched,
+                            crate::realbrowser::launch_fingerprint(),
+                            launched,
+                        );
                         let need_launch = drifted
                             || page.is_none()
                             || page.as_ref().map(|p| p.is_closed()).unwrap_or(true);
@@ -512,6 +519,21 @@ async fn serve(
                                         "note: Chrome was restarted (connection lost) — page state reset to about:blank. Navigate to continue.".into()
                                     );
                                 }
+                            } else if drifted {
+                                // Attach session (never owned): `rb off` /
+                                // settings change must DETACH — drop the
+                                // attached page; the user's browser is not
+                                // ours to close. The launch below opens the
+                                // browser the current lane/settings call for.
+                                eprintln!(
+                                    "[bladebro] lane/settings changed — detaching from the attached browser"
+                                );
+                                page = None;
+                                relaunch_note = Some(if crate::realbrowser::real_lane() {
+                                    "note: the real-browser lane settings changed — bladebro detached from the attached browser (left running, untouched) and reopened per the current settings. Page state reset to about:blank; navigate to continue.".into()
+                                } else {
+                                    "note: the real-browser lane is now OFF — bladebro detached from the attached browser (left running, untouched) and relaunched as the isolated agent browser. Page state reset to about:blank; navigate to continue.".into()
+                                });
                             } else if page.is_none() && relaunch_note.is_none() && last_activity.elapsed().as_secs() > idle_secs && idle_secs > 0 {
                                 // Post-idle relaunch: the agent's refs
                                 // are all gone. Say so explicitly.
@@ -551,9 +573,15 @@ async fn serve(
                                         if let Some(ref mut p) = page {
                                             warm_profile(p).await;
                                         }
-                                        relaunch_note = Some(
-                                            "note: first run — the profile was warmed (google.com, github.com, wikipedia.org visited to seed cookies/HSTS/history) before this call.".into()
-                                        );
+                                        // Compose with any existing note (e.g. a
+                                        // drift relaunch onto this lane) instead
+                                        // of clobbering it — the agent must see
+                                        // BOTH the lane switch and the warming.
+                                        let warm = "note: first run — the profile was warmed (google.com, github.com, wikipedia.org visited to seed cookies/HSTS/history) before this call.";
+                                        relaunch_note = Some(match relaunch_note.take() {
+                                            Some(prev) => format!("{prev}\n{warm}"),
+                                            None => warm.to_string(),
+                                        });
                                     }
                                 }
                                 Err(e) => {
@@ -1358,6 +1386,12 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
         && action_str != "save"
         && action_str != "load"
     {
+        // Manual-control pause: this pre-navigation would yank the page out
+        // from under the person — and it runs BEFORE the action, whose own
+        // pause gate (`Page::act`) would never get the chance to fire.
+        if crate::realbrowser::input_paused() {
+            return Err(crate::realbrowser::paused_error());
+        }
         page.navigate(url).await?;
     }
 
@@ -2439,6 +2473,11 @@ pub async fn handle_auto_extract(page: &mut Page, limit: usize, limit_explicit: 
 /// WHY collection stopped (feed exhausted vs. max vs. timeout) so the agent
 /// knows whether re-running can get more.
 pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
+    // Manual-control pause: collect navigates and auto-scrolls the page —
+    // it must not run while the person is using the browser.
+    if crate::realbrowser::input_paused() {
+        return Err(crate::realbrowser::paused_error());
+    }
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(100) as usize;
     let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
@@ -2545,6 +2584,11 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
             };
         }
         "open-tab" => {
+            // Manual-control pause: opening + focusing a tab changes what
+            // the person is looking at — the same class as navigation.
+            if crate::realbrowser::input_paused() {
+                return Err(crate::realbrowser::paused_error());
+            }
             // Create + auto-focus. Every agent that opens a tab
             // wants to act in it — a separate switch-tab call
             // would be pure waste. Browser-level create (works in
@@ -2555,11 +2599,20 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
             return Ok(format!("\u{2713} opened + switched to tab {new_id}\n{view}"));
         }
         "switch-tab" => {
+            // Manual-control pause: switching focuses a different tab —
+            // the person's view jumps.
+            if crate::realbrowser::input_paused() {
+                return Err(crate::realbrowser::paused_error());
+            }
             page.switch_tab(target_id).await?;
             let view = page.view(1500);
             return Ok(format!("\u{2713} switched to tab {target_id}\n{view}"));
         }
         "close-tab" => {
+            // Manual-control pause: the tab could be one the person is using.
+            if crate::realbrowser::input_paused() {
+                return Err(crate::realbrowser::paused_error());
+            }
             page.cdp_ref()
                 .send("Target.closeTarget", Some(json!({ "targetId": target_id })))
                 .await?;
@@ -3583,6 +3636,11 @@ async fn execute_step(
         "fill" => {
             let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
             if !step_url.is_empty() {
+                // Manual-control pause: the pre-navigation runs before the
+                // fill, whose per-field actions are gated in `Page::act`.
+                if crate::realbrowser::input_paused() {
+                    return Err(crate::realbrowser::paused_error());
+                }
                 page.navigate(step_url).await?;
             }
             match handle_fill(step, page).await {
@@ -3603,6 +3661,10 @@ async fn execute_step(
         "pdf" => {
             let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
             if !step_url.is_empty() {
+                // Manual-control pause: the pre-navigation runs first.
+                if crate::realbrowser::input_paused() {
+                    return Err(crate::realbrowser::paused_error());
+                }
                 page.navigate(step_url).await?;
             }
             match handle_pdf(page, step).await {
@@ -3638,6 +3700,11 @@ async fn execute_step(
             // Navigate first if url is given for a non-navigate action.
             let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
             if !step_url.is_empty() && action_str != "navigate" {
+                // Manual-control pause: the pre-navigation runs before the
+                // action, whose own gate is in `Page::act`.
+                if crate::realbrowser::input_paused() {
+                    return Err(crate::realbrowser::paused_error());
+                }
                 page.navigate(step_url).await?;
             }
             let action = build_action(step, page).await?;

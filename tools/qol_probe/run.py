@@ -29,6 +29,9 @@ Asserted behaviors (the contract):
      condition errors by name instead of being silently ignored
   9. extract=auto picks substance over unit-count fragments (extract.html:
      clean titles/urls/prices, no "2 units" garbage)
+ 10. the pause contract (`rb pause`): every disruptive path refuses (url=
+     pre-navs, see <url>, tab ops, collect), reads stay available, and
+     resume restores navigation
 
 Environment is isolated (own BLADE_HOME, own fixture port, no display leak).
 Run:  python3 tools/qol_probe/run.py            (uses target/release/bladebro)
@@ -64,13 +67,17 @@ def check(name, ok, detail=""):
         print(f"FAIL  {name}  {detail}")
 
 
-def cli(*args, timeout=120):
+def cli_rc(*args, timeout=120):
     env = dict(os.environ)
     env.update({"BLADE_HOME": HOME, "BLADE_NO_WARMING": "1", "BLADE_LANE": "agent"})
     for k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"):
         env.pop(k, None)
     r = subprocess.run([BINARY, *args], env=env, capture_output=True, text=True, timeout=timeout)
-    return (r.stdout or "") + (r.stderr or "")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def cli(*args, timeout=120):
+    return cli_rc(*args, timeout=timeout)[1]
 
 
 def first_line(out):
@@ -215,6 +222,45 @@ def main():
         out = cli("see", "extract", "auto")
         check("extract picks the listing cards",
               '"price":' in out and '"url":' in out and "units" not in out, first_line(out))
+
+        # S13: the pause contract — `rb pause` refuses every disruptive path,
+        # keeps reads alive, and `rb resume` restores navigation. (url=
+        # pre-navs, see <url>, tab ops and collect all bypassed the pause
+        # before this unit.)
+        cli("nav", URL)
+        out = cli("rb", "pause")
+        check("rb pause accepted", "paused" in out, first_line(out))
+        probe_url = f"http://127.0.0.1:{PORT}/extract.html"
+        rc, out = cli_rc("act", "eval", "document.URL", "--url", probe_url)
+        check("paused: act eval url= refused", rc != 0 and "paused — manual control" in out,
+              f"rc={rc} {first_line(out)}")
+        rc, out = cli_rc("see", probe_url)
+        check("paused: see <url> refused", rc != 0 and "paused — manual control" in out,
+              f"rc={rc} {first_line(out)}")
+        rc, out = cli_rc("act", "open-tab", "--url", probe_url)
+        check("paused: open-tab refused", rc != 0 and "paused — manual control" in out,
+              f"rc={rc} {first_line(out)}")
+        rc, out = cli_rc("act", "collect", "--url", probe_url)
+        check("paused: collect refused", rc != 0 and "paused — manual control" in out,
+              f"rc={rc} {first_line(out)}")
+        tabs = cli("state", "tabs")
+        m = re.search(r"[0-9A-F]{32}", tabs)
+        if m:
+            rc, out = cli_rc("state", "switch-tab", "--target-id", m.group(0))
+            check("paused: switch-tab refused", rc != 0 and "paused — manual control" in out,
+                  f"rc={rc} {first_line(out)}")
+        url_now = ev("document.URL")
+        check("paused: the page never moved", url_now == URL, repr(url_now))
+        out = cli("act", "eval", "1+1")
+        check("paused: eval (read) still works", "result: 2" in out, first_line(out))
+        out = cli("see")
+        check("paused: see (read) still works", "Page:" in out, first_line(out))
+        rc, out = cli_rc("act", "click", "--text", "Join the conversation")
+        check("paused: input refused", rc != 0 and "paused — manual control" in out,
+              f"rc={rc} {first_line(out)}")
+        cli("rb", "resume")
+        out = cli("nav", probe_url)
+        check("resume restores navigation", "outcome: navigated" in out, first_line(out))
     finally:
         try:
             cli("stop", timeout=30)

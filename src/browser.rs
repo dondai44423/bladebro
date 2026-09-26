@@ -1050,9 +1050,12 @@ impl Browser {
         // A quick clean exit means Chrome handed the command line to an
         // already-running instance on this profile (process singleton) and
         // quit — retrying cannot help, and the bare "exited" message would
-        // hide the actual cause.
-        let mut handoff = false;
+        // hide the actual cause. An endpoint timeout is equally not a startup
+        // death (the browser is RUNNING and not answering): only a genuine
+        // startup exit gets the --no-sandbox retry — anything else would just
+        // burn another 20s and mislabel the failure.
         for (attempt, no_sandbox) in [(0u8, false), (1u8, true)] {
+            let mut startup_exit = false;
             let spawned_at = Instant::now();
             let port = free_port();
             let args = launch_args_real(&RealLaunchCfg {
@@ -1114,7 +1117,6 @@ impl Browser {
                                 if spawned_at.elapsed() < Duration::from_secs(5)
                                     && status.success()
                                 {
-                                    handoff = true;
                                     last_err = Some(BladeError::Other(
                                         "the browser exited immediately (status 0) — another \
                                          instance is almost certainly running on this profile \
@@ -1124,6 +1126,7 @@ impl Browser {
                                             .into(),
                                     ));
                                 } else {
+                                    startup_exit = true;
                                     last_err = Some(BladeError::Other(format!(
                                         "browser exited during startup: {status}"
                                     )));
@@ -1148,7 +1151,8 @@ impl Browser {
                     }
                 }
             }
-            if handoff {
+            // Only a genuine startup death gets the --no-sandbox retry.
+            if !startup_exit {
                 break;
             }
             if attempt == 0 {

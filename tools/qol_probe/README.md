@@ -36,6 +36,10 @@ no display leakage. Exit 0 = all passed. Takes ~10s.
    `settle` condition errors by name instead of being silently ignored.
 9. `extract=auto` picks substance over unit-count fragments (`extract.html`):
    clean titles, urls and prices — no `"2 units"` garbage.
+10. the **pause contract**: `rb pause` refuses every disruptive path
+    (`act ... url=`, `see <url>`, `open-tab`/`switch-tab`/`close-tab`,
+    `collect`), the page never moves, reads (`see`, `eval`) stay available,
+    and `rb resume` restores navigation.
 
 ## The fixture models
 

@@ -120,7 +120,12 @@ pub fn launch_fingerprint_from(env_override: Option<&str>, cfg: &Config) -> u64 
         cfg.browser.hash(&mut h);
         cfg.profile.hash(&mut h);
         cfg.binary.hash(&mut h);
-        cfg.visible.hash(&mut h);
+        // `visible` shapes launches we OWN. An attach session never launches
+        // (the browser belongs to the user), so toggling it must not reset an
+        // attached page; every other mode still gets the relaunch.
+        if cfg.mode != Mode::Attach {
+            cfg.visible.hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -695,6 +700,13 @@ pub fn list_profiles(root: &Path) -> Vec<ProfileInfo> {
         }
     }
 
+    // Chrome's internal dirs carry a Preferences file but are never user
+    // profiles: "System Profile" holds system-level prefs; "Guest Profile"
+    // is transient. Listing them would let the default pick import an empty,
+    // login-less profile.
+    names.remove("System Profile");
+    names.remove("Guest Profile");
+
     let mut out: Vec<ProfileInfo> = names
         .into_iter()
         .map(|(key, name)| {
@@ -1005,6 +1017,14 @@ pub fn validate_binary_override(path: &str) -> Result<PathBuf> {
     if !p.is_file() {
         return Err(BladeError::Other(format!("binary not found: {path}")));
     }
+    // Store ABSOLUTE: a relative override resolved against the spawning
+    // shell's cwd would silently break in another process (daemon, MCP) that
+    // runs with a different cwd.
+    let p = p.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|c| c.join(&p))
+            .unwrap_or_else(|_| p.clone())
+    });
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1060,16 +1080,23 @@ pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
                     avail.join(", ")
                 ))
             })?,
-        None => browsers
-            .iter()
-            .max_by_key(|b| {
-                list_profiles(&b.profile_root)
-                    .first()
-                    .map(|p| p.last_used)
-                    .unwrap_or(0)
-            })
-            .cloned()
-            .expect("non-empty"),
+        None => {
+            // Most recently used wins; equal recency keeps the FIRST browser
+            // in table order (chromium first). `max_by_key` returns the LAST
+            // maximum — on a machine where every profile is equally fresh
+            // that silently picked the last table browser (opera).
+            let recency: Vec<u64> = browsers
+                .iter()
+                .map(|b| {
+                    list_profiles(&b.profile_root)
+                        .first()
+                        .map(|p| p.last_used)
+                        .unwrap_or(0)
+                })
+                .collect();
+            let idx = pick_recency_index(&recency).expect("non-empty");
+            browsers[idx].clone()
+        }
     };
 
     // `rb use --binary`: an explicit override always wins over discovery.
@@ -1114,6 +1141,36 @@ pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
     };
 
     Ok((spec, profile))
+}
+
+/// Index of the first maximum in `values` — ties keep the EARLIER entry, so
+/// the browser table order (chromium first) is the preference order. Rust's
+/// `max_by_key` returns the LAST maximum, which silently picked the last
+/// table browser whenever every profile was equally fresh.
+fn pick_recency_index(values: &[u64]) -> Option<usize> {
+    let mut best: Option<(usize, u64)> = None;
+    for (i, &v) in values.iter().enumerate() {
+        if best.map(|(_, bv)| v > bv).unwrap_or(true) {
+            best = Some((i, v));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Drift decision shared by the long-lived surfaces (daemon + MCP): a LIVE
+/// session (`session_live` — a page attached, owned or not) whose lane or
+/// launch inputs changed since its launch must be switched at the next
+/// action. Attach sessions have no owned browser but are still driven by
+/// bladebro — `rb off` must detach them, not keep steering the user's browser.
+/// Settled sessions (nothing changed) and sessions with no live page are
+/// exempt, so agent-lane sessions never pay a pointless relaunch.
+pub fn session_drifted(
+    session_live: bool,
+    lane_switched: bool,
+    fingerprint: u64,
+    launched: u64,
+) -> bool {
+    session_live && (lane_switched || fingerprint != launched)
 }
 
 /// Resolve `auto`: attach when a live debug endpoint already exists on the
@@ -1203,12 +1260,17 @@ pub fn should_idle_shutdown() -> bool {
     config().idle_shutdown
 }
 
-/// Whether the idle-hum behavior layer runs on this lane.
+/// Whether the idle-hum behavior layer runs on this lane. The pause marker
+/// silences it on EVERY lane (the pause contract covers the agent lane too);
+/// otherwise the agent lane always hums and the real lane follows its config.
 pub fn hum_enabled() -> bool {
+    if input_paused() {
+        return false;
+    }
     if !real_lane() {
         return true;
     }
-    config().idle_hum && !input_paused()
+    config().idle_hum
 }
 
 #[cfg(test)]
@@ -1330,6 +1392,46 @@ mod tests {
             launch_fingerprint_from(Some("agent"), &a1),
             launch_fingerprint_from(None, &a1)
         );
+
+        // `visible` shapes launches we OWN only: under Attach (never a
+        // launch) toggling it must NOT drift — an attached page must not be
+        // reset for a setting that cannot affect it...
+        let at1 = Config { enabled: true, mode: Mode::Attach, visible: true, ..Default::default() };
+        let at2 = Config { enabled: true, mode: Mode::Attach, visible: false, ..Default::default() };
+        assert_eq!(
+            launch_fingerprint_from(None, &at1),
+            launch_fingerprint_from(None, &at2),
+            "visible cannot affect an attach session"
+        );
+        // ...while every owned mode still gets the relaunch on a toggle.
+        let cl1 = Config { enabled: true, mode: Mode::Clone, visible: true, ..Default::default() };
+        let cl2 = Config { enabled: true, mode: Mode::Clone, visible: false, ..Default::default() };
+        assert_ne!(
+            launch_fingerprint_from(None, &cl1),
+            launch_fingerprint_from(None, &cl2)
+        );
+    }
+
+    #[test]
+    fn session_drift_requires_live_state_and_a_change() {
+        // A live session (owned browser or attached page) drifts on a lane
+        // switch or a launch-input change...
+        assert!(session_drifted(true, true, 7, 7));
+        assert!(session_drifted(true, false, 7, 8));
+        // ...a settled live session must not (no pointless relaunch)...
+        assert!(!session_drifted(true, false, 7, 7));
+        // ...and a session with nothing live never drifts.
+        assert!(!session_drifted(false, true, 7, 8));
+    }
+
+    #[test]
+    fn recency_tie_keeps_first_browser() {
+        // All-equal recency (a fresh machine) keeps the FIRST table entry
+        // (chromium) — `max_by_key` returned the LAST (opera).
+        assert_eq!(pick_recency_index(&[0, 0, 0, 0, 0]), Some(0));
+        assert_eq!(pick_recency_index(&[5, 9, 9, 2]), Some(1));
+        assert_eq!(pick_recency_index(&[1, 2, 3]), Some(2));
+        assert_eq!(pick_recency_index(&[]), None);
     }
 
     #[test]
@@ -1358,6 +1460,27 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn binary_override_stores_absolute_paths() {
+        // A relative override must be stored resolved: a later daemon/MCP
+        // process runs with a different cwd and the relative path would
+        // silently break there. (Unit-test cwd is the package root.)
+        let rel = std::path::PathBuf::from("target/rb-bin-rel-test");
+        let _ = std::fs::remove_dir_all(&rel);
+        std::fs::create_dir_all(&rel).unwrap();
+        let exe = rel.join("chrome");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let got = validate_binary_override("target/rb-bin-rel-test/chrome").expect("relative override");
+        assert!(got.is_absolute(), "stored path must be absolute, got {}", got.display());
+        assert!(got.exists());
+        let _ = std::fs::remove_dir_all(&rel);
     }
 
     #[test]
@@ -1392,11 +1515,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Default")).unwrap();
         std::fs::create_dir_all(root.join("Profile 1")).unwrap();
+        // Chrome's internal dirs carry a Preferences file but are not user
+        // profiles — listing them would let the default pick import an
+        // empty, login-less profile.
+        std::fs::create_dir_all(root.join("System Profile")).unwrap();
+        std::fs::create_dir_all(root.join("Guest Profile")).unwrap();
         std::fs::write(root.join("Default/Preferences"), "{}").unwrap();
         std::fs::write(root.join("Profile 1/Preferences"), "{}").unwrap();
+        std::fs::write(root.join("System Profile/Preferences"), "{}").unwrap();
+        std::fs::write(root.join("Guest Profile/Preferences"), "{}").unwrap();
         std::fs::write(
             root.join("Local State"),
-            r#"{"profile":{"info_cache":{"Default":{"name":"Main"},"Profile 1":{"name":"Work"}}}}"#,
+            r#"{"profile":{"info_cache":{"Default":{"name":"Main"},"Profile 1":{"name":"Work"},"System Profile":{"name":"System Profile"},"Guest Profile":{"name":"Guest Profile"}}}}"#,
         )
         .unwrap();
 
@@ -1404,6 +1534,10 @@ mod tests {
         let keys: Vec<(&str, &str)> = got.iter().map(|p| (p.key.as_str(), p.name.as_str())).collect();
         assert!(keys.contains(&("Default", "Main")), "got {keys:?}");
         assert!(keys.contains(&("Profile 1", "Work")), "got {keys:?}");
+        assert!(
+            keys.iter().all(|(k, _)| *k != "System Profile" && *k != "Guest Profile"),
+            "internal profiles must never be listed: got {keys:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1420,10 +1554,16 @@ mod tests {
         let prev = std::env::var(key).ok();
         std::env::set_var(key, &home);
         assert!(!input_paused());
+        // The agent lane hums by default...
+        assert!(hum_enabled(), "agent lane hums when not paused");
         set_paused(true).expect("pause");
         assert!(input_paused());
+        // ...and the pause marker silences the hum on EVERY lane, not just
+        // the real one (the pre-fix order let agent sessions keep humming).
+        assert!(!hum_enabled(), "pause must silence the hum on the agent lane");
         set_paused(false).expect("resume");
         assert!(!input_paused());
+        assert!(hum_enabled(), "resume restores the hum");
         match prev {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
