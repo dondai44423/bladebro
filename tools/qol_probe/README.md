@@ -40,6 +40,12 @@ no display leakage. Exit 0 = all passed. Takes ~10s.
     (`act ... url=`, `see <url>`, `open-tab`/`switch-tab`/`close-tab`,
     `collect`), the page never moves, reads (`see`, `eval`) stay available,
     and `rb resume` restores navigation.
+11. the **shadow-DOM suite** (`shadow.html`): `selector=` clicks a trigger
+    two open shadow roots deep; a hidden-only selector refuses with the
+    reason; a fake handler reports `state-only` (never `(+0 −0)`); an
+    occluded click names what receives it; one `batch` call opens the menu
+    and reads it; `see find` misses name hidden matches; `scope=eN` content
+    reads exactly one subtree (budget honored).
 
 ## The fixture models
 
@@ -56,6 +62,10 @@ no display leakage. Exit 0 = all passed. Takes ~10s.
 - **Extract fixture** (`extract.html`): a unit-count widget group (the
   "2 units" garbage class) next to a real listing-card group — auto-extract
   must pick the cards (url + price + clean title) and drop the fragments.
+- **Shadow fixture** (`shadow.html`): a trigger nested two open shadow roots
+  deep (the shreddit-overflow-menu class), a fake handler that only flips
+  state, a `display:none` control, an overlay-occluded pair, and a
+  shadow-DOM contenteditable composer.
 
 ## Notes
 

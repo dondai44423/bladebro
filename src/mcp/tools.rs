@@ -45,13 +45,13 @@ pub fn all_tools() -> Vec<ToolDef> {
         ToolDef {
             name: "act",
             description: "Do something on the page. Returns verdict + delta. navigate returns refs + content preview — usually enough to act without a separate see call.\n\
-ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > x,y. Add role= or nth= if ambiguous.\n\
+ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > selector=\"#overflow-trigger\" (CSS; pierces open shadow roots - use when a control has no ref or label; works on click/hover/type/select/clear/read/upload/eval) > x,y. Add role= or nth= if ambiguous.\n\
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call.\n\
 fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit gets JS click fallback if mouse click fails.\n\
 EDITORS: type replaces the field (clear verified) and works on rich contenteditable editors - the verdict names where the text landed (e.g. the live editor) and catches late draft hydration; press takes key chords (Control+a).\n\n\\
 WAIT: condition=settle (default) | element | text | title | url | js — text= without a condition means \"wait for this text\" (a timeout inside run errors with page state; wait+else runs the else branch instead).\n\\
-batch: same action set as act (fill/eval/pdf/download/collect/save/load included) plus {\"action\":\"see\", mode|extract|find, budget} steps — their read lands in a --- read --- section. Use text/label addressing in steps (not ref) — refs go stale after navigation; auto-settles after navigation. optional:true on a step continues past its failure.\n\
+batch: same action set as act (fill/eval/pdf/download/collect/save/load included) plus {\"action\":\"see\", mode|extract|find, budget} steps — their read lands in a --- read --- section. Use text/label/selector addressing in steps (not ref) — refs go stale after navigation; auto-settles after navigation. optional:true on a step continues past its failure.\n\
 Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
             input_schema: json!({
                 "type": "object",
@@ -64,6 +64,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "ref": {"type": "string", "description": "Element ref id (e.g. 'e5'). Self-heals."},
                     "text": {"type": "string", "description": "Visible text, value to type, file path, or URL (action-dependent)."},
                     "label": {"type": "string", "description": "Field label for click/type/fill/hover."},
+                    "selector": {"type": "string", "description": "CSS selector addressing for click/hover/type/select/clear/read/upload/eval (searches light DOM + open shadow roots). Use when a control has no usable ref or label, e.g. '#overflow-trigger', '[role=menuitem]'. nth= picks among matches; a hidden-only match errors with the reason instead of clicking nothing."},
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches."},
                     "key": {"type": "string", "description": "Key or chord: Enter, Tab, Escape, Backspace, ArrowDown, Control+a, Meta+Enter, Shift+Tab."},
@@ -87,6 +88,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                             "properties": {
                                 "ref": {"type": "string"},
                                 "label": {"type": "string"},
+                                "selector": {"type": "string"},
                                 "text": {"type": "string"},
                                 "option": {"type": "string"},
                                 "check": {"type": "boolean", "description": "true=check, false=uncheck, omit=toggle."}
@@ -143,7 +145,7 @@ Truncation: model output over budget ends with '…(N more: X link, Y button)' �
                     "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}."},
                     "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set). For artifact reads: max chars (default 20000)."},
                     "logs": {"type": "string", "enum": ["console", "network"], "description": "Console (JS errors) or network (requests)."},
-                    "scope": {"type": "string", "description": "Ref id of element to view subtree text of."},
+                    "scope": {"type": "string", "description": "Ref id of element to view subtree text of; with mode=content, returns just that element's subtree as markdown (budget honored)."},
                     "budget": {"type": "integer", "description": "Max chars in response. Default 8000."},
                     "artifact": {"type": "string", "description": "Read a previously offloaded payload from disk, paged. Pass the full payload path from a previous response; offset/limit are char-based (defaults 0 and 20000)."},
                     "offset": {"type": "integer", "description": "Artifact read: start char. Default 0."}

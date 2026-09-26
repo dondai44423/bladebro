@@ -98,11 +98,11 @@ cargo build --release
 
 ### `act` — do, then observe
 
-Every call returns an **outcome verdict + page delta**. Click auto-escalates mouse → JS → Enter; clicking by text skips the read step (`act click text="Sign in"`), and ambiguous text returns matches with refs + `nth` values.
+Every call returns an **outcome verdict + page delta**. Click auto-escalates mouse → JS → Enter; clicking by text skips the read step (`act click text="Sign in"`), and ambiguous text returns matches with refs + `nth` values. Verdicts report observable evidence only: a state-only change is labeled `state-only, no nodes added/removed` (never a phantom `(+0 −0)`), an occluded click names what actually receives it, and a coordinate click that hits nothing names the topmost element at that point.
 
 | Action | Example | What it does |
 |---|---|---|
-| `click` | `act click e5` / `act click text="Sign in"` | Mouse, JS, Enter escalation |
+| `click` | `act click e5` / `act click text="Sign in"` / `act click selector="#menu li"` | Mouse, JS, Enter escalation; `selector=` reaches controls inside open shadow roots |
 | `type` | `act type label="Search" text="hello"` | Cadenced typing into textboxes |
 | `fill` | `act fill fields=[...] submit="Go"` | Multi-field forms in ONE call, auto-detects field type |
 | `batch` | `act batch steps=[...]` | Multi-step workflows in ONE call |
@@ -133,12 +133,12 @@ Every call returns an **outcome verdict + page delta**. Click auto-escalates mou
 | `see` | Full model — interactive elements with refs (nav/footer auto-folded) |
 | `see mode=content` | Page text as clean markdown — for reading |
 | `see mode=outline` | Heading hierarchy only (~50–200 bytes) |
-| `see find="price"` | Search elements by text → refs + scores |
+| `see find="price"` | Search by text (light DOM + open shadow roots) → refs + scores; a miss names hidden matches with reasons |
 | `see filter="button,link"` | Zoom by role/name/landmark |
 | `see extract="auto"` | Template-free list extraction, site-aware (below) |
 | `see extract="json" template={...}` | Custom CSS-template extraction |
 | `see extract="links"` / `"forms"` | All links / all form fields |
-| `see scope=e5` | One element's subtree text |
+| `see scope=e5` | One element's subtree text; with `mode=content`: that subtree as markdown (budget honored) |
 | `see logs="console"` / `"network"` | JS errors / requests, failures first |
 
 - **Truncation is deterministic:** output ends with `…(N more: X link, Y button)` — roles sorted by count desc, then alphabetically; the full set stays available via `see filter=`.

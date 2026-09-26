@@ -134,6 +134,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left running and untouched (the live counterpart of the hunt's HIGH fix;
   before it the session kept steering the user's browser). Isolated,
   self-cleaning, exit 0 = the contract holds.
+- **Selector addressing — `selector=` reaches controls the ref model cannot
+  name, open shadow roots included.** `act click/hover/type/select/clear/
+  read/upload/eval` accept CSS (MCP `selector:` + `nth=`, CLI `--selector`,
+  and inside `fill` fields / `batch` / `run` steps). The selector searches
+  the light DOM **and open shadow roots**; the match is adopted into the
+  model by signature, so the action behaves exactly like a ref-addressed
+  one — real mouse input, healing, delta + verdict. A hidden-only match
+  refuses with the reason and the escape hatch (`act eval (el.click())` for
+  controls a site wires in JS) — the reported flow had no option but raw
+  synthetic `.click()`. Verified live on reddit: opening a post's overflow
+  menu (`dom-changed (+2 −0)`) and reading its items back.
+- **Transient menus are a one-call problem now.** `selector=` +
+  `batch`/`run` compose: open a dropdown and act on its items in ONE call
+  (`[{click, selector}, {see, find}]`), so a page re-render between calls
+  cannot eat open UI state (the reported racy open→inspect→act flow).
+  Live-verified: open + read the menu in one call.
+- **`see find` misses explain themselves.** A miss reports how many matches
+  exist but were not addressable, each with the reason (`display:none
+  (ancestor li)`, `visibility:hidden`, `zero-size`), how many live in open
+  shadow roots, and the programmatic-click hint — the reported case read as
+  a flat "not found" while the control provably existed. Text-addressing
+  misses carry the same note.
+- **Occlusion and no-op diagnostics in verdicts.** A ref click that cannot
+  land names what receives it (`(topmost=false - clicks land on
+  div#overlay-cover)`); a coordinate click that does nothing reports the
+  topmost element at that point (`topmost there: div#overlay-cover`) —
+  coordinate clicks used to fail in complete silence.
+- **Scoped content reads — `see mode=content scope=eN`.** Exactly one
+  element's subtree as markdown, budget honored, control roots included;
+  unknown scopes error loudly instead of being silently ignored (the
+  reported `scope:"main"` call read the whole page). The reddit comment-area
+  truncation marker now points at the cheap check (`find="<text>"`) for
+  one-text existence questions.
+- **Shadow-DOM editor support end to end.** Effective-editing-host
+  resolution descends `shadowRoot.activeElement` chains, so type/clear on a
+  shadow-DOM composer reads back the live editor; unverified readbacks name
+  the addressed element and point at `act read`.
+- **Reddit scores are labeled as what they are.** DOM-sourced feed/comment
+  scores emit as `fuzzed_score` with a container note (Reddit's displayed,
+  fuzzed values); content-mode points are labeled too — ranking posts on
+  silently-fuzzed numbers was the report's data-quality complaint.
+- **Instruments.** `tools/qol_probe/` gains S14 + a `shadow.html` fixture
+  (selector clicks two shadow roots deep, hidden-only refusal, state-only
+  verdict, occlusion naming, one-call batch, scoped reads, budget); the
+  three new injected scripts (selector matcher, miss diagnostic, hit probe)
+  are `node --check`-guarded like the capture script.
 
 ### Fixed
 - **Reddit comment trees no longer lose collapsed regions silently.** Empty
@@ -370,6 +416,14 @@ detectors flag exactly that (measured live: CreepJS `webDriverIsOn: true` →
   use a scratch `BLADE_HOME` (+ `BLADE_NO_WARMING=1` for deterministic
   timings), stop the daemon in a `finally`, and sweep any MCP-killed browser
   children — a gate run can no longer touch the user's data dir.
+- **The `dom-changed (+0 −0)` phantom is gone.** A click whose only
+  observable effect is attribute-level state reads `dom-changed (state-only:
+  N refs (...); no nodes added/removed)`; content-only effects say so; a
+  click with no effect at all states the dispatch happened and what was
+  tried (`click dispatched via mouse, js, enter ... - no navigation, no DOM
+  or state change`). Press/hover/coordinate verdicts share the same
+  classification. (The report burned two attempts on a plausible-looking
+  success string.)
 
 ### Changed
 - **Batch/run step vocabulary is derived, not hand-maintained** (`ACT_ACTIONS`

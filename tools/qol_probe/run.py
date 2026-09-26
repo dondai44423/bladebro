@@ -30,8 +30,13 @@ Asserted behaviors (the contract):
   9. extract=auto picks substance over unit-count fragments (extract.html:
      clean titles/urls/prices, no "2 units" garbage)
  10. the pause contract (`rb pause`): every disruptive path refuses (url=
-     pre-navs, see <url>, tab ops, collect), reads stay available, and
-     resume restores navigation
+      pre-navs, see <url>, tab ops, collect), reads stay available, and
+      resume restores navigation
+ 11. shadow-DOM addressing: selector= reaches controls nested in open shadow
+      roots; hidden-only matches and find misses explain themselves with
+      reasons; a state-only click never reads as real DOM change; coordinate
+      and occluded clicks name what actually receives the click; scoped
+      content reads one subtree
 
 Environment is isolated (own BLADE_HOME, own fixture port, no display leak).
 Run:  python3 tools/qol_probe/run.py            (uses target/release/bladebro)
@@ -102,6 +107,13 @@ def ev(js):
 def see_ref(pattern):
     out = cli("see")
     m = re.search(rf"(e\d+) textbox \"{re.escape(pattern)}\"", out)
+    return m.group(1) if m else ""
+
+
+def see_ref_any(pattern):
+    """Any-role ref from the model (buttons/links, not just textboxes)."""
+    out = cli("see")
+    m = re.search(rf'(e\d+) \S+ "{re.escape(pattern)}"', out)
     return m.group(1) if m else ""
 
 
@@ -261,6 +273,89 @@ def main():
         cli("rb", "resume")
         out = cli("nav", probe_url)
         check("resume restores navigation", "outcome: navigated" in out, first_line(out))
+
+        # S14: shadow-DOM addressing + honest click/coordinate diagnostics
+        # (the opencode-agent report: selector addressing for shadow-DOM
+        # controls, hidden-match diagnostics on find misses, state-only vs
+        # the phantom "dom-changed (+0 -0)", occlusion naming, scoped reads).
+        cli("nav", f"http://127.0.0.1:{PORT}/shadow.html")
+        out = cli("see", "--find", "Open user actions")
+        m = re.search(rf'(e\d+) \S+ "Open user actions"', out)
+        trigger_ref = m.group(1) if m else ""
+        check("shadow element reachable by find (2 shadow roots deep)", bool(trigger_ref), first_line(out))
+        check("find (shadow-piercing) finds exactly one trigger", "1 match" in out, first_line(out))
+
+        out = cli("see", "--find", "Ghost action")
+        check("find miss explains the hidden match",
+              "were not addressable" in out and "display:none" in out, first_line(out))
+
+        out = cli("act", "click", "--selector", "#overflow-trigger")
+        v = first_line(out)
+        opened = ev("(function(){var t=document.querySelector('shadow-menu-host').shadowRoot.querySelector('overflow-menu').shadowRoot.querySelector('#overflow-trigger');return t.getAttribute('aria-expanded');})()")
+        check("selector click reaches the shadow trigger", "dom-changed" in v and opened == "true",
+              f"{v} | aria-expanded={opened}")
+
+        out = cli("act", "click", "--selector", "#mi-fake")
+        v = first_line(out)
+        check("silent no-op reports state-only, not (+0 -0)",
+              "state-only" in v and "no nodes added/removed" in v, v)
+
+        out = cli("act", "click", "--selector", "#mi-real")
+        v = first_line(out)
+        landed = ev("!!document.getElementById('thing-done')")
+        check("selector click reaches the real handler", "dom-changed" in v and landed is True,
+              f"{v} | thing-done={landed}")
+
+        out = cli("see", "--find", "Delete comment")
+        check("menu items are findable while open", "1 match" in out and "menuitem" in out, first_line(out))
+
+        rc, out = cli_rc("act", "click", "--selector", "#ghost-action")
+        check("hidden-only selector errors with the reason",
+              rc != 0 and "none is visible" in out and "display:none" in out,
+              f"rc={rc} {first_line(out)}")
+
+        center = json.loads(ev("(function(){var r=document.getElementById('overlay-cover').getBoundingClientRect();return JSON.stringify([Math.round(r.x+r.width/2),Math.round(r.y+r.height/2)]);})()"))
+        out = cli("act", "click", "--x", str(center[0]), "--y", str(center[1]))
+        v = first_line(out)
+        check("coord click names what actually received it",
+              "no-effect" in v and "topmost there" in v and "overlay-cover" in v, v)
+
+        covered_ref = see_ref_any("Covered button")
+        out = cli("act", "click", covered_ref)
+        v = first_line(out)
+        ran = ev("!!window.__coveredClicked")
+        check("occluded ref click escalates and lands", "dom-changed" in v and ran is True,
+              f"{v} | ran={ran}")
+
+        inert_ref = see_ref_any("Covered inert")
+        out = cli("act", "click", inert_ref)
+        v = first_line(out)
+        check("occluded inert click says where clicks land",
+              "no-effect" in v and "clicks land on div#overlay-cover" in v, v)
+
+        out = cli("act", "type", "--selector", "[contenteditable]", "shadow hello")
+        v = first_line(out)
+        typed = ev("document.querySelector('shadow-composer').shadowRoot.getElementById('ce').innerText")
+        check("type by selector lands in the shadow editor",
+              'value="shadow hello"' in v and norm(typed) == "shadow hello", f"{v} | {typed!r}")
+
+        out = cli("act", "batch", '[{"action":"eval","js":"window.__closeMenu&&window.__closeMenu()"},{"action":"click","selector":"#overflow-trigger"},{"action":"see","find":"Delete comment"}]')
+        check("one call: close, reopen and read the shadow menu",
+              "Delete comment" in out and "HALT" not in out, first_line(out))
+
+        out = cli("see", "content", "--scope", inert_ref)
+        check("scoped content reads exactly that subtree",
+              "Covered inert" in out and "Shadow fixture" not in out, first_line(out))
+
+        out = cli("see", "content", "--scope", inert_ref, "--budget", "10")
+        check("scoped read honors the budget", 0 < len(out) <= 200, first_line(out))
+
+        rc, out = cli_rc("see", "content", "--scope", "main")
+        check("bogus scope errors loudly (was silently ignored)",
+              rc != 0 and "is not a known ref" in out, f"rc={rc} {first_line(out)}")
+
+        out = cli("see", "content", "--budget", "1200")
+        check("content mode still reads the page", "Shadow fixture" in out, first_line(out))
     finally:
         try:
             cli("stop", timeout=30)

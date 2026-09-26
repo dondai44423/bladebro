@@ -1191,6 +1191,12 @@ impl Page {
         crate::page::perception::capture_markdown(&self.cdp, budget).await
     }
 
+    /// Scoped markdown: ONE element's subtree (`see mode=content scope=eN`).
+    /// Bypasses site branches; budget is honored inside the subtree.
+    pub async fn markdown_scoped(&self, budget: usize, sig: &str, frame: &[usize]) -> Result<String> {
+        crate::page::perception::capture_markdown_scoped(&self.cdp, budget, sig, frame).await
+    }
+
     /// Extract just the page title + heading hierarchy. Ultra-minimal.
     pub async fn outline(&self) -> Result<String> {
         crate::page::perception::capture_outline(&self.cdp).await

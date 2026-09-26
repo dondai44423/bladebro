@@ -133,6 +133,12 @@ struct FoundElement {
     /// clicked, so `no-effect` verdicts expose the real target.
     #[serde(default, rename = "hit_tgt")]
     hit_tgt: Option<String>,
+    /// When the element is NOT topmost at its click point: a description of
+    /// the element that actually receives clicks there (or "outside the
+    /// viewport"). Turns a silent no-op into "clicks land on X" - the
+    /// occlusion diagnostic.
+    #[serde(default, rename = "top_desc")]
+    top_desc: Option<String>,
     /// Text content of the element (for "read" mode). For "check"/"prepare"
     /// mode this is the readback of the EFFECTIVE editing host - the focused
     /// editor when the framework moved focus away from the addressed wrapper
@@ -191,6 +197,16 @@ pub struct TextMatch {
     #[serde(default)]
     pub frame: Vec<usize>,
     pub score: i64,
+    /// Selector addressing: the match exists but fails the visibility gate.
+    /// Hidden matches are never addressed directly (a mouse cannot reach
+    /// them), but they are returned so callers can say WHY a selector
+    /// missed instead of reporting a bare "not found".
+    #[serde(default)]
+    pub hidden: bool,
+    /// Why the match is hidden: `display:none (ancestor ...)`,
+    /// `visibility:hidden`, `zero-size`, `not visible`.
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// Build the find-by-text page script. `include_hidden` keeps invisible
@@ -278,6 +294,203 @@ pub async fn find_by_text(
     Ok(matches)
 }
 
+/// Build the find-by-selector page script. The selector is matched with
+/// `Element.matches()` against every ACTIONABLE element (the same deepAll
+/// walk the capture uses, so open shadow roots are searched), and the
+/// count/rank math is identical to the capture script - returned sigs are
+/// directly adoptable into the model. Hidden matches come back flagged with
+/// a reason instead of being dropped: a selector miss must be able to say
+/// it found the element but could not reach it.
+fn find_selector_expr(selector: &str) -> Result<String> {
+    let sel_js = serde_json::to_string(selector)?;
+    Ok("((sel_user)=>{ "
+        .to_string()
+        + "const d=document;if(!d||!d.body)return[];"
+        + &JS_PREAMBLE
+        + "const _vrs=function(n){let e=n;for(let i=0;i<14&&e;i++){try{const cs=getComputedStyle(e);if(cs.display==='none')return 'display:none'+(e!==n?' (ancestor '+e.tagName.toLowerCase()+')':'');if(cs.visibility==='hidden')return 'visibility:hidden'+(e!==n?' (ancestor '+e.tagName.toLowerCase()+')':'');}catch(_e){}e=e.parentElement||(e.getRootNode&&e.getRootNode().host);}const r=n.getBoundingClientRect();if(!r.width||!r.height)return 'zero-size';return 'not visible';};"
+        + "const all=deepAll(d,sel);const results=[];const counts={};"
+        + "for(let i=0;i<all.length;i++){const n=all[i];"
+        + "const r=role(n);if(r==='hidden')continue;"
+        + "const snm=name(n,false);"
+        + "const key=r+'\\u0000'+snm;counts[key]=(counts[key]||0)+1;"
+        + "let m=false;try{m=!!(n.matches&&n.matches(sel_user));}catch(_e){m=false;}"
+        + "if(!m)continue;"
+        + "const v=vis(n);"
+        + "results.push({sig:'|'+r+'|'+snm+'|'+counts[key],score:0,role:r,name:name(n,true),frame:[],hidden:!v,reason:v?'':_vrs(n)});"
+        + "}"
+        + "return results.slice(0,30);})("
+        + &sel_js
+        + ")")
+}
+
+/// Resolve a CSS selector to actionable elements (light DOM + open shadow
+/// roots). Hidden matches are included (flagged) so callers can explain a
+/// miss instead of reporting a bare "not found" - the reddit comment-menu
+/// case, where the trigger exists but is desktop-hidden.
+pub async fn find_by_selector(cdp: &CdpSession, selector: &str) -> Result<Vec<TextMatch>> {
+    if selector.trim().is_empty() {
+        return Err(BladeError::Other("selector must not be empty".into()));
+    }
+    let expression = find_selector_expr(selector)?;
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expression,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    if let Some(exc) = res.get("exceptionDetails") {
+        let msg = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("unknown selector-match error");
+        return Err(BladeError::Other(format!("selector match failed: {msg}")));
+    }
+    let value = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .ok_or_else(|| BladeError::Other("selector match returned no value".to_string()))?;
+    let matches: Vec<TextMatch> = serde_json::from_value(value.clone())?;
+    Ok(matches)
+}
+
+/// One hidden-match example from the find-miss diagnostic.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MissExample {
+    pub role: String,
+    pub name: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub shadow: bool,
+}
+
+/// What a find-by-text miss left on the table: matches that exist but were
+/// not returned (invisible), with reasons, and how many live in shadow
+/// roots. Lets the miss message explain itself instead of reading as
+/// "nothing here".
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MissDiag {
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub hidden: usize,
+    #[serde(default)]
+    pub shadow: usize,
+    #[serde(default)]
+    pub examples: Vec<MissExample>,
+}
+
+/// Build the find-miss diagnostic script: the same name matching as
+/// find_by_text, run over deepAll (open shadow roots included), counting
+/// invisible matches with a reason for each.
+fn find_miss_expr(query: &str) -> Result<String> {
+    let q_js = serde_json::to_string(query)?;
+    Ok("((query)=>{ "
+        .to_string()
+        + "const d=document;if(!d||!d.body)return{total:0,hidden:0,shadow:0,examples:[]};"
+        + &JS_PREAMBLE
+        + "const _vrs=function(n){let e=n;for(let i=0;i<14&&e;i++){try{const cs=getComputedStyle(e);if(cs.display==='none')return 'display:none'+(e!==n?' (ancestor '+e.tagName.toLowerCase()+')':'');if(cs.visibility==='hidden')return 'visibility:hidden'+(e!==n?' (ancestor '+e.tagName.toLowerCase()+')':'');}catch(_e){}e=e.parentElement||(e.getRootNode&&e.getRootNode().host);}const r=n.getBoundingClientRect();if(!r.width||!r.height)return 'zero-size';return 'not visible';};"
+        + "const q=query.toLowerCase();const all=deepAll(d,sel);"
+        + "let total=0;let hidden=0;let shadow=0;const examples=[];"
+        + "for(let i=0;i<all.length;i++){const n=all[i];"
+        + "const r=role(n);if(r==='hidden')continue;"
+        + "const nm=name(n,true);if(!nm)continue;"
+        + "const nh=nm.toLowerCase();const al=(n.getAttribute('aria-label')||'').toLowerCase();const ph=(n.placeholder||'').toLowerCase();const ti=(n.title||'').toLowerCase();"
+        + "if(!(nh.includes(q)||al.includes(q)||ph.includes(q)||ti.includes(q)))continue;"
+        + "total++;const sh=n.getRootNode()!==d;"
+        + "if(sh)shadow++;"
+        + "if(!vis(n)){hidden++;if(examples.length<3)examples.push({role:r,name:nm,reason:_vrs(n),shadow:sh});}"
+        + "}"
+        + "return{total:total,hidden:hidden,shadow:shadow,examples:examples};})("
+        + &q_js
+        + ")")
+}
+
+/// Run [`find_miss_expr`] against the page. Returns zeroed diagnostics on
+/// any transport hiccup - this is a best-effort explainer for a miss, never
+/// a new failure of its own.
+pub async fn find_miss_diag(cdp: &CdpSession, query: &str) -> Result<MissDiag> {
+    if query.trim().is_empty() {
+        return Ok(MissDiag::default());
+    }
+    let expression = find_miss_expr(query)?;
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expression,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    let value = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or_default();
+    if !value.is_object() {
+        return Ok(MissDiag::default());
+    }
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+/// Build the coordinate hit-probe script: what element actually sits at
+/// viewport (x, y) - descending open shadow roots, since
+/// `document.elementFromPoint` returns the shadow HOST.
+fn hit_probe_expr(x: f64, y: f64) -> String {
+    "((x,y)=>{const d=document;if(!d)return null;const vw=window.innerWidth||0;const vh=window.innerHeight||0;let el=d.elementFromPoint(x,y);if(!el)return (x<0||y<0||x>vw||y>vh)?('outside the viewport ('+Math.round(vw)+'x'+Math.round(vh)+')'):'nothing at that point';while(el&&el.shadowRoot){let inner=null;try{inner=el.shadowRoot.elementFromPoint(x,y);}catch(_e){}if(!inner||inner===el)break;el=inner;}const t=el.tagName.toLowerCase();const idd=el.id?('#'+el.id):'';const cl=(typeof el.className==='string'&&el.className.trim())?('.'+el.className.trim().split(/\\s+/).slice(0,2).join('.')):'';const ala=(el.getAttribute&&(el.getAttribute('aria-label')||el.getAttribute('title')))||'';const tx=(el.textContent||'').replace(/\\s+/g,' ').trim().slice(0,30);let desc=t+idd+cl+(ala?(' ['+ala+']'):(tx?(' \"'+tx+'\"'):''));try{const cs=getComputedStyle(el);if(cs.pointerEvents==='none')desc+=' (pointer-events:none)';}catch(_e){}return desc;})"
+        .to_string()
+        + &format!("({x},{y})")
+}
+
+/// Describe the topmost element at viewport (x, y) - the diagnostic a
+/// coordinate click owes when it does nothing: WHAT is actually there.
+pub async fn hit_probe(cdp: &CdpSession, x: f64, y: f64) -> Result<Option<String>> {
+    let expression = hit_probe_expr(x, y);
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expression,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    Ok(res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .map(String::from))
+}
+
+/// Summarize a delta's DOM evidence. Node changes read as `+2 \u{2212}1`
+/// (strong evidence a handler ran). State-only changes (surviving elements
+/// whose value/checked/disabled flipped) read as `state-only (...)` - they
+/// are attribute-level and can be focus/hover paint, so a verdict must not
+/// sell them as a real effect. None = nothing observable changed.
+fn dom_effect_summary(delta: &PageDelta) -> Option<String> {
+    if !delta.added.is_empty() || !delta.removed.is_empty() {
+        Some(format!("+{} \u{2212}{}", delta.added.len(), delta.removed.len()))
+    } else if !delta.changed.is_empty() {
+        let refs: Vec<&str> = delta.changed.iter().take(3).map(|(r, _)| r.as_str()).collect();
+        let more = if delta.changed.len() > 3 { ", ..." } else { "" };
+        Some(format!(
+            "state-only: {} ref{} ({}{}) - no nodes added/removed",
+            delta.changed.len(),
+            if delta.changed.len() == 1 { "" } else { "s" },
+            refs.join(", "),
+            more
+        ))
+    } else {
+        None
+    }
+}
+
 /// Compute a one-line outcome verdict from the action + delta + click info.
 /// This is the M1 verdict — every act tells the agent what happened.
 fn compute_verdict(
@@ -286,30 +499,37 @@ fn compute_verdict(
     lpm: &LivePageModel,
     click_via: Option<(&str, &[&str], &str)>,
     edit: Option<&EditReport>,
+    coord_hit: Option<&str>,
 ) -> String {
-    let dom_changed = !delta.added.is_empty() || !delta.removed.is_empty() || !delta.changed.is_empty();
     match action {
         Action::ClickCoord { x, y } => {
             if delta.navigated {
                 format!("outcome: navigated \u{2192} {} via coord-click({x:.0},{y:.0})", shorten_url(&delta.url))
-            } else if dom_changed {
-                format!("outcome: dom-changed (+{} \u{2212}{}) via coord-click({x:.0},{y:.0})", delta.added.len(), delta.removed.len())
+            } else if let Some(eff) = dom_effect_summary(delta) {
+                format!("outcome: dom-changed ({eff}) via coord-click({x:.0},{y:.0})")
             } else if delta.content_changed {
-                format!("outcome: dom-changed (content) via coord-click({x:.0},{y:.0})")
+                format!("outcome: dom-changed (content-only) via coord-click({x:.0},{y:.0})")
             } else {
-                format!("outcome: no-effect (coord-click at {x:.0},{y:.0})")
+                match coord_hit {
+                    Some(h) => format!(
+                        "outcome: no-effect (coord-click at {x:.0},{y:.0} - page did not respond; topmost there: {h})"
+                    ),
+                    None => format!(
+                        "outcome: no-effect (coord-click at {x:.0},{y:.0} - page did not respond)"
+                    ),
+                }
             }
         }
         Action::Click { .. } => {
             let (via, tried, tgt_meta) = click_via.unwrap_or(("", &[][..], ""));
             if delta.navigated {
                 format!("outcome: navigated \u{2192} {} via {}", shorten_url(&delta.url), via)
-            } else if dom_changed {
-                format!("outcome: dom-changed (+{} \u{2212}{}) via {}", delta.added.len(), delta.removed.len(), via)
+            } else if let Some(eff) = dom_effect_summary(delta) {
+                format!("outcome: dom-changed ({eff}) via {via}")
             } else if delta.content_changed {
                 // Mutation watcher saw DOM effects on non-actionable
-                // content — text swaps, counters, live regions.
-                format!("outcome: dom-changed (content) via {}", via)
+                // content - text swaps, counters, live regions.
+                format!("outcome: dom-changed (content-only) via {via}")
             } else if tgt_meta.is_empty() {
                 no_effect_verdict(tried, "")
             } else {
@@ -346,8 +566,10 @@ fn compute_verdict(
         Action::Press { key } => {
             if delta.navigated {
                 format!("outcome: pressed {key} \u{2192} navigated \u{2192} {}", shorten_url(&delta.url))
-            } else if dom_changed {
-                format!("outcome: pressed {key} \u{2192} dom-changed (+{} \u{2212}{})", delta.added.len(), delta.removed.len())
+            } else if let Some(eff) = dom_effect_summary(delta) {
+                format!("outcome: pressed {key} \u{2192} dom-changed ({eff})")
+            } else if delta.content_changed {
+                format!("outcome: pressed {key} \u{2192} dom-changed (content-only)")
             } else {
                 format!("outcome: pressed {key}")
             }
@@ -373,8 +595,12 @@ fn compute_verdict(
             format!("outcome: reloaded {}", shorten_url(&delta.url))
         }
         Action::Hover { ref_id } => {
-            if dom_changed && !delta.navigated {
-                format!("outcome: hovered {ref_id} \u{2192} dom-changed (+{})", delta.added.len())
+            if delta.navigated {
+                format!("outcome: hovered {ref_id} \u{2192} navigated \u{2192} {}", shorten_url(&delta.url))
+            } else if let Some(eff) = dom_effect_summary(delta) {
+                format!("outcome: hovered {ref_id} \u{2192} dom-changed ({eff})")
+            } else if delta.content_changed {
+                format!("outcome: hovered {ref_id} \u{2192} dom-changed (content-only)")
             } else {
                 format!("outcome: hovered {ref_id}")
             }
@@ -673,12 +899,21 @@ const LEAF_TARGET_JS: &str = concat!(
 
 /// Build the verdict string for a no-effect click that names the resolved
 /// click target, so consumers can tell a wrong-target/avenue problem from a
-/// page that rejected a well-aimed click. (CL3, #15.)
+/// page that rejected a well-aimed click. (CL3, #15.) Says what was tried
+/// and that dispatch DID happen - a plausible-looking success string on a
+/// silent no-op was the original sin here.
 fn no_effect_verdict(tried: &[&str], target_meta: &str) -> String {
     if target_meta.is_empty() {
-        format!("outcome: no-effect (tried: {} - element may be disabled, hidden, or hover-gated)", tried.join(", "))
+        format!(
+            "outcome: no-effect (click dispatched via {} - no navigation, no DOM or state change; the element may be disabled, hidden, or hover-gated)",
+            tried.join(", ")
+        )
     } else {
-        format!("outcome: no-effect (tried: {} on {} - page did not respond)", tried.join(", "), target_meta)
+        format!(
+            "outcome: no-effect (click dispatched via {} on {} - no navigation, no DOM or state change)",
+            tried.join(", "),
+            target_meta
+        )
     }
 }
 
@@ -736,7 +971,9 @@ fn find_sig_expr(sig: &str, mode: &str, text: Option<&str>, frame: &[usize]) -> 
         + "function _lbx(e){var _lr=e.getBoundingClientRect();return [Math.round(_lr.x+ox)||0,Math.round(_lr.y+oy)||0,Math.round(_lr.width)||0,Math.round(_lr.height)||0];}"
         + LEAF_TARGET_JS
         + "var _lcbx=_lClick[0]+_lClick[2]/2,_lcby=_lClick[1]+_lClick[3]/2;var _lfc=doc.elementFromPoint(_lcbx-ox,_lcby-oy);"
-        + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:(_lfc===n||(n.contains?n.contains(_lfc):false)),hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']')};}"
+        + "var _desc=function(e){if(!e)return null;var t=e.tagName.toLowerCase();var idd=e.id?('#'+e.id):'';var cl=(typeof e.className==='string'&&e.className.trim())?('.'+e.className.trim().split(/\\s+/).slice(0,2).join('.')):'';var ala=(e.getAttribute&&(e.getAttribute('aria-label')||e.getAttribute('title')))||'';var tx=(e.textContent||'').replace(/\\s+/g,' ').trim().slice(0,30);return t+idd+cl+(ala?(' ['+ala+']'):(tx?(' \"'+tx+'\"'):''));};"
+        + "var _ltop=(_lfc===n||(n.contains&&_lfc&&n.contains(_lfc)))?null:(_lfc?_desc(_lfc):'outside the viewport');"
+        + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:(_lfc===n||(n.contains?n.contains(_lfc):false)),hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),top_desc:_ltop};}"
         + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();var _ph=_hostOf(tgt);const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false};}"
         + "if(mode==='focus'){tgt.focus();return{ok:true};}"
         + "if(mode==='clear'){var _ch=_hostOf(tgt);if(!_ch)return{ok:false,reason:'no editable host'};if(_ced(_ch)){_clr(_ch);}else if('value' in _ch){var _cpr=_ch.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _cd=Object.getOwnPropertyDescriptor(_cpr,'value');if(_cd&&_cd.set){_cd.set.call(_ch,'');}else{_ch.value='';}_ch.dispatchEvent(new Event('input',{bubbles:true}));_ch.dispatchEvent(new Event('change',{bubbles:true}));}else{return{ok:false,reason:'not an editable field'};}return{ok:true,text:_read(_ch)};}"
@@ -1802,16 +2039,24 @@ pub async fn perform_with_network(
             }
             // Expose the resolved click target so no-effect verdicts can
             // distinguish a bad selector from a page that rejected a well-
-            // aimed click (issue #15).
+            // aimed click (issue #15). When the target is NOT topmost, name
+            // what actually receives the click there (occlusion diagnostic).
             let mut tgt_meta = found.hit_tgt.as_deref().unwrap_or("").to_string();
             if !tgt_meta.is_empty() {
-                tgt_meta.push_str(&format!(
-                    " (topmost={},disabled={})",
-                    found.is_topmost.unwrap_or(false),
-                    found.disabled.unwrap_or(false)
-                ));
+                if found.is_topmost == Some(false) {
+                    match found.top_desc.as_deref() {
+                        Some(top) => tgt_meta.push_str(&format!(" (topmost=false - clicks land on {top})")),
+                        None => tgt_meta.push_str(" (topmost=false)"),
+                    }
+                } else {
+                    tgt_meta.push_str(&format!(
+                        " (topmost={},disabled={})",
+                        found.is_topmost.unwrap_or(false),
+                        found.disabled.unwrap_or(false)
+                    ));
+                }
             }
-            let mut verdict = compute_verdict(action, &delta, lpm, Some((via, &tried, &tgt_meta)), None);
+            let mut verdict = compute_verdict(action, &delta, lpm, Some((via, &tried, &tgt_meta)), None, None);
             if dialog_fired && !delta.navigated && delta.is_empty() && !delta.content_changed {
                 verdict = format!(
                     "outcome: dialog opened via {via} (auto-dismissed — see ambient)"
@@ -2213,7 +2458,16 @@ pub async fn perform_with_network(
     // Recapture → delta.
     let cap = capture(cdp).await?;
     let delta = lpm.ingest(cap);
-    let verdict = compute_verdict(action, &delta, lpm, None, edit_report.as_ref());
+    // Coordinate click with no observable effect: ask the page WHAT is
+    // actually at (x,y), so the verdict carries the reason (occluded point,
+    // element elsewhere, outside the viewport) instead of a bare fact.
+    let mut coord_hit: Option<String> = None;
+    if let Action::ClickCoord { x, y } = action {
+        if !delta.navigated && delta.is_empty() && !delta.content_changed {
+            coord_hit = hit_probe(cdp, *x, *y).await.unwrap_or(None);
+        }
+    }
+    let verdict = compute_verdict(action, &delta, lpm, None, edit_report.as_ref(), coord_hit.as_deref());
     Ok((delta, verdict))
 }
 
@@ -2233,16 +2487,35 @@ mod action_tests {
         );
         assert_eq!(
             msg,
-            "outcome: no-effect (tried: mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - page did not respond)"
+            "outcome: no-effect (click dispatched via mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - no navigation, no DOM or state change)"
         );
         assert!(!msg.contains('\u{2014}'), "no em-dash in public verdict");
+    }
+
+    #[test]
+    fn dom_effect_summary_distinguishes_state_only_changes() {
+        use super::{dom_effect_summary, PageDelta};
+        use crate::page::refs::StateChange;
+        // Nothing changed → None (the no-effect path).
+        assert!(dom_effect_summary(&PageDelta::default()).is_none());
+        // Node change → real counts.
+        let mut d = PageDelta::default();
+        d.removed.push("e9".into());
+        assert_eq!(dom_effect_summary(&d).unwrap(), "+0 \u{2212}1");
+        // State-only change (value/checked/disabled flip) → explicitly weak:
+        // this is the class that used to print a self-contradictory "(+0 -0)".
+        let mut d = PageDelta::default();
+        d.changed.push(("e2".into(), StateChange { value: None, disabled: None, checked: Some(true) }));
+        let s = dom_effect_summary(&d).unwrap();
+        assert!(s.starts_with("state-only:"), "{s}");
+        assert!(s.contains("e2") && s.contains("no nodes added/removed"), "{s}");
     }
 
     #[test]
     fn no_effect_verdict_falls_back_when_target_unknown() {
         let msg = super::no_effect_verdict(&["mouse"], "");
         assert!(
-            msg.ends_with("- element may be disabled, hidden, or hover-gated)"),
+            msg.ends_with("- no navigation, no DOM or state change; the element may be disabled, hidden, or hover-gated)"),
             "unexpected fallback: {msg}"
         );
         assert!(!msg.contains('\u{2014}'), "no em-dash in fallback verdict");
@@ -2339,6 +2612,46 @@ mod action_tests {
             assert!(
                 out.status.success(),
                 "find-text has a JS syntax error:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    // The selector matcher, the find-miss diagnostic and the coordinate
+    // hit probe are injected into live pages the same way; a syntax error in
+    // any of them would silently break addressing or misreport misses.
+    // Guarded with node --check (skips without node).
+    #[test]
+    fn selector_diag_and_probe_scripts_are_valid_js() {
+        let has_node = std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !has_node {
+            eprintln!("node not available — skipping selector/diag/probe syntax checks");
+            return;
+        }
+        let cases: Vec<(&str, String)> = vec![
+            ("bd-select", super::find_selector_expr("#overflow-trigger").expect("selector expr")),
+            ("bd-select2", super::find_selector_expr("[role=menuitem]").expect("selector expr")),
+            ("bd-missdiag", super::find_miss_expr("Open user actions \"quoted\"").expect("miss expr")),
+            ("bd-hitprobe", super::hit_probe_expr(216.0, 616.5)),
+        ];
+        for (name, js) in cases {
+            let path = std::env::temp_dir().join(format!("bladebro-{name}.js"));
+            std::fs::write(&path, &js).expect("write js fixture");
+            let out = std::process::Command::new("node")
+                .arg("--check")
+                .arg(&path)
+                .output()
+                .expect("run node --check");
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                out.status.success(),
+                "{name} has a JS syntax error:\n{}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }

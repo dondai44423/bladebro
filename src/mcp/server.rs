@@ -1252,6 +1252,55 @@ async fn resolve_text_target(
     Ok(id)
 }
 
+/// Resolve a CSS selector to a ref. Mirrors [`resolve_text_target`]: match
+/// against actionable elements (open shadow roots included), adopt the live
+/// sig into the model, return the ref - every action downstream (real mouse
+/// input, healing) then works exactly as with a text- or ref-addressed
+/// element. Hidden-only matches error with the reason: a mouse cannot reach
+/// a display:none control, and pretending otherwise would be the silent
+/// no-op class this addressing exists to kill.
+async fn resolve_selector_target(
+    page: &mut Page,
+    selector: &str,
+    nth: Option<usize>,
+) -> Result<String> {
+    let matches = crate::action::find_by_selector(page.cdp_ref(), selector).await?;
+    let visible: Vec<&crate::action::TextMatch> = matches.iter().filter(|m| !m.hidden).collect();
+    if visible.is_empty() {
+        if !matches.is_empty() {
+            let ex: Vec<String> = matches
+                .iter()
+                .take(3)
+                .map(|m| format!("{} \"{}\" [{}]", m.role, m.name, m.reason))
+                .collect();
+            return Err(BladeError::Other(format!(
+                "selector \"{selector}\" matched {} element(s) but none is visible: {} - a hidden control cannot be clicked by a mouse; if the site wires it programmatically, drive it with act eval (el.click())",
+                matches.len(),
+                ex.join("; ")
+            )));
+        }
+        return Err(BladeError::Other(format!(
+            "no actionable element matches selector \"{selector}\" (searched light DOM + open shadow roots)"
+        )));
+    }
+    if let Some(n) = nth {
+        if n >= 1 && n <= visible.len() {
+            let m = visible[n - 1];
+            return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
+        }
+    }
+    if visible.len() == 1 {
+        let m = visible[0];
+        return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
+    }
+    let top = visible[0];
+    let id = page.model_mut().adopt(&top.sig, &top.role, &top.name, &top.frame);
+    for m in visible.iter().skip(1) {
+        let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
+    }
+    Ok(id)
+}
+
 /// `fill` — multi-field forms in ONE call (type/select/checkbox-aware, with
 /// submit + JS-click fallback). Shared by `act`, `act batch` steps, and `run`
 /// steps: the step vocabulary and the act schema had drifted, which is why
@@ -1265,6 +1314,7 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
     for field in fields {
         let f_ref = field.get("ref").and_then(|r| r.as_str()).unwrap_or("");
         let f_label = field.get("label").and_then(|l| l.as_str()).unwrap_or("");
+        let f_selector = field.get("selector").and_then(|s| s.as_str()).unwrap_or("");
         let f_text = field.get("text").and_then(|t| t.as_str())
             .or_else(|| field.get("option").and_then(|o| o.as_str()))
             .unwrap_or("");
@@ -1273,6 +1323,8 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
         // Resolve the ref — try as-is first, then by label.
         let resolved = if !f_ref.is_empty() {
             f_ref.to_string()
+        } else if !f_selector.is_empty() {
+            resolve_selector_target(page, f_selector, None).await?
         } else if !f_label.is_empty() {
             // Don't restrict to textbox — the field could be a
             // checkbox or select. Search all actionable elements.
@@ -1366,6 +1418,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     let expect = args.get("expect").and_then(|e| e.as_str()).unwrap_or("");
     let press = args.get("press").and_then(|p| p.as_str()).unwrap_or("");
     let nth = args.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
+    let selector = args.get("selector").and_then(|s| s.as_str()).unwrap_or("");
 
     // Navigate first if url is given for a non-navigate action.
     // Previously url was silently ignored for fill/type/click etc.
@@ -1421,8 +1474,10 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 } else if !label.is_empty() {
                     let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                     resolve_text_target(page, label, rf, nth).await?
+                } else if !selector.is_empty() {
+                    resolve_selector_target(page, selector, nth).await?
                 } else {
-                    return Err(BladeError::Other("click requires 'ref', 'text', 'label', or 'x'+'y'".into()));
+                    return Err(BladeError::Other("click requires 'ref', 'text', 'label', 'selector', or 'x'+'y'".into()));
                 };
                 Action::Click { ref_id: resolved }
             }
@@ -1433,12 +1488,23 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else if !label.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
             } else {
-                return Err(BladeError::Other("type requires 'ref' or 'label' + 'text'".into()));
+                return Err(BladeError::Other("type requires 'ref', 'label', or 'selector' + 'text'".into()));
             };
             Action::Type { ref_id: resolved, text: text.into() }
         }
-        "clear" => Action::Clear { ref_id: ref_id.into() },
+        "clear" => {
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
+            } else {
+                return Err(BladeError::Other("clear requires 'ref' or 'selector'".into()));
+            };
+            Action::Clear { ref_id: resolved }
+        }
         "select" => {
             let opt = args.get("option").and_then(|o| o.as_str())
                 .or_else(|| args.get("text").and_then(|t| t.as_str()))
@@ -1451,8 +1517,10 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else if !label.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
             } else {
-                return Err(BladeError::Other("select requires 'ref' or 'label'".into()));
+                return Err(BladeError::Other("select requires 'ref', 'label', or 'selector'".into()));
             };
             Action::Select { ref_id: resolved, option: opt.into() }
         }
@@ -1466,7 +1534,14 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             if js.is_empty() {
                 return Err(BladeError::Other("eval requires 'js'".into()));
             }
-            return handle_eval(page, js, ref_id).await;
+            let eval_ref = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
+            } else {
+                String::new()
+            };
+            return handle_eval(page, js, &eval_ref).await;
         }
         "pdf" => {
             // V20: export the current page as a PDF artifact.
@@ -1489,22 +1564,37 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else if !label.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
             } else {
-                return Err(BladeError::Other("hover requires 'ref', 'text', or 'label'".into()));
+                return Err(BladeError::Other("hover requires 'ref', 'text', 'label', or 'selector'".into()));
             };
             Action::Hover { ref_id: resolved }
         }
-        "upload" => Action::Upload { ref_id: ref_id.into(), path: text.into() },
+        "upload" => {
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
+            } else {
+                return Err(BladeError::Other("upload requires 'ref' or 'selector'".into()));
+            };
+            Action::Upload { ref_id: resolved, path: text.into() }
+        }
         "read" => {
-            if ref_id.is_empty() {
+            let ref_id = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
+            } else {
                 return Err(BladeError::Other(
-                    "read requires 'ref' (an element id like e5 from see)".into(),
+                    "read requires 'ref' (an element id like e5 from see) or 'selector'".into(),
                 ));
-            }
+            };
             // Self-heal: the ref may have died since the agent saw it.
-            let heal = page.ensure_ref(ref_id).await?;
-            let text_content = crate::action::read_text(page.cdp_ref(), page.model(), ref_id).await?;
-            let el = page.model().element(ref_id);
+            let heal = page.ensure_ref(&ref_id).await?;
+            let text_content = crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
+            let el = page.model().element(&ref_id);
             let role = el.map(|e| e.raw.role.clone()).unwrap_or_default();
             let name = el.map(|e| e.raw.name.clone()).unwrap_or_default();
             let note = heal.map(|n| format!(" [{n}]")).unwrap_or_default();
@@ -1822,6 +1912,29 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // actionability markers — just the page text as structured markdown.
     // Headings, links, lists, code blocks, tables preserved.
     if mode == "content" {
+        // scope=eN: ONE element's subtree. scope used to be silently
+        // ignored here (a caller asking for scope="main" got the whole
+        // page); it is honored now and errors loudly when the scope is
+        // not a ref.
+        if !scope.is_empty() {
+            let _ = page.ensure_ref(scope).await;
+            match page.model().element(scope).cloned() {
+                Some(e) => {
+                    let md = page.markdown_scoped(budget, &e.raw.sig, &e.raw.frame).await?;
+                    if md.is_empty() {
+                        return Err(BladeError::Other(format!(
+                            "scope {scope}: element found but has no readable text (or it went stale mid-read - recapture with see)"
+                        )));
+                    }
+                    return Ok(md);
+                }
+                None => {
+                    return Err(BladeError::Other(format!(
+                        "scope \"{scope}\" is not a known ref - pass a ref id from see (e.g. e5), or drop scope and use find=\"<text>\" for a cheap existence check"
+                    )));
+                }
+            }
+        }
         let md = page.markdown(budget).await?;
         if md.is_empty() {
             return Ok("page has no text content (may be a SPA that hasn't rendered — try waiting, or use mode=model for interactive elements)".into());
@@ -1861,6 +1974,33 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     if !find.is_empty() {
         let matches = crate::action::find_by_text(page.cdp_ref(), find, None, false).await?;
         if matches.is_empty() {
+            // Explain the miss: matches that exist but were not returned
+            // (hidden / unreachable) are the difference between "the
+            // control is not there" and "it is there but not visible from
+            // here" - one flat "not found" sent an agent hunting through
+            // raw eval for a desktop-hidden trigger.
+            let diag = crate::action::find_miss_diag(page.cdp_ref(), find).await.ok();
+            let diag_note = match diag {
+                Some(d) if d.total > 0 => {
+                    let mut s = format!(" ({} match(es) exist but were not addressable", d.total);
+                    if !d.examples.is_empty() {
+                        let ex: Vec<String> = d
+                            .examples
+                            .iter()
+                            .map(|e| format!("{} \"{}\" [{}]", e.role, e.name, e.reason))
+                            .collect();
+                        s.push_str(&format!(": {}", ex.join("; ")));
+                    } else if d.hidden > 0 {
+                        s.push_str(&format!(": {} hidden", d.hidden));
+                    }
+                    if d.shadow > 0 {
+                        s.push_str(&format!("; {} in open shadow roots", d.shadow));
+                    }
+                    s.push_str(" - hidden controls are not clickable by a mouse; if the site wires them programmatically use act eval (el.click()))");
+                    s
+                }
+                _ => String::new(),
+            };
             // M11 contract is full-page search: when no ACTIONABLE element
             // matches, probe the plain text. Returns a context snippet so
             // agents can verify outcomes ("Order confirmed") without
@@ -1873,10 +2013,10 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
                 .and_then(|r| r.get("result").and_then(|x| x.get("value")).cloned());
             if let Some(serde_json::Value::String(snip)) = probe {
                 return Ok(format!(
-                    "no actionable elements matching \"{find}\", but text present in page:\n  \"…{snip}…\"\n  (see content=true to read full context)"
+                    "no actionable elements matching \"{find}\"{diag_note}, but text present in page:\n  \"…{snip}…\"\n  (see content=true to read full context)"
                 ));
             }
-            return Ok(format!("no elements matching \"{find}\" found", ));
+            return Ok(format!("no elements matching \"{find}\" found{diag_note}"));
         }
         let mut out = format!("find \"{}\": {} match{}\n", find, matches.len(), if matches.len() > 1 { "es" } else { "" });
         for m in &matches {
@@ -2202,12 +2342,12 @@ const SKIP_TAGS=new Set(['STYLE','SCRIPT','HEAD','NOSCRIPT','SVG','TEMPLATE','LI
  const cmts=[...document.querySelectorAll('shreddit-comment')];
  const posts=[...document.querySelectorAll('shreddit-post')];
  if(isCp&&cmts.length>=3){
- const items=cmts.slice(0,__LIMIT__).map(sc=>{const o={};const a=n=>sc.getAttribute(n)||'';const au=a('author');if(au)o.author='u/'+au;const s=a('score');if(s!=='')o.score=parseInt(s,10);const d=a('depth');if(d!=='')o.depth=parseInt(d,10);const pl=a('permalink');if(pl)o.url='https://www.reddit.com'+(pl.charAt(0)==='/'?pl:'/'+pl);const cr=a('created');if(cr)o.date=cr.slice(0,16).replace('T',' ');const bd=sc.querySelector('[slot="comment"]');const bt=bd?vtxt(bd):'';if(bt)o.text=bt.slice(0,500);return o;}).filter(o=>Object.keys(o).length>0);
- if(items.length>0)return JSON.stringify({container:'reddit-comments',count:items.length,items});
+ const items=cmts.slice(0,__LIMIT__).map(sc=>{const o={};const a=n=>sc.getAttribute(n)||'';const au=a('author');if(au)o.author='u/'+au;const s=a('score');if(s!=='')o.fuzzed_score=parseInt(s,10);const d=a('depth');if(d!=='')o.depth=parseInt(d,10);const pl=a('permalink');if(pl)o.url='https://www.reddit.com'+(pl.charAt(0)==='/'?pl:'/'+pl);const cr=a('created');if(cr)o.date=cr.slice(0,16).replace('T',' ');const bd=sc.querySelector('[slot="comment"]');const bt=bd?vtxt(bd):'';if(bt)o.text=bt.slice(0,500);return o;}).filter(o=>Object.keys(o).length>0);
+ if(items.length>0)return JSON.stringify({container:'reddit-comments',count:items.length,items,note:"fuzzed_score values are Reddit's displayed (fuzzed) scores"});
  }
  if(!isCp&&posts.length>=3){
- const items=posts.slice(0,__LIMIT__).map(sp=>{const o={};const a=n=>sp.getAttribute(n)||'';const pt=a('post-title');if(pt)o.title=pt.slice(0,200);const pl=a('permalink');if(pl)o.url='https://www.reddit.com'+(pl.charAt(0)==='/'?pl:'/'+pl);const s=a('score');if(s!=='')o.score=parseInt(s,10);const cc=a('comment-count');if(cc!=='')o.comments=parseInt(cc,10);const au=a('author');if(au)o.author='u/'+au;const sub=a('subreddit-prefixed-name')||a('subreddit-name');if(sub)o.subreddit=sub.indexOf('/')>=0?sub:'r/'+sub;const ts=a('created-timestamp');if(ts)o.date=ts.slice(0,16).replace('T',' ');const dm=a('domain');if(dm)o.domain=dm;const ty=a('post-type');if(ty)o.type=ty;const ch=a('content-href');if(ch)o.content_href=ch.slice(0,300);return o;}).filter(o=>Object.keys(o).length>0);
- if(items.length>0)return JSON.stringify({container:'reddit-feed',count:items.length,items});
+ const items=posts.slice(0,__LIMIT__).map(sp=>{const o={};const a=n=>sp.getAttribute(n)||'';const pt=a('post-title');if(pt)o.title=pt.slice(0,200);const pl=a('permalink');if(pl)o.url='https://www.reddit.com'+(pl.charAt(0)==='/'?pl:'/'+pl);const s=a('score');if(s!=='')o.fuzzed_score=parseInt(s,10);const cc=a('comment-count');if(cc!=='')o.comments=parseInt(cc,10);const au=a('author');if(au)o.author='u/'+au;const sub=a('subreddit-prefixed-name')||a('subreddit-name');if(sub)o.subreddit=sub.indexOf('/')>=0?sub:'r/'+sub;const ts=a('created-timestamp');if(ts)o.date=ts.slice(0,16).replace('T',' ');const dm=a('domain');if(dm)o.domain=dm;const ty=a('post-type');if(ty)o.type=ty;const ch=a('content-href');if(ch)o.content_href=ch.slice(0,300);return o;}).filter(o=>Object.keys(o).length>0);
+ if(items.length>0)return JSON.stringify({container:'reddit-feed',count:items.length,items,note:"fuzzed_score values are Reddit's displayed (fuzzed) scores"});
  }
  }
  // Hacker News: server-rendered rows — the subtext line carries points,
@@ -2318,7 +2458,7 @@ if(hd)hd.remove();
 const desc=(clone.innerText||'').replace(/\s+/g,' ').trim();
 if(desc&&desc.length>15){const dn=norm(desc),tn=norm(title||'');if(dn&&!tn.includes(dn)&&!dn.includes(tn))o.description=desc.slice(0,300);}
 // Site-specific fields.
-if(IS_REDDIT){var sp=item.tagName==='SHREDDIT-POST'?item:item.querySelector('shreddit-post');var sc0=item.tagName==='SHREDDIT-COMMENT'?item:item.querySelector('shreddit-comment');if(sp){var sps=sp.getAttribute('score');if(sps)o.score=parseInt(sps,10);var spc=sp.getAttribute('comment-count');if(spc)o.comments=parseInt(spc,10);var spa=sp.getAttribute('author');if(spa)o.author='u/'+spa;var spsub=sp.getAttribute('subreddit-prefixed-name');if(spsub)o.subreddit=spsub;var spt=sp.getAttribute('post-title');if(spt)o.title=spt.slice(0,200);var spl=sp.getAttribute('permalink');if(spl)o.url='https://www.reddit.com'+(spl.charAt(0)==='/'?spl:'/'+spl);var spts=sp.getAttribute('created-timestamp');if(spts)o.date=spts.slice(0,16).replace('T',' ');}else if(sc0){var sca=sc0.getAttribute('author');if(sca)o.author='u/'+sca;var scs=sc0.getAttribute('score');if(scs!=='')o.score=parseInt(scs,10);var scd=sc0.getAttribute('depth');if(scd!=='')o.depth=parseInt(scd,10);var scb=sc0.querySelector('[slot="comment"]');var sct=scb?vtxt(scb).slice(0,400):'';if(sct)o.text=sct;}else if(item.classList&&item.classList.contains('thing')){var g2=n=>item.getAttribute(n)||'';var gs2=g2('data-score');if(gs2)o.score=parseInt(gs2,10);var gc2=g2('data-comments-count');if(gc2)o.comments=parseInt(gc2,10);var ga2=g2('data-author');if(ga2)o.author='u/'+ga2;var gsb2=g2('data-subreddit');if(gsb2)o.subreddit='r/'+gsb2;var gp2=g2('data-permalink');if(gp2)o.url='https://www.reddit.com'+gp2;var gtl=item.querySelector('a.title');if(gtl)o.title=vtxt(gtl).slice(0,200);}else{var rsc=rdScore(item);if(rsc!==null)o.score=rsc;var rcm=rdComments(item);if(rcm!==null)o.comments=rcm;var rau=rdAuthor(item);if(rau)o.author=rau;var rsu=rdSub(item);if(rsu)o.subreddit=rsu;var rcl=item.querySelector('a[href*="/comments/"]');if(rcl){o.url=rcl.href;var rclt=vtxt(rcl);if(rclt&&rclt.length>5&&rclt.length<300)o.title=rclt.slice(0,200);}}}
+if(IS_REDDIT){var sp=item.tagName==='SHREDDIT-POST'?item:item.querySelector('shreddit-post');var sc0=item.tagName==='SHREDDIT-COMMENT'?item:item.querySelector('shreddit-comment');if(sp){var sps=sp.getAttribute('score');if(sps)o.fuzzed_score=parseInt(sps,10);var spc=sp.getAttribute('comment-count');if(spc)o.comments=parseInt(spc,10);var spa=sp.getAttribute('author');if(spa)o.author='u/'+spa;var spsub=sp.getAttribute('subreddit-prefixed-name');if(spsub)o.subreddit=spsub;var spt=sp.getAttribute('post-title');if(spt)o.title=spt.slice(0,200);var spl=sp.getAttribute('permalink');if(spl)o.url='https://www.reddit.com'+(spl.charAt(0)==='/'?spl:'/'+spl);var spts=sp.getAttribute('created-timestamp');if(spts)o.date=spts.slice(0,16).replace('T',' ');}else if(sc0){var sca=sc0.getAttribute('author');if(sca)o.author='u/'+sca;var scs=sc0.getAttribute('score');if(scs!=='')o.fuzzed_score=parseInt(scs,10);var scd=sc0.getAttribute('depth');if(scd!=='')o.depth=parseInt(scd,10);var scb=sc0.querySelector('[slot="comment"]');var sct=scb?vtxt(scb).slice(0,400):'';if(sct)o.text=sct;}else if(item.classList&&item.classList.contains('thing')){var g2=n=>item.getAttribute(n)||'';var gs2=g2('data-score');if(gs2)o.score=parseInt(gs2,10);var gc2=g2('data-comments-count');if(gc2)o.comments=parseInt(gc2,10);var ga2=g2('data-author');if(ga2)o.author='u/'+ga2;var gsb2=g2('data-subreddit');if(gsb2)o.subreddit='r/'+gsb2;var gp2=g2('data-permalink');if(gp2)o.url='https://www.reddit.com'+gp2;var gtl=item.querySelector('a.title');if(gtl)o.title=vtxt(gtl).slice(0,200);}else{var rsc=rdScore(item);if(rsc!==null)o.fuzzed_score=rsc;var rcm=rdComments(item);if(rcm!==null)o.comments=rcm;var rau=rdAuthor(item);if(rau)o.author=rau;var rsu=rdSub(item);if(rsu)o.subreddit=rsu;var rcl=item.querySelector('a[href*="/comments/"]');if(rcl){o.url=rcl.href;var rclt=vtxt(rcl);if(rclt&&rclt.length>5&&rclt.length<300)o.title=rclt.slice(0,200);}}}
 else if(IS_GITHUB){const st=ghStars(item);if(st!==null)o.stars=st;const fk=ghForks(item);if(fk!==null)o.forks=fk;const sd=ghStarsToday(item);if(sd!==null)o.stars_today=sd;const lb=ghLabels(item);if(lb.length>0)o.labels=lb;const nm=ghNumber(item);if(nm!==null)o.number=nm;const gs=ghStatus(item);if(gs)o.status=gs;}
 else{const rt=rating(item);if(rt!==null)o.rating=rt;const rv=reviews(item);if(rv!==null)o.reviews=rv;const av=avail(item);if(av)o.availability=av;const op=origPrice(item);if(op)o.original_price=op;if(isSponsored(item))o.sponsored=true;}
 return o;
@@ -2778,6 +2918,7 @@ fn wait_condition(cond: &str, text: &str) -> String {
 async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
     let action_str = step.get("action").and_then(|a| a.as_str()).unwrap_or("");
     let ref_id = step.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+    let selector = step.get("selector").and_then(|s| s.as_str()).unwrap_or("");
     let text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
     let key = step.get("key").and_then(|k| k.as_str()).unwrap_or("");
     let dx = step.get("dx").and_then(|d| d.as_i64()).unwrap_or(0);
@@ -2796,9 +2937,11 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             } else if !label.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
             } else {
                 return Err(crate::error::BladeError::Other(
-                    "click step requires 'ref', 'text', or 'label'".into(),
+                    "click step requires 'ref', 'text', 'label', or 'selector'".into(),
                 ));
             };
             Ok(Action::Click { ref_id: resolved })
@@ -2809,14 +2952,27 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             } else if !label.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
             } else {
                 return Err(crate::error::BladeError::Other(
-                    "type step requires 'ref' or 'label'".into(),
+                    "type step requires 'ref', 'label', or 'selector'".into(),
                 ));
             };
             Ok(Action::Type { ref_id: resolved, text: text.into() })
         }
-        "clear" => Ok(Action::Clear { ref_id: ref_id.into() }),
+        "clear" => {
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
+            } else {
+                return Err(crate::error::BladeError::Other(
+                    "clear step requires 'ref' or 'selector'".into(),
+                ));
+            };
+            Ok(Action::Clear { ref_id: resolved })
+        }
         "select" => {
             let opt = step.get("option").and_then(|o| o.as_str())
                 .or_else(|| step.get("text").and_then(|t| t.as_str()))
@@ -2826,9 +2982,11 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             } else if !label.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
             } else {
                 return Err(crate::error::BladeError::Other(
-                    "select step requires 'ref' or 'label'".into(),
+                    "select step requires 'ref', 'label', or 'selector'".into(),
                 ));
             };
             Ok(Action::Select { ref_id: resolved, option: opt.into() })
@@ -2846,14 +3004,27 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             } else if !label.is_empty() {
                 let rf = if !role_str.is_empty() { Some(role_str) } else { None };
                 resolve_text_target(page, label, rf, nth).await?
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
             } else {
                 return Err(crate::error::BladeError::Other(
-                    "hover step requires 'ref', 'text', or 'label'".into(),
+                    "hover step requires 'ref', 'text', 'label', or 'selector'".into(),
                 ));
             };
             Ok(Action::Hover { ref_id: resolved })
         }
-        "upload" => Ok(Action::Upload { ref_id: ref_id.into(), path: text.into() }),
+        "upload" => {
+            let resolved = if !ref_id.is_empty() {
+                ref_id.to_string()
+            } else if !selector.is_empty() {
+                resolve_selector_target(page, selector, nth).await?
+            } else {
+                return Err(crate::error::BladeError::Other(
+                    "upload step requires 'ref' or 'selector'".into(),
+                ));
+            };
+            Ok(Action::Upload { ref_id: resolved, path: text.into() })
+        }
         "wait" => {
             let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
             let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");

@@ -930,7 +930,7 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
             match flag {
                 "ref" | "label" | "text" | "role" | "key" | "url" | "option" | "js" | "path"
                 | "condition" | "press" | "submit" | "block" | "name" | "expect" | "steps"
-                | "fields" => {
+                | "fields" | "selector" => {
                     let v = take_value(args, &mut i, flag)?;
                     j[flag] = json!(v);
                 }
@@ -967,7 +967,7 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
 
     match action {
         "click" | "hover" => {
-            if j.get("ref").is_none() && j.get("label").is_none() && !pos.is_empty() {
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() && !pos.is_empty() {
                 if is_ref(&pos[0]) {
                     j["ref"] = json!(pos[0].clone());
                     if pos.len() > 1 {
@@ -983,7 +983,7 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
         }
         "type" => {
             let mut pi = 0usize;
-            if j.get("ref").is_none() && j.get("label").is_none() {
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
                 if let Some(t) = pos.first() {
                     if is_ref(t) {
                         j["ref"] = json!(t);
@@ -996,9 +996,9 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
             if j.get("text").is_none() && pos.len() > pi {
                 j["text"] = json!(pos[pi..].join(" "));
             }
-            if j.get("ref").is_none() && j.get("label").is_none() {
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
                 return Err(BladeError::Usage(
-                    "type needs a target — `act type <ref|label> <text>` or --ref/--label/--text"
+                    "type needs a target — `act type <ref|label> <text>` or --ref/--label/--selector/--text"
                         .into(),
                 ));
             }
@@ -1036,7 +1036,7 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
         }
         "select" => {
             let mut pi = 0usize;
-            if j.get("ref").is_none() && j.get("label").is_none() {
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
                 if let Some(t) = pos.first() {
                     if is_ref(t) {
                         j["ref"] = json!(t);
@@ -1049,9 +1049,9 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
             if j.get("option").is_none() && pos.len() > pi {
                 j["option"] = json!(pos[pi..].join(" "));
             }
-            if j.get("ref").is_none() && j.get("label").is_none() {
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
                 return Err(BladeError::Usage(
-                    "select needs a target — `act select <ref|label> <option>`".into(),
+                    "select needs a target — `act select <ref|label|--selector> <option>`".into(),
                 ));
             }
             if j.get("option").is_none() {
@@ -1061,12 +1061,12 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
             }
         }
         "clear" | "read" => {
-            if j.get("ref").is_none() && !pos.is_empty() {
+            if j.get("ref").is_none() && j.get("selector").is_none() && !pos.is_empty() {
                 j["ref"] = json!(pos[0].clone());
             }
-            if j.get("ref").is_none() {
+            if j.get("ref").is_none() && j.get("selector").is_none() {
                 return Err(BladeError::Usage(format!(
-                    "{action} needs a ref — `act {action} e5` (refs come from see model / nav)"
+                    "{action} needs a ref or --selector — `act {action} e5` (refs come from see model / nav)"
                 )));
             }
         }
@@ -1118,7 +1118,7 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
         }
         "upload" => {
             let mut pi = 0usize;
-            if j.get("ref").is_none() && j.get("label").is_none() {
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
                 if let Some(t) = pos.first() {
                     if is_ref(t) {
                         j["ref"] = json!(t);
@@ -1143,9 +1143,9 @@ fn parse_act_args(args: &[String]) -> Result<Value> {
                 obj.remove("path");
             }
             j["text"] = json!(path);
-            if j.get("ref").is_none() && j.get("label").is_none() {
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
                 return Err(BladeError::Usage(
-                    "upload needs a target — `act upload <ref|label> <path>`".into(),
+                    "upload needs a target — `act upload <ref|label|--selector> <path>`".into(),
                 ));
             }
         }
@@ -2867,6 +2867,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             "universal_flags": {
                 "--ref": "element ref (self-heals)",
                 "--label": "field label",
+                "--selector": "CSS selector (searches open shadow roots)",
                 "--text": "value — text to type, file path (upload), wait match value",
                 "--role": "role filter for text/label resolution",
                 "--nth": "1-based pick among matches",
@@ -3196,7 +3197,7 @@ ACTIONS
   open-tab [url] / switch-tab <id> / close-tab <id>
 
 UNIVERSAL FLAGS (mirror the MCP schema — accepted on every action)
-  --ref --label --text --role --nth --key --url --option --condition --timeout
+  --ref --label --text --selector --role --nth --key --url --option --condition --timeout
   --dx --dy --js --submit --block --slim   (per-action: --path, --max, --x/--y…)
 
 Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
@@ -3205,6 +3206,7 @@ payloads: @file or - (stdin). Unknown flags fail loudly (exit 2). Key chords: 'a
 EXAMPLES
   bladebro act click e5                          click a ref
   bladebro act click "Sign in"                   click by text
+  bladebro act click --selector "[role=menuitem]"   click by CSS (searches shadow DOM)
   bladebro act type e12 "hello world"            type
   bladebro act fill '{"e3":"John","e5":"Doe"}' --submit e8
   bladebro act click Submit --url example.com/login   navigate + click in ONE call
@@ -3490,6 +3492,30 @@ mod tests {
         let v = parse_act_args(&a(&["click", "Sign", "in"])).unwrap();
         assert_eq!(v["label"], "Sign in");
         assert!(v.get("ref").is_none());
+    }
+
+    #[test]
+    fn act_accepts_selector_flag() {
+        // --selector is an addressing mode for click/hover/type/select/
+        // clear/read/upload/eval: it must survive parsing and suppress the
+        // positional label fallback.
+        let v = parse_act_args(&a(&["click", "--selector", "#menu li"])).unwrap();
+        assert_eq!(v["selector"], "#menu li");
+        let v = parse_act_args(&a(&["hover", "--selector", "button[aria-label=\"x\"]"])).unwrap();
+        assert_eq!(v["selector"], "button[aria-label=\"x\"]");
+        let v = parse_act_args(&a(&["type", "--selector", "[role=textbox]", "--text", "hi"])).unwrap();
+        assert_eq!(v["selector"], "[role=textbox]");
+        assert_eq!(v["text"], "hi");
+        let v = parse_act_args(&a(&["select", "--selector", "#pet", "cat"])).unwrap();
+        assert_eq!(v["selector"], "#pet");
+        assert_eq!(v["option"], "cat");
+        let v = parse_act_args(&a(&["read", "--selector", "#note"])).unwrap();
+        assert_eq!(v["selector"], "#note");
+        let v = parse_act_args(&a(&["clear", "--selector", "#note"])).unwrap();
+        assert_eq!(v["selector"], "#note");
+        let v = parse_act_args(&a(&["upload", "--selector", "input[type=file]", "--path", "/tmp/f.pdf"])).unwrap();
+        assert_eq!(v["selector"], "input[type=file]");
+        assert_eq!(v["text"], "/tmp/f.pdf");
     }
 
     #[test]

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shadow fixture</title>
+<style>
+  body{font:14px system-ui,sans-serif;margin:0;padding:16px}
+  #zone{position:relative;height:110px;margin-top:12px;border:1px dashed #ccc}
+  #overlay-cover{position:absolute;left:16px;top:20px;width:480px;height:56px;z-index:5;background:rgba(0,0,0,.08)}
+  #covered-btn{position:absolute;left:16px;top:20px;width:230px;height:56px}
+  #covered-inert{position:absolute;left:260px;top:20px;width:230px;height:56px}
+  #ghost-action{display:none}
+  #thingbox{margin-top:12px}
+  shadow-composer{display:block;margin-top:12px}
+</style>
+</head>
+<body>
+<h1>Shadow fixture</h1>
+
+<shadow-menu-host></shadow-menu-host>
+<button id="ghost-action" aria-label="Ghost action">Ghost</button>
+
+<div id="zone">
+  <div id="overlay-cover"></div>
+  <button id="covered-btn">Covered button</button>
+  <button id="covered-inert">Covered inert</button>
+</div>
+
+<shadow-composer></shadow-composer>
+<div id="thingbox"></div>
+
+<script>
+// Models the real-world structures from the agent report: a trigger nested
+// two open shadow roots deep (shreddit-overflow-menu > rpl-dropdown class),
+// a handler that only flips state (silent no-op), a desktop-hidden control,
+// an occluded control, and a shadow-DOM contenteditable composer.
+class MenuDropdown extends HTMLElement {
+  connectedCallback() {
+    if (this.__built) return;
+    this.__built = true;
+    this.innerHTML = '<ul style="list-style:none;padding:0;margin:4px 0">' +
+      '<li><button role="menuitem" id="mi-fake" style="display:block;width:100%;text-align:left">Delete comment</button></li>' +
+      '<li><button role="menuitem" id="mi-real" style="display:block;width:100%;text-align:left">Do the thing</button></li></ul>';
+  }
+}
+customElements.define('menu-dropdown', MenuDropdown);
+
+class OverflowMenu extends HTMLElement {
+  connectedCallback() {
+    if (this.__built) return;
+    this.__built = true;
+    const sr = this.attachShadow({mode: 'open'});
+    sr.innerHTML = '<button id="overflow-trigger" aria-label="Open user actions" aria-expanded="false">...</button>' +
+      '<menu-dropdown hidden></menu-dropdown>';
+    const trig = sr.querySelector('#overflow-trigger');
+    const dd = sr.querySelector('menu-dropdown');
+    window.__closeMenu = () => { dd.hidden = true; trig.setAttribute('aria-expanded', 'false'); };
+    trig.addEventListener('click', () => {
+      const open = dd.hidden;
+      dd.hidden = !open;
+      trig.setAttribute('aria-expanded', String(open));
+    });
+    // Fake handler: looks actionable, only flips a state bit — the
+    // "silent no-op with attribute-level evidence" class.
+    sr.querySelector('#mi-fake').addEventListener('click', function () {
+      this.disabled = true;
+    });
+    // Real handler: appends an actionable node.
+    sr.querySelector('#mi-real').addEventListener('click', function () {
+      if (document.getElementById('thing-done')) return;
+      const b = document.createElement('button');
+      b.id = 'thing-done';
+      b.textContent = 'THING DONE';
+      document.getElementById('thingbox').appendChild(b);
+    });
+  }
+}
+customElements.define('overflow-menu', OverflowMenu);
+
+class ShadowMenuHost extends HTMLElement {
+  connectedCallback() {
+    if (this.__built) return;
+    this.__built = true;
+    this.attachShadow({mode: 'open'}).innerHTML = '<overflow-menu></overflow-menu>';
+  }
+}
+customElements.define('shadow-menu-host', ShadowMenuHost);
+
+class ShadowComposer extends HTMLElement {
+  connectedCallback() {
+    if (this.__built) return;
+    this.__built = true;
+    this.attachShadow({mode: 'open'}).innerHTML =
+      '<div id="ce" contenteditable="true" aria-label="Write a comment" ' +
+      'style="border:1px solid #999;min-height:48px;padding:6px;max-width:600px"></div>';
+  }
+}
+customElements.define('shadow-composer', ShadowComposer);
+
+document.getElementById('covered-btn').addEventListener('click', function () {
+  window.__coveredClicked = true;
+  if (document.getElementById('covered-ran')) return;
+  const b = document.createElement('button');
+  b.id = 'covered-ran';
+  b.textContent = 'Covered ran';
+  document.getElementById('thingbox').appendChild(b);
+});
+</script>
+</body>
+</html>
