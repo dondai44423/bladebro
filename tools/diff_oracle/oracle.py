@@ -333,6 +333,7 @@ def main():
         wm_proc = setup_display_session(display)
 
     real_home, real_src, real_env = None, None, None
+    agent_home, agent_env = None, None
     if args.lane == "real":
         # Isolated home + a synthetic source profile; the clone lane imports
         # it and runs the real-browser path with zero patches. Forced via
@@ -375,9 +376,15 @@ def main():
         else:
             # Pin the agent lane: a live real-browser config (`rb on`) would
             # silently redirect the subject to the user's own browser and the
-            # mask surface would never be measured.
+            # mask surface would never be measured. Scratch BLADE_HOME too —
+            # without one the CLI daemon runs on the user's real data dir
+            # (test session profiles + a leftover daemon in ~/.blade, found
+            # live 2026-09-26); no warming keeps runs deterministic.
+            agent_home = tempfile.mkdtemp(prefix="blade-oracle-agent-")
             agent_env = dict(os.environ)
             agent_env["BLADE_LANE"] = "agent"
+            agent_env["BLADE_HOME"] = agent_home
+            agent_env["BLADE_NO_WARMING"] = "1"
             subject = bladebro_probe(bladebro, args.url, battery, env=agent_env)
     finally:
         if wm_proc:
@@ -395,11 +402,16 @@ def main():
         if real_env is not None:
             subprocess.run([bladebro, "stop"], env=real_env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if agent_env is not None:
+            subprocess.run([bladebro, "stop"], env=agent_env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
         if not args.keep:
             if real_home:
                 shutil.rmtree(real_home, ignore_errors=True)
             if real_src:
                 shutil.rmtree(real_src, ignore_errors=True)
+            if agent_home:
+                shutil.rmtree(agent_home, ignore_errors=True)
 
     keys = sorted(set(stock) | set(subject))
     ok, expected, divergent = [], [], []

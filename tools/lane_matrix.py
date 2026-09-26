@@ -14,7 +14,7 @@ Binary under test: `BLADEBRO` env -> the repo build (`target/release/bladebro`)
 -> `~/.local/bin/bladebro`; printed at startup. The real lane refuses a binary
 that predates `rb` (BLADE_LANE=real would be silently ignored).
 """
-import json, os, shutil, subprocess, sys, tempfile, time
+import json, os, shutil, signal, subprocess, sys, tempfile, time
 
 def _resolve_blade():
     """BLADEBRO wins; otherwise prefer the repo build (a stale installed
@@ -136,18 +136,73 @@ def lane_real(rounds=5):
     return out
 
 
-def agent_env():
+def agent_env(home):
     """The agent lanes pin BLADE_LANE=agent: a live real-browser config
     (`rb on`) would otherwise silently redirect these runs to the user's own
-    browser and every mask assertion would measure the wrong lane."""
+    browser and every mask assertion would measure the wrong lane.
+
+    Scratch BLADE_HOME + no warming: without a home every run drives its CLI
+    daemon on the user's real data dir — test session profiles and a leftover
+    daemon in `~/.blade` (found live 2026-09-26); no warming keeps the cold
+    timings deterministic and offline-safe."""
     env = dict(os.environ)
     env["BLADE_LANE"] = "agent"
+    env["BLADE_HOME"] = home
+    env["BLADE_NO_WARMING"] = "1"
     return env
 
 
-def lane_daemon(rounds=5):
+def lane_home():
+    return tempfile.mkdtemp(prefix="blade-matrix-home-")
+
+
+def cleanup_lane(home, env):
+    """Stop the lane's daemon and sweep any browser children it left (MCP
+    lanes are killed, so their browser/Xvfb can outlive the parent briefly).
+    Wait for the swept processes to die before deleting the home — a dying
+    Chromium can re-create its user-data-dir during shutdown writes."""
+    subprocess.run([BLADE, "stop"], env=env, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=60)
+    for pid in _pids_under(home):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    end = time.time() + 5
+    while time.time() < end and _pids_under(home):
+        time.sleep(0.2)
+    for _ in range(3):
+        shutil.rmtree(home, ignore_errors=True)
+        if not os.path.exists(home):
+            break
+        time.sleep(0.2)
+
+
+def _pids_under(home):
     out = []
-    env = agent_env()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().decode("utf8", "ignore").replace("\x00", " ")
+        except Exception:
+            continue
+        if home in cmd and "chrome_crashpad" not in cmd and "--type=" not in cmd:
+            out.append(int(pid))
+    return out
+
+
+def lane_daemon(rounds=5):
+    home = lane_home()
+    env = agent_env(home)
+    try:
+        return _lane_daemon_rounds(rounds, env)
+    finally:
+        cleanup_lane(home, env)
+
+
+def _lane_daemon_rounds(rounds, env):
+    out = []
     for i in range(rounds):
         t0 = time.time()
         subprocess.run([BLADE, "stop"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
@@ -166,7 +221,15 @@ def lane_daemon(rounds=5):
 
 
 def lane_oneshot(rounds=5):
-    env = agent_env()
+    home = lane_home()
+    env = agent_env(home)
+    try:
+        return _lane_oneshot_rounds(rounds, env)
+    finally:
+        cleanup_lane(home, env)
+
+
+def _lane_oneshot_rounds(rounds, env):
     out = []
     for i in range(rounds):
         t0 = time.time()
@@ -183,6 +246,7 @@ def lane_oneshot(rounds=5):
 
 
 def mcp_call(proc, msg, want_id):
+    assert proc.stdin is not None and proc.stdout is not None
     proc.stdin.write(json.dumps(msg) + "\n")
     proc.stdin.flush()
     end = time.time() + 180
@@ -200,14 +264,23 @@ def mcp_call(proc, msg, want_id):
 
 
 def lane_mcp(rounds=5, tool="act", env_extra=None):
-    out = []
-    env = agent_env()
+    home = lane_home()
+    env = agent_env(home)
     if env_extra:
         env.update(env_extra)
+    try:
+        return _lane_mcp_rounds(rounds, tool, env)
+    finally:
+        cleanup_lane(home, env)
+
+
+def _lane_mcp_rounds(rounds, tool, env):
+    out = []
     for i in range(rounds):
         t0 = time.time()
         proc = subprocess.Popen([BLADE, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
+        assert proc.stdin is not None and proc.stdout is not None
         try:
             mcp_call(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
@@ -221,13 +294,26 @@ def lane_mcp(rounds=5, tool="act", env_extra=None):
                                  "params": {"name": tool,
                                             "arguments": {"action": "eval", "js": PROBE}}}, 3)
             txt = json.dumps(r2)
+            if r2 is None:
+                raise RuntimeError("no response")
             payload = r2["result"]["content"][0]["text"]
             j = parse_result(payload)
             out.append((i + 1, " ".join(classify(j)) + f" [{time.time()-t0:.1f}s]"))
         except Exception as e:
             out.append((i + 1, f"FAIL {e}"))
         finally:
-            proc.kill()
+            # Graceful close: EOF shuts the MCP down, and it shuts its
+            # browser down with it. SIGKILL would orphan the browser (the
+            # next round's launch reaps it, but the last round's would
+            # linger past the run and re-create its profile dirs mid-dying).
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=30)
+            except Exception:
+                proc.kill()
     return out
 
 

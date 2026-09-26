@@ -128,6 +128,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-navs, `see <url>`, `open-tab`/`switch-tab`/`close-tab`, `collect`), the
   page never moves, reads (`see`, `eval`) stay available, and `rb resume`
   restores navigation. Wired into the gate battery.
+- **`tools/rb_live/attach_drift.py` — the attach-drift live check.** A scripted
+  MCP session against a scratch headless Chromium: attach → `rb off` → the
+  session must detach and relaunch on the current lane, the attached browser
+  left running and untouched (the live counterpart of the hunt's HIGH fix;
+  before it the session kept steering the user's browser). Isolated,
+  self-cleaning, exit 0 = the contract holds.
 
 ### Fixed
 - **Reddit comment trees no longer lose collapsed regions silently.** Empty
@@ -355,6 +361,15 @@ detectors flag exactly that (measured live: CreepJS `webDriverIsOn: true` →
   pick could import an empty, login-less profile).
 - **`rb pause` silences the idle hum on the agent lane too** (the pause check
   now runs before the lane branch).
+- **The gate harness runs hermetically now.** `tools/diff_oracle/oracle.py` and
+  `tools/lane_matrix.py` pinned `BLADE_LANE=agent` but not `BLADE_HOME` — so
+  every agent-lane run drove its CLI daemon on the user's **real data dir**
+  (`~/.blade`): test session profiles appeared under `profiles/`, knowledge
+  stats were written, and the last run left its daemon alive (found as a live
+  leak during the review's final sweep; residue quarantined). Both tools now
+  use a scratch `BLADE_HOME` (+ `BLADE_NO_WARMING=1` for deterministic
+  timings), stop the daemon in a `finally`, and sweep any MCP-killed browser
+  children — a gate run can no longer touch the user's data dir.
 
 ### Changed
 - **Batch/run step vocabulary is derived, not hand-maintained** (`ACT_ACTIONS`
