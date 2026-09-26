@@ -564,8 +564,9 @@ async fn cmd_mcp_pipe() -> Result<()> {
     Err(bladebro::error::BladeError::Other("pipe transport is Unix-only".into()))
 }
 
-/// S13: `bladebro audit` — run the stealth vectors + boot self-check (S2)
-/// and print a scorecard. One-shot CLI command (WS transport).
+/// S13: `bladebro audit` — run the stealth vectors, the boot self-check (S2),
+/// and a cross-restart consistency stamp (v3.9.12); print a scorecard.
+/// One-shot CLI command (WS transport).
 async fn cmd_audit(base: &str) -> Result<()> {
     use bladebro::action::Action;
     use bladebro::page::Page;
@@ -639,6 +640,64 @@ async fn cmd_audit(base: &str) -> Result<()> {
         println!("    window.cdc_:         {} ({})", if cdc == "undefined" { "OK" } else { "FAIL" }, cdc);
         println!("    navigator.plugins:   {} ({} plugins)", if plugins > 0 { "OK" } else { "WARN" }, plugins);
         println!("    toString integrity:  {}", if native { "OK (native)" } else { "FAIL" });
+    }
+
+    // v3.9.12: cross-restart consistency stamp — the fingerprint that must
+    // not drift between audit runs (canvas/audio hashes, geometry, UA, GL
+    // identity). The launch healthcheck makes the backend deterministic; any
+    // drift here is a regression (a flapping GL state, a misplaced mask).
+    let stamp_expr = r#"(async function(){
+var out={};
+try{
+var c=document.createElement('canvas');c.width=240;c.height=60;
+var x=c.getContext('2d');x.textBaseline='top';x.font='16px Arial';x.fillStyle='#f60';
+x.fillRect(10,10,80,20);x.fillStyle='#069';x.fillText('Bladebro,\ud83d\ude00',12,24);
+var d=c.toDataURL();var hh=5381;for(var i=0;i<d.length;i++)hh=((hh<<5)+hh+d.charCodeAt(i))>>>0;out.canvas=hh.toString(16);
+var ac=new OfflineAudioContext(1,5000,44100);var o=ac.createOscillator();o.frequency.value=1000;
+var k=ac.createDynamicsCompressor();o.connect(k);k.connect(ac.destination);o.start(0);
+var b=await ac.startRendering();var s=0;var a=b.getChannelData(0);
+for(var j=100;j<1100;j++)s+=Math.abs(a[j]);out.audio=s.toFixed(6);
+}catch(e){out.err=String(e);}
+out.screen=[screen.width,screen.height,screen.availWidth,screen.availHeight,devicePixelRatio].join('x');
+out.ua=navigator.userAgent;
+out.gl=(function(){try{var g=document.createElement('canvas').getContext('webgl');var e=g.getExtension('WEBGL_debug_renderer_info');return e?String(g.getParameter(e.UNMASKED_RENDERER_WEBGL)):'';}catch(e){return '';}})();
+return JSON.stringify(out);
+})()"#;
+    let stamp = session
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": stamp_expr,
+                "returnByValue": true,
+                "awaitPromise": true,
+            })),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).map(String::from));
+    if let Some(ref s) = stamp {
+        let stamp_path = bladebro::platform::blade_dir().join("audit-stamp.json");
+        let prev = std::fs::read_to_string(&stamp_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        println!("\n  Consistency (vs previous audit run):");
+        match prev.as_ref().and_then(|p| p.as_object()) {
+            None => println!("    first run — baseline recorded"),
+            Some(p) => {
+                if let Ok(cur) = serde_json::from_str::<serde_json::Value>(s) {
+                    for f in ["canvas", "audio", "screen", "ua", "gl"] {
+                        let a = p.get(f).and_then(|v| v.as_str()).unwrap_or("<none>");
+                        let b = cur.get(f).and_then(|v| v.as_str()).unwrap_or("<none>");
+                        if a == b {
+                            println!("    {f:<6} PASS stable ({b})");
+                        } else {
+                            println!("    {f:<6} FAIL drift — now {b} (was {a})");
+                        }
+                    }
+                }
+            }
+        }
+        let _ = std::fs::write(&stamp_path, s);
     }
     println!("{bar}");
     Ok(())

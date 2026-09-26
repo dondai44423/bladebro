@@ -51,12 +51,22 @@ docs: update README comparison table
 If your change touches the stealth system, verify it doesn't regress:
 
 ```bash
-# Local vectors — must stay 36/36
+# Local vectors — must stay 61/61
 ./target/release/bladebro audit
+
+# Differential oracle — divergent must be 0 (stock vs bladebro, same display)
+python3 tools/diff_oracle/oracle.py
+
+# CreepJS lie-engine port — headless-relevant flags clean, 189 properties
+# (also the instrument that catches cross-realm toString leaks)
+
+# Per-lane smoke (daemon / one-shot / MCP-pipe), 5 cold starts each
+python3 tools/lane_matrix.py all 5
 
 # Real detection sites
 # bot.sannysoft.com — all checks must pass
 # incolumitas.com — no bot detection
+# abrahamjuliot.github.io/creepjs — headless 0%, stealth 0%
 ```
 
 Include the before/after scores in your PR description.

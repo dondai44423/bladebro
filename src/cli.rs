@@ -2034,7 +2034,7 @@ COMMANDS
   vision [--marks]                screenshot (saved to a file; path printed)
   daemon | stop                   manage the persistent Chrome session
   mcp                             MCP server on stdio — add to your agent's client config
-  audit                           stealth audit — 36-vector suite + boot self-check
+  audit                           stealth audit — 61-check suite + boot self-check + drift stamp
   update | -u [--check] [--force]  self-update; --rollback restores the previous binary
   doctor | -doc                   system diagnostics (13 checks)
   -v | --version                  version + install method + update status
@@ -2242,7 +2242,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             "usage": "bladebro audit",
             "tool": null,
             "examples": ["bladebro audit"],
-            "notes": ["stealth audit — 36-vector local suite + boot self-check scorecard; 36/36 is the bar"]
+            "notes": ["stealth audit — 61-check local suite + boot self-check + cross-restart consistency stamp; 61/61 is the bar"]
         }),
         "update" => json!({
             "usage": "bladebro update | -u [--check] [--force]",
@@ -2577,9 +2577,12 @@ WebSocket. Chrome launches lazily on the first tool call.
 USAGE
   bladebro audit
 
-Runs the 36-vector local suite (tests/vectors.html) plus a boot
-self-check (webdriver, cdc_, plugins, toString integrity) and prints a
-scorecard. Run it after any stealth-affecting change; 36/36 is the bar.
+Runs the local vector suite (tests/vectors.html — 61 checks: the core
+stealth surface, the permissions native-parity battery, GL-coherence
+checks, worker/iframe propagation) plus a boot self-check and a
+cross-restart consistency stamp (canvas/audio/geometry/UA/GL must not
+drift between runs). Run it after any stealth-affecting change; 61/61
+is the bar.
 "#,
         "update" => r#"bladebro -u / update — self-update
 

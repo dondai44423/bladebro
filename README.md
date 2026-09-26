@@ -318,23 +318,26 @@ Six layers, all on by default, no config needed:
 | Layer | What it does |
 |---|---|
 | **Protocol** | No `Runtime.enable` (defuses the DataDome console trap); CDP over a zero-port pipe; isolated world for DOM reads. |
-| **Environment** | UA + Client Hints override (no HeadlessChrome), WebGL renderer, screen geometry, hardwareConcurrency, deviceMemory, mediaDevices, permissions. |
+| **Environment** | UA + Client Hints override (no HeadlessChrome), WebGL renderer/limits/extension coherent with the machine's real GPU, mediaDevices, permissions — every override installed as a Proxy over the native original, so it keeps native receiver/argument errors, own keys `{length,name}`, no `prototype`, and stringifies as native in **every** realm. |
+| **Display** | A window manager on the virtual display (xfwm4) plus a declared work area, so `outerWidth > innerWidth` and `availHeight < height` are real — window chrome and a taskbar, not patched getters. Falls back to a self-correcting mask on WM-less hosts. |
 | **Behavior** | Bezier mouse paths with overshoot + correction, `movementX/Y` deltas, micro-tremors, non-zero key-press duration, log-normal typing, idle hum, smooth scroll. |
 | **Coherence** | Per-domain timezone/locale memory, geo-consistent identity, WebRTC fail-closed, stable canvas/audio (noise off by default). |
-| **Residue** | `cdc_` removal, native `toString` integrity, MutationObserver for late artifacts. |
+| **Residue** | `cdc_` removal, `MutationObserver` for late artifacts, and — deliberately — **no `Function.prototype.toString` patch**: masks are native-shaped by construction, so there is nothing to leak across realms. |
 | **Seasoning** | Persistent profile (cookies, history, HSTS) + a login snapshot that survives clean shutdown, SIGKILL and power loss. |
 
 **Verified against real detection sites:**
 
 | Test | Result |
 |---|---|
-| 36-vector local suite + boot self-check (`bladebro audit`) | 36/36 pass |
+| 61-check local suite + boot self-check + drift stamp (`bladebro audit`) | 61/61 pass, stamps stable |
+| Differential oracle vs stock Chrome on the same display (`tools/diff_oracle`) | 67 probes: 49 identical, 18 documented mask surface, **0 divergent** |
+| CreepJS | **headless: 0%, stealth: 0%** (stock Chrome on the same lane: 0%/0%) |
 | bot.sannysoft.com | All pass |
-| incolumitas.com | 8/8 automated tests (webdriver=false, no UA leak) |
-| CreepJS | headless: 6%, stealth: 20% (hasSwiftShader=false) |
+| incolumitas.com | All OK (webdriver=false, no UA leak) |
+| deviceandbrowserinfo.com | “You are human!” — `isBot: false` |
 | PerimeterX/HUMAN (Zillow, Fiverr) | Full page load, no block |
 
-Run `bladebro audit` to verify your own setup.
+Run `bladebro audit` to verify your own setup; run `python3 tools/diff_oracle/oracle.py` before any release.
 
 ## 🧩 Site adapters
 
@@ -467,7 +470,7 @@ Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME
 | Command | What it does |
 |---|---|
 | `bladebro -doc` / `bladebro doctor` | System check — Chrome, display, profile hygiene, logins, data root, network, version |
-| `bladebro audit` | Stealth audit — 36-vector suite + boot self-check, against your setup |
+| `bladebro audit` | Stealth audit — 61-check suite + boot self-check + cross-restart drift stamp, against your setup |
 | `bladebro -v` | Version + update status |
 | `bladebro -u` | Self-update: check, download, SHA-256-verify, swap (source installs) |
 | `bladebro --rollback` | Restore the previous version |

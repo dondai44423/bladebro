@@ -193,6 +193,132 @@ async function run() {
   const stack = new Error("probe").stack || "";
   check("error-stack-clean", !/cdc|devtools|__puppeteer|__playwright/i.test(stack), stack.split("\n").length + " frames clean");
 
+  // --- v3.9.12: permissions native-parity battery (the creepjs tripwire class) ---
+  async function expectMsg(fn) {
+    try { const p = fn(); if (p && p.then) { try { await p; return "resolved"; } catch (e) { return e.message || String(e); } } return "sync-ok"; }
+    catch (e) { return "threw:" + (e.message || e); }
+  }
+  {
+    const P = navigator.permissions;
+    const m0 = await expectMsg(() => P.query());
+    check("perm-zero-arg-msg", m0 === "Failed to execute 'query' on 'Permissions': 1 argument required, but only 0 present.", m0.slice(0, 90));
+    const m1 = await expectMsg(() => P.query("geolocation"));
+    check("perm-nonobject-msg", m1 === "Failed to execute 'query' on 'Permissions': parameter 1 is not of type 'object'.", m1.slice(0, 90));
+    const m2 = await expectMsg(() => P.query.call({}, { name: "geolocation" }));
+    check("perm-receiver", m2 === "Failed to execute 'query' on 'Permissions': Illegal invocation", m2.slice(0, 90));
+    check("perm-proto-owned", P.query === Object.getPrototypeOf(P).query, "prototype-owned");
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(P), "query");
+    check("perm-descriptor", !!desc && desc.writable === true && desc.enumerable === true && desc.configurable === true,
+          desc ? ("w:" + desc.writable + " e:" + desc.enumerable + " c:" + desc.configurable) : "none");
+    try {
+      const st = await P.query({ name: "notifications" });
+      check("perm-status-shape", Object.getOwnPropertyNames(st).length === 0, "own=[" + Object.getOwnPropertyNames(st).join("|") + "]");
+    } catch (e) { check("perm-status-shape", false, "threw: " + e.message); }
+  }
+
+  // --- v3.9.12: GL coherence — the mask must match the claimed GPU exactly ---
+  let mainRenderer = "";
+  {
+    const g1c = document.createElement("canvas").getContext("webgl");
+    const g2c = document.createElement("canvas").getContext("webgl2");
+    check("gl-never-null", !!g1c && !!g2c, "webgl=" + !!g1c + " webgl2=" + !!g2c);
+    let masked = false;
+    if (g1c) {
+      const e = g1c.getExtension("WEBGL_debug_renderer_info");
+      mainRenderer = e ? String(g1c.getParameter(e.UNMASKED_RENDERER_WEBGL)) : "";
+      check("gl-renderer-not-software", !!mainRenderer && !/llvmpipe|swiftshader|softpipe|software/i.test(mainRenderer), mainRenderer);
+      masked = /Intel\(R\) Graphics \(ADL GT2\)/.test(mainRenderer);
+      if (masked) {
+        const ex = g1c.getSupportedExtensions();
+        check("gl-ext-count", ex.length === 36, String(ex.length));
+        check("gl-ext-filtered", ex.indexOf("EXT_shader_texture_lod") === -1 && ex.indexOf("WEBGL_polygon_mode") === -1,
+              "lod=" + ex.indexOf("EXT_shader_texture_lod") + " poly=" + ex.indexOf("WEBGL_polygon_mode"));
+        const ex2 = g1c.getSupportedExtensions();
+        check("gl-ext-fresh-array", ex !== ex2 && ex.join(",") === ex2.join(","), "fresh=" + (ex !== ex2));
+        check("gl-ext-blocked-call", g1c.getExtension("EXT_shader_texture_lod") === null, String(g1c.getExtension("EXT_shader_texture_lod")));
+        check("gl-max-combined", g1c.getParameter(35661) === 64, String(g1c.getParameter(35661)));
+        const hf = g1c.getShaderPrecisionFormat(g1c.FRAGMENT_SHADER, g1c.HIGH_FLOAT);
+        const mf = g1c.getShaderPrecisionFormat(g1c.FRAGMENT_SHADER, g1c.MEDIUM_FLOAT);
+        const lf = g1c.getShaderPrecisionFormat(g1c.FRAGMENT_SHADER, g1c.LOW_FLOAT);
+        check("gl-precision-remap",
+              [mf.rangeMin, mf.rangeMax, mf.precision].join(",") === [hf.rangeMin, hf.rangeMax, hf.precision].join(",") &&
+              [lf.rangeMin, lf.rangeMax, lf.precision].join(",") === [hf.rangeMin, hf.rangeMax, hf.precision].join(","),
+              "H=" + hf.precision + " M=" + mf.precision + " L=" + lf.precision);
+        check("gl-precision-genuine", mf instanceof WebGLShaderPrecisionFormat, "genuine=" + (mf instanceof WebGLShaderPrecisionFormat));
+      } else {
+        info("gl-mask-checks", "skipped (mask not active: " + mainRenderer + ")");
+      }
+    }
+    if (g2c && masked) {
+      check("gl2-max-samples", g2c.getParameter(36183) === 16, String(g2c.getParameter(36183)));
+      const e2 = g2c.getSupportedExtensions();
+      check("gl2-ext-count", e2.length === 32 && e2.indexOf("OVR_multiview2") === -1 && g2c.getExtension("OVR_multiview2") === null,
+            "n=" + e2.length + " ovr=" + e2.indexOf("OVR_multiview2"));
+    }
+  }
+
+  // --- v3.9.12: worker + iframe propagation of the mask ---
+  let workerMask = null;
+  try {
+    workerMask = await new Promise((resolve) => {
+      const code = `onmessage = () => {
+        let out = { extN: -1, maxc: -1, tsr: null };
+        try {
+          const g = new OffscreenCanvas(8, 8).getContext("webgl");
+          if (g) {
+            out.extN = g.getSupportedExtensions().length;
+            out.maxc = g.getParameter(35661);
+            out.tsr = Function.prototype.toString.call(WebGLRenderingContext.prototype.getParameter).indexOf("native code") !== -1;
+          }
+        } catch (e) { out.err = String(e); }
+        postMessage(out);
+      };`;
+      const w = new Worker(URL.createObjectURL(new Blob([code], { type: "application/javascript" })));
+      const to = setTimeout(() => resolve({ timeout: true }), 10000);
+      w.onmessage = (ev) => { clearTimeout(to); w.terminate(); resolve(ev.data); };
+      w.postMessage(0);
+    });
+  } catch (e) { workerMask = { err: String(e) }; }
+  if (workerMask) {
+    if (/Intel\(R\) Graphics \(ADL GT2\)/.test(mainRenderer)) {
+      check("worker-ext-count", workerMask.extN === 36, String(workerMask.extN));
+      check("worker-max-combined", workerMask.maxc === 64, String(workerMask.maxc));
+    }
+    check("worker-tostring-mask", workerMask.tsr === true, String(workerMask.tsr));
+  }
+
+  try {
+    const ires = await new Promise((resolve) => {
+      const f = document.createElement("iframe");
+      f.src = "about:blank";
+      f.onload = () => {
+        try {
+          const g = f.contentWindow.document.createElement("canvas").getContext("webgl");
+          const e = g ? g.getExtension("WEBGL_debug_renderer_info") : null;
+          resolve({ r: g ? (e ? String(g.getParameter(e.UNMASKED_RENDERER_WEBGL)) : "no-ext") : "null" });
+        } catch (err) { resolve({ r: "err:" + err.message }); }
+      };
+      document.body.appendChild(f);
+      setTimeout(() => resolve({ r: "timeout" }), 3000);
+    });
+    check("iframe-gl-renderer-match", !!mainRenderer && String(ires.r) === mainRenderer, String(ires.r).slice(0, 90));
+  } catch (e) { check("iframe-gl-renderer-match", false, "threw: " + e.message); }
+
+  // --- v3.9.12: geometry + client-hint coherence ---
+  {
+    const owd = window.outerWidth - window.innerWidth;
+    check("outerwidth-plausible", owd > 0 && owd <= 40, "diff=" + owd);
+    check("inner-within-screen", window.innerWidth <= screen.width && window.innerHeight <= screen.height,
+          window.innerWidth + "x" + window.innerHeight + " in " + screen.width + "x" + screen.height);
+    if (navigator.userAgentData) {
+      const hv = await navigator.userAgentData.getHighEntropyValues(["uaFullVersion"]);
+      const uaMaj = ((navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1] || "").split(".")[0];
+      const hvMaj = String(hv.uaFullVersion || "").split(".")[0];
+      check("uad-full-version-coherent", !!uaMaj && uaMaj === hvMaj, "ua=" + uaMaj + " hv=" + hvMaj);
+    }
+    check("webgpu-api-shape", ("gpu" in navigator) && (navigator.gpu === null || typeof navigator.gpu.requestAdapter === "function"), "gpu=" + ("gpu" in navigator));
+  }
+
   document.getElementById("out").textContent =
     "SCORE: " + pass + "/" + total + " pass\n" + lines.join("\n");
   document.title = "DONE " + pass + "/" + total;

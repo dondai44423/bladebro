@@ -8,6 +8,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **WebGL is no longer dead on the MCP/pipe lane.** The pipe transport built its
+  Chrome command line without `--ignore-gpu-blocklist`, so on a software-GL
+  display Chrome reported "WebGL1/2 blocklisted" and `getContext('webgl')`
+  returned null — the reported "no WebGL" anomaly. Both transports now build
+  their flags from one pure builder (`launch_args`), so they cannot drift, and
+  the launch healthcheck runs the GL ladder (native-GL → SwiftShader) on both,
+  warning loudly when even the last stage has no context.
+- **`navigator.permissions.query` is byte-native again at every boundary.**
+  Zero-arg calls return Chrome's own `TypeError: 1 argument required, but only
+  0 present.`, non-object descriptors return `parameter 1 is not of type
+  'object'.`, and a wrong receiver is rejected with `Illegal invocation` — the
+  relay delegates to the native method first and only rewrites the headless
+  `denied` notifications result on real origins.
+- **CreepJS: 33% headless / 20% stealth → 0% headless / 0% stealth.** The
+  injection used to replace `Function.prototype.toString` with a mask backed by
+  a per-realm registry. CreepJS stringifies functions from a *nested-iframe
+  realm*, where that registry cannot recognise anything: the real source of
+  every patched function leaked, the lie engine flagged all of them, and the
+  escalation (`detectProxies`) poisoned unrelated APIs — `hasToStringProxy` and
+  `webDriverIsOn` were both consequences, not causes. The mask is gone: see
+  "proxy masks" under Changed. Headless-relevant properties now measure clean
+  on a 189-property port of CreepJS's own lie engine (2 remaining entries, both
+  the WebGL `getParameter` mask on a software-GL lane, documented below).
+- **`navigator.webdriver` is `false` on the MCP lane again.** Chrome treats
+  `--remote-debugging-pipe` as its automation transport and enables the blink
+  AutomationControlled feature for it, so the pipe lane reported
+  `navigator.webdriver === true` while the WS lanes reported `false` (measured
+  on Chrome 151 against a stock control). The flag that clears it natively
+  (`--disable-blink-features=AutomationControlled`) re-triggers Chrome's
+  "unsupported command-line flag" infobar — a visible 56px tell that skews
+  `innerHeight` (932 vs 988) — so the value is masked on that lane only: a
+  proxy over the native getter that delegates first. The WS lanes stay
+  native-`false`.
+- **Removed `--disable-blink-features=AutomationControlled`.** On Chrome 151 it
+  is a no-op for `navigator.webdriver` unless the browser is launched with
+  `--enable-automation` (never the case here), and it triggers Chrome's
+  "unsupported command-line flag" infobar — a visible 56px in-window tell that
+  also skews `innerHeight`. Caught by `tools/diff_oracle` (936 vs 992).
+- **Console capture works on Chrome 151.** `console.log` and friends are own
+  properties of the console instance there; the hook patched
+  `Console.prototype`, so it was shadowed and did nothing (and added a
+  prototype property stock Chrome does not have). It now installs where the
+  method actually lives.
+- **Screen geometry is honest by default.** The virtual display now runs a
+  window manager (xfwm4 when installed) and declares a work area
+  (`_NET_WORKAREA`: a 40px bottom taskbar), so `outerWidth > innerWidth` and
+  `availHeight < height` come from the environment instead of a patched
+  `Screen.prototype` getter. The JS mask survives only for WM-less lanes, where
+  it self-corrects once the real work area appears.
+- **WebGL values stay coherent with the machine.** When the launch healthcheck
+  finds a software backend, the mask replays the machine's *real* GPU profile —
+  vendor/renderer strings, pinned limits (`MAX_COMBINED_TEXTURE_IMAGE_UNITS` 64,
+  `MAX_SAMPLES` 16), HIGH-class precision remap and the hardware extension list
+  — so `getParameter`, `getSupportedExtensions` and `getShaderPrecisionFormat`
+  agree with each other and with the worker context.
+
+### Changed
+- **Stealth masks are proxies now (no `toString` patch anywhere).** Every
+  installed function or getter is a `Proxy` over the native original with an
+  `apply` trap that delegates first — native receiver/argument validation
+  (`Illegal invocation`, TypeError text, promise timing) is preserved by
+  construction, the trap closure is unreachable from page code, and V8 gives a
+  proxy no source text, so it stringifies as `function () { [native code] }`
+  in every realm. Own keys stay `{length,name}`, there is no `prototype`, and
+  `new` throws — including in the phantom nested-iframe realm CreepJS-class
+  lie engines stringify from.
+- The notifications relay, the mediaDevices patch and the locale override are
+  now installed only when the environment needs them (`BLADE_PERMS=patch|real`
+  forces the permissions decision); a headful lane keeps the honest state.
+- `bladebro audit`: 36 → 61 vectors — GL-null assertion, permissions parity
+  battery, mask-gated GL coherence, worker/iframe propagation, descriptor
+  shapes, geometry, UA-CH — plus a cross-restart consistency stamp
+  (`~/.blade/audit-stamp.json`) that flags drift in canvas/audio/screen/UA/GL.
+
+### Added
+- **`tools/diff_oracle/`** — a differential oracle: the same probe battery runs
+  against stock Chrome and Bladebro on the same virtual display, every diff is
+  classified as EXPECTED (with a reason) or DIVERGENT, and any divergence
+  exits non-zero. This is what caught the removed-flag infobar, the dead
+  pipe-lane GL stack and the window-geometry drift; run it before any release.
+- `BLADE_DUMP_INJECT=<path>` writes the exact assembled injection (plus
+  `<path>.worker.js`) so it can be syntax-linted (`node --check`): a parse
+  error silently disables every patch, and the audit's vector score is the only
+  other thing that would notice.
+
 ## [3.9.11] - 2026-09-25
 
 ### Fixed

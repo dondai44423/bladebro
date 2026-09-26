@@ -5,14 +5,17 @@
 //!
 //! 6-layer stealth architecture:
 //! 1. Protocol: No Runtime.enable (defuses DataDome console trap) — in CdpSession.
-//! 2. Launch: --disable-blink-features=AutomationControlled (webdriver=false at Blink level).
+//! 2. Launch: navigator.webdriver is false by Chrome's own default without
+//!    --enable-automation; the old blink-flag workaround was removed in
+//!    v3.9.12 (it triggered the unsupported-flag infobar — a visible tell).
 //! 3. UA: Network.setUserAgentOverride with full Client Hints — in Page::attach.
 //! 4. Injection (this file): native-lie toString masking (S9), cdc_ removal,
-//!    outer dims, WebGL1+2, screen geometry, permissions, Web API polyfills
+//!    outer dims, WebGL1+2, screen geometry, Web API polyfills
 //!    (WebShare, ContentIndex, ContactsManager, downlinkMax),
 //!    seeded canvas noise, seeded audio noise,
-//!    window.chrome object, speech synthesis voices, battery API,
-//!    WebRTC IP leak prevention, error stack normalization.
+//!    window.chrome object, battery API, WebRTC IP leak prevention.
+//!    The permissions rewrite + media-devices patch are conditional
+//!    segments — only injected when the environment actually needs them.
 //! 5. Biometrics: Bezier mouse paths, log-normal typing cadence — in action.rs.
 //! 6. Xvfb: Headful mode on virtual display (eliminates headless signals at root).
 //!
@@ -30,9 +33,16 @@
 //! - hardwareConcurrency / deviceMemory spoofs REMOVED: real machine values
 //!   are more coherent than normalized ones (D14 — coherence over noise).
 //!
-//! Residual: Function.prototype.toString replacement is a plain function
-//! (not a Proxy, so hasToStringProxy passes) but owns a .prototype property
-//! that native methods lack — accepted, ultra-rare check.
+//! S10: no Function.prototype.toString patch anywhere. Every installed
+//! function is a Proxy over a native target (the original accessor/method,
+//! or a bound non-constructible placeholder for polyfills). V8 gives a Proxy
+//! no [[SourceText]], so it stringifies as "function () { [native code] }" in
+//! EVERY realm — including the phantom nested-iframe realm CreepJS-class lie
+//! engines stringify from. The trap closure is unreachable from page code
+//! (own keys stay {length,name}, no 'prototype', non-constructible), and
+//! delegation to the captured native runs FIRST, so receiver/argument
+//! semantics ('Illegal invocation', TypeError text, promise timing) stay
+//! byte-native.
 
 use crate::cdp::CdpSession;
 use crate::error::Result;
@@ -64,8 +74,37 @@ pub fn has_full_script() -> bool {
 
 pub type ScriptId = String;
 
-/// Core block (always applied): seed, native-lie registry, helpers, cdc_
-/// removal, outer dims, screen geometry, permissions, polyfills.
+/// Core block (always applied): seed, proxy-mask helpers (PROXY_HELPERS),
+/// cdc_ removal, outer dims, screen geometry, polyfills. `__SEED__` is
+/// replaced with a random u32 at injection time (stable per session).
+/// Launch flags handle navigator.webdriver, window.chrome, and
+/// navigator.plugins — this script never touches them.
+///
+/// Shared proxy-mask helper block. Used verbatim by the page core and by the
+/// worker scripts (via `__PROXY_HELPERS__` / direct prefix) so the two realms
+/// can never drift apart.
+const PROXY_HELPERS: &str = r#"// --- S10: proxy masks. Install helper contract: `fn(th, a, orig)` gets the
+// call-site receiver, the arguments array, and the native target; it must
+// delegate to `orig` (or a no-orig placeholder) so the native validation and
+// coercion order run before any rewrite. ---
+var _PP=typeof Proxy!=='undefined'?Proxy:null;
+var _nop={m(){}}.m.bind(null);
+function _mk(orig,fn){return new _PP(orig,{apply:function(t,th,a){return fn(th,a,t);}});}
+function _mkN(fn){return new _PP(_nop,{apply:function(t,th,a){return fn(th,a,t);}});}
+function _fix(p,name,len){try{Object.defineProperty(p,'name',{value:name,configurable:true});Object.defineProperty(p,'length',{value:len,configurable:true});}catch(e){}return p;}
+function _ogs(obj,name){try{return Object.getOwnPropertyDescriptor(obj,name).get;}catch(e){return undefined;}}
+// WebIDL attributes/methods are enumerable:true on prototypes; interface
+// objects (constructors) on window are enumerable:false. A proxy of a native
+// accessor keeps the engine's "get " name automatically.
+function _defGet(obj,name,g,fn){if(!g)return;try{Object.defineProperty(obj,name,{get:_mk(g,fn),configurable:true,enumerable:true});}catch(e){}}
+function _defGetN(obj,name,fn){try{Object.defineProperty(obj,name,{get:_fix(_mkN(fn),'get '+name,0),configurable:true,enumerable:true});}catch(e){}}
+function _defFn(obj,name,orig,fn){if(!orig)return;try{Object.defineProperty(obj,name,{value:_mk(orig,fn),writable:true,configurable:true,enumerable:true});}catch(e){}}
+function _defFnN(obj,name,fn,len){try{Object.defineProperty(obj,name,{value:_fix(_mkN(fn),name,len||0),writable:true,configurable:true,enumerable:true});}catch(e){}}
+function _defCtor(name,fn){try{Object.defineProperty(window,name,{value:_fix(_mkN(fn),name,0),writable:true,configurable:true,enumerable:false});}catch(e){}}
+"#;
+
+/// Core block (always applied): seed, proxy-mask helpers, cdc_ removal, outer
+/// dims, screen geometry, permissions, polyfills.
 /// `__SEED__` is replaced with a random u32 at injection time (stable per
 /// session). Launch flags handle navigator.webdriver, window.chrome, and
 /// navigator.plugins — this script never touches them.
@@ -74,26 +113,7 @@ var S=__SEED__;
 function R(){S^=S<<13;S^=S>>>17;S^=S<<5;return((S>>>0)%256);}
 var cn=R()&1,an=R(),cn2=R()&1;
 
-// --- S9: native-lie registry. One patched toString masks every override. ---
-var _lies=[];
-function _lie(fn,name,isGetter){_lies.push([fn,name,!!isGetter]);}
-var _ots=Function.prototype.toString;
-var _nts=function toString(){
-  for(var i=0;i<_lies.length;i++){if(this===_lies[i][0])return _lies[i][2]?('function get '+_lies[i][1]+'() { [native code] }'):('function '+_lies[i][1]+'() { [native code] }');}
-  return _ots.apply(this,arguments);
-};
-_lie(_nts,'toString');
-Function.prototype.toString=_nts;
-// Masked helpers: WebIDL attributes/methods are enumerable:true on prototypes;
-// interface objects (constructors) on window are enumerable:false.
-// Getter naming: real V8 accessors stringify WITH a "get " prefix —
-// Object.getOwnPropertyDescriptor(Screen.prototype,'width').get.toString()
-// === 'function get width() { [native code] }'. Accessors created here MUST
-// be masked with isGetter=true or their toString drops the "get " and a
-// toString-format comparison against a native accessor flags the tamper.
-function _defGet(obj,name,fn){try{Object.defineProperty(obj,name,{get:fn,configurable:true,enumerable:true});_lie(fn,name,true);}catch(e){}}
-function _defFn(obj,name,fn){try{Object.defineProperty(obj,name,{value:fn,writable:true,configurable:true,enumerable:true});_lie(fn,name);}catch(e){}}
-function _defCtor(name,fn){try{Object.defineProperty(window,name,{value:fn,writable:true,configurable:true,enumerable:false});_lie(fn,name);}catch(e){}}
+__PROXY_HELPERS__
 
 // cdc_ residue removal (chromedriver artifact — belt and suspenders).
 var p=Object.getOwnPropertyNames(document).concat(Object.getOwnPropertyNames(window));
@@ -101,113 +121,77 @@ for(var i=0;i<p.length;i++){if(p[i].indexOf('cdc_')===0){try{delete document[p[i
 
 // Window outer dims. Xvfb has no window manager, so the native outerWidth
 // collapses to innerWidth (a 0 diff is a bot tell: real desktops reserve
-// side chrome). Modern Chrome (129+) exposes outerWidth/innerWidth as OWN
-// configurable accessors on the window INSTANCE — a Window.prototype
-// override is shadowed and never read. Override the own accessor in place
-// (keeps the native descriptor shape: own, configurable, enumerable, get
-// with "get " toString format). Fall back to the prototype only on older
-// Chrome where the own slot isn't redefinable. outerHeight is left native:
-// its natural diff (title/tab bar, here ~143px) is realistic.
+// side chrome). Modern Chrome (129+) exposes outerWidth as an OWN
+// configurable accessor on the window INSTANCE — a Window.prototype
+// override is shadowed and never read. Only correct the tell: when the diff
+// is already positive (real WM), the natural value is coherent and stays
+// native (coherence over noise, D14). outerHeight is left native: its
+// natural diff (title/tab bar, here ~143px) is realistic.
 try{
 var _w0=window.outerWidth,_i0=window.innerWidth;
-// Xvfb has no window manager, so native outerWidth collapses to innerWidth
-// (a 0 diff is a bot tell: real desktops reserve side chrome). Modern
-// Chrome (129+) exposes outerWidth/innerWidth as OWN configurable accessors
-// on the window INSTANCE — a Window.prototype override is shadowed and
-// never read. Only correct the tell: when the diff is already positive
-// (real WM), the natural value is coherent and must be left native
-// (coherence over noise, D14). Override the OWN accessor in place (keeps
-// the native descriptor shape), falling back to the prototype only on
-// Chrome where the own slot isn't redefinable. outerHeight stays native.
 if(_w0-_i0<=0){
-var _wfn=function outerWidth(){return window.innerWidth+16;};
+var _mow=function(th,a,og){og.apply(th,a);return window.innerWidth+16;};
 var _ow=Object.getOwnPropertyDescriptor(window,'outerWidth');
-if(_ow&&_ow.configurable){try{Object.defineProperty(window,'outerWidth',{get:_wfn,configurable:true,enumerable:true});_lie(_wfn,'outerWidth',true);}catch(e){}}
-else{var _wp=(typeof Window!=='undefined'&&Window.prototype)?Window.prototype:Object.getPrototypeOf(window);_defGet(_wp,'outerWidth',_wfn);}
+if(_ow&&_ow.configurable&&_ow.get){_defGet(window,'outerWidth',_ow.get,_mow);}
+else{var _wp=(typeof Window!=='undefined'&&Window.prototype)?Window.prototype:Object.getPrototypeOf(window);_defGet(_wp,'outerWidth',_ogs(_wp,'outerWidth'),_mow);}
 }
 }catch(e){}
 
 // Screen geometry on Screen.prototype (real location, not the instance).
+// Only the *incoherent* case is corrected: a window manager gives the screen
+// a real work area (availHeight < height) and that native value then stays
+// untouched (D14 — coherence over noise). availWidth is left native always:
+// a horizontal panel keeps it equal to width, and a narrow one is an honest
+// side dock — masking it would hide a real desk, not a tell.
 try{
 var _sp=(typeof Screen!=='undefined'&&Screen.prototype)?Screen.prototype:Object.getPrototypeOf(screen);
-_defGet(_sp,'availWidth',function(){return screen.width;});
-_defGet(_sp,'availHeight',function(){return screen.height-40;});
+if(screen.height-screen.availHeight<16){_defGet(_sp,'availHeight',_ogs(_sp,'availHeight'),function(th,a,og){var v=og.apply(th,a);return (screen.height-v<16)?(screen.height-40):v;});}
 }catch(e){}
 
-// permissions.query('notifications') — headless returns 'denied', real
-// desktop 'prompt'. The wrapper delegates to the REAL query (so the
-// result is a genuine PermissionStatus: instanceof + EventTarget methods
-// work) and rewrites only the headless 'denied' tell to 'prompt'. On
-// headful Xvfb the real state already is 'prompt' — the rewrite never
-// fires, zero added surface.
-try{
-var _opq=navigator.permissions.query;
-var _pq=function query(d){
-  var p=_opq.call(navigator.permissions,d);
-  if(d&&d.name==='notifications'){
-    return p.then(function(s){
-      if(s&&s.state==='denied'){try{Object.defineProperty(s,'state',{value:'prompt',configurable:true});}catch(e){}}
-      return s;
-    });
-  }
-  return p;
-};
-var _pp=Object.getPrototypeOf(navigator.permissions);
-try{Object.defineProperty(_pp,'query',{value:_pq,writable:true,configurable:true,enumerable:true});}catch(e){navigator.permissions.query=_pq;}
-_lie(_pq,'query');
-}catch(e){}
+// permissions.query rewrite lives in PERMISSIONS_PATCH (apply()): a
+// perfect native relay; only a real-origin 'denied' notifications result
+// is rewritten (the headless tell). Opaque origins keep native results.
 
-// Web API polyfills (Linux-headless absence signals).
+// Web API polyfills (Linux-headless absence signals). Polyfill targets use
+// the shared bound placeholder, so a polyfilled method is shaped exactly
+// like a native one (no 'prototype', {length,name}, native toString).
 try{
 var _np=(typeof Navigator!=='undefined'&&Navigator.prototype)?Navigator.prototype:Object.getPrototypeOf(navigator);
-if(!('share' in navigator)){_defFn(_np,'share',function share(){return Promise.reject(new TypeError('Not supported'));});}
-if(!('canShare' in navigator)){_defFn(_np,'canShare',function canShare(){return false;});}
-if(!('ContentIndex' in window)){_defCtor('ContentIndex',function ContentIndex(){throw new TypeError('Illegal constructor');});}
-if(!('ContactsManager' in window)){_defCtor('ContactsManager',function ContactsManager(){throw new TypeError('Illegal constructor');});}
+if(!('share' in navigator)){_defFnN(_np,'share',function(){return Promise.reject(new TypeError('Not supported'));},1);}
+if(!('canShare' in navigator)){_defFnN(_np,'canShare',function(){return false;},1);}
+if(!('ContentIndex' in window)){_defCtor('ContentIndex',function(){throw new TypeError('Illegal constructor');});}
+if(!('ContactsManager' in window)){_defCtor('ContactsManager',function(){throw new TypeError('Illegal constructor');});}
 if(navigator.connection){
   var _pr=Object.getPrototypeOf(navigator.connection);
-  if(_pr&&!('downlinkMax' in _pr)){_defGet(_pr,'downlinkMax',function(){return Infinity;});}
-  if(typeof window.NetworkInformation==='undefined'){_defCtor('NetworkInformation',navigator.connection.constructor);}
+  if(_pr&&!('downlinkMax' in _pr)){_defGetN(_pr,'downlinkMax',function(){return Infinity;});}
+  if(typeof window.NetworkInformation==='undefined'){try{Object.defineProperty(window,'NetworkInformation',{value:navigator.connection.constructor,writable:true,configurable:true,enumerable:false});}catch(e){}}
 }
 }catch(e){}
 
 // ── Additional stealth layers ───────────────────────────────
 
-// window.chrome object: real Chrome has chrome.app, chrome.runtime,
-// chrome.csi(), chrome.loadTimes(). Headless may be missing these.
+// window.chrome object: stock Chromium exposes chrome.app, chrome.csi(),
+// chrome.loadTimes() — verified headful AND headless via the differential
+// oracle. Polyfill only what is genuinely missing; chrome.runtime is NOT
+// exposed by this engine, so adding it was a deviation, not coverage
+// (removed v3.9.12; re-check with tools/diff_oracle when the engine moves).
 try{
 if(!window.chrome){window.chrome={};}
 if(!window.chrome.app){window.chrome.app={isInstalled:false,InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'}};}
-if(!window.chrome.runtime){window.chrome.runtime={OnInstalledReason:{CHROME_UPDATE:'chrome_update',INSTALL:'install',SHARED_MODULE_UPDATE:'shared_module_update',UPDATE:'update'},OnRestartRequiredReason:{APP_UPDATE:'app_update',OS_UPDATE:'os_update',PERIODIC:'periodic'},PlatformArch:{ARM:'arm',MIPS:'mips',MIPS64:'mips64',X86_32:'x86-32',X86_64:'x86-64'},PlatformNaclArch:{ARM:'arm',MIPS:'mips',MIPS64:'mips64',X86_32:'x86-32',X86_64:'x86-64'},PlatformOs:{ANDROID:'android',CROS:'cros',FUCHSIA:'fuchsia',LINUX:'linux',MAC:'mac',OPENBSD:'openbsd',WIN:'win'},RequestUpdateCheckStatus:{NO_UPDATE:'no_update',THROTTLED:'throttled',UPDATE_AVAILABLE:'update_available'}};}
-if(!window.chrome.csi){window.chrome.csi=function csi(){return{startE:Date.now(),onloadT:Date.now()+100,pageT:1000,tran:15};};_lie(window.chrome.csi,'csi');}
-if(!window.chrome.loadTimes){window.chrome.loadTimes=function loadTimes(){return{commitLoadTime:Date.now()/1000,connectionInfo:'h2',finishDocumentLoadTime:Date.now()/1000+0.1,finishLoadTime:Date.now()/1000+0.2,firstPaintAfterLoadTime:0,firstPaintTime:Date.now()/1000+0.05,navigationType:'Other',npnNegotiatedProtocol:'h2',requestTime:Date.now()/1000-0.5,startLoadTime:Date.now()/1000-0.5,wasAlternateProtocolAvailable:false,wasFetchedViaSpdy:true,wasNpnNegotiated:true};};_lie(window.chrome.loadTimes,'loadTimes');}
+if(!window.chrome.csi){window.chrome.csi=_fix(_mkN(function(){return{startE:Date.now(),onloadT:Date.now()+100,pageT:1000,tran:15};}),'csi',0);}
+if(!window.chrome.loadTimes){window.chrome.loadTimes=_fix(_mkN(function(){return{commitLoadTime:Date.now()/1000,connectionInfo:'h2',finishDocumentLoadTime:Date.now()/1000+0.1,finishLoadTime:Date.now()/1000+0.2,firstPaintAfterLoadTime:0,firstPaintTime:Date.now()/1000+0.05,navigationType:'Other',npnNegotiatedProtocol:'h2',requestTime:Date.now()/1000-0.5,startLoadTime:Date.now()/1000-0.5,wasAlternateProtocolAvailable:false,wasFetchedViaSpdy:true,wasNpnNegotiated:true};}),'loadTimes',0);}
 }catch(e){}
 
-// Speech synthesis voices: headless returns empty array.
-// Real Linux Chrome has at least a few voices.
-// Patched on SpeechSynthesis.prototype (the real location — the
-// speechSynthesis instance has zero own properties) and returns a
-// FRESH array per call (getVoices() === getVoices() must be false,
-// as in real Chrome).
-try{
-if(typeof speechSynthesis!=='undefined'&&speechSynthesis.getVoices().length===0){
-  var _voices=[
-    {voiceURI:'Google US English',name:'Google US English',lang:'en-US',localService:false,default:true},
-    {voiceURI:'Google UK English Female',name:'Google UK English Female',lang:'en-GB',localService:false,default:false},
-    {voiceURI:'Google UK English Male',name:'Google UK English Male',lang:'en-GB',localService:false,default:false}
-  ];
-  var _ssp=(typeof SpeechSynthesis!=='undefined'&&SpeechSynthesis.prototype)?SpeechSynthesis.prototype:Object.getPrototypeOf(speechSynthesis);
-  var _gv=function getVoices(){return _voices.slice();};
-  try{Object.defineProperty(_ssp,'getVoices',{value:_gv,writable:true,configurable:true,enumerable:true});}catch(e){speechSynthesis.getVoices=_gv;}
-  _lie(_gv,'getVoices');
-}
-}catch(e){}
+// Speech synthesis voices: NO PATCH (removed v3.9.12). The fixed 3-voice
+// Google set was a cluster signature shared by every Bladebro profile;
+// the machine truth (0 voices without speech-dispatcher, the real list
+// with it) is coherent and unremarkable — the differential oracle shows
+// stock Chrome on the same box reports 0.
 
 // Battery API: headless may not have navigator.getBattery.
 try{
 if(!navigator.getBattery){
-  var _gb=function getBattery(){return Promise.resolve({charging:true,chargingTime:0,dischargingTime:Infinity,level:1,onchargingchange:null,onchargingtimechange:null,ondischargingtimechange:null,onlevelchange:null});};
-  _defFn(Navigator.prototype,'getBattery',_gb);
+  _defFnN(Navigator.prototype,'getBattery',function(){return Promise.resolve({charging:true,chargingTime:0,dischargingTime:Infinity,level:1,onchargingchange:null,onchargingtimechange:null,ondischargingtimechange:null,onlevelchange:null});},0);
 }
 }catch(e){}
 
@@ -234,8 +218,8 @@ if(!navigator.getBattery){
 try{
 if(document.visibilityState!=='visible'){
   var _dp=(typeof Document!=='undefined'&&Document.prototype)?Document.prototype:Object.getPrototypeOf(document);
-  _defGet(_dp,'visibilityState',function visibilityState(){return 'visible';});
-  _defGet(_dp,'hidden',function hidden(){return false;});
+  _defGet(_dp,'visibilityState',_ogs(_dp,'visibilityState'),function(th,a,og){og.apply(th,a);return 'visible';});
+  _defGet(_dp,'hidden',_ogs(_dp,'hidden'),function(th,a,og){og.apply(th,a);return false;});
 }
 }catch(e){}
 
@@ -248,7 +232,7 @@ if(document.visibilityState!=='visible'){
 // Notification.permission: should be 'default' (not 'denied').
 try{
 if(typeof Notification!=='undefined'&&Notification.permission==='denied'){
-  _defGet(Notification,'permission',function permission(){return 'default';});
+  _defGet(Notification,'permission',_ogs(Notification,'permission'),function(th,a,og){og.apply(th,a);return 'default';});
 }
 }catch(e){}
 
@@ -257,7 +241,7 @@ if(typeof Notification!=='undefined'&&Notification.permission==='denied'){
 // so patch it back to true to maintain the fingerprint.
 try{
 if(navigator.pdfViewerEnabled===false){
-  _defGet(Navigator.prototype,'pdfViewerEnabled',function pdfViewerEnabled(){return true;});
+  _defGet(Navigator.prototype,'pdfViewerEnabled',_ogs(Navigator.prototype,'pdfViewerEnabled'),function(th,a,og){og.apply(th,a);return true;});
 }
 }catch(e){}
 
@@ -271,10 +255,10 @@ try{
 if(navigator.connection){
   var _cp=Object.getPrototypeOf(navigator.connection);
   if(_cp){
-    if(!('effectiveType' in _cp))_defGet(_cp,'effectiveType',function(){return '4g';});
-    if(!('rtt' in _cp))_defGet(_cp,'rtt',function(){return 50;});
-    if(!('downlink' in _cp))_defGet(_cp,'downlink',function(){return 10;});
-    if(!('saveData' in _cp))_defGet(_cp,'saveData',function(){return false;});
+    if(!('effectiveType' in _cp))_defGetN(_cp,'effectiveType',function(){return '4g';});
+    if(!('rtt' in _cp))_defGetN(_cp,'rtt',function(){return 50;});
+    if(!('downlink' in _cp))_defGetN(_cp,'downlink',function(){return 10;});
+    if(!('saveData' in _cp))_defGetN(_cp,'saveData',function(){return false;});
   }
 }
 }catch(e){}
@@ -283,51 +267,43 @@ if(navigator.connection){
 // Use getter (not data property) — real Chrome exposes it as an accessor.
 try{
 if(!navigator.scheduling&&!('scheduling' in navigator)){
-  var _sch={isInputPending:function isInputPending(){return false;},isInputPendingOrAvailable:function isInputPendingOrAvailable(){return false;}};
-  _lie(_sch.isInputPending,'isInputPending');
-  _lie(_sch.isInputPendingOrAvailable,'isInputPendingOrAvailable');
-  _defGet(Navigator.prototype,'scheduling',function scheduling(){return _sch;});
+  var _sch={isInputPending:_fix(_mkN(function(){return false;}),'isInputPending',0),isInputPendingOrAvailable:_fix(_mkN(function(){return false;}),'isInputPendingOrAvailable',0)};
+  _defGetN(Navigator.prototype,'scheduling',function(){return _sch;});
 }
 }catch(e){}
 
 // navigator.cookieEnabled: should be true (Chrome default).
 try{
 if(!navigator.cookieEnabled){
-  _defGet(Navigator.prototype,'cookieEnabled',function cookieEnabled(){return true;});
+  _defGet(Navigator.prototype,'cookieEnabled',_ogs(Navigator.prototype,'cookieEnabled'),function(th,a,og){og.apply(th,a);return true;});
 }
 }catch(e){}
 
-// Screen colorDepth/pixelDepth: should be 24 (standard).
 try{
 var _sp2=(typeof Screen!=='undefined'&&Screen.prototype)?Screen.prototype:Object.getPrototypeOf(screen);
-if(screen.colorDepth!==24){_defGet(_sp2,'colorDepth',function colorDepth(){return 24;});}
-if(screen.pixelDepth!==24){_defGet(_sp2,'pixelDepth',function pixelDepth(){return 24;});}
+if(screen.colorDepth!==24){_defGet(_sp2,'colorDepth',_ogs(_sp2,'colorDepth'),function(th,a,og){og.apply(th,a);return 24;});}
+if(screen.pixelDepth!==24){_defGet(_sp2,'pixelDepth',_ogs(_sp2,'pixelDepth'),function(th,a,og){og.apply(th,a);return 24;});}
 }catch(e){}
 
 // V8: console capture for driver introspection (see logs=console).
-// Hooked methods are masked by the _lie registry (toString shows
-// native code) and carry their proper .name. The ring buffer lives
-// under a Symbol-keyed NON-ENUMERABLE window slot: invisible to
-// for-in, Object.keys, and getOwnPropertyNames — the old string-keyed
-// `__uxa` own property was readable by any page with `'__uxa' in window`.
-// Ring buffer, 200 entries, resets per document (correct: logs are
-// per load).
+// Chrome 151 owns the console methods on the INSTANCE (Console.prototype has
+// no 'log' — verified against stock), so install where the method actually
+// lives: adding a prototype property stock doesn't have is itself a
+// differential. The hook is a proxy over the native method — masked in every
+// realm, native receiver/argument semantics preserved. The ring buffer lives
+// under a Symbol-keyed NON-ENUMERABLE window slot: invisible to for-in,
+// Object.keys, and getOwnPropertyNames. 200 entries, resets per document.
 try{
 var _uk=Symbol.for('q');
 var _uxa=[];
 function _uxp(l,a){try{var p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.push(typeof v==='string'?v:JSON.stringify(v));}catch(e){p.push(String(v));}}_uxa.push({l:l,m:p.join(' ').slice(0,400),t:Date.now()});if(_uxa.length>200)_uxa.shift();}catch(e){}}
 ['log','info','warn','error','debug'].forEach(function(m){
-  var _o=console[m];
-  var _h=function(){_uxp(m,arguments);return _o.apply(console,arguments);};
-  // Real console methods have matching .name ('log' etc.) — an
-  // anonymous hook's inferred name is a separate observable from
-  // toString.
-  try{Object.defineProperty(_h,'name',{value:m,configurable:true});}catch(e){}
-  // Override on Console.prototype, not the console instance.
-  // Own properties on the console instance are a detection vector
-  // (Object.getOwnPropertyDescriptor(console,'log') should be undefined).
-  try{var _cp=Object.getPrototypeOf(console);Object.defineProperty(_cp,m,{value:_h,writable:true,configurable:true,enumerable:true});}catch(e){console[m]=_h;}
-  _lie(_h,m);
+  var _cp=Object.getPrototypeOf(console);
+  var _own=Object.getOwnPropertyDescriptor(console,m);
+  var _host=_own?console:_cp;
+  var _o=_own?_own.value:_cp[m];
+  if(typeof _o!=='function')return;
+  try{Object.defineProperty(_host,m,{value:_fix(_mk(_o,function(th,a,og){_uxp(m,a);return og.apply(console,a);}),m,_o.length),writable:true,configurable:true,enumerable:true});}catch(e){}
 });
 window.addEventListener('error',function(e){_uxp('exception',[String(e.message||'')+' @'+String(e.filename||'')+':'+String(e.lineno||'')]);});
 window.addEventListener('unhandledrejection',function(e){_uxp('unhandledrejection',[String(e.reason)]);});
@@ -366,6 +342,87 @@ var obs=new MutationObserver(function(){
 });obs.observe(document,{childList:true,subtree:true});setTimeout(function(){obs.disconnect();},3000);
 })();"#;
 
+/// Real-hardware extension lists captured from this machine's Intel i915
+/// (ADL GT2, Mesa, Chrome 151): WebGL1 = 36 entries, WebGL2 = 32 entries.
+/// Used to filter the software backend's (llvmpipe) supersets down to the
+/// claimed GPU's surface — llvmpipe adds EXT_shader_texture_lod and
+/// WEBGL_polygon_mode on WebGL1, and OVR_multiview2, WEBGL_polygon_mode and
+/// WEBGL_provoking_vertex on WebGL2. Every nominal entry is supported by
+/// llvmpipe, so filtering never over-claims.
+const INTEL_EXT1_NOMINAL: &[&str] = &[
+    "ANGLE_instanced_arrays",
+    "EXT_blend_minmax",
+    "EXT_clip_control",
+    "EXT_color_buffer_half_float",
+    "EXT_depth_clamp",
+    "EXT_disjoint_timer_query",
+    "EXT_float_blend",
+    "EXT_frag_depth",
+    "EXT_polygon_offset_clamp",
+    "EXT_sRGB",
+    "EXT_texture_compression_bptc",
+    "EXT_texture_compression_rgtc",
+    "EXT_texture_filter_anisotropic",
+    "EXT_texture_mirror_clamp_to_edge",
+    "KHR_parallel_shader_compile",
+    "OES_element_index_uint",
+    "OES_fbo_render_mipmap",
+    "OES_standard_derivatives",
+    "OES_texture_float",
+    "OES_texture_float_linear",
+    "OES_texture_half_float",
+    "OES_texture_half_float_linear",
+    "OES_vertex_array_object",
+    "WEBGL_blend_func_extended",
+    "WEBGL_color_buffer_float",
+    "WEBGL_compressed_texture_astc",
+    "WEBGL_compressed_texture_etc",
+    "WEBGL_compressed_texture_etc1",
+    "WEBGL_compressed_texture_s3tc",
+    "WEBGL_compressed_texture_s3tc_srgb",
+    "WEBGL_debug_renderer_info",
+    "WEBGL_debug_shaders",
+    "WEBGL_depth_texture",
+    "WEBGL_draw_buffers",
+    "WEBGL_lose_context",
+    "WEBGL_multi_draw",
+];
+
+const INTEL_EXT2_NOMINAL: &[&str] = &[
+    "EXT_clip_control",
+    "EXT_color_buffer_float",
+    "EXT_color_buffer_half_float",
+    "EXT_conservative_depth",
+    "EXT_depth_clamp",
+    "EXT_disjoint_timer_query_webgl2",
+    "EXT_float_blend",
+    "EXT_polygon_offset_clamp",
+    "EXT_render_snorm",
+    "EXT_texture_compression_bptc",
+    "EXT_texture_compression_rgtc",
+    "EXT_texture_filter_anisotropic",
+    "EXT_texture_mirror_clamp_to_edge",
+    "EXT_texture_norm16",
+    "KHR_parallel_shader_compile",
+    "NV_shader_noperspective_interpolation",
+    "OES_draw_buffers_indexed",
+    "OES_sample_variables",
+    "OES_shader_multisample_interpolation",
+    "OES_texture_float_linear",
+    "WEBGL_blend_func_extended",
+    "WEBGL_clip_cull_distance",
+    "WEBGL_compressed_texture_astc",
+    "WEBGL_compressed_texture_etc",
+    "WEBGL_compressed_texture_etc1",
+    "WEBGL_compressed_texture_s3tc",
+    "WEBGL_compressed_texture_s3tc_srgb",
+    "WEBGL_debug_renderer_info",
+    "WEBGL_debug_shaders",
+    "WEBGL_lose_context",
+    "WEBGL_multi_draw",
+    "WEBGL_stencil_texturing",
+];
+
 /// GPU profile for WebGL spoofing — detected from host hardware (lspci on
 /// Linux) so the spoofed renderer string and GL capability limits match the
 /// real GPU. Falls back to Intel UHD 630 when detection fails (Docker without
@@ -377,10 +434,21 @@ struct GpuProfile {
     max_texture_size: i32,      // 3379 (MAX_TEXTURE_SIZE)
     max_renderbuffer_size: i32, // 34024
     max_cube_map_size: i32,      // 34076
-    max_vtx_tex_units: i32,     // 35661
+    max_combined_tex_units: i32, // 35661 (MAX_COMBINED_TEXTURE_IMAGE_UNITS)
+    max_samples: i32,            // 36183 (MAX_SAMPLES, WebGL2)
     max_viewport_dims: [i32; 2], // 3386
     point_size_range: [f32; 2],  // 33902
     line_width_range: [f32; 2],  // 33901
+    /// i915/ANGLE reports HIGH-class precision values for every level; when
+    /// true the mask remaps MEDIUM/LOW precision queries onto the HIGH
+    /// query (argument remap — the returned object stays a genuine native
+    /// WebGLShaderPrecisionFormat).
+    precision_full: bool,
+    /// Nominal WebGL1/WebGL2 extension lists captured from real hardware
+    /// (Intel ADL GT2, Mesa/Chrome 151). The mask filters the software
+    /// backend's superset down to the claimed GPU's surface. None = no filter.
+    ext1_nominal: Option<&'static [&'static str]>,
+    ext2_nominal: Option<&'static [&'static str]>,
 }
 
 static DETECTED_GPU: OnceLock<GpuProfile> = OnceLock::new();
@@ -436,7 +504,7 @@ fn detect_gpu_lspci() -> Option<GpuProfile> {
         // Intel
         if lower.contains("intel") {
             if lower.contains("alder lake-p") || lower.contains("adl-p") {
-                return Some(intel_profile("Mesa Intel(R) Graphics (ADL-P GT2)"));
+                return Some(intel_profile("Mesa Intel(R) Graphics (ADL GT2)"));
             }
             if lower.contains("alder lake-s") || lower.contains("adl-s") || lower.contains("uhd 770") {
                 return Some(intel_profile("Mesa Intel(R) Graphics (ADL-S GT1)"));
@@ -483,10 +551,14 @@ fn intel_profile(mesa_name: &str) -> GpuProfile {
         max_texture_size: 16384,
         max_renderbuffer_size: 16384,
         max_cube_map_size: 16384,
-        max_vtx_tex_units: 16,
+        max_combined_tex_units: 64,
+        max_samples: 16,
         max_viewport_dims: [16384, 16384],
         point_size_range: [1.0, 255.0],
         line_width_range: [1.0, 1024.0],
+        precision_full: true,
+        ext1_nominal: Some(INTEL_EXT1_NOMINAL),
+        ext2_nominal: Some(INTEL_EXT2_NOMINAL),
     }
 }
 
@@ -497,10 +569,14 @@ fn amd_profile() -> GpuProfile {
         max_texture_size: 16384,
         max_renderbuffer_size: 16384,
         max_cube_map_size: 16384,
-        max_vtx_tex_units: 32,
+        max_combined_tex_units: 64,
+        max_samples: 16,
         max_viewport_dims: [16384, 16384],
         point_size_range: [1.0, 8192.0],
         line_width_range: [1.0, 8192.0],
+        precision_full: false,
+        ext1_nominal: None,
+        ext2_nominal: None,
     }
 }
 
@@ -511,10 +587,14 @@ fn nvidia_profile() -> GpuProfile {
         max_texture_size: 32768,
         max_renderbuffer_size: 32768,
         max_cube_map_size: 32768,
-        max_vtx_tex_units: 32,
+        max_combined_tex_units: 64,
+        max_samples: 16,
         max_viewport_dims: [32768, 32768],
         point_size_range: [1.0, 2048.0],
         line_width_range: [1.0, 10.0],
+        precision_full: false,
+        ext1_nominal: None,
+        ext2_nominal: None,
     }
 }
 
@@ -527,10 +607,14 @@ fn mali_profile() -> GpuProfile {
         max_texture_size: 8192,
         max_renderbuffer_size: 8192,
         max_cube_map_size: 8192,
-        max_vtx_tex_units: 16,
+        max_combined_tex_units: 32,
+        max_samples: 4,
         max_viewport_dims: [8192, 8192],
         point_size_range: [1.0, 1024.0],
         line_width_range: [1.0, 1024.0],
+        precision_full: false,
+        ext1_nominal: None,
+        ext2_nominal: None,
     }
 }
 
@@ -542,54 +626,161 @@ fn adreno_profile() -> GpuProfile {
         max_texture_size: 16384,
         max_renderbuffer_size: 16384,
         max_cube_map_size: 16384,
-        max_vtx_tex_units: 16,
+        max_combined_tex_units: 32,
+        max_samples: 4,
         max_viewport_dims: [16384, 16384],
         point_size_range: [1.0, 1024.0],
         line_width_range: [1.0, 1024.0],
+        precision_full: false,
+        ext1_nominal: None,
+        ext2_nominal: None,
     }
 }
 
-/// Build GL spoof JS for the main page (has _lie from STEALTH_CORE).
+/// Build GL spoof JS for the main page. Installed methods are Proxies over
+/// the native ones (S10): V8 stringifies a proxy as native in every realm and
+/// delegation runs first, so receiver/argument semantics stay byte-native.
+/// Coherence additions (v3.9.12, captured against real i915 hardware):
+/// - MAX_COMBINED_TEXTURE_IMAGE_UNITS (35661) and MAX_SAMPLES (36183) pinned
+///   to the real GPU's values (llvmpipe says 16/8 where i915 says 64/16).
+/// - getShaderPrecisionFormat remap: i915 answers [127,127,23] / [31,30,0]
+///   at every level; llvmpipe distinguishes medium/low — remapped onto the
+///   HIGH query so the returned object stays a genuine native one.
+/// - Extension lists filtered to the claimed GPU's real sets.
 fn build_gl_spoof(p: &GpuProfile) -> String {
+    let precision_patch = precision_remap_patch(p.precision_full);
+    let ext_patch = build_ext_patch(p.ext1_nominal, p.ext2_nominal);
     format!(
         r#"try{{
 var _fv='{vendor}',_fr='{renderer}';
-var _glLimits={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mvtu}}};
+var _glLimits={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mctu},36183:{msamples}}};
 var _glVP=new Int32Array([{vp0},{vp1}]);
 var _glPtR=new Float32Array([{psr0},{psr1}]);
 var _glLwR=new Float32Array([{lwr0},{lwr1}]);
 function _mkGP(proto){{
   var orig=proto.getParameter;
-  var f=function getParameter(p){{
+  _defFn(proto,'getParameter',orig,function(th,a,og){{
+    var r=og.apply(th,a);
+    var p=a[0];
     if(p===37445)return _fv;
     if(p===37446)return _fr;
     if(p===3386)return _glVP;
     if(p===33902)return _glPtR;
     if(p===33901)return _glLwR;
     if(_glLimits[p]!==undefined)return _glLimits[p];
-    return orig.call(this,p);
-  }};
-  try{{Object.defineProperty(proto,'getParameter',{{value:f,writable:true,configurable:true,enumerable:true}});_lie(f,'getParameter');}}catch(e){{}}
+    return r;
+  }});
 }}
 _mkGP(WebGLRenderingContext.prototype);
 if(typeof WebGL2RenderingContext!=='undefined'){{_mkGP(WebGL2RenderingContext.prototype);}}
+{precision_patch}
+{ext_patch}
 }}catch(e){{}}"#,
         vendor = p.gl_vendor,
         renderer = p.gl_renderer,
         mts = p.max_texture_size,
         mrs = p.max_renderbuffer_size,
         mcs = p.max_cube_map_size,
-        mvtu = p.max_vtx_tex_units,
+        mctu = p.max_combined_tex_units,
+        msamples = p.max_samples,
         vp0 = p.max_viewport_dims[0],
         vp1 = p.max_viewport_dims[1],
         psr0 = p.point_size_range[0],
         psr1 = p.point_size_range[1],
         lwr0 = p.line_width_range[0],
         lwr1 = p.line_width_range[1],
+        precision_patch = precision_patch,
+        ext_patch = ext_patch,
     )
 }
 
-/// Build GL spoof JS for Worker contexts (self-contained, no _lie).
+/// Precision-format remap for a hardware backend that answers HIGH-class
+/// precision at every level (i915/ANGLE): MEDIUM/LOW float queries are
+/// answered from the HIGH_FLOAT query, INT likewise from HIGH_INT — via
+/// argument remap, so the returned value is a genuine native
+/// WebGLShaderPrecisionFormat. Zero-arg / wrong-receiver semantics stay
+/// byte-native (slice + apply, native validation runs first).
+fn precision_remap_patch(enabled: bool) -> String {
+    if !enabled {
+        return String::new();
+    }
+    r#"
+function _mkPrec(proto){
+  var orig=proto.getShaderPrecisionFormat;
+  _defFn(proto,'getShaderPrecisionFormat',orig,function(th,a,og){
+    var b=Array.prototype.slice.call(a);
+    if(b.length>1){
+      if(b[1]===36337||b[1]===36336)b[1]=36338;
+      if(b[1]===36340||b[1]===36339)b[1]=36341;
+    }
+    return og.apply(th,b);
+  });
+}
+_mkPrec(WebGLRenderingContext.prototype);
+if(typeof WebGL2RenderingContext!=='undefined'){_mkPrec(WebGL2RenderingContext.prototype);}
+"#
+        .to_string()
+}
+
+/// Extension-list mask: filter the software backend's lists down to the
+/// claimed GPU's real sets. getSupportedExtensions returns a fresh filtered
+/// array each call (native semantics); getExtension returns null for
+/// anything outside the nominal set — checked AFTER the native call, so
+/// error/receiver/coercion semantics stay native. Surviving entries keep the
+/// backend's own order (plausible as any driver's list).
+fn build_ext_patch(
+    ext1: Option<&'static [&'static str]>,
+    ext2: Option<&'static [&'static str]>,
+) -> String {
+    if ext1.is_none() && ext2.is_none() {
+        return String::new();
+    }
+    let mk_list = |l: &[&str]| -> String {
+        let mut s = String::from("[");
+        for (i, n) in l.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push('\'');
+            s.push_str(n);
+            s.push('\'');
+        }
+        s.push(']');
+        s
+    };
+    let l1 = ext1.map(mk_list).unwrap_or_else(|| "null".into());
+    let l2 = ext2.map(mk_list).unwrap_or_else(|| "null".into());
+    format!(
+        r#"
+function _mkExts(proto,list){{
+  var set={{}};for(var i=0;i<list.length;i++)set[list[i]]=1;
+  var oge=proto.getSupportedExtensions;
+  _defFn(proto,'getSupportedExtensions',oge,function(th,a,og){{
+    var r=og.apply(th,a);
+    if(!r||typeof r.length!=='number')return r;
+    var out=[];for(var j=0;j<r.length;j++){{if(set[r[j]])out.push(r[j]);}}
+    return out;
+  }});
+  var ogx=proto.getExtension;
+  _defFn(proto,'getExtension',ogx,function(th,a,og){{
+    var r=og.apply(th,a);
+    if(r!=null&&a.length>0&&!set[a[0]])return null;
+    return r;
+  }});
+}}
+var _ex1={l1};
+if(_ex1)_mkExts(WebGLRenderingContext.prototype,_ex1);
+var _ex2={l2};
+if(_ex2&&typeof WebGL2RenderingContext!=='undefined')_mkExts(WebGL2RenderingContext.prototype,_ex2);
+"#,
+        l1 = l1,
+        l2 = l2,
+    )
+}
+
+/// Build GL spoof JS for Worker contexts. Same proxy architecture as the page
+/// (PROXY_HELPERS is the shared helper block), so a worker realm — where the
+/// old code needed its own toString mask — has nothing left to patch.
 fn build_worker_gl_spoof(p: &GpuProfile, locale: Option<&str>) -> String {
     let locale_patch = if let Some(l) = locale {
         let base = l.split('-').next().unwrap_or(l);
@@ -597,8 +788,8 @@ fn build_worker_gl_spoof(p: &GpuProfile, locale: Option<&str>) -> String {
 try{{
   if(typeof WorkerNavigator!=='undefined'){{
     var _wl='{l}';var _wls=['{l}','{base}'];
-    Object.defineProperty(WorkerNavigator.prototype,'language',{{get:function(){{return _wl;}},configurable:true,enumerable:true}});
-    Object.defineProperty(WorkerNavigator.prototype,'languages',{{get:function(){{return _wls;}},configurable:true,enumerable:true}});
+    _defGet(WorkerNavigator.prototype,'language',_ogs(WorkerNavigator.prototype,'language'),function(th,a,og){{og.apply(th,a);return _wl;}});
+    _defGet(WorkerNavigator.prototype,'languages',_ogs(WorkerNavigator.prototype,'languages'),function(th,a,og){{og.apply(th,a);return _wls;}});
   }}
 }}catch(e){{}}
 "#, l=l, base=base)
@@ -606,54 +797,52 @@ try{{
         String::new()
     };
 
+    let precision_patch = precision_remap_patch(p.precision_full);
+    let ext_patch = build_ext_patch(p.ext1_nominal, p.ext2_nominal);
     format!(
-        r#"try{{
+        r#"{helpers}
+try{{
 var _fv='{vendor}',_fr='{renderer}';
-var _glLimits={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mvtu}}};
+var _glLimits={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mctu},36183:{msamples}}};
 var _glVP=new Int32Array([{vp0},{vp1}]);
 var _glPtR=new Float32Array([{psr0},{psr1}]);
 var _glLwR=new Float32Array([{lwr0},{lwr1}]);
 function _mkGP(proto){{
   var orig=proto.getParameter;
-  var f=function getParameter(p){{
+  _defFn(proto,'getParameter',orig,function(th,a,og){{
+    var r=og.apply(th,a);
+    var p=a[0];
     if(p===37445)return _fv;
     if(p===37446)return _fr;
     if(p===3386)return _glVP;
     if(p===33902)return _glPtR;
     if(p===33901)return _glLwR;
     if(_glLimits[p]!==undefined)return _glLimits[p];
-    return orig.call(this,p);
-  }};
-  _wmasked.push(f);
-  try{{Object.defineProperty(proto,'getParameter',{{value:f,writable:true,configurable:true,enumerable:true}});}}catch(e){{}}
+    return r;
+  }});
 }}
-var _wmasked=[];
 if(typeof WebGLRenderingContext!=='undefined')_mkGP(WebGLRenderingContext.prototype);
 if(typeof WebGL2RenderingContext!=='undefined')_mkGP(WebGL2RenderingContext.prototype);
-// toString mask: workers get a pristine Function.prototype.toString,
-// so without this the patched getParameter stringifies as JS source —
-// exactly the check Pixelscan/Creepjs run in workers to catch masking.
-try{{
-var _wots=Function.prototype.toString;
-Function.prototype.toString=function toString(){{
-  for(var _wi=0;_wi<_wmasked.length;_wi++){{if(this===_wmasked[_wi])return'function getParameter() {{ [native code] }}';}}
-  return _wots.apply(this,arguments);
-}};
-}}catch(e){{}}
+{precision_patch}
+{ext_patch}
 }}catch(e){{}}
 {locale_patch}"#,
+        helpers = PROXY_HELPERS,
         vendor = p.gl_vendor,
         renderer = p.gl_renderer,
         mts = p.max_texture_size,
         mrs = p.max_renderbuffer_size,
         mcs = p.max_cube_map_size,
-        mvtu = p.max_vtx_tex_units,
+        mctu = p.max_combined_tex_units,
+        msamples = p.max_samples,
         vp0 = p.max_viewport_dims[0],
         vp1 = p.max_viewport_dims[1],
         psr0 = p.point_size_range[0],
         psr1 = p.point_size_range[1],
         lwr0 = p.line_width_range[0],
         lwr1 = p.line_width_range[1],
+        precision_patch = precision_patch,
+        ext_patch = ext_patch,
         locale_patch = locale_patch,
     )
 }
@@ -668,16 +857,64 @@ try{
 var _mdp=(typeof MediaDevices!=='undefined'&&MediaDevices.prototype)?MediaDevices.prototype:Object.getPrototypeOf(navigator.mediaDevices);
 if(_mdp){
   var _ed=_mdp.enumerateDevices;
-  var _fed=function enumerateDevices(){
-    return _ed.call(this).then(function(d){
+  _defFn(_mdp,'enumerateDevices',_ed,function(th,a,og){
+    return og.apply(th,a).then(function(d){
       if(d&&d.length>0)return d;
-      function mk(k){var o={deviceId:'',kind:k,label:'',groupId:''};o.toJSON=function toJSON(){return{deviceId:'',kind:k,label:'',groupId:''};};_lie(o.toJSON,'toJSON');return o;}
+      function mk(k){var o={deviceId:'',kind:k,label:'',groupId:''};o.toJSON=_fix(_mkN(function(){return{deviceId:'',kind:k,label:'',groupId:''};}),'toJSON',0);return o;}
       return[mk('audioinput'),mk('audiooutput')];
     });
-  };
-  try{Object.defineProperty(_mdp,'enumerateDevices',{value:_fed,writable:true,configurable:true,enumerable:true});}catch(e){_mdp.enumerateDevices=_fed;}
-  _lie(_fed,'enumerateDevices');
+  });
 }
+}catch(e){}
+
+"#;
+
+/// permissions.query('notifications') rewrite — always installed; the
+/// rewrite itself fires only for genuinely-origined documents
+/// (`location.origin !== 'null'`) whose result is 'denied'. On opaque
+/// origins (about:blank) real Chrome also reports 'denied', so the native
+/// result stands; on real origins the only divergent environment
+/// (headless-new: 'denied' everywhere) is masked to 'prompt'. The wrapper
+/// relays with the caller's exact receiver and arguments — native validation
+/// runs first, so zero-arg TypeErrors, non-object TypeErrors, wrong-receiver
+/// 'Illegal invocation' and promise timing stay byte-native.
+const PERMISSIONS_PATCH: &str = r#"
+try{
+var _opq=navigator.permissions.query;
+var _pp=Object.getPrototypeOf(navigator.permissions);
+var _pq=function(th,a,og){
+  var p=og.apply(th,a);
+  try{
+    var d=a.length>0?a[0]:undefined;
+    if(d&&typeof d==='object'&&d.name==='notifications'&&location.origin!=='null'){
+      return p.then(function(s){
+        if(s&&s.state==='denied'){try{Object.defineProperty(s,'state',{value:'prompt',configurable:true});}catch(e){}}
+        return s;
+      });
+    }
+  }catch(e){}
+  return p;
+};
+_defFn(_pp,'query',_pp.query||_opq,_pq);
+}catch(e){}
+
+"#;
+
+/// `--remote-debugging-pipe` is Chrome's automation transport, and Chrome
+/// enables the blink AutomationControlled feature for it: `navigator.webdriver`
+/// is `true` on that lane while the WS lane reports `false` (measured on
+/// Chrome 151 against a stock control). The launch flag that clears it
+/// natively (`--disable-blink-features=AutomationControlled`) also triggers
+/// Chrome's "unsupported command-line flag" infobar — a visible 56px tell that
+/// skews innerHeight (measured: 932 vs 988) — so the value is masked instead,
+/// exactly like every other environment override: a proxy over the native
+/// getter that delegates first (receiver validation stays byte-native) and
+/// returns `false`. Residual: the proxy shape is lie-engine-visible, which is
+/// why the WS transport remains the cleaner lane.
+const WEBDRIVER_PATCH: &str = r#"
+try{
+var _wdg=_ogs(Navigator.prototype,'webdriver');
+if(_wdg){_defGet(Navigator.prototype,'webdriver',_wdg,function(th,a,og){og.apply(th,a);return false;});}
 }catch(e){}
 "#;
 
@@ -688,9 +925,10 @@ const LOCALE_OVERRIDE: &str = r#"
 try{
   var _lang='__LOCALE__';
   var _langs=['__LOCALE__','__LOCALE_BASE__'];
-  _defGet(Navigator.prototype,'language',function language(){return _lang;});
-  _defGet(Navigator.prototype,'languages',function languages(){return _langs;});
+  _defGet(Navigator.prototype,'language',_ogs(Navigator.prototype,'language'),function(th,a,og){og.apply(th,a);return _lang;});
+  _defGet(Navigator.prototype,'languages',_ogs(Navigator.prototype,'languages'),function(th,a,og){og.apply(th,a);return _langs;});
 }catch(e){}
+
 "#;
 
 /// Seeded canvas+audio noise block — opt-in via BLADE_NOISE=1 (D14: noise
@@ -700,18 +938,18 @@ const NOISE: &str = r#"
 // Seeded canvas noise (stable per session — random-per-load is itself a signal).
 try{
 var _otd=HTMLCanvasElement.prototype.toDataURL;var _ogi=CanvasRenderingContext2D.prototype.getImageData;var _m=new WeakMap();
-var _tdu=function toDataURL(){if(!_m.has(this)){try{var c=this.getContext('2d');if(c&&this.width>0&&this.height>0){var px=_ogi.call(c,0,0,1,1);px.data[0]=(px.data[0]+cn)%256;px.data[1]=(px.data[1]+cn2)%256;c.putImageData(px,0,0);_m.set(this,true);}}catch(e){}}return _otd.apply(this,arguments);};
-try{Object.defineProperty(HTMLCanvasElement.prototype,'toDataURL',{value:_tdu,writable:true,configurable:true,enumerable:true});}catch(e){HTMLCanvasElement.prototype.toDataURL=_tdu;}
-_lie(_tdu,'toDataURL');
+_defFn(HTMLCanvasElement.prototype,'toDataURL',_otd,function(th,a,og){
+  if(!_m.has(th)){try{var c=th.getContext('2d');if(c&&th.width>0&&th.height>0){var px=_ogi.call(c,0,0,1,1);px.data[0]=(px.data[0]+cn)%256;px.data[1]=(px.data[1]+cn2)%256;c.putImageData(px,0,0);_m.set(th,true);}}catch(e){}}
+  return og.apply(th,a);
+});
 }catch(e){}
 
 // Seeded audio noise.
 try{
 var _ogcd=AudioBuffer.prototype.getChannelData;
-var _gcd=function getChannelData(){var d=_ogcd.apply(this,arguments);if(d.length>0){d[0]+=an*1e-7;}return d;};
-try{Object.defineProperty(AudioBuffer.prototype,'getChannelData',{value:_gcd,writable:true,configurable:true,enumerable:true});}catch(e){AudioBuffer.prototype.getChannelData=_gcd;}
-_lie(_gcd,'getChannelData');
+_defFn(AudioBuffer.prototype,'getChannelData',_ogcd,function(th,a,og){var d=og.apply(th,a);if(d.length>0){d[0]+=an*1e-7;}return d;});
 }catch(e){}
+
 "#;
 
 /// WebRTC ICE filtering — applied ONLY when BLADE_PROXY is set. Without a
@@ -724,39 +962,31 @@ const RTC_PATCH: &str = r#"
 try{
 if(typeof RTCPeerConnection!=='undefined'){
   var _origRTC=RTCPeerConnection.prototype;
-  var _origCreateOffer=_origRTC.createOffer;
-  var _origCreateAnswer=_origRTC.createAnswer;
   function _filterSDP(sdp){
     if(!sdp)return sdp;
     return sdp.replace(/a=candidate:[^\r\n]*typ host[^\r\n]*/g,'').replace(/a=candidate:[^\r\n]*typ srflx[^\r\n]*/g,'');
   }
-  var _co=function createOffer(opts){
-    return _origCreateOffer.call(this,opts).then(function(offer){
+  var _oco=_origRTC.createOffer,_oca=_origRTC.createAnswer,_oaic=_origRTC.addIceCandidate;
+  _defFn(_origRTC,'createOffer',_oco,function(th,a,og){
+    return og.apply(th,a).then(function(offer){
       if(offer&&offer.sdp){offer.sdp=_filterSDP(offer.sdp);}
       return offer;
     });
-  };
-  var _ca=function createAnswer(opts){
-    return _origCreateAnswer.call(this,opts).then(function(answer){
+  });
+  _defFn(_origRTC,'createAnswer',_oca,function(th,a,og){
+    return og.apply(th,a).then(function(answer){
       if(answer&&answer.sdp){answer.sdp=_filterSDP(answer.sdp);}
       return answer;
     });
-  };
-  var _origAIC=_origRTC.addIceCandidate;
-  var _aic=function addIceCandidate(candidate){
-    if(candidate&&candidate.candidate){
-      if(candidate.candidate.indexOf('typ host')!==-1){return Promise.resolve();}
-    }
-    return _origAIC.call(this,candidate);
-  };
-  try{Object.defineProperty(_origRTC,'createOffer',{value:_co,writable:true,configurable:true,enumerable:true});}catch(e){}
-  try{Object.defineProperty(_origRTC,'createAnswer',{value:_ca,writable:true,configurable:true,enumerable:true});}catch(e){}
-  try{Object.defineProperty(_origRTC,'addIceCandidate',{value:_aic,writable:true,configurable:true,enumerable:true});}catch(e){}
-  _lie(_co,'createOffer');
-  _lie(_ca,'createAnswer');
-  _lie(_aic,'addIceCandidate');
+  });
+  _defFn(_origRTC,'addIceCandidate',_oaic,function(th,a,og){
+    var c=a[0];
+    if(c&&c.candidate&&String(c.candidate).indexOf('typ host')!==-1){return Promise.resolve();}
+    return og.apply(th,a);
+  });
 }
 }catch(e){}
+
 "#;
 
 /// What the attach-time environment probe learned about the real machine.
@@ -766,7 +996,9 @@ struct EnvProbe {
 }
 
 /// Probe the REAL environment of the current page before any spoofing is
-/// registered: WebGL renderer + media device count. One evaluate round-trip.
+/// registered: WebGL renderer (fallback for externally-attached browsers —
+/// launched browsers use the launch healthcheck), media device count, and
+/// the notifications permission state. One evaluate round-trip.
 async fn probe_environment(cdp: &CdpSession) -> EnvProbe {
     let res = cdp
         .send(
@@ -790,21 +1022,23 @@ async fn probe_environment(cdp: &CdpSession) -> EnvProbe {
     }
 }
 
-/// True when a GL renderer string is a headless/server artifact that must be hidden.
+/// True when a GL renderer string is a headless/server artifact that must
+/// be hidden. Delegates to the shared definition in `browser` so the
+/// launch healthcheck and the spoof decision can never disagree.
 fn is_software_gl(renderer: &str) -> bool {
-    let r = renderer.to_lowercase();
-    r.contains("swiftshader") || r.contains("llvmpipe") || r.contains("softpipe") || r.contains("software")
+    crate::browser::is_software_renderer(renderer)
 }
 
 /// Legacy alias kept for external references (doc/examples).
 pub const STEALTH_SCRIPT_TEMPLATE: &str = STEALTH_CORE;
 
 /// Apply the stealth script to a CDP client via `Page.addScriptToEvaluateOnNewDocument`.
-/// Adaptive: probes the real WebGL renderer first; the GL spoof is only
-/// registered when the real value is a software/headless artifact (D14 —
-/// coherence over noise; a page-scope-only spoof loses to hasBadWebGL).
-/// Canvas/audio noise is opt-in via BLADE_NOISE=1. BLADE_WEBGL=spoof|real
-/// forces the GL decision. Returns the script identifier.
+/// Adaptive: the launch healthcheck's GL verdict (browser.rs) drives the
+/// WebGL spoof — a real GPU is reported honestly (no mask), software GL
+/// gets the spoof (D14 — coherence over noise). Externally-attached
+/// browsers fall back to a live probe here. Canvas/audio noise is opt-in
+/// via BLADE_NOISE=1. BLADE_WEBGL=spoof|real forces the GL decision.
+/// Returns the script identifier.
 pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<ScriptId> {
     // Persistent seed: stable across sessions (canvas/audio fingerprint
     // consistency). Generated once, stored in ~/.blade/.fingerprint.json.
@@ -813,21 +1047,38 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     // One environment probe drives every adaptive decision (S8/S15).
     let env = probe_environment(cdp).await;
 
-    // Adaptive GL decision.
+    // Adaptive GL decision. The launch healthcheck (browser.rs) already
+    // probed the real backend when Bladebro launched the browser itself —
+    // trust it: hardware GL is reported honestly (nothing to mask), software
+    // GL gets the spoof. Only an externally-attached browser (no healthcheck
+    // in this process) falls back to a live probe here.
     let gl_mode = std::env::var("BLADE_WEBGL").unwrap_or_else(|_| "auto".to_string());
     let spoof_gl = match gl_mode.as_str() {
         "spoof" => true,
         "real" => false,
-        _ => match &env.gl_renderer {
-            Some(renderer) => {
-                let software = is_software_gl(renderer);
-                if software {
-                    eprintln!("[stealth] real GL is software ({renderer}) — registering WebGL spoof");
-                }
-                software
+        _ => match crate::browser::gpu_state() {
+            Some(crate::browser::GpuState::Hardware(renderer)) => {
+                eprintln!("[stealth] GL healthcheck says hardware ({renderer}) — no WebGL spoof");
+                false
             }
-            // Probe failed — safest default is to spoof (hides SwiftShader).
-            None => true,
+            Some(crate::browser::GpuState::Software(renderer)) => {
+                eprintln!("[stealth] GL healthcheck says software ({renderer}) — registering WebGL spoof");
+                true
+            }
+            // No context existed at launch — the spoof is inert either way;
+            // keep the fail-safe default.
+            Some(crate::browser::GpuState::Missing) => true,
+            None => match &env.gl_renderer {
+                Some(renderer) => {
+                    let software = is_software_gl(renderer);
+                    if software {
+                        eprintln!("[stealth] real GL is software ({renderer}) — registering WebGL spoof");
+                    }
+                    software
+                }
+                // Probe failed — safest default is to spoof (hides SwiftShader).
+                None => true,
+            },
         },
     };
     // S15: mediaDevices patch only when the machine reports zero devices.
@@ -856,7 +1107,7 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         eprintln!("[stealth] registering locale override: {l}");
     }
 
-    let mut script = String::with_capacity(STEALTH_CORE.len() + 2048 + MEDIA_PATCH.len() + LOCALE_OVERRIDE.len() + NOISE.len() + RTC_PATCH.len() + STEALTH_TAIL.len());
+    let mut script = String::with_capacity(STEALTH_CORE.len() + 2048 + MEDIA_PATCH.len() + PERMISSIONS_PATCH.len() + LOCALE_OVERRIDE.len() + NOISE.len() + RTC_PATCH.len() + STEALTH_TAIL.len());
     script.push_str(STEALTH_CORE);
     // WebRTC candidate filtering only under a proxy (see RTC_PATCH docs).
     if std::env::var("BLADE_PROXY").map(|v| !v.is_empty()).unwrap_or(false) {
@@ -877,6 +1128,25 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     if patch_media {
         script.push_str(MEDIA_PATCH);
     }
+    // Notifications relay: only the headless lane needs it. Headless-New
+    // reports 'denied' for notifications on real origins — a server tell —
+    // while a headful lane reports the honest state (verified against stock
+    // on the same display: headful-on-Xvfb says 'prompt'). Installing it
+    // otherwise is both a lie on honest desktops and a patched function a
+    // lie engine can inspect. BLADE_PERMS=patch|real overrides.
+    let patch_perms = match std::env::var("BLADE_PERMS").as_deref() {
+        Ok("patch") => true,
+        Ok("real") => false,
+        _ => crate::browser::launched_headless(),
+    };
+    if patch_perms {
+        script.push_str(PERMISSIONS_PATCH);
+    }
+    // Pipe transport: the automation flag makes navigator.webdriver true
+    // (see WEBDRIVER_PATCH).
+    if crate::browser::launched_pipe() {
+        script.push_str(WEBDRIVER_PATCH);
+    }
     if locale.is_some() {
         script.push_str(LOCALE_OVERRIDE);
     }
@@ -885,6 +1155,8 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     }
     script.push_str(STEALTH_TAIL);
     let script = script.replace("__SEED__", &seed.to_string());
+    // Shared proxy-mask helpers (also used by the worker scripts).
+    let script = script.replace("__PROXY_HELPERS__", PROXY_HELPERS);
     let script = if let Some(ref l) = locale {
         let base = l.split('-').next().unwrap_or(l).to_string();
         script.replace("__LOCALE__", l).replace("__LOCALE_BASE__", &base)
@@ -895,6 +1167,17 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     // Register for the OOPIF auto-attach handler (see FULL_SCRIPT).
     if let Ok(mut guard) = FULL_SCRIPT.write() {
         *guard = script.clone();
+    }
+
+    // BLADE_DUMP_INJECT=<path>: write the exact assembled script to a file.
+    // Used by the release checklist / regression work to syntax-lint the
+    // injection (`node --check`): a parse error silently disables EVERY patch
+    // (the audit's vector score drops, but a lint catches it before it ships).
+    if let Ok(path) = std::env::var("BLADE_DUMP_INJECT") {
+        let _ = std::fs::write(&path, &script);
+        if let Some(w) = worker_gl_spoof(locale.as_deref()) {
+            let _ = std::fs::write(format!("{path}.worker.js"), w);
+        }
     }
 
     let res = cdp
@@ -920,15 +1203,17 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     Ok(id)
 }
 
-/// Worker GL spoof script — self-contained (no _lie dependency) for Worker
-/// contexts. Returns None when neither the GL spoof is active nor a locale
+/// Worker GL spoof script — the same proxy architecture as the page
+/// (PROXY_HELPERS is the shared helper block, so the two realms cannot
+/// drift). Returns None when neither the GL spoof is active nor a locale
 /// override is set (M11: with BLADE_LOCALE, WorkerNavigator.language must
 /// match the main frame or the mismatch is itself a fingerprint).
-/// D22: Injected via CDP Target.setAutoAttach into each worker target.
+/// D22: injected via CDP Target.setAutoAttach into each worker target.
 pub fn worker_gl_spoof(locale: Option<&str>) -> Option<String> {
     if !GL_SPOOFED.load(Ordering::Relaxed) {
         if locale.is_some() {
-            return Some(format!("try{{{{{}}}}}catch(e){{}}", worker_locale_patch(locale)));
+            let patch = worker_locale_patch(locale);
+            return Some(format!("{}\ntry{{{patch}}}catch(e){{}}", PROXY_HELPERS));
         }
         return None;
     }
@@ -936,15 +1221,16 @@ pub fn worker_gl_spoof(locale: Option<&str>) -> Option<String> {
     Some(build_worker_gl_spoof(&profile, locale))
 }
 
-/// The WorkerNavigator locale patch as a standalone JS statement list.
+/// The WorkerNavigator locale patch as a standalone JS statement list —
+/// proxy getters over the native accessors (needs PROXY_HELPERS).
 fn worker_locale_patch(locale: Option<&str>) -> String {
     if let Some(l) = locale {
         let base = l.split('-').next().unwrap_or(l);
         format!(
             r#"if(typeof WorkerNavigator!=='undefined'){{
   var _wl='{l}';var _wls=['{l}','{base}'];
-  Object.defineProperty(WorkerNavigator.prototype,'language',{{get:function(){{return _wl;}},configurable:true,enumerable:true}});
-  Object.defineProperty(WorkerNavigator.prototype,'languages',{{get:function(){{return _wls;}},configurable:true,enumerable:true}});
+  _defGet(WorkerNavigator.prototype,'language',_ogs(WorkerNavigator.prototype,'language'),function(th,a,og){{og.apply(th,a);return _wl;}});
+  _defGet(WorkerNavigator.prototype,'languages',_ogs(WorkerNavigator.prototype,'languages'),function(th,a,og){{og.apply(th,a);return _wls;}});
 }}"#,
             l = l,
             base = base
@@ -955,11 +1241,13 @@ fn worker_locale_patch(locale: Option<&str>) -> String {
 }
 
 /// SharedWorker constructor wrapper for the main page injection.
-/// CDP doesn't emit Target.attachedToTarget for shared_worker targets,
-/// so we intercept the SharedWorker constructor and inject the GL spoof
-/// via a blob URL: <gl_spoof + locale patch + importScripts(original_url)>.
-/// Falls back to the original URL for cross-origin workers (importScripts throws).
-/// Returns None when GL spoof is not active.
+/// CDP doesn't emit Target.attachedToTarget for shared_worker targets, so we
+/// intercept the SharedWorker constructor and inject the GL spoof via a blob
+/// URL: <gl_spoof + locale patch + importScripts(original_url)>. A Proxy
+/// construct trap keeps the interface object native-shaped (toString, own
+/// keys, prototype forwarding) — the old plain-wrapper function was itself a
+/// differential. Falls back to the original URL for cross-origin workers
+/// (importScripts throws). Returns None when GL spoof is not active.
 pub fn sharedworker_wrapper(locale: Option<&str>) -> Option<String> {
     if !GL_SPOOFED.load(Ordering::Relaxed) {
         return None;
@@ -979,21 +1267,19 @@ try{{
   var _swCode='{escaped}';
   var _OrigSW=window.SharedWorker;
   if(_OrigSW){{
-    var _SWProxy=function SharedWorker(url,options){{
+    var _SWProxy=new Proxy(_OrigSW,{{construct:function(t,a,nt){{
       try{{
+        var url=a[0],options=a[1];
         var full=_swCode+'\nimportScripts('+JSON.stringify(url)+')';
         var blob=new Blob([full],{{type:'application/javascript'}});
         var blobUrl=URL.createObjectURL(blob);
-        var sw=new _OrigSW(blobUrl,options);
+        var sw=Reflect.construct(t,[blobUrl,options],nt);
         setTimeout(function(){{URL.revokeObjectURL(blobUrl);}},10000);
         return sw;
       }}catch(e){{
-        return new _OrigSW(url,options);
+        return Reflect.construct(t,a,nt);
       }}
-    }};
-    _SWProxy.prototype=_OrigSW.prototype;
-    Object.setPrototypeOf(_SWProxy,_OrigSW);
-    _lie(_SWProxy,'SharedWorker');
+    }}}});
     Object.defineProperty(window,'SharedWorker',{{value:_SWProxy,writable:true,configurable:true,enumerable:false}});
   }}
 }}catch(e){{}}

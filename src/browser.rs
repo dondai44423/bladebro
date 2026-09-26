@@ -8,7 +8,7 @@
 //!
 //! Stealth mode: if Xvfb (virtual X display) is available, Chrome runs in
 //! headful mode on a virtual display. This eliminates most headless-detection
-//! signals at the root (real CSS rendering, real GPU, real UA in workers).
+//! signals at the root (real CSS rendering, a live GL stack, real UA in workers).
 //! If Xvfb isn't available, falls back to `--headless=new`.
 
 use std::process::{Child, Command, Stdio};
@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::{BladeError, Result};
 use crate::platform;
+use std::sync::atomic::{AtomicBool, Ordering};
+use serde_json::json;
 
 /// Flags applied to every Chrome launch (both headless and headful).
 /// SECURITY: the Chrome renderer sandbox stays ON. `--no-sandbox` used to
@@ -25,7 +27,12 @@ use crate::platform;
 const STEALTH_FLAGS: &[&str] = &[
     "--disable-extensions",
     "--no-first-run",
-    "--disable-blink-features=AutomationControlled",
+    // (v3.9.12) --disable-blink-features=AutomationControlled REMOVED: on
+    // Chrome 151 it is a no-op for navigator.webdriver unless the browser is
+    // launched with --enable-automation (we never pass it) — verified
+    // with/without in headful AND headless — and it triggers Chrome's
+    // "unsupported command-line flag" infobar: a visible 56px in-window tell
+    // that also skews innerHeight (caught by tools/diff_oracle).
     "--disable-dev-shm-usage",
     "--disable-background-networking",
     "--disable-sync",
@@ -49,6 +56,303 @@ const STEALTH_FLAGS: &[&str] = &[
 /// Additional flags for headless mode only.
 const HEADLESS_FLAGS: &[&str] = &["--headless=new", "--disable-gpu"];
 
+/// GL backend ladder stage. The launch healthcheck walks these in order and
+/// keeps the first stage that yields a live WebGL context; a stage that comes
+/// up without one is shut down and the next is tried (bounded).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GlStage {
+    /// Native-GL ANGLE backend. Under Xvfb this lands on Mesa (llvmpipe —
+    /// software, but a live context) which the stealth GL mask normalizes.
+    NativeGl,
+    /// SwiftShader ANGLE backend — last resort for stacks where the
+    /// native-GL backend cannot initialize (observed live: SwANGLE
+    /// `eglInitialize` failing with a Vulkan init error is the *default*
+    /// ANGLE choice on some Mesa builds).
+    SwiftShader,
+}
+
+/// CDP transport — the ONLY difference a launcher is allowed to make
+/// between the WS and pipe command lines.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Transport {
+    Ws,
+    Pipe,
+}
+
+/// Launch-time GL healthcheck result. Consumed by `stealth::apply`: the
+/// WebGL spoof registers only when the real backend is software (D14 —
+/// coherence over noise; a real GPU is reported honestly, nothing to mask).
+#[derive(Clone, Debug)]
+pub enum GpuState {
+    Hardware(String),
+    Software(String),
+    /// No WebGL context after the whole ladder — inert spoof, loud warning.
+    Missing,
+}
+
+/// Launch-time GL state, read by `stealth::apply` at attach time.
+static GPU_STATE: std::sync::RwLock<Option<GpuState>> = std::sync::RwLock::new(None);
+
+/// Record the GL healthcheck result (called by the launch paths).
+pub fn set_gpu_state(state: Option<GpuState>) {
+    if let Ok(mut g) = GPU_STATE.write() {
+        *g = state;
+    }
+}
+
+/// The launch-time GL state, if a healthcheck ran in this process.
+pub fn gpu_state() -> Option<GpuState> {
+    match GPU_STATE.read() {
+        Ok(g) => g.clone(),
+        Err(_) => None,
+    }
+}
+
+/// Launch-mode flag: true when this process launched the browser with
+/// `--headless=new` (no virtual display available). The stealth layer uses it
+/// to gate environment-specific masks that are only *needed* in headless
+/// mode — e.g. the notifications permission relay (headless-New reports
+/// 'denied' on real origins; a headful lane reports the honest 'prompt',
+/// verified against stock on the same display). Unknown (external attach)
+/// reads as false = honest: never lie to a browser we did not launch.
+static LAUNCH_HEADLESS: AtomicBool = AtomicBool::new(false);
+
+/// Record whether the launch fell back to `--headless=new`.
+pub fn set_launched_headless(headless: bool) {
+    LAUNCH_HEADLESS.store(headless, Ordering::Relaxed);
+}
+
+/// True when this process launched a headless (`--headless=new`) browser.
+pub fn launched_headless() -> bool {
+    LAUNCH_HEADLESS.load(Ordering::Relaxed)
+}
+
+/// Launch-transport flag: true when the browser was launched with
+/// `--remote-debugging-pipe`. Chrome treats that transport as its automation
+/// transport and enables the blink AutomationControlled feature, so
+/// `navigator.webdriver` is `true` on this lane while the WS lane reports
+/// `false` (measured on Chrome 151, both transports, stock control). The
+/// stealth layer masks it there — see `WEBDRIVER_PATCH`.
+static LAUNCH_PIPE: AtomicBool = AtomicBool::new(false);
+
+/// Record whether the launch used the pipe transport.
+pub fn set_launched_pipe(pipe: bool) {
+    LAUNCH_PIPE.store(pipe, Ordering::Relaxed);
+}
+
+/// True when this process launched the browser over `--remote-debugging-pipe`.
+pub fn launched_pipe() -> bool {
+    LAUNCH_PIPE.load(Ordering::Relaxed)
+}
+
+/// True for software/headless renderer artifacts (llvmpipe, SwiftShader,
+/// softpipe). Single definition shared with `stealth::inject` so the launch
+/// healthcheck and the spoof decision can never disagree.
+pub fn is_software_renderer(renderer: &str) -> bool {
+    let r = renderer.to_lowercase();
+    r.contains("swiftshader") || r.contains("llvmpipe") || r.contains("softpipe") || r.contains("software")
+}
+
+/// Classify a live renderer string into the launch-time [`GpuState`].
+fn classify_gl(renderer: &str) -> GpuState {
+    if is_software_renderer(renderer) {
+        GpuState::Software(renderer.to_string())
+    } else {
+        GpuState::Hardware(renderer.to_string())
+    }
+}
+
+/// Human label for a ladder stage (logs).
+fn stage_label(stage: GlStage) -> &'static str {
+    match stage {
+        GlStage::NativeGl => "native-gl",
+        GlStage::SwiftShader => "swiftshader",
+    }
+}
+
+/// The GL ladder, in attempt order. Both transports walk the same list.
+fn gl_stages() -> &'static [GlStage] {
+    &[GlStage::NativeGl, GlStage::SwiftShader]
+}
+
+/// Everything a Chrome command line depends on. Both transports build from
+/// [`launch_args`] — the v3.9.11 pipe path silently missing
+/// `--ignore-gpu-blocklist` is exactly the class of bug this prevents:
+/// Chrome then answers "WebGL{1,2} blocklisted" and every context is null
+/// (stealth was fine; the launch wasn't).
+struct LaunchCfg<'a> {
+    stage: GlStage,
+    headful: bool,
+    no_sandbox: bool,
+    transport: Transport,
+    port: u16,
+    user_data_dir: &'a std::path::Path,
+    proxy: Option<&'a str>,
+    extra: &'a [String],
+}
+
+/// The single source of truth for a Chrome command line. Pure — unit tests
+/// lock the WS/pipe delta to exactly the transport flag.
+fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
+    let mut args: Vec<String> = STEALTH_FLAGS.iter().map(|s| s.to_string()).collect();
+    if cfg.no_sandbox {
+        args.push("--no-sandbox".into());
+    }
+    if !cfg.headful {
+        args.extend(HEADLESS_FLAGS.iter().map(|s| s.to_string()));
+    }
+    // Chrome 139+ only hands out software WebGL contexts when this is set
+    // (hardware GL is unaffected). Without it, GPU-less environments get
+    // `getContext('webgl') === null` — the loudest automation tell there is.
+    args.push("--enable-unsafe-swiftshader".into());
+    // Software/virtual renderers (llvmpipe, SwiftShader) sit on Chrome's GPU
+    // blocklist; without the override Chrome reports "WebGL1/2 blocklisted"
+    // and contexts are null. The override turns a dead GL stack into a
+    // working, mask-normalized one. BOTH transports must carry it.
+    args.push("--ignore-gpu-blocklist".into());
+    #[cfg(target_os = "linux")]
+    if cfg.headful {
+        // Pin the window to the Xvfb display (the caller strips Wayland env
+        // first). Explicit so Chrome can never drift onto the user's real
+        // session via platform auto-detection.
+        args.push("--ozone-platform=x11".into());
+    }
+    match cfg.stage {
+        GlStage::NativeGl => {
+            #[cfg(target_os = "linux")]
+            if cfg.headful {
+                args.push("--use-angle=gl".into());
+            }
+        }
+        GlStage::SwiftShader => {
+            args.push("--use-angle=swiftshader".into());
+        }
+    }
+    match cfg.transport {
+        Transport::Ws => args.push(format!("--remote-debugging-port={}", cfg.port)),
+        Transport::Pipe => args.push("--remote-debugging-pipe".into()),
+    }
+    args.push(format!("--user-data-dir={}", cfg.user_data_dir.display()));
+    if let Some(proxy) = cfg.proxy {
+        args.push(format!("--proxy-server={proxy}"));
+    }
+    if cfg.headful {
+        args.push("--window-size=1920,1080".into());
+    }
+    args.extend(cfg.extra.iter().cloned());
+    args
+}
+
+/// The healthcheck expression — evaluated in a normal document (the probe
+/// navigates the target to about:blank first: the startup tab may be a
+/// WebUI where canvas access can be restricted).
+const GL_PROBE_EXPR: &str = "(function(){try{var c=document.createElement('canvas');var g=c.getContext('webgl');if(!g)return '';var e=g.getExtension('WEBGL_debug_renderer_info');return e?String(g.getParameter(e.UNMASKED_RENDERER_WEBGL)):String(g.getParameter(g.RENDERER));}catch(err){return ''}})()";
+
+/// Healthcheck the WS transport: evaluate the GL probe in the first page
+/// target with bounded retries. Returns the renderer string, or None when
+/// no context ever appears.
+async fn probe_gl_ws(base: &str) -> Option<String> {
+    for _ in 0..3 {
+        if let Some(renderer) = probe_gl_ws_once(base).await {
+            return Some(renderer);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    None
+}
+
+async fn probe_gl_ws_once(base: &str) -> Option<String> {
+    let target = crate::cdp::first_page_target(base).await.ok()?;
+    let client = crate::cdp::CdpClient::connect(target.ws_url().ok()?).await.ok()?;
+    let session = crate::cdp::CdpSession::root(client);
+    let _ = session
+        .send("Page.navigate", Some(json!({ "url": "about:blank" })))
+        .await;
+    for _ in 0..10 {
+        if let Ok(v) = session
+            .send(
+                "Runtime.evaluate",
+                Some(json!({ "expression": GL_PROBE_EXPR, "returnByValue": true })),
+            )
+            .await
+        {
+            if let Some(s) = v.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    None
+}
+
+/// Healthcheck the pipe transport over the browser-level connection
+/// (`Target.getTargets` → `attachToTarget` flatten → evaluate → detach).
+#[cfg(unix)]
+async fn probe_gl_pipe(client: &crate::cdp::CdpClient) -> Option<String> {
+    for _ in 0..3 {
+        if let Some(renderer) = probe_gl_pipe_once(client).await {
+            return Some(renderer);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    None
+}
+
+#[cfg(unix)]
+async fn probe_gl_pipe_once(client: &crate::cdp::CdpClient) -> Option<String> {
+    let targets = client.send("Target.getTargets", None).await.ok()?;
+    let empty = Vec::new();
+    let infos = targets
+        .get("targetInfos")
+        .and_then(|t| t.as_array())
+        .unwrap_or(&empty);
+    let target_id = infos
+        .iter()
+        .find(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+        .and_then(|t| t.get("targetId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())?;
+    let res = client
+        .send(
+            "Target.attachToTarget",
+            Some(json!({ "targetId": target_id, "flatten": true })),
+        )
+        .await
+        .ok()?;
+    let session_id = res.get("sessionId").and_then(|v| v.as_str())?.to_string();
+    let session = crate::cdp::CdpSession::child(client.clone(), session_id.clone());
+    let _ = session
+        .send("Page.navigate", Some(json!({ "url": "about:blank" })))
+        .await;
+    let mut found = None;
+    for _ in 0..10 {
+        if let Ok(v) = session
+            .send(
+                "Runtime.evaluate",
+                Some(json!({ "expression": GL_PROBE_EXPR, "returnByValue": true })),
+            )
+            .await
+        {
+            if let Some(s) = v.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    found = Some(s.to_string());
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let _ = client
+        .send(
+            "Target.detachFromTarget",
+            Some(json!({ "sessionId": session_id })),
+        )
+        .await;
+    found
+}
+
 /// A launched Chrome process + virtual display + session
 /// profile. Chrome killed on Drop; the session profile is
 /// synced back to the template and removed on explicit
@@ -68,6 +372,11 @@ pub struct Browser {
 #[cfg(target_os = "linux")]
 pub struct VirtualDisplay {
     child: Child,
+    /// Window manager on the virtual display, when available: real window
+    /// decorations (`outerWidth > innerWidth`) and a declared work area
+    /// (`availHeight < height`) so the JS geometry masks stay off. Absent when
+    /// no WM binary is installed — the JS masks are then the fallback.
+    wm: Option<Child>,
     display_num: u16,
 }
 
@@ -97,7 +406,7 @@ impl VirtualDisplay {
             let child = Command::new(&xvfb_path)
                 .args([
                     &format!(":{display_num}"),
-                    "-screen", "0", "1920x1080x24",
+                    "-screen", "0", &format!("{XVFB_SCREEN_WIDTH}x{XVFB_SCREEN_HEIGHT}x24"),
                     "-ac",           // disable access control (headless server)
                     "-nolisten", "tcp",
                 ])
@@ -119,8 +428,9 @@ impl VirtualDisplay {
             std::thread::sleep(Duration::from_millis(300));
             match child.try_wait() {
                 Ok(None) => {
+                    let wm = spawn_session_chrome(display_num);
                     eprintln!("[bladebro] Xvfb virtual display on :{display_num}");
-                    return Ok(Self { child, display_num });
+                    return Ok(Self { child, wm, display_num });
                 }
                 Ok(Some(status)) => {
                     last_err = format!("Xvfb :{display_num} exited ({status})");
@@ -140,6 +450,106 @@ impl VirtualDisplay {
         format!(":{}", self.display_num)
     }
 }
+
+/// Start a window manager on the virtual display and give the screen an
+/// honest work area. An X screen with no WM has no work area at all:
+/// `screen.availHeight` equals `screen.height`, `outerWidth` equals
+/// `innerWidth` and windows carry no decorations — an Xvfb signature that
+/// would otherwise have to be masked in JS (and every JS mask is a patched
+/// function a lie engine can inspect). With a WM the decorations are real and
+/// `_NET_WORKAREA` — which Chromium reads for `screen.availHeight`, the
+/// `avail*` family and window maximization — declares a plausible 40px bottom
+/// taskbar. No panel process is spawned: xfce4-panel is a per-user singleton
+/// ("There is already a running instance") so a second lane cannot get a
+/// strut from it, while the property belongs to no one once the WM is up.
+/// Degrades silently when the tools are missing — the JS geometry masks are
+/// then the fallback.
+#[cfg(target_os = "linux")]
+fn spawn_session_chrome(display_num: u16) -> Option<Child> {
+    fn find_bin(name: &str, extra: &[&str]) -> Option<String> {
+        for path in extra {
+            if std::path::Path::new(path).exists() {
+                return Some((*path).to_string());
+            }
+        }
+        find_in_path(name)
+    }
+    let wm = find_bin("xfwm4", &["/usr/bin/xfwm4", "/usr/local/bin/xfwm4"]).and_then(|path| {
+        let mut cmd = Command::new(path);
+        cmd.args(["--compositor=off", "--replace"])
+            .env("DISPLAY", format!(":{display_num}"))
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("XDG_SESSION_TYPE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd.spawn().ok()
+    });
+    // xfwm4 publishes the full screen first, then stops touching the property
+    // (there are no struts to react to) — so declare the taskbar after a short
+    // settle and verify the read-back before the caller launches Chrome, whose
+    // window caches this geometry at creation time.
+    if wm.is_some() {
+        std::thread::sleep(Duration::from_millis(400));
+        for _ in 0..25 {
+            if set_work_area(display_num) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    wm
+}
+
+/// Declare a 40px bottom taskbar on `_NET_WORKAREA` (x, y, w, h per desktop)
+/// via `xprop -set`. Returns true once the property reads back with the
+/// expected height, or when `xprop` is unavailable (the JS mask's own
+/// self-correcting guard is then the fallback — never spin without an
+/// instrument).
+#[cfg(target_os = "linux")]
+fn set_work_area(display_num: u16) -> bool {
+    let disp = format!(":{display_num}");
+    let want = XVFB_SCREEN_HEIGHT - 40;
+    let value = format!("0, 0, {XVFB_SCREEN_WIDTH}, {want}");
+    let set = Command::new("xprop")
+        .args([
+            "-display",
+            &disp,
+            "-root",
+            "-f",
+            "_NET_WORKAREA",
+            "32c",
+            "-set",
+            "_NET_WORKAREA",
+            &value,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if !matches!(set, Ok(s) if s.success()) {
+        return true;
+    }
+    let out = Command::new("xprop")
+        .args(["-display", &disp, "-root", "-notype", "_NET_WORKAREA"])
+        .output();
+    match out {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let nums: Vec<u64> = s
+                .split(|c: char| !c.is_ascii_digit())
+                .filter_map(|t| t.parse().ok())
+                .collect();
+            nums.len() >= 4 && nums.chunks(4).any(|c| c.len() == 4 && c[3] == want)
+        }
+        Err(_) => true,
+    }
+}
+
+/// The virtual display's geometry (one source for the Xvfb args and the
+/// work-area check).
+#[cfg(target_os = "linux")]
+const XVFB_SCREEN_WIDTH: u64 = 1920;
+#[cfg(target_os = "linux")]
+const XVFB_SCREEN_HEIGHT: u64 = 1080;
 
 /// Atomically claim a free display number via O_EXCL file
 /// creation. Returns None when 99..200 are all claimed.
@@ -177,6 +587,10 @@ impl Drop for VirtualDisplay {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(mut w) = self.wm.take() {
+            let _ = w.kill();
+            let _ = w.wait();
+        }
         // Clean up the lock file + our claim.
         let lock = format!("/tmp/.X{}-lock", self.display_num);
         let _ = std::fs::remove_file(lock);
@@ -192,7 +606,8 @@ fn apply_xvfb_env(cmd: &mut Command, xvfb: &VirtualDisplay) {
     cmd.env("DISPLAY", xvfb.display_env());
     cmd.env_remove("WAYLAND_DISPLAY");
     cmd.env_remove("XDG_SESSION_TYPE");
-    cmd.arg("--ozone-platform=x11");
+    // The --ozone-platform=x11 pin itself lives in `launch_args` (both
+    // transports build from that single source).
 }
 
 impl Browser {
@@ -238,7 +653,61 @@ impl Browser {
         Err(last_err.unwrap_or_else(|| BladeError::Other("launch failed".into())))
     }
 
+    /// Launch with the GL ladder: walk `gl_stages()`, keep the first stage
+    /// that yields a live WebGL context, and record the result for the
+    /// stealth layer. A stage that comes up without GL is shut down and the
+    /// next stage is tried (bounded — the ladder has two stages) so a
+    /// GL-less browser is never what pages see.
     async fn launch_inner(port: u16, no_sandbox: bool) -> Result<Self> {
+        let stages = gl_stages();
+        let mut last: Option<Self> = None;
+        for (i, stage) in stages.iter().enumerate() {
+            if let Some(b) = last.take() {
+                // No GL in the previous stage — tear it down before the
+                // relaunch (fresh Xvfb + profile; the WS transport re-binds
+                // the same port, so the old Chrome must be gone first).
+                let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+            }
+            let (browser, probe) = Self::launch_inner_stage(port, no_sandbox, *stage).await?;
+            match probe {
+                Some(renderer) => {
+                    let state = classify_gl(&renderer);
+                    eprintln!(
+                        "[stealth] GL healthcheck: {renderer} ({}) via {}",
+                        if matches!(state, GpuState::Hardware(_)) {
+                            "hardware"
+                        } else {
+                            "software"
+                        },
+                        stage_label(*stage)
+                    );
+                    set_gpu_state(Some(state));
+                    return Ok(browser);
+                }
+                None => {
+                    if i + 1 < stages.len() {
+                        eprintln!(
+                            "[bladebro] GL healthcheck: no WebGL context via {} — escalating to {}",
+                            stage_label(*stage),
+                            stage_label(stages[i + 1])
+                        );
+                        last = Some(browser);
+                    } else {
+                        eprintln!(
+                            "[bladebro] WARNING: no WebGL context after the full GL ladder — \
+                             pages will see `getContext('webgl') === null`. Run `bladebro audit`."
+                        );
+                        set_gpu_state(Some(GpuState::Missing));
+                        return Ok(browser);
+                    }
+                }
+            }
+        }
+        Err(BladeError::Other("no GL stages configured".into()))
+    }
+
+    /// One launch attempt with a pinned GL stage (driven by `launch_inner`).
+    async fn launch_inner_stage(port: u16, no_sandbox: bool, stage: GlStage) -> Result<(Self, Option<String>)> {
         let chrome_path = find_chrome()?;
         let profile = crate::session_profile::SessionProfile::create()?;
         let user_data_dir = profile.dir().to_path_buf();
@@ -260,53 +729,30 @@ impl Browser {
         #[cfg(not(target_os = "linux"))]
         let headful = true; // macOS/Windows have native window servers
 
-        let mut args: Vec<String> = STEALTH_FLAGS.iter().map(|s| s.to_string()).collect();
-        if no_sandbox {
-            args.push("--no-sandbox".into());
-        }
-        if !headful {
-            args.extend(HEADLESS_FLAGS.iter().map(|s| s.to_string()));
-        }
-        // On Xvfb there is no GPU: Chrome 139+ refuses software
-        // WebGL unless this flag is set (contexts return null).
-        // --ignore-gpu-blocklist additionally unblocks WebGL when the
-        // software/virtual renderer lands on the GPU blocklist (a real
-        // Xvfb failure mode: ANGLE or Mesa GL displays "WebGL{1,2}
-        // blocklisted" and getContext returns null). Together these
-        // guarantee a software context on GPU-less displays; the
-        // stealth GL spoof masks the SwiftShader/llvmpipe strings, so
-        // pages see a coherent hardware identity either way.
-        #[cfg(target_os = "linux")]
-        if headful {
-            args.push("--enable-unsafe-swiftshader".into());
-            args.push("--ignore-gpu-blocklist".into());
-        }
-        args.push(format!("--remote-debugging-port={port}"));
-        args.push(format!("--user-data-dir={}", user_data_dir.display()));
+        // After both bindings: the recording must compile on every target.
+        set_launched_headless(!headful);
 
         // M18: Proxy support via BLADE_PROXY env var.
-        if let Ok(proxy) = std::env::var("BLADE_PROXY") {
-            if !proxy.is_empty() {
-                args.push(format!("--proxy-server={proxy}"));
-                eprintln!("[bladebro] using proxy: {proxy}");
-            }
+        let proxy = std::env::var("BLADE_PROXY").ok().filter(|p| !p.is_empty());
+        if let Some(p) = &proxy {
+            eprintln!("[bladebro] using proxy: {p}");
         }
-
-        // Set a realistic window size for headful mode.
-        if headful {
-            args.push("--window-size=1920,1080".into());
-        }
-
         // Power-user escape hatch: append raw Chrome flags. Useful for
         // diagnosing GL/WebGL backend issues on odd displays and for
         // users who need a specific Chromium switch. Whitespace-split.
-        if let Ok(extra) = std::env::var("BLADE_CHROME_FLAGS") {
-            for f in extra.split_whitespace() {
-                if !f.is_empty() {
-                    args.push(f.to_string());
-                }
-            }
-        }
+        let extra: Vec<String> = std::env::var("BLADE_CHROME_FLAGS")
+            .map(|s| s.split_whitespace().map(String::from).collect())
+            .unwrap_or_default();
+        let args = launch_args(&LaunchCfg {
+            stage,
+            headful,
+            no_sandbox,
+            transport: Transport::Ws,
+            port,
+            user_data_dir: &user_data_dir,
+            proxy: proxy.as_deref(),
+            extra: &extra,
+        });
 
         #[cfg(target_os = "linux")]
         let mode_str = if headful { "headful (Xvfb)" } else { "headless" };
@@ -347,13 +793,17 @@ impl Browser {
                         "[bladebro] Chrome ready: {} (protocol {})",
                         v.browser, v.protocol_version
                     );
-                    return Ok(Self {
-                        child,
-                        #[cfg(target_os = "linux")]
-                        xvfb,
-                        port,
-                        profile,
-                    });
+                    let probe = probe_gl_ws(&base).await;
+                    return Ok((
+                        Self {
+                            child,
+                            #[cfg(target_os = "linux")]
+                            xvfb,
+                            port,
+                            profile,
+                        },
+                        probe,
+                    ));
                 }
                 Err(_) => {
                     match child.try_wait() {
@@ -492,8 +942,64 @@ impl Browser {
         Err(last_err.unwrap_or_else(|| BladeError::Other("pipe launch failed".into())))
     }
 
+    /// Launch over the pipe transport with the same GL ladder as the WS
+    /// path (shared `gl_stages()` — lane parity is structural, not a
+    /// promise).
     #[cfg(unix)]
     async fn launch_pipe_inner(no_sandbox: bool) -> Result<(Self, crate::cdp::CdpClient)> {
+        let stages = gl_stages();
+        let mut last: Option<(Self, crate::cdp::CdpClient)> = None;
+        for (i, stage) in stages.iter().enumerate() {
+            if let Some((b, c)) = last.take() {
+                drop(c);
+                let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+            }
+            let (browser, client, probe) =
+                Self::launch_pipe_inner_stage(no_sandbox, *stage).await?;
+            match probe {
+                Some(renderer) => {
+                    let state = classify_gl(&renderer);
+                    eprintln!(
+                        "[stealth] GL healthcheck: {renderer} ({}) via {}",
+                        if matches!(state, GpuState::Hardware(_)) {
+                            "hardware"
+                        } else {
+                            "software"
+                        },
+                        stage_label(*stage)
+                    );
+                    set_gpu_state(Some(state));
+                    return Ok((browser, client));
+                }
+                None => {
+                    if i + 1 < stages.len() {
+                        eprintln!(
+                            "[bladebro] GL healthcheck: no WebGL context via {} — escalating to {}",
+                            stage_label(*stage),
+                            stage_label(stages[i + 1])
+                        );
+                        last = Some((browser, client));
+                    } else {
+                        eprintln!(
+                            "[bladebro] WARNING: no WebGL context after the full GL ladder — \
+                             pages will see `getContext('webgl') === null`. Run `bladebro audit`."
+                        );
+                        set_gpu_state(Some(GpuState::Missing));
+                        return Ok((browser, client));
+                    }
+                }
+            }
+        }
+        Err(BladeError::Other("no GL stages configured".into()))
+    }
+
+    /// One pipe launch attempt with a pinned GL stage (driven by
+    /// `launch_pipe_inner`).
+    #[cfg(unix)]
+    async fn launch_pipe_inner_stage(
+        no_sandbox: bool,
+        stage: GlStage,
+    ) -> Result<(Self, crate::cdp::CdpClient, Option<String>)> {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
         use tokio::net::unix::pipe;
@@ -517,32 +1023,30 @@ impl Browser {
         #[cfg(not(target_os = "linux"))]
         let headful = true; // macOS/Windows have native window servers
 
-        let mut args: Vec<String> = STEALTH_FLAGS.iter().map(|s| s.to_string()).collect();
-        if no_sandbox {
-            args.push("--no-sandbox".into());
-        }
-        if !headful {
-            args.extend(HEADLESS_FLAGS.iter().map(|s| s.to_string()));
-        }
-        // On Xvfb there is no GPU: Chrome 139+ refuses software
-        // WebGL unless this flag is set (contexts return null).
-        // The stealth GL spoof masks the SwiftShader strings.
-        #[cfg(target_os = "linux")]
-        if headful {
-            args.push("--enable-unsafe-swiftshader".into());
-        }
-        args.push("--remote-debugging-pipe".into());
-        args.push(format!("--user-data-dir={}", user_data_dir.display()));
+        // After both bindings: the recording must compile on every target.
+        set_launched_headless(!headful);
 
-        if let Ok(proxy) = std::env::var("BLADE_PROXY") {
-            if !proxy.is_empty() {
-                args.push(format!("--proxy-server={proxy}"));
-                eprintln!("[bladebro] using proxy: {proxy}");
-            }
+        // M18: Proxy support via BLADE_PROXY env var.
+        let proxy = std::env::var("BLADE_PROXY").ok().filter(|p| !p.is_empty());
+        if let Some(p) = &proxy {
+            eprintln!("[bladebro] using proxy: {p}");
         }
-        if headful {
-            args.push("--window-size=1920,1080".into());
-        }
+        // Power-user escape hatch (same as the WS path — this used to be
+        // WS-only, another quiet lane divergence).
+        let extra: Vec<String> = std::env::var("BLADE_CHROME_FLAGS")
+            .map(|s| s.split_whitespace().map(String::from).collect())
+            .unwrap_or_default();
+        set_launched_pipe(true);
+        let args = launch_args(&LaunchCfg {
+            stage,
+            headful,
+            no_sandbox,
+            transport: Transport::Pipe,
+            port: 0,
+            user_data_dir: &user_data_dir,
+            proxy: proxy.as_deref(),
+            extra: &extra,
+        });
 
         // Pipe pairs: out = us→chrome (chrome reads fd 3), in = chrome→us
         // (chrome writes fd 4). We keep out_tx/in_rx; the child-side ends
@@ -607,13 +1111,18 @@ impl Browser {
                 Ok(v) => {
                     let product = v.get("product").and_then(|p| p.as_str()).unwrap_or("unknown");
                     eprintln!("[bladebro] Chrome ready: {product} (pipe transport)");
-                    return Ok((Self {
-                        child,
-                        #[cfg(target_os = "linux")]
-                        xvfb,
-                        port: 0,
-                        profile,
-                    }, client));
+                    let probe = probe_gl_pipe(&client).await;
+                    return Ok((
+                        Self {
+                            child,
+                            #[cfg(target_os = "linux")]
+                            xvfb,
+                            port: 0,
+                            profile,
+                        },
+                        client,
+                        probe,
+                    ));
                 }
                 Err(_) => {
                     match child.try_wait() {
@@ -827,4 +1336,120 @@ fn free_port() -> u16 {
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .unwrap_or(9222)
+}
+
+#[cfg(test)]
+mod launch_flag_tests {
+    use super::*;
+    use std::path::Path;
+
+    const EMPTY_EXTRA: &[String] = &[];
+
+    fn cfg(stage: GlStage, headful: bool, transport: Transport) -> LaunchCfg<'static> {
+        LaunchCfg {
+            stage,
+            headful,
+            no_sandbox: false,
+            transport,
+            port: 9222,
+            user_data_dir: Path::new("/tmp/bb-launch-args-test"),
+            proxy: None,
+            extra: EMPTY_EXTRA,
+        }
+    }
+
+    /// The v3.9.11 bug: the pipe path was missing `--ignore-gpu-blocklist` and
+    /// Chrome answered "WebGL{1,2} blocklisted" with *null* contexts on every
+    /// soft-GL display (stealth was fine; the launch wasn't). The stealth core
+    /// must be identical across transports — always.
+    #[test]
+    fn both_transports_share_the_stealth_core() {
+        let ws = launch_args(&cfg(GlStage::NativeGl, true, Transport::Ws));
+        let pipe = launch_args(&cfg(GlStage::NativeGl, true, Transport::Pipe));
+        let strip = |v: &[String]| -> Vec<String> {
+            v.iter()
+                .filter(|a| !a.starts_with("--remote-debugging"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(strip(&ws), strip(&pipe));
+    }
+
+    /// Both overrides are mandatory on every platform/stage/headful combo —
+    /// without them GPU-less environments get null WebGL contexts.
+    #[test]
+    fn blocklist_and_swiftshader_overrides_are_always_present() {
+        for stage in gl_stages() {
+            for headful in [true, false] {
+                for transport in [Transport::Ws, Transport::Pipe] {
+                    let a = launch_args(&cfg(*stage, headful, transport));
+                    assert!(
+                        a.iter().any(|f| f == "--ignore-gpu-blocklist"),
+                        "missing --ignore-gpu-blocklist for {stage:?} headful={headful}"
+                    );
+                    assert!(
+                        a.iter().any(|f| f == "--enable-unsafe-swiftshader"),
+                        "missing --enable-unsafe-swiftshader for {stage:?} headful={headful}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_headful_pins_x11_and_the_stage_backend() {
+        let native = launch_args(&cfg(GlStage::NativeGl, true, Transport::Pipe));
+        assert!(native.iter().any(|f| f == "--ozone-platform=x11"));
+        assert!(native.iter().any(|f| f == "--use-angle=gl"));
+        let sw = launch_args(&cfg(GlStage::SwiftShader, true, Transport::Pipe));
+        assert!(sw.iter().any(|f| f == "--ozone-platform=x11"));
+        assert!(sw.iter().any(|f| f == "--use-angle=swiftshader"));
+        assert!(!sw.iter().any(|f| f == "--use-angle=gl"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn headless_never_pins_a_display_or_native_angle() {
+        let a = launch_args(&cfg(GlStage::NativeGl, false, Transport::Ws));
+        assert!(!a.iter().any(|f| f == "--ozone-platform=x11"));
+        assert!(!a.iter().any(|f| f == "--use-angle=gl"));
+        assert!(a.iter().any(|f| f == "--headless=new"));
+    }
+
+    #[test]
+    fn ladder_order_is_native_first() {
+        assert_eq!(gl_stages()[0], GlStage::NativeGl);
+        assert!(gl_stages().len() >= 2);
+    }
+
+    #[test]
+    fn classifier_flags_software_renders() {
+        assert!(is_software_renderer(
+            "ANGLE (Mesa, llvmpipe (LLVM 21.1.7 256 bits), OpenGL 4.6)"
+        ));
+        assert!(is_software_renderer(
+            "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)"
+        ));
+        assert!(!is_software_renderer(
+            "ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)"
+        ));
+        assert!(matches!(
+            classify_gl("ANGLE (Mesa, llvmpipe (LLVM 21.1.7 256 bits), OpenGL 4.6)"),
+            GpuState::Software(_)
+        ));
+        assert!(matches!(
+            classify_gl("ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)"),
+            GpuState::Hardware(_)
+        ));
+    }
+
+    #[test]
+    fn window_size_and_user_data_are_shared() {
+        let a = launch_args(&cfg(GlStage::NativeGl, true, Transport::Ws));
+        assert!(a.iter().any(|f| f == "--window-size=1920,1080"));
+        assert!(a.iter().any(|f| f.starts_with("--user-data-dir=")));
+        let h = launch_args(&cfg(GlStage::NativeGl, false, Transport::Ws));
+        assert!(!h.iter().any(|f| f == "--window-size=1920,1080"));
+    }
 }
