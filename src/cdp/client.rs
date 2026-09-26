@@ -35,8 +35,10 @@ pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Broadcast bus capacity for events. Large enough to absorb bursts; a lagging
 /// subscriber receives [`broadcast::error::RecvError::Lagged`] which callers
-/// treat as "skip and continue".
-const EVENT_BUS_CAPACITY: usize = 4096;
+/// treat as "skip and continue". Sized with headroom: a momentarily-slow
+/// consumer must not drop `Target.attachedToTarget` events — a dropped attach
+/// leaves a `waitForDebuggerOnStart` target paused forever (frozen worker).
+const EVENT_BUS_CAPACITY: usize = 16384;
 
 /// The result delivered to a pending command caller.
 type CdpOutcome = std::result::Result<Value, BladeError>;

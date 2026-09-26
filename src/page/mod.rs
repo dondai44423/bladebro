@@ -362,6 +362,7 @@ impl Page {
             let client = cdp.client().clone();
             let worker_script = worker_gl.clone();
             let full_script = crate::stealth::full_script();
+            let dbg = std::env::var("BLADE_DBG_WORKERS").is_ok();
             worker_task = Some(tokio::spawn(async move {
                 let sub = client.subscribe();
                 let mut rx = sub;
@@ -380,14 +381,50 @@ impl Page {
                             if session_id.is_empty() {
                                 continue;
                             }
+                            if dbg {
+                                eprintln!("[workers] attach type={target_type} sid={session_id}");
+                            }
                             let worker_session = CdpSession::child(client.clone(), session_id);
+                            // Runtime.evaluate against a PAUSED service worker
+                            // deadlocks — its execution context only exists once
+                            // the script runs — and the 30s command timeout then
+                            // froze this whole handler (every later target stayed
+                            // paused; live effect: hung SW registration and
+                            // CreepJS's worker card reading `blocked`). Service
+                            // workers are resumed FIRST, then patched best-effort.
+                            let is_sw = target_type == "service_worker";
+                            if is_sw {
+                                let res = worker_session.send("Runtime.runIfWaitingForDebugger", None).await;
+                                if dbg {
+                                    eprintln!("[workers] resume(sw-first) {target_type}: {}", if res.is_ok() { "ok".to_string() } else { format!("ERR {:?}", res.err()) });
+                                }
+                            }
                             match target_type {
-                                "worker" | "service_worker" | "shared_worker" => {
+                                "worker" | "shared_worker" => {
                                     if let Some(ref script) = worker_script {
-                                        let _ = worker_session.send("Runtime.evaluate", Some(serde_json::json!({
+                                        // Bounded: a pathological target must not
+                                        // stall the attach pipeline.
+                                        let res = worker_session.send_with_timeout("Runtime.evaluate", Some(serde_json::json!({
                                             "expression": script,
                                             "returnByValue": true,
-                                        }))).await;
+                                        })), std::time::Duration::from_secs(5)).await;
+                                        if dbg {
+                                            eprintln!("[workers] eval {target_type}: {}", if res.is_ok() { "ok".to_string() } else { format!("ERR {:?}", res.err()) });
+                                        }
+                                    }
+                                }
+                                "service_worker" => {
+                                    // Already resumed above. The SW realm has no
+                                    // WebGL; this only matters for the locale
+                                    // patch — best-effort, bounded.
+                                    if let Some(ref script) = worker_script {
+                                        let res = worker_session.send_with_timeout("Runtime.evaluate", Some(serde_json::json!({
+                                            "expression": script,
+                                            "returnByValue": true,
+                                        })), std::time::Duration::from_secs(3)).await;
+                                        if dbg {
+                                            eprintln!("[workers] eval {target_type}: {}", if res.is_ok() { "ok".to_string() } else { format!("ERR {:?}", res.err()) });
+                                        }
                                     }
                                 }
                                 "iframe" | "oopif" => {
@@ -396,21 +433,32 @@ impl Page {
                                     // before resume, so the frame's scripts
                                     // run against the patched environment.
                                     if let Some(ref script) = full_script {
-                                        let _ = worker_session.send("Runtime.evaluate", Some(serde_json::json!({
+                                        let _ = worker_session.send_with_timeout("Runtime.evaluate", Some(serde_json::json!({
                                             "expression": script,
                                             "returnByValue": true,
-                                        }))).await;
+                                        })), std::time::Duration::from_secs(5)).await;
                                     }
                                 }
                                 _ => {}
                             }
                             // ALWAYS resume — an unresumed target stays frozen.
-                            let _ = worker_session.send("Runtime.runIfWaitingForDebugger", None).await;
+                            // (Service workers were already resumed above.)
+                            if !is_sw {
+                                let res = worker_session.send("Runtime.runIfWaitingForDebugger", None).await;
+                                if dbg {
+                                    eprintln!("[workers] resume {target_type}: {}", if res.is_ok() { "ok".to_string() } else { format!("ERR {:?}", res.err()) });
+                                }
+                            }
                         }
                         Ok(_) => {}
                         // Lagged: we skipped events but the connection is
                         // alive. Continue — never leave future targets paused.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            if dbg {
+                                eprintln!("[workers] LAGGED {n} events dropped");
+                            }
+                            continue;
+                        }
                         Err(_) => break,
                     }
                 }

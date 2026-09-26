@@ -1260,11 +1260,14 @@ fn worker_locale_patch(locale: Option<&str>) -> String {
 /// SharedWorker constructor wrapper for the main page injection.
 /// CDP doesn't emit Target.attachedToTarget for shared_worker targets, so we
 /// intercept the SharedWorker constructor and inject the GL spoof via a blob
-/// URL: <gl_spoof + locale patch + importScripts(original_url)>. A Proxy
-/// construct trap keeps the interface object native-shaped (toString, own
-/// keys, prototype forwarding) — the old plain-wrapper function was itself a
-/// differential. Falls back to the original URL for cross-origin workers
-/// (importScripts throws). Returns None when GL spoof is not active.
+/// URL: <gl_spoof + locale patch + importScripts(absolute_url)>. The URL is
+/// resolved against the document first — relative paths cannot resolve inside
+/// a blob: worker's scope (importScripts throws), which is exactly how
+/// CreepJS's shared-worker tier was broken. A Proxy construct trap keeps the
+/// interface object native-shaped (toString, own keys, prototype forwarding)
+/// — the old plain-wrapper function was itself a differential. Any
+/// construction failure falls back to the untouched constructor. Returns
+/// None when GL spoof is not active.
 pub fn sharedworker_wrapper(locale: Option<&str>) -> Option<String> {
     if !GL_SPOOFED.load(Ordering::Relaxed) {
         return None;
@@ -1287,6 +1290,7 @@ try{{
     var _SWProxy=new Proxy(_OrigSW,{{construct:function(t,a,nt){{
       try{{
         var url=a[0],options=a[1];
+        try{{url=new URL(url, document.baseURI).href;}}catch(e){{}}
         var full=_swCode+'\nimportScripts('+JSON.stringify(url)+')';
         var blob=new Blob([full],{{type:'application/javascript'}});
         var blobUrl=URL.createObjectURL(blob);

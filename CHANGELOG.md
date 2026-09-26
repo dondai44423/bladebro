@@ -81,6 +81,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     zero-port transport covered.
 
 ### Fixed
+- **The worker pipeline no longer freezes: `Runtime.evaluate` against a paused
+  service worker deadlocked and stalled every attached worker.** Found from a
+  live report — CreepJS's worker card read `lang/timezone/gpu/userAgent/
+  device/userAgentData: blocked` and `navigator.serviceWorker.register()
+  never settled`. Root cause, measured with an instrumented attach handler
+  (`BLADE_DBG_WORKERS=1`): the auto-attach pipeline evaluates the worker patch
+  BEFORE resuming a `waitForDebuggerOnStart` target — fine for dedicated
+  workers (8/8 attaches eval'd `ok`), but a PAUSED service worker has no
+  execution context yet, so the evaluate hangs until the 30s command
+  timeout, and during that window every newly attached worker stayed paused
+  forever (CreepJS's own probe workers among them — the exact mechanism
+  behind the blocked card). Fix: service workers are RESUMED FIRST and
+  patched best-effort afterwards; every per-target evaluate is bounded
+  (3–5s) so a pathological target can never stall the pipeline; the event
+  bus capacity went 4096 → 16384, because a dropped
+  `Target.attachedToTarget` leaves its target paused with nothing to
+  recover it. Live after the fix: `register()` 112ms, SW `active:true`, all
+  five worker-card fields populated — with the coherent Intel GL mask
+  inside the worker — `LAGGED 0`, blob workers instant through the whole
+  page load (before: multi-second stalls), CreepJS fingerprint complete in
+  722ms (was 10s), `✔ service worker passed`.
+- **The SharedWorker GL wrapper resolved relative script URLs inside a
+  blob: worker, where they cannot resolve** (`importScripts('./creep.js')`
+  throws; the worker dies with `onerror` — CreepJS's shared-worker tier was
+  dead because of it). The URL is now resolved against the document
+  (`new URL(url, document.baseURI)`) before being embedded. Residual,
+  software-GL lanes only: the wrapper is a Proxy, so
+  `SharedWorker.toString()` loses the name (`function () { [native code] }`
+  vs stock's `function SharedWorker() { [native code] }`) — the same
+  unavoidable class as the two WebGL `getParameter` lie entries, kept
+  because the wrapper is what keeps worker GL coherent with the page mask.
 - **Lane switches now take effect on live surfaces — `rb on|off` under a
   running browser actually switches it.** A long-lived MCP or daemon session
   holds its browser, and that browser belongs to the lane it was launched on:
