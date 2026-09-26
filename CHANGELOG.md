@@ -135,6 +135,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agree with each other and with the worker context.
 
 ### Changed
+- **CLI presentation pass — structure, color, and a hard switch.** All human
+  output now flows through one gated style layer (`src/ui`): aligned
+  label/value blocks for `rb` (`status`/`on`/`off`/`use`/`profile`), red error
+  lines, dim dividers and hints, bold-cyan `help` headers, aligned
+  browser/profile tables, and typo suggestions (`bladebro browser use` →
+  “did you mean `rb use`?”). Color is ON only when it cannot corrupt a machine
+  consumer: stdout is a terminal and `NO_COLOR`/`TERM=dumb` are absent;
+  `BLADE_PLAIN=1` is the hard switch, `CLICOLOR_FORCE=1` forces color for
+  demos. Piped output (scripts, files, MCP) stays byte-identical plain — the
+  same code path, verified at 0 escape bytes off-TTY. `doctor`/`update`/
+  `rollback` inherit the same gating (they used to emit ANSI unconditionally).
 - **Stealth masks are proxies now (no `toString` patch anywhere).** Every
   installed function or getter is a `Proxy` over the native original with an
   `apply` trap that delegates first — native receiver/argument validation

@@ -500,6 +500,7 @@ Everything optional; configuration is environment variables.
 | `BLADE_CHROME_FLAGS` | none | Extra Chrome launch flags |
 | `BLADE_LANE` | auto | `real` forces the real-browser lane for this process (same as `rb on`) |
 | `BLADE_RB_DEBUG` | — | `1` surfaces the browser's own stderr on real-lane launches |
+| `BLADE_PLAIN` | — | `1` renders CLI output plain — no ANSI even on a terminal (same: `NO_COLOR`; override: `CLICOLOR_FORCE=1`) |
 
 Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME/.local/state/blade` → `$HOME/.blade` (legacy). Existing installs keep their tree — nothing is ever split across two directories. Windows: `%USERPROFILE%\.blade` (plus `BLADE_HOME`). `bladebro doctor` prints the resolved data root.
 

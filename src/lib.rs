@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod stealth;
 pub mod browser;
 pub mod platform;
+pub mod ui;
 pub mod updater;
 pub mod artifacts;
 pub mod knowledge;

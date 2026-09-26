@@ -545,9 +545,9 @@ fn print_result(result: &ToolResult, json_mode: bool) -> i32 {
         }
         println!("{v}");
     } else if let Some(p) = &image_path {
-        println!("{}\nsaved: {}", result.text, p);
+        println!("{}\nsaved: {}", crate::ui::style_report(&result.text), p);
     } else {
-        println!("{}", result.text);
+        println!("{}", crate::ui::style_report(&result.text));
     }
     code
 }
@@ -1616,12 +1616,19 @@ async fn restart_daemon_for_lane() {
     }
 }
 
+/// One aligned `label  value` row for the `rb` blocks: labels dim, column
+/// width 9 (the longest label, `mechanism`).
+fn rb_row(label: &str, value: &str) -> String {
+    crate::ui::kv(label, value, 9)
+}
+
 /// `bladebro rb ...` — switch between the default agent browser and the
 /// user's real browser (S18). Local config work only: nothing here talks to
 /// a running browser except the daemon restart that makes the switch take
 /// effect on the next launch.
 async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
     use crate::realbrowser as rb;
+    use crate::ui;
 
     let raw_sub = args.first().map(|s| s.as_str()).unwrap_or("status");
     let sub = match raw_sub {
@@ -1657,49 +1664,81 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 return Ok(());
             }
-            println!("real browser: {}", if cfg.enabled { "ON" } else { "off" });
-            println!("  paused: {}", if paused { "yes (manual control)" } else { "no" });
+            let state = if cfg.enabled {
+                ui::bold(&ui::green("ON"))
+            } else {
+                ui::dim("off")
+            };
+            println!("{} {state}", ui::bold("Real-browser lane:"));
+            println!();
             match sel {
                 Ok((spec, profile)) => {
+                    let auto = if cfg.browser.is_none() { " · auto (most recently used)" } else { "" };
                     println!(
-                        "  browser: {} ({}){}",
-                        spec.name,
-                        spec.brand.as_str(),
-                        if cfg.browser.is_none() { " — auto: most recently used" } else { "" }
+                        "{}",
+                        rb_row("browser", &format!("{} ({}){auto}", spec.name, spec.brand.as_str()))
                     );
-                    if spec.binary.as_os_str().is_empty() {
-                        println!(
-                            "  binary:  (none found — install it or set `rb use --binary <path>`)"
-                        );
-                    } else if cfg.binary.is_some() {
-                        println!("  binary:  {}  (override)", spec.binary.display());
+                    let bin = if spec.binary.as_os_str().is_empty() {
+                        ui::yellow("none found — install it or set `rb use --binary <path>`")
                     } else {
-                        println!("  binary:  {}", spec.binary.display());
-                    }
-                    println!("  profile: \"{}\" — {}", profile.name, profile.path.display());
+                        let p = spec.binary.display().to_string();
+                        if cfg.binary.is_some() {
+                            format!("{p}  {}", ui::dim("(override)"))
+                        } else {
+                            p
+                        }
+                    };
+                    println!("{}", rb_row("binary", &bin));
                     println!(
-                        "  mode:    {} (configured) / {} (now)",
-                        cfg.mode.as_str(),
-                        rb::effective_mode(&cfg, &profile.root).as_str()
+                        "{}",
+                        rb_row(
+                            "profile",
+                            &format!("\"{}\" · {}", profile.name, ui::dim(&profile.path.display().to_string()))
+                        )
+                    );
+                    println!(
+                        "{}",
+                        rb_row(
+                            "mode",
+                            &format!(
+                                "{} → {} (now)",
+                                cfg.mode.as_str(),
+                                rb::effective_mode(&cfg, &profile.root).as_str()
+                            )
+                        )
                     );
                     if let Some(port) = rb::devtools_port(&profile.root) {
                         println!(
-                            "  attach:  a live debug endpoint is exposed (127.0.0.1:{port}) — auto would attach"
+                            "{}",
+                            rb_row("attach", &format!("live debug endpoint on 127.0.0.1:{port} — auto would attach"))
                         );
                     }
                     match rb::template_stats(&spec.id) {
                         Some((files, bytes)) => {
-                            println!("  clone:   {files} files ({})", rb::human_bytes(bytes));
+                            println!("{}", rb_row("clone", &format!("{files} files ({})", rb::human_bytes(bytes))));
                             if let Some(src) = rb::template_source(&spec.id) {
-                                println!("  source:  {src}");
+                                println!("{}", rb_row("source", &ui::dim(&src)));
                             }
                         }
-                        None => println!("  clone:   not imported yet (first launch imports)"),
+                        None => println!(
+                            "{}",
+                            rb_row("clone", &ui::dim("not imported yet (first launch imports)"))
+                        ),
                     }
                 }
-                Err(e) => println!("  selection: {e}"),
+                Err(e) => println!("{}", rb_row("selection", &ui::red(&e.to_string()))),
             }
-            println!("hint: `bladebro rb on|off` switches the lane; `bladebro help rb` for the full story");
+            if paused {
+                println!(
+                    "{}",
+                    rb_row("paused", &ui::yellow("yes — agent input and navigation refuse until `rb resume`"))
+                );
+            }
+            println!();
+            println!(
+                "{}",
+                ui::dim("hint: `bladebro rb on|off` switches the lane · `bladebro help rb` for the full story")
+            );
             Ok(())
         }
 
@@ -1717,7 +1756,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 if json_mode {
                     println!("{}", serde_json::json!({"ok": true, "enabled": true, "note": "already on"}));
                 } else {
-                    println!("real browser already ON — `bladebro rb status` for details");
+                    println!("{} {}", ui::bold("Real-browser lane:"), ui::bold(&ui::green("already ON")) + " — `bladebro rb status` for details");
                 }
                 return Ok(());
             }
@@ -1746,18 +1785,29 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 return Ok(());
             }
-            println!("real browser: ON — the next browser launch uses YOUR browser");
-            println!("  browser:  {} ({})", spec.name, spec.brand.as_str());
-            println!("  profile:  \"{}\" ({})", profile.name, profile.path.display());
-            println!("  mechanism: {}", mode.as_str());
-            println!("  lane:     zero page patches — your real environment IS the stealth");
-            println!("  WARNING:  the agent browses AS YOU — anything it does is attributable");
-            println!("            to your identity (accounts, sessions, reputation).");
-            println!("  revert:   `bladebro rb off`    wipe the imported copy: `rb forget`");
-            println!("  control:  `rb pause` / `rb resume` hand the browser to you");
-            println!("  note:     every surface picks this up at its next browser launch —");
-            println!("            the CLI daemon already restarted; a running MCP/agent session");
-            println!("            switches on its next launch (no restart needed)");
+            println!(
+                "{} {} — the next browser launch uses YOUR browser",
+                ui::bold("Real-browser lane:"),
+                ui::bold(&ui::green("ON"))
+            );
+            println!();
+            println!("{}", rb_row("browser", &format!("{} ({})", spec.name, spec.brand.as_str())));
+            println!(
+                "{}",
+                rb_row("profile", &format!("\"{}\" · {}", profile.name, ui::dim(&profile.path.display().to_string())))
+            );
+            println!("{}", rb_row("mechanism", mode.as_str()));
+            println!("{}", rb_row("lane", "zero page patches — your real environment IS the stealth"));
+            println!();
+            println!(
+                "  {} the agent browses AS YOU — anything it does is attributable to your",
+                ui::yellow("⚠")
+            );
+            println!("    identity (accounts, sessions, reputation).");
+            println!();
+            println!("{}", rb_row("revert", "`bladebro rb off` · wipe the imported copy: `rb forget`"));
+            println!("{}", rb_row("control", "`rb pause` / `rb resume` hand the browser to you"));
+            println!("{}", rb_row("note", "every surface switches at its next browser launch — no restart needed"));
             Ok(())
         }
 
@@ -1766,7 +1816,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 if json_mode {
                     println!("{}", serde_json::json!({"ok": true, "enabled": false, "note": "already off"}));
                 } else {
-                    println!("real browser already off");
+                    println!("{} {}", ui::bold("Real-browser lane:"), ui::dim("already off"));
                 }
                 return Ok(());
             }
@@ -1777,7 +1827,11 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             if json_mode {
                 println!("{}", serde_json::json!({"ok": true, "enabled": false}));
             } else {
-                println!("real browser: off — the isolated agent browser is the default again");
+                println!(
+                    "{} {} — the isolated agent browser is the default again",
+                    ui::bold("Real-browser lane:"),
+                    ui::dim("off")
+                );
             }
             Ok(())
         }
@@ -1804,9 +1858,9 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             if json_mode {
                 println!("{}", serde_json::json!({"ok": true, "mode": mode.as_str()}));
             } else {
-                println!("mechanism set to {}", mode.as_str());
+                println!("mechanism set to {}", ui::bold(mode.as_str()));
                 if cfg.enabled {
-                    println!("  applies on the next browser launch (running sessions keep theirs)");
+                    println!("  {}", ui::dim("applies on the next browser launch (running sessions keep theirs)"));
                 }
             }
             Ok(())
@@ -1833,26 +1887,30 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 println!("{}", serde_json::json!({"ok": true, "setting": sub, "value": on}));
             } else {
                 match sub {
-                    "visible" => println!(
-                        "{}",
-                        if on {
-                            "visible — the browser opens as a real window (the point of the lane)"
+                    "visible" => {
+                        let (head, tail) = if on {
+                            (ui::green("visible"), "the browser opens as a real window (the point of the lane)")
                         } else {
-                            "invisible — --headless=new; honest, but a degraded environment (servers/CI)"
-                        }
-                    ),
-                    "idle-hum" => println!(
-                        "{}",
-                        if on { "idle hum on (silent while paused)" } else { "idle hum off" }
-                    ),
-                    _ => println!(
-                        "{}",
-                        if on {
-                            "idle shutdown on — the idle timeout may close a real-lane browser"
+                            (ui::dim("invisible"), "--headless=new; honest, but a degraded environment (servers/CI)")
+                        };
+                        println!("{head} — {tail}");
+                    }
+                    "idle-hum" => {
+                        let (head, tail) = if on {
+                            (ui::green("idle hum on"), " (silent while paused)")
                         } else {
-                            "idle shutdown off — a real-lane browser is never closed by the idle timeout (default)"
-                        }
-                    ),
+                            (ui::dim("idle hum off"), "")
+                        };
+                        println!("{head}{tail}");
+                    }
+                    _ => {
+                        let (head, tail) = if on {
+                            (ui::yellow("idle shutdown on"), " — the idle timeout may close a real-lane browser")
+                        } else {
+                            (ui::dim("idle shutdown off"), " — a real-lane browser is never closed by the idle timeout (default)")
+                        };
+                        println!("{head}{tail}");
+                    }
                 }
             }
             Ok(())
@@ -1897,29 +1955,36 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 None => {
                     let browsers = rb::discover();
                     if browsers.is_empty() {
-                        println!("no Chromium-family browsers found");
+                        println!("{}", ui::yellow("no Chromium-family browsers found"));
                     }
                     let selected = rb::resolve_selection(&cfg).ok().map(|(s, _)| s.id);
+                    let id_w = browsers.iter().map(|b| b.id.chars().count()).max().unwrap_or(2);
+                    let name_w = browsers.iter().map(|b| b.name.chars().count()).max().unwrap_or(4);
                     for b in browsers {
+                        let sel = selected.as_deref() == Some(b.id.as_str());
+                        let star = if sel { ui::green("*") } else { " ".to_string() };
+                        let idp = format!("{:<id_w$}", b.id);
+                        let id = if sel { ui::bold(&idp) } else { idp };
+                        let name = format!("{:<name_w$}", b.name);
                         let missing = if b.binary.as_os_str().is_empty() {
-                            " [binary missing]"
+                            format!("  {}", ui::yellow("[binary missing]"))
                         } else {
-                            ""
+                            String::new()
                         };
                         println!(
-                            "{}{} — {} ({}){missing}",
-                            if selected.as_deref() == Some(b.id.as_str()) { "* " } else { "  " },
-                            b.id,
-                            b.name,
-                            b.profile_root.display()
+                            "  {star} {id}  {name}  {}{missing}",
+                            ui::dim(&b.profile_root.display().to_string())
                         );
                     }
                     if let Some(ov) = cfg.binary.as_deref() {
-                        println!("binary override active: {ov}");
+                        println!("{}", rb_row("override", ov));
                     }
+                    println!();
                     println!(
-                        "hint: `bladebro rb use <id>` selects one; custom / nix / flatpak \
-                         install: `rb use --binary <path>` (CHROME_PATH does not apply here)"
+                        "{}",
+                        ui::dim(
+                            "hint: `bladebro rb use <id>` selects one · custom / nix / flatpak install: `rb use --binary <path>`"
+                        )
                     );
                 }
                 Some(id) => {
@@ -1935,14 +2000,15 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                     cfg.binary = None; // an explicit browser switch resets a custom binary
                     rb::save_config(&cfg)?;
                     if !json_mode {
-                        println!("browser set to {} ({})", spec.name, spec.binary.display());
+                        println!("browser set to {} ({})", ui::bold(&spec.name), ui::dim(&spec.binary.display().to_string()));
                         if cleared {
                             println!(
-                                "  binary override cleared (re-apply with `rb use --binary` if wanted)"
+                                "  {}",
+                                ui::dim("binary override cleared (re-apply with `rb use --binary` if wanted)")
                             );
                         }
                         if !rb::has_template(&spec.id) && cfg.enabled {
-                            println!("  note: no clone for `{id}` yet — the first launch imports it");
+                            println!("  {}", ui::dim(&format!("note: no clone for `{id}` yet — the first launch imports it")));
                         }
                     }
                 }
@@ -1958,18 +2024,20 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 None => {
                     let (spec, _) = rb::resolve_selection(&cfg)?;
                     let profiles = rb::list_profiles(&spec.profile_root);
+                    let key_w = profiles.iter().map(|p| p.key.chars().count()).max().unwrap_or(4);
                     for p in &profiles {
-                        println!(
-                            "{}{} — \"{}\" ({})",
-                            if cfg.profile.as_deref() == Some(p.key.as_str()) { "* " } else { "  " },
-                            p.key,
-                            p.name,
-                            p.path.display()
-                        );
+                        let sel = cfg.profile.as_deref() == Some(p.key.as_str());
+                        let star = if sel { ui::green("*") } else { " ".to_string() };
+                        let kp = format!("{:<key_w$}", p.key);
+                        let key = if sel { ui::bold(&kp) } else { kp };
+                        println!("  {star} {key}  \"{}\"  {}", p.name, ui::dim(&p.path.display().to_string()));
                     }
+                    println!();
                     println!(
-                        "hint: `bladebro rb profile <key>` selects one; `rb profile auto` resets; \
-                         an absolute path to a profile dir also works"
+                        "{}",
+                        ui::dim(
+                            "hint: `bladebro rb profile <key>` selects one · `rb profile auto` resets · an absolute path to a profile dir also works"
+                        )
                     );
                 }
                 Some("auto") => {
@@ -2018,11 +2086,11 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
 
         "refresh" => {
             let (spec, profile) = rb::resolve_selection(&cfg)?;
-            if rb::profile_owner_pid(&profile.root).is_some() {
+            if let Some(owner) = rb::profile_in_use(&profile.root) {
                 eprintln!(
-                    "[realbrowser] note: `{}` is open — the copy may miss the last writes \
+                    "{} note: your browser ({owner}) is open — the copy may miss the last writes \
                      (the source is never touched).",
-                    profile.path.display()
+                    ui::dim("[realbrowser]")
                 );
             }
             // A live clone session syncs back over the template on exit —
@@ -2032,7 +2100,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             if json_mode {
                 println!("{}", serde_json::json!({"ok": true, "refreshed_from": profile.path.display().to_string()}));
             } else {
-                println!("clone refreshed from {}", profile.path.display());
+                println!("clone refreshed from {}", ui::dim(&profile.path.display().to_string()));
             }
             Ok(())
         }
@@ -2073,8 +2141,9 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 println!("{}", serde_json::json!({"ok": true, "paused": true}));
             } else {
                 println!(
-                    "paused — input, navigation, history and downloads refuse; the browser is \
-                     yours (reads, waits and eval stay available; `rb resume` hands it back)"
+                    "{} — input, navigation, history and downloads refuse; the browser is \
+                     yours (reads, waits and eval stay available; `rb resume` hands it back)",
+                    ui::yellow("paused")
                 );
             }
             Ok(())
@@ -2085,7 +2154,7 @@ async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             if json_mode {
                 println!("{}", serde_json::json!({"ok": true, "paused": false}));
             } else {
-                println!("resumed — the agent has the wheel again");
+                println!("{} — the agent has the wheel again", ui::green("resumed"));
             }
             Ok(())
         }
@@ -2531,7 +2600,7 @@ RELIABILITY: real Chromium with the full stealth stack and human-like input; per
 
 /// The human manual — printed by `bladebro help` / `-h` / bare `bladebro`.
 pub fn help_text() -> String {
-    HELP_TEXT.replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+    crate::ui::style_help(&HELP_TEXT.replace("__VERSION__", env!("CARGO_PKG_VERSION")))
 }
 
 const HELP_TEXT: &str = r#"bladebro __VERSION__ — agentic browser driver (CLI)
@@ -2597,12 +2666,63 @@ ENVIRONMENT
   BLADE_NO_COMPRESS=1  disable response compression
   BLADE_LANE           real|agent — force the real-browser lane for this process
   BLADE_RB_DEBUG=1     real lane: surface the browser's own stderr on launch failures
+  BLADE_PLAIN          plain output — no ANSI even on a terminal
+                       (NO_COLOR also disables; CLICOLOR_FORCE=1 forces color off-TTY)
   CHROME_PATH          override the Chrome/Chromium binary
 
 Agents: `bladebro help --json` returns the machine version of this manual —
 tool schemas (same as MCP tools/list), per-command usage, exit codes, payload
 conventions, and examples. Fetch it once, then drive the CLI with --json.
 "#;
+
+/// Closest known command for a mistyped/informal one, so the
+/// unknown-command error gives a pointer instead of a dead end:
+/// synonyms first (`browser` → `rb use`), then edit distance (≤2, or ≤3 for
+/// inputs of six or more chars).
+pub fn suggest_command(cmd: &str) -> Option<&'static str> {
+    /// Words users reach for that map onto a real command.
+    const ALIASES: &[(&str, &str)] = &[
+        ("browser", "rb use"),
+        ("browsers", "rb use"),
+        ("lane", "rb"),
+        ("real", "rb"),
+    ];
+    let lower = cmd.to_ascii_lowercase();
+    if let Some((_, target)) = ALIASES.iter().find(|(a, _)| *a == lower) {
+        return Some(target);
+    }
+    const COMMANDS: &[&str] = &[
+        "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help", "rb",
+        "realbrowser", "mcp", "audit", "probe", "targets", "update", "doctor", "rollback",
+        "version",
+    ];
+    let mut best: Option<(usize, &'static str)> = None;
+    for c in COMMANDS {
+        let d = edit_distance(&lower, c);
+        let limit = if lower.chars().count() >= 6 { 3 } else { 2 };
+        if d <= limit && best.map(|(bd, _)| d < bd).unwrap_or(true) {
+            best = Some((d, c));
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+/// Plain Levenshtein over chars — short strings, no dependency.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
 
 /// Canonical command name: resolve aliases to what the user actually types
 /// on the CLI, so every help surface accepts the same spellings.
@@ -2909,6 +3029,7 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
             "BLADE_NO_COMPRESS": "set 1 to disable response compression",
             "BLADE_LANE": "real|agent — force the real-browser lane for this process",
             "BLADE_RB_DEBUG": "real lane: set 1 to surface the browser's own stderr on launch failures",
+            "BLADE_PLAIN": "plain CLI output — no ANSI even on a TTY (NO_COLOR also honored; CLICOLOR_FORCE=1 forces color off-TTY)",
             "BLADE_TRANSPORT": "mcp: 'ws' forces the WebSocket transport",
             "CHROME_PATH": "override the Chrome/Chromium binary",
             "RUST_LOG": "log filter (default warn,bladebro=info)"
@@ -3215,7 +3336,7 @@ state: behind (with the hint), on the latest release, or ahead of it
 "#,
         _ => return None,
     };
-    Some(text.to_string())
+    Some(crate::ui::style_help(text))
 }
 
 #[cfg(test)]
@@ -3642,6 +3763,17 @@ mod tests {
         assert!(command_help_json("-u").is_some() && command_help_json("-v").is_some());
         assert!(command_help_text("bogus").is_none());
         assert!(command_help_json("bogus").is_none());
+    }
+
+    #[test]
+    fn suggestions_map_typos_and_synonyms() {
+        assert_eq!(suggest_command("nva"), Some("nav"));
+        assert_eq!(suggest_command("stte"), Some("state"));
+        assert_eq!(suggest_command("visio"), Some("vision"));
+        assert_eq!(suggest_command("realbrwoser"), Some("realbrowser"));
+        assert_eq!(suggest_command("browser"), Some("rb use"), "the word users reach for");
+        assert_eq!(suggest_command("browsers"), Some("rb use"));
+        assert_eq!(suggest_command("completely-unrelated"), None);
     }
 
     #[test]

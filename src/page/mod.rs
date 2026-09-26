@@ -239,10 +239,11 @@ impl Page {
                 == Some(true)
         {
             eprintln!(
-                "[realbrowser] note: this browser reports navigator.webdriver=true — Chrome does \
+                "{} note: this browser reports navigator.webdriver=true — Chrome does \
                  that itself for an ephemeral debug port (`--remote-debugging-port=0`) or the \
                  chrome://inspect approval flow; the lane never masks it. For stealth-critical \
-                 work, arm with a FIXED --remote-debugging-port, or use clone/profile mode."
+                 work, arm with a FIXED --remote-debugging-port, or use clone/profile mode.",
+                crate::ui::dim("[realbrowser]")
             );
         }
 

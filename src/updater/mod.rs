@@ -11,7 +11,7 @@
 pub mod download;
 pub mod doctor;
 pub mod swap;
-pub mod ui;
+pub use crate::ui;
 pub mod version;
 
 use crate::error::{BladeError, Result};

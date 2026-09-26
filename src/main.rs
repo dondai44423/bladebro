@@ -5,6 +5,7 @@
 //! later); the CLI stays as a direct-use / debugging path.
 
 use bladebro::cdp;
+use bladebro::ui;
 use bladebro::Result;
 
 fn main() {
@@ -29,9 +30,8 @@ fn main() {
     let code = match run() {
         Ok(()) => 0,
         Err(e) => {
-            let code = if matches!(e, bladebro::BladeError::Usage(_)) { 2 } else { 1 };
-            eprintln!("bladebro: {e}");
-            code
+            print_error(&e);
+            if matches!(e, bladebro::BladeError::Usage(_)) { 2 } else { 1 }
         }
     };
     // See exit_immediately: a parked stdin read hangs
@@ -56,6 +56,18 @@ fn main() {
 /// is safe.
 fn exit_immediately(code: i32) -> ! {
     std::process::exit(code);
+}
+
+/// One error line: `bladebro:` dim, message red — or yellow for usage errors
+/// (a typo is not a failure).
+fn print_error(e: &bladebro::BladeError) {
+    let msg = e.to_string();
+    let styled = if matches!(e, bladebro::BladeError::Usage(_)) {
+        ui::yellow(&msg)
+    } else {
+        ui::red(&msg)
+    };
+    eprintln!("{} {styled}", ui::dim("bladebro:"));
 }
 
 fn run() -> Result<()> {
@@ -160,7 +172,12 @@ fn run() -> Result<()> {
     // an error.
     let is_known = is_update_cmd || is_cli_cmd || is_debug_cmd || cmd == "mcp";
     if !is_known {
-        eprintln!("Unknown command: {cmd}\nRun 'bladebro help' for the command list.");
+        let mut line = format!("{} unknown command `{cmd}`", ui::red("✗"));
+        if let Some(s) = bladebro::cli::suggest_command(&cmd) {
+            line.push_str(&format!(" — did you mean `{s}`?"));
+        }
+        eprintln!("{line}");
+        eprintln!("  {}", ui::dim("run `bladebro help` for the command list"));
         std::process::exit(2);
     }
 
@@ -244,9 +261,8 @@ fn run() -> Result<()> {
     match result {
         Ok(()) => exit_immediately(0),
         Err(e) => {
-            let code = if matches!(e, bladebro::BladeError::Usage(_)) { 2 } else { 1 };
-            eprintln!("bladebro: {e}");
-            exit_immediately(code);
+            print_error(&e);
+            exit_immediately(if matches!(e, bladebro::BladeError::Usage(_)) { 2 } else { 1 });
         }
     }
 }

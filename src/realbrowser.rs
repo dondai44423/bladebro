@@ -1061,20 +1061,23 @@ pub fn effective_mode(cfg: &Config, user_data_root: &Path) -> Mode {
 pub fn ensure_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<ImportStats> {
     if let Some(owner) = profile_in_use(&profile.root) {
         eprintln!(
-            "[realbrowser] your browser ({owner}) is open — importing its profile now. The \
+            "{} your browser ({owner}) is open — importing its profile now. The \
              copy may miss the last few writes (SQLite snapshot); the source is never written \
-             to. `bladebro rb refresh` with the browser closed gives a clean copy."
+             to. `bladebro rb refresh` with the browser closed gives a clean copy.",
+            crate::ui::dim("[realbrowser]")
         );
     }
     eprintln!(
-        "[realbrowser] importing {} profile `{}` ({})...",
+        "{} importing {} profile `{}` ({})...",
+        crate::ui::dim("[realbrowser]"),
         spec.name,
         profile.name,
         profile.path.display()
     );
     let stats = import_template(&spec.id, &profile.root)?;
     eprintln!(
-        "[realbrowser] imported {} files ({}) in {}ms",
+        "{} imported {} files ({}) in {}ms",
+        crate::ui::dim("[realbrowser]"),
         stats.files,
         human_bytes(stats.bytes),
         stats.ms
