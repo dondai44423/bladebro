@@ -1228,10 +1228,14 @@ async fn resolve_text_target(
     // has no matches (page changed since last capture).
     let matches = crate::action::find_by_text(page.cdp_ref(), query, role_filter, false).await?;
     if matches.is_empty() {
+        // Same explainer as `see find`: a flat "not found" while a hidden or
+        // shadow-root match exists is exactly the diagnostic gap that sent
+        // an agent hunting through raw eval.
+        let note = miss_diag_note(crate::action::find_miss_diag(page.cdp_ref(), query).await.ok());
         let view = page.view(2000);
         return Err(BladeError::Other(format!(
-            "no element matching \"{}\" found\n\n--- current page ---\n{}",
-            query, view
+            "no element matching \"{}\" found{}\n\n--- current page ---\n{}",
+            query, note, view
         )));
     }
     if let Some(n) = nth {
@@ -1250,6 +1254,32 @@ async fn resolve_text_target(
         let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
     }
     Ok(id)
+}
+
+/// Format the hidden/unaddressable-match note shared by `see find` and text
+/// addressing misses (`act click text=...`): a miss must say WHY it missed.
+fn miss_diag_note(diag: Option<crate::action::MissDiag>) -> String {
+    match diag {
+        Some(d) if d.total > 0 => {
+            let mut s = format!(" ({} match(es) exist but were not addressable", d.total);
+            if !d.examples.is_empty() {
+                let ex: Vec<String> = d
+                    .examples
+                    .iter()
+                    .map(|e| format!("{} \"{}\" [{}]", e.role, e.name, e.reason))
+                    .collect();
+                s.push_str(&format!(": {}", ex.join("; ")));
+            } else if d.hidden > 0 {
+                s.push_str(&format!(": {} hidden", d.hidden));
+            }
+            if d.shadow > 0 {
+                s.push_str(&format!("; {} in open shadow roots", d.shadow));
+            }
+            s.push_str(" - hidden controls are not clickable by a mouse; if the site wires them programmatically use act eval (el.click()))");
+            s
+        }
+        _ => String::new(),
+    }
 }
 
 /// Resolve a CSS selector to a ref. Mirrors [`resolve_text_target`]: match
@@ -1979,28 +2009,7 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
             // control is not there" and "it is there but not visible from
             // here" - one flat "not found" sent an agent hunting through
             // raw eval for a desktop-hidden trigger.
-            let diag = crate::action::find_miss_diag(page.cdp_ref(), find).await.ok();
-            let diag_note = match diag {
-                Some(d) if d.total > 0 => {
-                    let mut s = format!(" ({} match(es) exist but were not addressable", d.total);
-                    if !d.examples.is_empty() {
-                        let ex: Vec<String> = d
-                            .examples
-                            .iter()
-                            .map(|e| format!("{} \"{}\" [{}]", e.role, e.name, e.reason))
-                            .collect();
-                        s.push_str(&format!(": {}", ex.join("; ")));
-                    } else if d.hidden > 0 {
-                        s.push_str(&format!(": {} hidden", d.hidden));
-                    }
-                    if d.shadow > 0 {
-                        s.push_str(&format!("; {} in open shadow roots", d.shadow));
-                    }
-                    s.push_str(" - hidden controls are not clickable by a mouse; if the site wires them programmatically use act eval (el.click()))");
-                    s
-                }
-                _ => String::new(),
-            };
+            let diag_note = miss_diag_note(crate::action::find_miss_diag(page.cdp_ref(), find).await.ok());
             // M11 contract is full-page search: when no ACTIONABLE element
             // matches, probe the plain text. Returns a context snippet so
             // agents can verify outcomes ("Order confirmed") without

@@ -314,6 +314,10 @@ def main():
               rc != 0 and "none is visible" in out and "display:none" in out,
               f"rc={rc} {first_line(out)}")
 
+        rc, out = cli_rc("act", "click", "--text", "Ghost action")
+        check("text-addressing miss carries the same explainer",
+              rc != 0 and "were not addressable" in out, f"rc={rc} {first_line(out)}")
+
         center = json.loads(ev("(function(){var r=document.getElementById('overlay-cover').getBoundingClientRect();return JSON.stringify([Math.round(r.x+r.width/2),Math.round(r.y+r.height/2)]);})()"))
         out = cli("act", "click", "--x", str(center[0]), "--y", str(center[1]))
         v = first_line(out)
