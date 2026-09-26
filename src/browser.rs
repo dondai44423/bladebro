@@ -915,7 +915,11 @@ impl Browser {
         // Visible needs a display on Linux. No display → an honest
         // headless fallback with a loud note. Never a virtual display:
         // that would re-create the mock environment this lane deletes.
+        // On non-Linux targets there is no display probing below, so these
+        // two stay untouched — the `mut` is Linux-only.
+        #[allow(unused_mut)]
         let mut headless = !visible;
+        #[allow(unused_mut)]
         let mut ozone_x11 = false;
         #[cfg(target_os = "linux")]
         {
@@ -950,7 +954,13 @@ impl Browser {
             .unwrap_or_default();
 
         let mut last_err = None;
+        // A quick clean exit means Chrome handed the command line to an
+        // already-running instance on this profile (process singleton) and
+        // quit — retrying cannot help, and the bare "exited" message would
+        // hide the actual cause.
+        let mut handoff = false;
         for (attempt, no_sandbox) in [(0u8, false), (1u8, true)] {
+            let spawned_at = Instant::now();
             let port = free_port();
             let args = launch_args_real(&RealLaunchCfg {
                 headless,
@@ -1008,9 +1018,23 @@ impl Browser {
                     Err(_) => {
                         match child.try_wait() {
                             Ok(Some(status)) => {
-                                last_err = Some(BladeError::Other(format!(
-                                    "browser exited during startup: {status}"
-                                )));
+                                if spawned_at.elapsed() < Duration::from_secs(5)
+                                    && status.success()
+                                {
+                                    handoff = true;
+                                    last_err = Some(BladeError::Other(
+                                        "the browser exited immediately (status 0) — another \
+                                         instance is almost certainly running on this profile \
+                                         and Chrome handed the launch off to it. Close it and \
+                                         retry, or use `rb mode clone` (works while it stays \
+                                         open), or `rb mode attach`."
+                                            .into(),
+                                    ));
+                                } else {
+                                    last_err = Some(BladeError::Other(format!(
+                                        "browser exited during startup: {status}"
+                                    )));
+                                }
                                 break;
                             }
                             Ok(None) => {}
@@ -1030,6 +1054,9 @@ impl Browser {
                         tokio::time::sleep(Duration::from_millis(300)).await;
                     }
                 }
+            }
+            if handoff {
+                break;
             }
             if attempt == 0 {
                 eprintln!(
@@ -1114,8 +1141,10 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
                      DevToolsActivePort file, which browsers write when started with \
                      `--remote-debugging-port=0` (or via chrome://inspect#remote-debugging on \
                      Chrome 144+). For a browser on a FIXED debug port, point bladebro at it \
-                     directly: `bladebro nav <url> --port <N>`. Or switch mechanism: \
-                     `bladebro rb mode clone`.",
+                     directly: `bladebro nav <url> --port <N>` — a fixed port is also the \
+                     stealthier arm: Chrome reports navigator.webdriver=true for an ephemeral \
+                     port (measured, 151), and the lane never masks Chrome's own value. Or \
+                     switch mechanism: `bladebro rb mode clone`.",
                     profile.path.display()
                 ))
             })?;
@@ -1155,7 +1184,7 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
                 )));
             }
             if crate::realbrowser::requires_non_default_dir(spec.brand)
-                && profile.root == spec.profile_root
+                && crate::realbrowser::same_dir(&profile.root, &spec.profile_root)
             {
                 return Err(BladeError::Other(format!(
                     "Google Chrome (136+) refuses remote debugging on the DEFAULT profile dir \
@@ -1167,9 +1196,9 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
                     profile.path.display()
                 )));
             }
-            if let Some(pid) = crate::realbrowser::profile_owner_pid(&profile.root) {
+            if let Some(owner) = crate::realbrowser::profile_in_use(&profile.root) {
                 return Err(BladeError::Other(format!(
-                    "your browser is running on this profile (pid {pid}) — Chrome would hand off \
+                    "your browser is running on this profile ({owner}) — Chrome would hand off \
                      to it and swallow the debug flag. Close it first, or use `rb mode clone` \
                      (works while it stays open), or `rb mode attach`."
                 )));

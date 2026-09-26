@@ -219,11 +219,32 @@ impl Page {
         // replace just "HeadlessChrome" with "Chrome" — preserving the real
         // Chrome version and OS. This is a CDP-level override, not JS.
         let ua_info = cdp.send("Runtime.evaluate", Some(serde_json::json!({
-            "expression": "JSON.stringify({ua:navigator.userAgent,plt:navigator.platform})",
+            "expression": "JSON.stringify({ua:navigator.userAgent,plt:navigator.platform,wd:navigator.webdriver})",
             "returnByValue": true,
         }))).await.ok()
             .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).map(String::from))
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
+        // Real-browser lane honesty probe (measured, Chrome 151.0.7922.108):
+        // a browser armed with an EPHEMERAL `--remote-debugging-port=0` (or
+        // via Chrome's chrome://inspect approval flow) reports
+        // `navigator.webdriver === true` natively — Chromium's own behavior,
+        // not a bladebro patch (fixed-port arms report false). The lane's
+        // contract forbids masking it, so surface it once instead of letting
+        // the agent discover it from a page.
+        if crate::realbrowser::real_lane()
+            && ua_info
+                .as_ref()
+                .and_then(|v| v.get("wd").and_then(|w| w.as_bool()))
+                == Some(true)
+        {
+            eprintln!(
+                "[realbrowser] note: this browser reports navigator.webdriver=true — Chrome does \
+                 that itself for an ephemeral debug port (`--remote-debugging-port=0`) or the \
+                 chrome://inspect approval flow; the lane never masks it. For stealth-critical \
+                 work, arm with a FIXED --remote-debugging-port, or use clone/profile mode."
+            );
+        }
 
         let need_override = ua_info.as_ref()
             .and_then(|v| v.get("ua").and_then(|u| u.as_str()))
@@ -1183,10 +1204,8 @@ impl Page {
         // Manual-control pause (`rb pause`): the person has the browser.
         // Refuse input-dispatching actions so agent and human never fight
         // over clicks/keys; reads and waits still work.
-        if crate::realbrowser::input_paused() && action.injects_input() {
-            return Err(crate::error::BladeError::Other(
-                "paused — manual control is claimed (`bladebro rb resume` to hand it back)".into(),
-            ));
+        if crate::realbrowser::input_paused() && action.disrupts_page() {
+            return Err(crate::realbrowser::paused_error());
         }
         let mut heal_note = if let Some(ref_id) = action.ref_id() {
             self.ensure_ref(ref_id).await?
@@ -1743,6 +1762,12 @@ impl Page {
     /// Stores timezone and locale overrides per-domain so the driver remembers
     /// which settings work for each site. The agent can edit the file directly.
     async fn apply_domain_profile(&mut self, url: &str) {
+        // Real-browser lane: per-domain tz/locale overrides are page-visible
+        // masks, and this lane's contract is that nothing page-visible is
+        // manufactured. Return before any CDP call.
+        if crate::realbrowser::real_lane() {
+            return;
+        }
         let domain = extract_domain(url);
         if domain.is_empty() {
             return;

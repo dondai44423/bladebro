@@ -162,6 +162,10 @@ async fn launch_browser(
     host: &str,
     port: u16,
 ) -> Result<(Page, Option<crate::browser::Browser>)> {
+    // Re-read the lane at every launch: `rb on|off` (or a hand-edited
+    // config) takes effect on the next launch, even inside a long-lived
+    // MCP session.
+    crate::realbrowser::init_lane();
     // Real-browser lane (S18): never the pipe transport (it flips
     // navigator.webdriver) and never the isolated agent browser — this lane
     // launches or attaches the user's own browser (see `launch_lane`).
@@ -1511,6 +1515,9 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 view=view));
         }
         "navigate" => {
+            if crate::realbrowser::input_paused() {
+                return Err(crate::realbrowser::paused_error());
+            }
             let delta = page.navigate(url).await?;
             page.reset_act_turn();
             let _rt = std::time::Instant::now();
@@ -3000,6 +3007,12 @@ async fn wait_for_download(
 /// and, while a new transfer was still starting, returned the previous
 /// file's completion metadata.)
 pub async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
+    // Manual-control pause: a download is triggered by clicking a synthetic
+    // anchor (and may open a viewer tab on the CORS fallback) — it must not
+    // fire while the person is using the browser.
+    if crate::realbrowser::input_paused() {
+        return Err(crate::realbrowser::paused_error());
+    }
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
     let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
     let downloads = page.downloads();
@@ -3192,6 +3205,9 @@ async fn execute_step(
             }
         }
         "navigate" => {
+            if crate::realbrowser::input_paused() {
+                return Err(crate::realbrowser::paused_error());
+            }
             let url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
             let delta = page.navigate(url).await?;
             if delta.navigated {

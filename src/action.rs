@@ -98,6 +98,13 @@ impl Action {
                 | Action::Upload { .. }
         )
     }
+
+    /// True for actions the pause must refuse: input dispatch plus the
+    /// page-level moves that would yank the user's context out from under
+    /// them (history, reload). Reads, waits and eval stay available.
+    pub fn disrupts_page(&self) -> bool {
+        self.injects_input() || matches!(self, Action::Back | Action::Forward | Action::Reload)
+    }
 }
 
 /// Result of the find-by-sig script: the element's current box + metadata.
@@ -1739,5 +1746,35 @@ mod action_tests {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pause_gate_tests {
+    use super::*;
+
+    #[test]
+    fn pause_refuses_input_and_page_moves_but_not_reads() {
+        // Input dispatch.
+        assert!(Action::Click { ref_id: "e1".into() }.disrupts_page());
+        assert!(Action::ClickCoord { x: 1.0, y: 2.0 }.disrupts_page());
+        assert!(Action::Type { ref_id: "e1".into(), text: "x".into() }.disrupts_page());
+        assert!(Action::Upload { ref_id: "e1".into(), path: "/tmp/x".into() }.disrupts_page());
+        // Page-level moves (history/reload) — they replace what the person
+        // using the browser is looking at.
+        assert!(Action::Back.disrupts_page());
+        assert!(Action::Forward.disrupts_page());
+        assert!(Action::Reload.disrupts_page());
+        // Reads and waits stay available while paused.
+        assert!(!Action::Read { ref_id: "e1".into() }.disrupts_page());
+        assert!(!Action::Wait {
+            condition: "settle".into(),
+            text: String::new(),
+            timeout: std::time::Duration::from_secs(1),
+        }
+        .disrupts_page());
+        // `injects_input` stays exactly the input set (no navigation).
+        assert!(!Action::Back.injects_input());
+        assert!(!Action::Reload.injects_input());
     }
 }

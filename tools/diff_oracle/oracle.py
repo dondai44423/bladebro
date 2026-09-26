@@ -267,6 +267,24 @@ def classify(key):
     return None
 
 
+def require_real_lane_support(bladebro: str) -> None:
+    """The real lane is forced via BLADE_LANE=real. A binary that predates the
+    real-browser lane ignores that variable, and the run would silently measure
+    the AGENT lane (masked GL, masked geometry) and report bogus divergences.
+    Refuse instead of producing a lying report."""
+    try:
+        r = subprocess.run([bladebro, "help", "--json"], capture_output=True,
+                           text=True, timeout=60)
+        supported = r.returncode == 0 and '"rb"' in r.stdout
+    except Exception:
+        supported = False
+    if not supported:
+        fail(f"{bladebro} does not support the real-browser lane (`rb` missing) — "
+             "BLADE_LANE=real would be ignored and the AGENT lane measured. Set "
+             "BLADEBRO to the build under test (e.g. "
+             "BLADEBRO=$PWD/target/release/bladebro).")
+
+
 def main():
     ap = argparse.ArgumentParser(description="bladebro differential oracle")
     ap.add_argument("--chrome", help="stock Chrome/Chromium path (default: CHROME_PATH or PATH)")
@@ -282,9 +300,22 @@ def main():
     battery_body = open(os.path.join(here, "battery.js"), encoding="utf-8").read()
     battery = "(async()=>{" + battery_body + "})()"
 
-    bladebro = os.environ.get("BLADEBRO", "bladebro")
+    bladebro = os.environ.get("BLADEBRO")
+    if not bladebro:
+        # Prefer the repo build over whatever PATH resolves to: a stale
+        # `bladebro` (an installed release predating a feature) silently
+        # changes what is being measured.
+        repo = os.path.dirname(os.path.dirname(here))
+        candidate = os.path.join(repo, "target", "release", "bladebro")
+        bladebro = (
+            candidate
+            if os.path.exists(candidate) and os.access(candidate, os.X_OK)
+            else "bladebro"
+        )
     if not shutil.which(bladebro) and not os.path.exists(bladebro):
         fail("bladebro binary not found (set BLADEBRO)")
+    if args.lane == "real":
+        require_real_lane_support(bladebro)
     chrome = find_chrome(args.chrome)
 
     xvfb_proc, display, wm_proc = None, None, None

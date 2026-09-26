@@ -353,7 +353,7 @@ blocking, biometrics + idle hum.
 ```bash
 bladebro rb on        # switch every surface (CLI, daemon, MCP) to your browser
 bladebro rb status    # what is configured / live (--json for agents)
-bladebro rb pause     # take manual control; input actions refuse until `rb resume`
+bladebro rb pause     # manual control: input, navigation and downloads refuse until `rb resume`
 bladebro rb off       # back to the isolated agent browser
 ```
 
@@ -361,11 +361,15 @@ bladebro rb off       # back to the isolated agent browser
 |---|---|---|
 | `clone` (default) | Imports your profile once into a blade-owned copy (browser may stay open; the source is never written to); runs your real binary on the copy, which ages through use | Everyday use; works on branded Google Chrome |
 | `profile` | Launches your binary on your live profile | Purists — close the browser first; Google Chrome 136+ refuses CDP on the default profile dir |
-| `attach` | Drives a browser that already exposes a debug endpoint (`--remote-debugging-port=0`, or Chrome 144+ `chrome://inspect#remote-debugging`) | Zero disruption; never owned, never shut down |
+| `attach` | Drives a browser that already exposes a debug endpoint (`--remote-debugging-port=0`, or Chrome 144+ `chrome://inspect#remote-debugging`) | Zero disruption; never owned, never shut down. Caveat (measured, Chrome 151): an *ephemeral* `--remote-debugging-port=0` arm — and the approval flow — makes Chrome itself report `navigator.webdriver=true`; a fixed port reports `false` |
 
 `rb mode auto` (default) attaches when a live endpoint exists, else clones.
-Browser override: `rb use <id>` · profile pick: `rb profile <key>` · re-import:
-`rb refresh` · wipe the imported copy: `rb forget`. Switching restarts the
+Browser override: `rb use <id>` · custom binary (nix/flatpak wrapper):
+`rb use --binary <path|auto>` · profile pick: `rb profile <key>` (validated;
+an absolute profile path also works) · re-import: `rb refresh` · wipe the
+imported copy: `rb forget` · `rb visible on|off` (real window vs
+`--headless=new`) · `rb idle-hum on|off` · `rb idle-shutdown on|off` (may the
+idle timeout close the real browser — default off). Switching restarts the
 daemon; long-lived MCP sessions pick the lane up at their next browser launch.
 
 > ⚠️ The agent browses **as you**: anything it does is attributable to your

@@ -707,7 +707,7 @@ mod tests {
     fn empty_selector_not_learned() {
         let mut kb = KnowledgeBase::default();
         kb.learn_consent("example.com", "", "generic");
-        assert!(kb.domains.get("example.com").is_none() || kb.domains["example.com"].consent.is_none(),
+        assert!(!kb.domains.contains_key("example.com") || kb.domains["example.com"].consent.is_none(),
             "empty selector should not be stored");
     }
 

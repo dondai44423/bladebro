@@ -48,6 +48,15 @@ Exit codes: `0` clean · `1` DIVERGENT present · `2` setup error.
 - Before a release (release checklist).
 - After every Chrome upgrade (fingerprints move; the oracle re-validates).
 
+## Binary under test
+
+Resolution order: `BLADEBRO` env → the repo build (`target/release/bladebro`,
+when present) → `bladebro` on PATH. The chosen binary is printed at startup —
+a stale installed binary silently changes what is measured. For `--lane real`
+the oracle **refuses to run** when the resolved binary predates the real-browser
+lane (`rb` missing in `help --json`): such a binary ignores `BLADE_LANE=real`,
+and the run would measure the AGENT lane while claiming to measure the real one.
+
 ## Extending
 
 - `battery.js` — the probe list; keep keys flat (`out.foo = ...`), and keep

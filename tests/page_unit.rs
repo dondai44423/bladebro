@@ -251,9 +251,9 @@ fn re_render_immunity_refs_survive_when_text_changes_but_structure_is_identical(
     // Without fingerprint matching, all three would have been removed+re-added.
     // With fingerprint matching, the first two rebound (refs kept) and the third
     // is unchanged (exact sig match).
-    assert!(d.rebound.len() >= 1,
+    assert!(!d.rebound.is_empty(),
         "expected at least one fingerprint rebind, got: {:?}", d.rebound);
-    assert!(d.removed.len() == 0,
+    assert!(d.removed.is_empty(),
         "no refs should have been removed during re-render: {:?}", d.removed);
 
     // Verify the refs are still the SAME identity (e1, e2, e3 preserved).

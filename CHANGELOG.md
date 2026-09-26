@@ -28,13 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     exposes a debug endpoint (`--remote-debugging-port=0`, or Chrome 144+'s
     `chrome://inspect#remote-debugging` approval flow); never owned, never
     shut down.
-  - **Commands:** `rb on|off|status|mode <m>|use [browser]|profile [key]|`
+  - **Commands:** `rb on|off|status|mode <m>|use [browser|--binary <path|auto>]|`
+    `profile [key|auto]|visible on|off|idle-hum on|off|idle-shutdown on|off|`
     `refresh|forget|pause|resume` (+ `--json`, `help rb`). Switching restarts
-    the daemon; MCP sessions pick the lane up at their next browser launch.
-  - **Manual control is first-class:** `rb pause` refuses every
-    input-dispatching action (click, type, fill, select, press, scroll, hover,
-    upload) and silences the idle hum; reads and waits keep working;
-    `rb resume` hands the wheel back.
+    the daemon; every surface re-reads the lane at its next browser launch
+    (a running MCP/agent session picks it up without a restart).
+  - **Manual control is first-class:** `rb pause` refuses input dispatch
+    (click, type, fill, select, press, scroll, hover, upload), navigation,
+    history (back/forward/reload) and downloads, and silences the idle hum;
+    reads, waits and eval keep working; `rb resume` hands the wheel back.
   - **Cross-platform discovery** (Linux incl. flatpak/snap profile roots,
     macOS app bundles, Windows per-user installs), profile names from
     `Local State`, and guards for browsers with a profile but no binary.
@@ -49,6 +51,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     agent browses as *you*"; `rb forget` wipes the imported copy);
     `BLADE_RB_DEBUG=1` surfaces the browser's own stderr when a visible launch
     fails. New env: `BLADE_LANE=real|agent` (per-process lane override).
+  - **Hardening pass:** a running browser is detected from the right path
+    (POSIX `SingletonLock` pid; Windows Chromium's `lockfile` handle — there
+    is no `SingletonLock` file on Windows, verified against Chromium source),
+    so `profile` mode fails with a named reason instead of a silent singleton
+    hand-off; a hand-off that still slips through is reported as such (quick
+    exit-0 detection); flatpak is no longer a bogus binary candidate (a
+    `/usr/bin/flatpak` entry cannot take Chrome flags — `rb use --binary
+    <wrapper>` covers flatpak/nix installs); Opera's Windows profile dir uses
+    Roaming (`%APPDATA%`) as Chromium does; absent Windows env vars can no
+    longer produce relative candidates; `rb profile <key>` validates against
+    the browser's profile list (absolute paths accepted); `rb forget` stops
+    the daemon first and still works after the browser was uninstalled.
+  - **Attach caveat (measured, Chrome 151):** a browser armed with an
+    ephemeral `--remote-debugging-port=0` — and Chrome's
+    `chrome://inspect#remote-debugging` approval flow — reports
+    `navigator.webdriver=true` itself; a FIXED debug port reports `false`.
+    The lane never masks Chrome's own value: it prints the note at attach
+    time and the help documents the fixed-port arm as the stealthier one.
+  - **Harness guards (`tools/`):** the oracle and the lane matrix now prefer
+    the repo build (`target/release/bladebro`) over whatever `bladebro` PATH
+    resolves to, print the binary under test, and **refuse `--lane real`**
+    when the resolved binary predates the lane (`rb` missing). A stale
+    installed binary silently ignored `BLADE_LANE=real` — the run measured
+    the agent lane and produced a bogus 15-key "regression" that was caught
+    here and traced to exactly that.
 
 ### Fixed
 - **WebGL is no longer dead on the MCP/pipe lane.** The pipe transport built its

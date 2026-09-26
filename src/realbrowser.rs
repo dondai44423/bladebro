@@ -121,6 +121,11 @@ pub struct Config {
     /// to a profile dir. `None` = most recently used.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Absolute path to a custom browser binary (`rb use --binary`): nix
+    /// wrappers, flatpak launcher scripts, dev builds. `None` = the
+    /// discovered binary for the selected browser.
+    #[serde(default)]
+    pub binary: Option<String>,
     /// Launch a visible window (the point of the feature on a desktop). An
     /// invisible lane falls back to `--headless=new` — honest, but a
     /// degraded environment; only for servers.
@@ -144,6 +149,7 @@ impl Default for Config {
             mode: Mode::Auto,
             browser: None,
             profile: None,
+            binary: None,
             visible: true,
             idle_shutdown: false,
             idle_hum: true,
@@ -258,9 +264,15 @@ pub struct BrowserSpec {
 }
 
 /// Candidate browser installs for this OS. Pure-ish (paths only); the
-/// caller filters by existence.
+/// caller filters by existence. Flatpak is deliberately NOT a binary
+/// candidate: `/usr/bin/flatpak` is a launcher, not a browser — spawning
+/// it with Chrome flags just fails. Flatpak profile roots are listed so a
+/// flatpak system can still work via `rb use --binary <wrapper>`.
 #[allow(clippy::type_complexity)]
 fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<PathBuf>)> {
+    // Used by the Linux + macOS candidate tables; Windows builds its paths
+    // from LOCALAPPDATA/APPDATA/PROGRAMFILES instead.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let home = platform::home_dir();
     let mut out: Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<PathBuf>)> = Vec::new();
 
@@ -282,7 +294,6 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
                 PathBuf::from("/usr/bin/chromium"),
                 PathBuf::from("/usr/bin/chromium-browser"),
                 PathBuf::from("/snap/bin/chromium"),
-                PathBuf::from("/usr/bin/flatpak"),
             ],
             vec![
                 xdg.join("chromium"),
@@ -298,7 +309,6 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
                 PathBuf::from("/usr/bin/google-chrome"),
                 PathBuf::from("/usr/bin/google-chrome-stable"),
                 PathBuf::from("/opt/google/chrome/chrome"),
-                PathBuf::from("/usr/bin/flatpak"),
             ],
             vec![
                 xdg.join("google-chrome"),
@@ -313,7 +323,6 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
                 PathBuf::from("/usr/bin/brave"),
                 PathBuf::from("/usr/bin/brave-browser"),
                 PathBuf::from("/opt/brave.com/brave/brave"),
-                PathBuf::from("/usr/bin/flatpak"),
             ],
             vec![
                 xdg.join("BraveSoftware/Brave-Browser"),
@@ -328,7 +337,6 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
                 PathBuf::from("/usr/bin/microsoft-edge"),
                 PathBuf::from("/usr/bin/microsoft-edge-stable"),
                 PathBuf::from("/opt/microsoft/msedge/msedge"),
-                PathBuf::from("/usr/bin/flatpak"),
             ],
             vec![
                 xdg.join("microsoft-edge"),
@@ -342,9 +350,11 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
             vec![
                 PathBuf::from("/usr/bin/vivaldi"),
                 PathBuf::from("/usr/bin/vivaldi-stable"),
-                PathBuf::from("/usr/bin/flatpak"),
             ],
-            vec![xdg.join("vivaldi")],
+            vec![
+                xdg.join("vivaldi"),
+                home.join(".var/app/com.vivaldi.Vivaldi/config/vivaldi"),
+            ],
         );
         push(
             "opera",
@@ -352,7 +362,6 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
             Brand::Opera,
             vec![
                 PathBuf::from("/usr/bin/opera"),
-                PathBuf::from("/usr/bin/flatpak"),
             ],
             vec![xdg.join("opera")],
         );
@@ -431,64 +440,89 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
 
     #[cfg(target_os = "windows")]
     {
-        let local = std::env::var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default();
-        let pf = std::env::var("PROGRAMFILES").map(PathBuf::from).unwrap_or_default();
-        let pf86 = std::env::var("PROGRAMFILES(X86)").map(PathBuf::from).unwrap_or_default();
+        // Env-var roots: a missing variable must never produce a RELATIVE
+        // candidate (`PathBuf::from("").join(x)` is cwd-relative and could
+        // accidentally exist). Absent base → no candidate.
+        let ev = |var: &str| {
+            std::env::var(var)
+                .ok()
+                .map(PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+        };
+        let local = ev("LOCALAPPDATA");
+        let roaming = ev("APPDATA");
+        let pf = ev("PROGRAMFILES");
+        let pf86 = ev("PROGRAMFILES(X86)");
+        let j = |b: &Option<PathBuf>, rel: &str| b.as_ref().map(|b| b.join(rel));
         let mut push = |id: &'static str, name: &'static str, brand: Brand,
-                        bins: Vec<PathBuf>, roots: Vec<PathBuf>| {
-            out.push((id, name, brand, bins, roots));
+                        bins: Vec<Option<PathBuf>>, roots: Vec<Option<PathBuf>>| {
+            out.push((
+                id,
+                name,
+                brand,
+                bins.into_iter().flatten().collect(),
+                roots.into_iter().flatten().collect(),
+            ));
         };
         push(
             "chrome",
             "Google Chrome",
             Brand::Chrome,
             vec![
-                local.join("Google/Chrome/Application/chrome.exe"),
-                pf.join("Google/Chrome/Application/chrome.exe"),
-                pf86.join("Google/Chrome/Application/chrome.exe"),
+                j(&local, "Google/Chrome/Application/chrome.exe"),
+                j(&pf, "Google/Chrome/Application/chrome.exe"),
+                j(&pf86, "Google/Chrome/Application/chrome.exe"),
             ],
-            vec![local.join("Google/Chrome/User Data")],
+            vec![j(&local, "Google/Chrome/User Data")],
         );
         push(
             "chromium",
             "Chromium",
             Brand::Chromium,
-            vec![local.join("Chromium/Application/chrome.exe")],
-            vec![local.join("Chromium/User Data")],
+            vec![j(&local, "Chromium/Application/chrome.exe")],
+            vec![j(&local, "Chromium/User Data")],
         );
         push(
             "brave",
             "Brave",
             Brand::Brave,
             vec![
-                local.join("BraveSoftware/Brave-Browser/Application/brave.exe"),
-                pf.join("BraveSoftware/Brave-Browser/Application/brave.exe"),
+                j(&local, "BraveSoftware/Brave-Browser/Application/brave.exe"),
+                j(&pf, "BraveSoftware/Brave-Browser/Application/brave.exe"),
             ],
-            vec![local.join("BraveSoftware/Brave-Browser/User Data")],
+            vec![j(&local, "BraveSoftware/Brave-Browser/User Data")],
         );
         push(
             "edge",
             "Microsoft Edge",
             Brand::Edge,
             vec![
-                pf86.join("Microsoft/Edge/Application/msedge.exe"),
-                pf.join("Microsoft/Edge/Application/msedge.exe"),
+                j(&pf86, "Microsoft/Edge/Application/msedge.exe"),
+                j(&pf, "Microsoft/Edge/Application/msedge.exe"),
             ],
-            vec![local.join("Microsoft/Edge/User Data")],
+            vec![j(&local, "Microsoft/Edge/User Data")],
         );
         push(
             "vivaldi",
             "Vivaldi",
             Brand::Vivaldi,
-            vec![local.join("Vivaldi/Application/vivaldi.exe")],
-            vec![local.join("Vivaldi/User Data")],
+            vec![j(&local, "Vivaldi/Application/vivaldi.exe")],
+            vec![j(&local, "Vivaldi/User Data")],
         );
         push(
             "opera",
             "Opera",
             Brand::Opera,
-            vec![local.join("Programs/Opera/opera.exe")],
-            vec![local.join("Opera Software/Opera Stable")],
+            vec![
+                j(&local, "Programs/Opera/opera.exe"),
+                j(&pf, "Programs/Opera/opera.exe"),
+            ],
+            // Opera's profile lives in Roaming (APPDATA) on Windows — its
+            // LOCALAPPDATA entry is the install location, not the profile.
+            vec![
+                j(&roaming, "Opera Software/Opera Stable"),
+                j(&local, "Opera Software/Opera Stable"),
+            ],
         );
     }
 
@@ -503,7 +537,10 @@ pub fn discover() -> Vec<BrowserSpec> {
         let root = roots.iter().find(|p| p.exists()).cloned();
         let root = match (root, binary.as_ref()) {
             (Some(r), _) => r,
-            (None, Some(_)) => roots[0].clone(),
+            // Binary without a profile root: show the canonical path. Never
+            // index blindly — a platform table may legitimately leave the
+            // root list empty (e.g. a missing %%APPDATA%% on Windows).
+            (None, Some(_)) => roots.first().cloned().unwrap_or_default(),
             (None, None) => continue,
         };
         found.push(BrowserSpec {
@@ -639,6 +676,46 @@ pub fn profile_owner_pid(root: &Path) -> Option<u32> {
     } else {
         None
     }
+}
+
+/// Human description of who holds this profile, if a live process does.
+/// POSIX/macOS: the `SingletonLock` symlink's pid. Windows: Chromium's
+/// singleton is a `lockfile` opened with `FILE_FLAG_DELETE_ON_CLOSE`
+/// (chrome/browser/process_singleton_win.cc — there is no `SingletonLock`
+/// file at all), so the file's existence means a running browser holds the
+/// profile; the kernel deletes it when that process dies, stale ones cannot
+/// persist across a crash.
+pub fn profile_in_use(root: &Path) -> Option<String> {
+    if let Some(pid) = profile_owner_pid(root) {
+        return Some(format!("pid {pid}"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if root.join("lockfile").exists() {
+            return Some("lock file held".to_string());
+        }
+    }
+    None
+}
+
+/// Do two paths name the same directory? Canonicalizing both sides makes
+/// path comparisons (the branded-Chrome default-dir gate) immune to
+/// spelling: trailing slash, symlinked home, `..` components.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+/// The single pause-refusal error, so every gate speaks identically.
+pub fn paused_error() -> BladeError {
+    BladeError::Other(
+        "paused — manual control is claimed (`bladebro rb resume` to hand it back)".into(),
+    )
 }
 
 // ── Template management (clone lane) ────────────────────────────────────
@@ -843,6 +920,48 @@ fn resolve_abs_profile(path: &Path) -> Result<ProfileInfo> {
     })
 }
 
+/// Validate a `rb use --binary` override: the path must exist and (Unix)
+/// carry an execute bit. Failing at set time (and again at resolve time)
+/// beats a spawn failure inside a later launch.
+pub fn validate_binary_override(path: &str) -> Result<PathBuf> {
+    let p = PathBuf::from(path);
+    if !p.is_file() {
+        return Err(BladeError::Other(format!("binary not found: {path}")));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let exec = std::fs::metadata(&p)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+        if !exec {
+            return Err(BladeError::Other(format!(
+                "binary is not executable: {path}"
+            )));
+        }
+    }
+    Ok(p)
+}
+
+/// The id of the only realbrowser root on disk, when exactly one exists —
+/// `rb forget` after the browser itself was uninstalled still needs a
+/// target, and at that point discovery cannot name one.
+pub fn sole_root_id() -> Option<String> {
+    let dir = platform::blade_dir().join("realbrowser");
+    let mut ids: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    ids.sort();
+    if ids.len() == 1 {
+        ids.pop()
+    } else {
+        None
+    }
+}
+
 /// Resolve the configured (or best) browser + profile.
 pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
     let browsers = discover();
@@ -852,7 +971,7 @@ pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
         ));
     }
 
-    let spec = match cfg.browser.as_deref() {
+    let mut spec = match cfg.browser.as_deref() {
         Some(id) => browsers
             .iter()
             .find(|b| b.id == id)
@@ -876,6 +995,13 @@ pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
             .expect("non-empty"),
     };
 
+    // `rb use --binary`: an explicit override always wins over discovery.
+    // Re-validated here so a binary deleted since it was set fails with the
+    // path named, not with a spawn error inside a launch.
+    if let Some(ov) = cfg.binary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        spec.binary = validate_binary_override(ov)?;
+    }
+
     // Profile: absolute path override → use as-is; key → lookup; else most
     // recently used.
     let profiles = list_profiles(&spec.profile_root);
@@ -894,10 +1020,19 @@ pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
                 ))
             })?,
         None => profiles.first().cloned().ok_or_else(|| {
-            BladeError::Other(format!(
-                "no profiles found under {}",
-                spec.profile_root.display()
-            ))
+            if spec.profile_root.is_dir() {
+                BladeError::Other(format!(
+                    "no profiles found under {}",
+                    spec.profile_root.display()
+                ))
+            } else {
+                BladeError::Other(format!(
+                    "profile root {} does not exist yet — launch {} once so it creates one, \
+                     or point `bladebro rb profile <absolute path>` at an existing profile",
+                    spec.profile_root.display(),
+                    spec.name
+                ))
+            }
         })?,
     };
 
@@ -924,9 +1059,9 @@ pub fn effective_mode(cfg: &Config, user_data_root: &Path) -> Mode {
 /// Import-on-first-use for the clone lane — shared by `rb on` and the
 /// launch path so their behavior cannot drift apart.
 pub fn ensure_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<ImportStats> {
-    if let Some(pid) = profile_owner_pid(&profile.path) {
+    if let Some(owner) = profile_in_use(&profile.root) {
         eprintln!(
-            "[realbrowser] your browser (pid {pid}) is open — importing its profile now. The \
+            "[realbrowser] your browser ({owner}) is open — importing its profile now. The \
              copy may miss the last few writes (SQLite snapshot); the source is never written \
              to. `bladebro rb refresh` with the browser closed gives a clean copy."
         );
@@ -1043,6 +1178,58 @@ mod tests {
         assert_eq!(parse_singleton_owner("nopid"), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn profile_in_use_reads_live_and_stale_singleton_locks() {
+        let root = std::env::temp_dir().join(format!("blade-rb-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(profile_in_use(&root), None, "no lock → not in use");
+
+        let live = format!("host-{}", std::process::id());
+        std::os::unix::fs::symlink(&live, root.join("SingletonLock")).unwrap();
+        assert_eq!(
+            profile_in_use(&root),
+            Some(format!("pid {}", std::process::id())),
+            "a lock held by a live pid reads as in use"
+        );
+
+        std::fs::remove_file(root.join("SingletonLock")).unwrap();
+        // Beyond any pid_max: kill(pid, 0) errors → not alive → stale.
+        std::os::unix::fs::symlink("host-99999999", root.join("SingletonLock")).unwrap();
+        assert_eq!(profile_in_use(&root), None, "a dead pid is a stale lock");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn binary_override_must_exist_and_be_executable() {
+        let dir = std::env::temp_dir().join(format!("blade-rb-bin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("chrome");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(validate_binary_override(&exe.display().to_string()).is_ok());
+        assert!(validate_binary_override("/nonexistent/bladebro-browser").is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let noexec = dir.join("noexec");
+            std::fs::write(&noexec, b"x").unwrap();
+            std::fs::set_permissions(&noexec, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(
+                validate_binary_override(&noexec.display().to_string()).is_err(),
+                "a non-executable file must be refused"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn config_round_trips_and_survives_corruption() {
         let dir = std::env::temp_dir().join(format!("blade-rb-cfg-{}", std::process::id()));
@@ -1054,6 +1241,7 @@ mod tests {
         assert_eq!(cfg.mode, Mode::Auto);
         assert!(cfg.visible, "visible must default on");
         assert!(!cfg.idle_shutdown, "idle shutdown must default off");
+        assert!(cfg.binary.is_none(), "no binary override by default");
         cfg.enabled = true;
         cfg.mode = Mode::Clone;
         cfg.browser = Some("brave".into());

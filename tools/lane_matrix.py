@@ -9,10 +9,27 @@ and a display with an honest work area.
 Real lane: real-clone (isolated BLADE_HOME, BLADE_LANE=real, invisible) —
 the probe checks the REAL-lane contract instead of the mask: navigator.webdriver
 false, and NO GL mask (the browser's own renderer string, reported as-is).
+
+Binary under test: `BLADEBRO` env -> the repo build (`target/release/bladebro`)
+-> `~/.local/bin/bladebro`; printed at startup. The real lane refuses a binary
+that predates `rb` (BLADE_LANE=real would be silently ignored).
 """
 import json, os, shutil, subprocess, sys, tempfile, time
 
-BLADE = os.environ.get("BLADEBRO", os.path.expanduser("~/.local/bin/bladebro"))
+def _resolve_blade():
+    """BLADEBRO wins; otherwise prefer the repo build (a stale installed
+    `bladebro` silently changes what is measured); then the user-local install."""
+    env = os.environ.get("BLADEBRO")
+    if env:
+        return env
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidate = os.path.join(repo, "target", "release", "bladebro")
+    if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return os.path.expanduser("~/.local/bin/bladebro")
+
+
+BLADE = _resolve_blade()
 PROBE = ("(function(){var o={};try{var c=document.createElement('canvas');var g=c.getContext('webgl');"
          "if(g){var e=g.getExtension('WEBGL_debug_renderer_info');"
          "o.gl=e?g.getParameter(e.UNMASKED_RENDERER_WEBGL):'no-ext';o.exts=g.getSupportedExtensions().length;"
@@ -200,9 +217,30 @@ def lane_mcp(rounds=5, tool="act"):
     return out
 
 
+def require_real_lane_support():
+    """The real lane is forced via BLADE_LANE=real. A binary that predates the
+    real-browser lane ignores that variable and the matrix would silently
+    measure the AGENT lane against the real-lane contract. Refuse instead."""
+    try:
+        r = subprocess.run([BLADE, "help", "--json"], capture_output=True,
+                           text=True, timeout=60)
+        ok = r.returncode == 0 and '"rb"' in r.stdout
+    except Exception:
+        ok = False
+    if not ok:
+        sys.stderr.write(
+            f"FATAL: {BLADE} does not support the real-browser lane (`rb` missing) — "
+            "BLADE_LANE=real would be ignored and the AGENT lane measured. "
+            "Set BLADEBRO to the build under test.\n")
+        sys.exit(2)
+
+
 if __name__ == "__main__":
     lane = sys.argv[1] if len(sys.argv) > 1 else "all"
     rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+    print(f"bladebro under test: {BLADE}")
+    if lane in ("real", "all"):
+        require_real_lane_support()
     if lane in ("daemon", "all"):
         print("== daemon lane")
         for n, res in lane_daemon(rounds):

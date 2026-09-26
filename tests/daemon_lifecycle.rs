@@ -88,7 +88,7 @@ fn second_daemon_does_not_steal_a_live_socket() {
         .spawn()
         .expect("second daemon must spawn");
     let st = wait_exit(&mut d2, 10).unwrap_or_else(|| {
-        let _ = term(&d2);
+        term(&d2);
         panic!("second daemon did not exit — it stole the socket");
     });
     assert!(st.success(), "second daemon exit: {st:?}");

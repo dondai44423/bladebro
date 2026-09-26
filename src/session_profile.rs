@@ -578,8 +578,10 @@ fn restore_interrupted_real_swap(root: &Path) {
     }
 }
 
-/// Read the pid from a profile dir's SingletonLock (symlink
-/// "hostname-pid" on Unix, pid text file on Windows).
+/// Read the pid from a profile dir's SingletonLock (a `hostname-pid`
+/// symlink on Linux/macOS). Windows has no such file — its singleton is a
+/// `lockfile` handle with no pid in it — so this returns None there and the
+/// orphan kill is Unix-only (documented residual).
 fn read_singleton_pid(dir: &Path) -> Option<u32> {
     let lock = dir.join("SingletonLock");
     #[cfg(unix)]
@@ -602,16 +604,26 @@ fn read_singleton_pid(dir: &Path) -> Option<u32> {
 /// Does process `pid` have `dir` in its command line?
 /// Guards against killing a recycled pid.
 fn process_uses_dir(pid: u32, dir: &Path) -> bool {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
             .map(|c| c.contains(&dir.display().to_string()))
             .unwrap_or(false)
     }
+    #[cfg(target_os = "macos")]
+    {
+        // No /proc on macOS — ask ps for the full command line.
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&dir.display().to_string()))
+            .unwrap_or(false)
+    }
     #[cfg(windows)]
     {
-        // wmic is deprecated but universally present; fall back
-        // to trusting process_is_chrome for the profile kill.
+        // No cheap command-line read on Windows (wmic is gone on recent
+        // builds). Trust process_is_chrome — the pid comes from OUR session
+        // dir's lock, so a recycled-pid kill window is narrow.
         let _ = (pid, dir);
         true
     }
