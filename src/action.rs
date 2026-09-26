@@ -133,9 +133,26 @@ struct FoundElement {
     /// clicked, so `no-effect` verdicts expose the real target.
     #[serde(default, rename = "hit_tgt")]
     hit_tgt: Option<String>,
-    /// Text content of the element (for "read" mode).
+    /// Text content of the element (for "read" mode). For "check"/"prepare"
+    /// mode this is the readback of the EFFECTIVE editing host - the focused
+    /// editor when the framework moved focus away from the addressed wrapper
+    /// (a facade composer's real contenteditable), else the element itself.
     #[serde(default)]
     text: Option<String>,
+    /// "check"/"prepare": kind of the effective editing host
+    /// ("ce" = contenteditable, "input", "textarea", ...).
+    #[serde(default, rename = "hostKind")]
+    host_kind: Option<String>,
+    /// "check"/"prepare": the effective host is the addressed element.
+    #[serde(default, rename = "hostIsTgt")]
+    host_is_tgt: Option<bool>,
+    /// "check"/"selhost": selected character count in the host.
+    #[serde(default)]
+    sel: Option<u64>,
+    /// "check"/"prepare": the addressed element is gone (framework
+    /// remounted it); `text`/`hostKind` still describe the live editor.
+    #[serde(default, rename = "tgtMissing")]
+    tgt_missing: Option<bool>,
     /// Live options of a select whose pick failed (#21): `text` or
     /// `text=value` tokens, capped at 80.
     #[serde(default)]
@@ -176,24 +193,19 @@ pub struct TextMatch {
     pub score: i64,
 }
 
-/// Find actionable elements by text/label query. Returns up to 30 matches
-/// sorted by relevance score. Used by text addressing (M3): `act click text="Sign in"`
-/// resolves the text to an element ref without a prior `see` call.
-pub async fn find_by_text(
-    cdp: &CdpSession,
-    query: &str,
-    role_filter: Option<&str>,
-) -> Result<Vec<TextMatch>> {
-    if query.trim().is_empty() {
-        return Err(BladeError::Other("find query must not be empty".into()));
-    }
+/// Build the find-by-text page script. `include_hidden` keeps invisible
+/// matches in the results - the ref HEAL path needs them (a facade
+/// composer's hidden wrapper resolves to its live editor downstream),
+/// while text addressing and `see find` stay visible-only.
+fn find_text_expr(query: &str, role_filter: Option<&str>, include_hidden: bool) -> Result<String> {
     let query_js = serde_json::to_string(query)?;
     let role_js = match role_filter {
         Some(r) => serde_json::to_string(r)?,
         None => "null".to_string(),
     };
+    let ih_js = if include_hidden { "true" } else { "false" };
 
-    let expression = "((query,rf)=>{"
+    Ok("((query,rf,ih)=>{"
         .to_string()
         + "const d=document;if(!d||!d.body)return[];"
         + &JS_PREAMBLE
@@ -208,7 +220,7 @@ pub async fn find_by_text(
         + "const snm=name(n,false);"
         + "const key=r+'\\u0000'+snm;counts[key]=(counts[key]||0)+1;"
         + "if(rf&&r!==rf)continue;"
-        + "if(!vis(n))continue;"
+        + "if(!vis(n)&&!ih)continue;"
         + "const sig='|'+r+'|'+snm+'|'+counts[key];"
         + "const nm=name(n,true);let score=0;"
         + "if(nm===query)score=100;else if(nm.toLowerCase()===q)score=80;"
@@ -220,7 +232,22 @@ pub async fn find_by_text(
         + "if(score>0)results.push({sig,score,role:r,name:nm,frame:[]});"
         + "}"
         + "results.sort((a,b)=>b.score-a.score);return results.slice(0,30);})"
-        + "(" + &query_js + "," + &role_js + ")";
+        + "(" + &query_js + "," + &role_js + "," + ih_js + ")")
+}
+
+/// Find actionable elements by text/label query. Returns up to 30 matches
+/// sorted by relevance score. Used by text addressing (M3): `act click text="Sign in"`
+/// resolves the text to an element ref without a prior `see` call.
+pub async fn find_by_text(
+    cdp: &CdpSession,
+    query: &str,
+    role_filter: Option<&str>,
+    include_hidden: bool,
+) -> Result<Vec<TextMatch>> {
+    if query.trim().is_empty() {
+        return Err(BladeError::Other("find query must not be empty".into()));
+    }
+    let expression = find_text_expr(query, role_filter, include_hidden)?;
 
     let res = cdp
         .send(
@@ -258,6 +285,7 @@ fn compute_verdict(
     delta: &PageDelta,
     lpm: &LivePageModel,
     click_via: Option<(&str, &[&str], &str)>,
+    edit: Option<&EditReport>,
 ) -> String {
     let dom_changed = !delta.added.is_empty() || !delta.removed.is_empty() || !delta.changed.is_empty();
     match action {
@@ -292,6 +320,9 @@ fn compute_verdict(
             }
         }
         Action::Type { ref_id, text } => {
+            if let Some(rep) = edit {
+                return type_verdict_text(ref_id, text, rep, lpm);
+            }
             let actual = lpm
                 .element(ref_id)
                 .and_then(|e| e.raw.value.as_deref())
@@ -307,7 +338,10 @@ fn compute_verdict(
                 format!("outcome: typed \"{}\" \u{2192} value empty (input may be framework-controlled)", clip(text, 40))
             }
         }
-        Action::Clear { ref_id } => format!("outcome: cleared {ref_id}"),
+        Action::Clear { ref_id } => match edit {
+            Some(rep) => clear_verdict_text(ref_id, rep),
+            None => format!("outcome: cleared {ref_id}"),
+        },
         Action::Select { option, .. } => format!("outcome: selected \"{}\"", clip(option, 40)),
         Action::Press { key } => {
             if delta.navigated {
@@ -672,6 +706,19 @@ fn find_sig_expr(sig: &str, mode: &str, text: Option<&str>, frame: &[usize]) -> 
         + "const ir=f.getBoundingClientRect();ox+=ir.x;oy+=ir.y;}"
         + "const all=deepAll(doc,sel);"
         + "const fps=frame.join(',');const counts={};"
+        // Editing-host helpers, shared by prepare/clear/check/selhost/type:
+        // every input path resolves the EFFECTIVE editing host first - the
+        // focused editor when a framework moved focus (facade composers),
+        // else the addressed element or its inner editable field.
+        + "var _ced=function(e){return !!(e&&(e.isContentEditable||(e.getAttribute&&e.getAttribute('contenteditable')==='true')));};"
+        + "var _clr=function(e){try{var _s=window.getSelection();_s.selectAllChildren(e);document.execCommand('delete',false);}catch(_e){}e.dispatchEvent(new Event('input',{bubbles:true}));};"
+        + "var _tvr=function(v){return String(v==null?'':v).replace(/\\s+/g,' ').trim();};"
+        + "var _read=function(e){if(!e)return '';if('value' in e&&typeof e.value==='string')return _tvr(e.value);return _tvr(e.innerText||e.textContent||'');};"
+        + "var _isd=function(e){return !!(e&&(_ced(e)||((e.tagName==='INPUT'||e.tagName==='TEXTAREA')&&e.type!=='hidden')));};"
+        + "var _hostOf=function(t){var a=doc.activeElement;if(_isd(a))return a;if(t&&t.querySelector){var ii=_ced(t)?null:t.querySelector('textarea,input:not([type=hidden]),[contenteditable]:not([contenteditable=false])');if(ii)return ii;}return t;};"
+        + "var _selLen=function(h){try{if(h&&('selectionStart' in h)&&'value' in h)return Math.abs((h.selectionEnd||0)-(h.selectionStart||0));var s=doc.getSelection&&doc.getSelection();return (s&&!s.isCollapsed)?String(s).length:0;}catch(_e){return 0;}};"
+        + "var _nearish=function(n,a){if(!n||!a)return false;if(n.contains(a)||a.contains(n))return true;try{var f1=n.closest?n.closest('form'):null;if(f1&&f1===(a.closest?a.closest('form'):null))return true;}catch(_e){}var p=n.parentElement;for(var i=0;i<4&&p;i++){if(p.contains(a))return true;p=p.parentElement;}return false;};"
+        + "var _hiddenHost=function(n){var a=doc.activeElement;if(a&&a!==n&&_isd(a)&&vis(a)&&_nearish(n,a))return a;var p=n.parentElement;for(var i=0;i<3&&p;i++){var q=p.querySelectorAll('[contenteditable]:not([contenteditable=false]),textarea,input:not([type=hidden])');for(var j=0;j<q.length;j++){var r=q[j];if(r!==n&&_isd(r)&&vis(r))return r;}p=p.parentElement;}return null;};"
         + "for(let i=0;i<all.length;i++){const n=all[i];"
         + "const r=role(n);if(r==='hidden')continue;"
         + "const nm=name(n,false);"
@@ -679,30 +726,26 @@ fn find_sig_expr(sig: &str, mode: &str, text: Option<&str>, frame: &[usize]) -> 
         + "const s=fps+'|'+r+'|'+nm+'|'+counts[key];"
         + "if(s==="
         + &sig_js
-        + "){if(!vis(n))return{ok:false,reason:'element hidden'};const rect=n.getBoundingClientRect();"
+        + "){if(!vis(n)){var _vd=(mode==='check'||mode==='prepare'||mode==='focus')?_hiddenHost(n):null;if(_vd){if(mode!=='check'){_vd.scrollIntoView({block:'center'});_vd.focus();}if(mode==='focus')return{ok:true};return{ok:true,text:_read(_vd),hostKind:(_ced(_vd)?'ce':((_vd.tagName)?_vd.tagName.toLowerCase():'')),hostIsTgt:false,sel:_selLen(_vd),tgtMissing:true};}return{ok:false,reason:'element hidden'};}const rect=n.getBoundingClientRect();"
         + "const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;"
         + "const top=doc.elementFromPoint(cx,cy);"
         + "const isTopmost=top===n||n.contains(top);"
         + "var tgt=n;if(n.getAttribute&&n.getAttribute('role')==='combobox'&&n.tagName!=='SELECT'){var ii=n.querySelector('textarea,input:not([type=hidden])');if(ii)tgt=ii;}"
-        // Contenteditable handling: rich editors (x.com composer, Slack, …)
-        // are contenteditable DIVs — the input value-setter hack throws
-        // Illegal invocation on them and `.value` reads nothing.
-        + "var _ced=function(e){return !!(e&&(e.isContentEditable||(e.getAttribute&&e.getAttribute('contenteditable')==='true')));};"
-        + "var _clr=function(e){try{var _s=window.getSelection();_s.selectAllChildren(e);document.execCommand('delete',false);}catch(_e){}e.dispatchEvent(new Event('input',{bubbles:true}));};"
         + "if(mode==='box'){"
         + "function _lnb(e){return !!(e&&e.tagName&&(e.tagName==='BUTTON'||e.tagName==='A'||e.tagName==='SELECT'||e.tagName==='TEXTAREA'||(e.tagName==='INPUT'&&e.type!=='hidden'))&&(e.tagName!=='A'||!!e.href));}"
         + "function _lbx(e){var _lr=e.getBoundingClientRect();return [Math.round(_lr.x+ox)||0,Math.round(_lr.y+oy)||0,Math.round(_lr.width)||0,Math.round(_lr.height)||0];}"
         + LEAF_TARGET_JS
         + "var _lcbx=_lClick[0]+_lClick[2]/2,_lcby=_lClick[1]+_lClick[3]/2;var _lfc=doc.elementFromPoint(_lcbx-ox,_lcby-oy);"
         + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:(_lfc===n||(n.contains?n.contains(_lfc):false)),hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']')};}"
-        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}else if(_ced(tgt)){_clr(tgt);}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled};}"
+        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();var _ph=_hostOf(tgt);const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false};}"
         + "if(mode==='focus'){tgt.focus();return{ok:true};}"
-        + "if(mode==='clear'){if('value' in tgt){tgt.value='';tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));}else if(_ced(tgt)){_clr(tgt);}return{ok:true};}"
+        + "if(mode==='clear'){var _ch=_hostOf(tgt);if(!_ch)return{ok:false,reason:'no editable host'};if(_ced(_ch)){_clr(_ch);}else if('value' in _ch){var _cpr=_ch.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _cd=Object.getOwnPropertyDescriptor(_cpr,'value');if(_cd&&_cd.set){_cd.set.call(_ch,'');}else{_ch.value='';}_ch.dispatchEvent(new Event('input',{bubbles:true}));_ch.dispatchEvent(new Event('change',{bubbles:true}));}else{return{ok:false,reason:'not an editable field'};}return{ok:true,text:_read(_ch)};}"
         + "if(mode==='click'){n.click();return{ok:true};}"
-        + "if(mode==='check'){var _cv=('value' in tgt&&typeof tgt.value==='string')?tgt.value:((tgt.innerText||tgt.textContent||'').replace(/\\s+/g,' ').trim());return{ok:true,text:_cv};}"
-        + "if(mode==='type'){tgt.focus();var _tx="
+        + "if(mode==='check'){var _kh=_hostOf(tgt);return{ok:true,text:_read(_kh),hostKind:(_ced(_kh)?'ce':((_kh&&_kh.tagName)?_kh.tagName.toLowerCase():'')),hostIsTgt:_kh===tgt,sel:_selLen(_kh),tgtMissing:(tgt&&tgt.isConnected===false)?true:false};}"
+        + "if(mode==='selhost'){var _sh=_hostOf(tgt);if(!_sh)return{ok:false,reason:'no editable host'};try{_sh.focus();if('setSelectionRange' in _sh&&'value' in _sh){_sh.setSelectionRange(0,(_sh.value||'').length);}else{var _s3=doc.getSelection();var _r3=doc.createRange();_r3.selectNodeContents(_sh);_s3.removeAllRanges();_s3.addRange(_r3);}}catch(_e){}return{ok:true,sel:_selLen(_sh)};}"
+        + "if(mode==='type'){var _th=_hostOf(tgt)||tgt;if(!_th||_ced(_th)||!('value' in _th))return{ok:false,reason:'js-type only applies to value fields'};_th.focus();var _tx="
         + &text_js
-        + ";if(_ced(tgt)){var _ok=false;try{var _s2=window.getSelection();_s2.selectAllChildren(tgt);_ok=document.execCommand('insertText',false,_tx);}catch(_e){_ok=false;}if(!_ok){tgt.textContent=_tx;tgt.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:_tx}));}return{ok:true};}var proto=tgt.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var setter=Object.getOwnPropertyDescriptor(proto,'value').set;if(setter&&('value' in tgt)){setter.call(tgt,_tx);}else{tgt.value=_tx;}tgt.dispatchEvent(new Event('input',{bubbles:true}));tgt.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true};}"
+        + ";var _tpr=_th.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _tsd=Object.getOwnPropertyDescriptor(_tpr,'value');if(_tsd&&_tsd.set){_tsd.set.call(_th,_tx);}else{_th.value=_tx;}_th.dispatchEvent(new Event('input',{bubbles:true}));_th.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true,text:_read(_th)};}"
         + "if(mode==='select'){"
         + "if(n.tagName==='SELECT'){"
         + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
@@ -713,6 +756,7 @@ fn find_sig_expr(sig: &str, mode: &str, text: Option<&str>, frame: &[usize]) -> 
         + "if(mode==='read'){var txt=n.innerText||n.textContent||'';if(!txt&&('value' in n)&&n.value)txt=n.value;return{ok:true,text:txt.slice(0,5000)};}"
         + "if(mode==='hover'){n.scrollIntoView({block:'center'});const rect=n.getBoundingClientRect();const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;const top=doc.elementFromPoint(cx,cy);const isTopmost=top===n||n.contains(top);return{ok:true,box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],isTopmost:isTopmost};}"
         + "return{ok:false,reason:'unknown mode'};}}"
+        + "if(mode==='check'||mode==='prepare'){var _a3=doc.activeElement;var _h3=_isd(_a3)?_a3:null;if(_h3){if(mode==='prepare')_h3.focus();return{ok:true,text:_read(_h3),hostKind:(_ced(_h3)?'ce':((_h3.tagName)?_h3.tagName.toLowerCase():'')),hostIsTgt:false,sel:_selLen(_h3),tgtMissing:true};}}"
         + "return{ok:false,reason:'not found'};})("
         + &sig_js
         + ","
@@ -763,6 +807,323 @@ async fn find_by_sig(
 
     let found: FoundElement = serde_json::from_value(value.clone())?;
     Ok(found)
+}
+
+/// Kind of edit an `EditReport` describes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EditKind {
+    Type,
+    Clear,
+}
+
+/// What actually happened to an edited field - the authority behind the
+/// verdict. The Type/Clear arms fill it; `finalize_edit` re-reads after
+/// settle (and runs at most one bounded corrective pass); `compute_verdict`
+/// formats it. Every note in the verdict must be backed by a readback here.
+#[derive(Debug, Clone)]
+struct EditReport {
+    kind: EditKind,
+    /// Typed text (empty for clears).
+    text: String,
+    /// Readback of the effective editing host at verdict time.
+    final_text: String,
+    /// Readback right after the action (diffed against `final_text`).
+    branch_text: String,
+    /// "ce" | "input" | "textarea" | "" - host kind at the last read.
+    host_kind: String,
+    /// The host IS the addressed element (no framework redirect).
+    host_is_tgt: bool,
+    /// The addressed element is gone (framework remounted it); the host
+    /// data still describes the live editor.
+    tgt_missing: bool,
+    /// Chars the field held before a replace-clear ran.
+    pre_text_len: usize,
+    /// The field was empty (or verified-cleared) before typing.
+    pre_cleared: bool,
+    /// Exact match (type) / empty (clear) at the last readback.
+    verified: bool,
+    /// A JS setter wrote the value because key events did not register.
+    set_via_js: bool,
+    /// A corrective pass ran (late content / failed clear retried once).
+    corrected: bool,
+}
+
+/// Outcome of a verified clear.
+struct ClearResult {
+    /// The host read empty at the last readback.
+    ok: bool,
+    /// Last readback of the host.
+    text: String,
+    /// The host was already empty (nothing to do).
+    was_empty: bool,
+    /// Neither the addressed element nor a live editor host was reachable.
+    missing: bool,
+}
+
+/// Normalize text for readback comparison (mirrors the JS `_tvr`).
+fn norm_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Readback of the effective editing host via the "check" mode. `None`
+/// when the eval itself fails - callers treat that as "unverified", never
+/// as "empty".
+async fn check_editor(cdp: &CdpSession, sig: &str, frame: &[usize]) -> Option<FoundElement> {
+    find_by_sig(cdp, sig, frame, "check", None).await.ok().filter(|f| f.ok)
+}
+
+/// Clear the addressed element's effective editing host, verified at every
+/// rung. Ladder: JS setter (value fields) -> trusted Ctrl+A + Backspace ->
+/// Ctrl+A carrying the selectAll editing command -> JS range-select +
+/// trusted Backspace -> execCommand. The result carries the final readback
+/// so no caller can claim a clear that did not happen.
+async fn clear_editable(cdp: &CdpSession, sig: &str, frame: &[usize]) -> Result<ClearResult> {
+    // Focus first: framework editors mount and take focus here, and the
+    // trusted-key rungs act on whatever is focused.
+    let _ = find_by_sig(cdp, sig, frame, "focus", None).await;
+    let mut cur = check_editor(cdp, sig, frame).await;
+    let Some(first) = cur.as_ref() else {
+        return Ok(ClearResult { ok: false, text: String::new(), was_empty: false, missing: true });
+    };
+    let mut text = first.text.clone().unwrap_or_default();
+    if text.is_empty() {
+        return Ok(ClearResult { ok: true, text, was_empty: true, missing: false });
+    }
+    let kind = first.host_kind.clone().unwrap_or_default();
+    if kind == "input" || kind == "textarea" || kind == "select" {
+        // Fast path for value fields: native setter + input/change events
+        // (React/Vue compatible), then readback.
+        let _ = find_by_sig(cdp, sig, frame, "clear", None).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        cur = check_editor(cdp, sig, frame).await;
+        text = cur.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+        if text.is_empty() {
+            return Ok(ClearResult { ok: true, text, was_empty: false, missing: false });
+        }
+    }
+    // Trusted select-all + Backspace; then the command variant; then a
+    // programmatic selection with the same trusted delete.
+    for rung in 0..3u8 {
+        let after = match rung {
+            0 => trusted_select_all(cdp, sig, frame, false).await?,
+            1 => trusted_select_all(cdp, sig, frame, true).await?,
+            _ => js_select_all(cdp, sig, frame).await?,
+        };
+        if let Some(t) = after {
+            text = t;
+            if text.is_empty() {
+                return Ok(ClearResult { ok: true, text, was_empty: false, missing: false });
+            }
+        }
+    }
+    // Legacy editors: the execCommand path, then a final readback.
+    let _ = find_by_sig(cdp, sig, frame, "clear", None).await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    cur = check_editor(cdp, sig, frame).await;
+    text = cur.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+    Ok(ClearResult { ok: text.is_empty(), text, was_empty: false, missing: false })
+}
+
+/// Rung helper: trusted Ctrl+A (optionally carrying the selectAll editing
+/// command) + trusted Backspace. `Some(readback)` when a selection was
+/// made and deleted; `None` when the shortcut did not select anything.
+async fn trusted_select_all(
+    cdp: &CdpSession,
+    sig: &str,
+    frame: &[usize],
+    with_cmd: bool,
+) -> Result<Option<String>> {
+    let combo = KeyCombo { ctrl: true, alt: false, shift: false, meta: false, key: "a".to_string() };
+    let cmds = if with_cmd { Some(vec!["selectAll".to_string()]) } else { None };
+    dispatch_combo(cdp, &combo, cmds).await?;
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let cur = check_editor(cdp, sig, frame).await;
+    let sel = cur.as_ref().and_then(|c| c.sel).unwrap_or(0);
+    if sel == 0 {
+        return Ok(None);
+    }
+    dispatch_key(cdp, "Backspace").await?;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    let after = check_editor(cdp, sig, frame).await;
+    Ok(Some(after.as_ref().and_then(|c| c.text.clone()).unwrap_or_default()))
+}
+
+/// Rung helper: JS range-select (selhost) + the same trusted Backspace.
+async fn js_select_all(cdp: &CdpSession, sig: &str, frame: &[usize]) -> Result<Option<String>> {
+    let sh = find_by_sig(cdp, sig, frame, "selhost", None).await?;
+    if !sh.ok || sh.sel.unwrap_or(0) == 0 {
+        return Ok(None);
+    }
+    dispatch_key(cdp, "Backspace").await?;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    let after = check_editor(cdp, sig, frame).await;
+    Ok(Some(after.as_ref().and_then(|c| c.text.clone()).unwrap_or_default()))
+}
+
+/// Dispatch the typing itself: humanized per-char key events for short text
+/// (the biometrics path - keydown/keyup pairs, Shift wrapping, the full
+/// log-normal cadence), one `Input.insertText` for long text (a paste/IME
+/// commit - human-plausible and fast). Returns true when a dispatch path
+/// reported success; the readback remains the authority on what landed.
+async fn type_text(cdp: &CdpSession, text: &str) -> bool {
+    const PER_CHAR_MAX: usize = 120;
+    let mut typed = false;
+    if text.chars().count() <= PER_CHAR_MAX {
+        typed = type_per_char(cdp, text).await;
+    }
+    if !typed {
+        typed = cdp.send("Input.insertText", Some(json!({ "text": text }))).await.is_ok();
+    }
+    if !typed {
+        let _ = type_per_char(cdp, text).await;
+    }
+    typed
+}
+
+/// Post-settle finalization for editor actions: one last readback of the
+/// host plus at most ONE bounded corrective pass - retype when the field
+/// shows content that is not exactly the typed text, re-clear when a draft
+/// restored after a verified clear. Corrections need a readable state; a
+/// readback we cannot see is reported, never fought (a blind retry could
+/// double-type).
+async fn finalize_edit(rep: &mut EditReport, cdp: &CdpSession, sig: &str, frame: &[usize]) -> Result<()> {
+    let read = check_editor(cdp, sig, frame).await;
+    let mut final_text = read.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+    if let Some(c) = &read {
+        rep.host_kind = c.host_kind.clone().unwrap_or_default();
+        rep.host_is_tgt = c.host_is_tgt.unwrap_or(false);
+        rep.tgt_missing = c.tgt_missing.unwrap_or(false);
+    }
+    match rep.kind {
+        EditKind::Type => {
+            let want = norm_text(&rep.text);
+            rep.verified = norm_text(&final_text) == want;
+            if !rep.verified {
+                // Visible-but-wrong states can be corrected safely; value
+                // fields are readable by construction; blind CE readbacks
+                // stay as reported.
+                let retry_ok = !norm_text(&final_text).is_empty()
+                    || matches!(rep.host_kind.as_str(), "input" | "textarea");
+                if retry_ok {
+                    let cl = clear_editable(cdp, sig, frame).await?;
+                    if cl.ok {
+                        let _ = type_text(cdp, &rep.text).await;
+                        for _ in 0..3u8 {
+                            tokio::time::sleep(Duration::from_millis(120)).await;
+                            let after = check_editor(cdp, sig, frame).await;
+                            final_text = after.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+                            if norm_text(&final_text) == want {
+                                break;
+                            }
+                        }
+                        rep.corrected = true;
+                        rep.verified = norm_text(&final_text) == want;
+                    }
+                }
+            }
+            rep.final_text = final_text;
+        }
+        EditKind::Clear => {
+            if !final_text.is_empty() && rep.branch_text.is_empty() {
+                // Content restored after a verified clear (draft hydration).
+                let cl = clear_editable(cdp, sig, frame).await?;
+                final_text = cl.text;
+                rep.corrected = true;
+                rep.verified = cl.ok;
+            } else {
+                rep.verified = final_text.is_empty();
+            }
+            rep.final_text = final_text;
+        }
+    }
+    Ok(())
+}
+
+/// Find a ref (different from `target`) whose captured value equals
+/// `final_text` - the "where did the text actually land" lookup for
+/// framework editors whose wrapper and editor are separate elements.
+fn landed_ref_excluding(lpm: &LivePageModel, target: &str, final_text: &str) -> Option<String> {
+    let want = norm_text(final_text);
+    if want.is_empty() {
+        return None;
+    }
+    lpm.elements()
+        .iter()
+        .find(|e| {
+            e.ref_id != target
+                && e.raw.role == "textbox"
+                && norm_text(e.raw.value.as_deref().unwrap_or("")) == want
+        })
+        .map(|e| e.ref_id.clone())
+}
+
+/// Type verdict from the verified report. `edit: None` callers keep the
+/// capture-based fallback in `compute_verdict`.
+fn type_verdict_text(ref_id: &str, text: &str, rep: &EditReport, lpm: &LivePageModel) -> String {
+    let want = norm_text(text);
+    let got = norm_text(&rep.final_text);
+    if rep.verified && got == want {
+        let mut s = format!("outcome: typed \"{}\" → value=\"{}\"", clip(text, 40), clip(&rep.final_text, 40));
+        if rep.pre_text_len > 0 {
+            s.push_str(&format!(" (replaced {} chars)", rep.pre_text_len));
+        }
+        if rep.corrected {
+            s.push_str(" (after a retry)");
+        }
+        if rep.set_via_js {
+            s.push_str(" (set via JS - key events did not register)");
+        } else if rep.tgt_missing || !rep.host_is_tgt {
+            match landed_ref_excluding(lpm, ref_id, &rep.final_text) {
+                Some(l) => s.push_str(&format!(" (landed in {l}: the live editor)")),
+                None => s.push_str(" (landed in the focused editor)"),
+            }
+        }
+        if !rep.corrected && norm_text(&rep.branch_text) != got {
+            s.push_str(" (settled late)");
+        }
+        s
+    } else if !got.is_empty() && got.contains(&want) {
+        let why = if rep.pre_cleared {
+            "content changed after typing (late restore?)"
+        } else {
+            "field had existing content (clear did not empty it)"
+        };
+        format!(
+            "outcome: typed \"{}\" → value=\"{}\" ({why})",
+            clip(text, 40),
+            clip(&rep.final_text, 40)
+        )
+    } else if !got.is_empty() {
+        format!(
+            "outcome: typed \"{}\" → value=\"{}\" (readback mismatch)",
+            clip(text, 40),
+            clip(&rep.final_text, 40)
+        )
+    } else {
+        format!(
+            "outcome: typed \"{}\" → readback unverified (the editor shows no readable text; it may hydrate late)",
+            clip(text, 40)
+        )
+    }
+}
+
+/// Clear verdict from the verified report.
+fn clear_verdict_text(ref_id: &str, rep: &EditReport) -> String {
+    if rep.verified {
+        let mut s = format!("outcome: cleared {ref_id} (verified empty)");
+        if rep.corrected {
+            s.push_str(" (draft restored and was cleared again)");
+        } else if !rep.host_is_tgt || rep.tgt_missing {
+            s.push_str(" (live editor)");
+        }
+        s
+    } else {
+        format!(
+            "outcome: clear failed - still contains \"{}\" ({} chars)",
+            clip(&rep.final_text, 40),
+            rep.final_text.chars().count()
+        )
+    }
 }
 
 /// Dispatch a human-like mouse move from a random start point to `target`.
@@ -887,11 +1248,165 @@ pub(crate) async fn dispatch_mouse_click(
     Ok(())
 }
 
+/// A parsed key chord ("Control+a", "Meta+Enter", "Shift+Tab").
+#[derive(Debug, Clone, PartialEq)]
+struct KeyCombo {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    meta: bool,
+    key: String,
+}
+
+/// Parse chord syntax. `Ok(None)` when the input is not a chord (no '+' at
+/// all); `Err` for malformed chords so the caller can name the problem.
+fn parse_key_combo(input: &str) -> std::result::Result<Option<KeyCombo>, String> {
+    // A single character (including '+' itself) is never chord syntax.
+    if input.chars().count() <= 1 || !input.contains('+') {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = input.split('+').collect();
+    let mut combo = KeyCombo {
+        ctrl: false,
+        alt: false,
+        shift: false,
+        meta: false,
+        key: String::new(),
+    };
+    for (i, raw) in parts.iter().enumerate() {
+        let p = raw.trim();
+        if p.is_empty() {
+            return Err(format!("invalid key combo '{input}'"));
+        }
+        if i == parts.len() - 1 {
+            combo.key = p.to_string();
+        } else {
+            match p.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => combo.ctrl = true,
+                "alt" => combo.alt = true,
+                "shift" => combo.shift = true,
+                "meta" | "cmd" | "command" | "super" | "win" => combo.meta = true,
+                other => return Err(format!("unsupported modifier '{other}' in '{input}'")),
+            }
+        }
+    }
+    Ok(Some(combo))
+}
+
+/// Named keys (case-insensitive) -> (key name, code, windowsVirtualKeyCode).
+fn named_key(key: &str) -> Option<(&'static str, &'static str, u32)> {
+    match key.to_ascii_lowercase().as_str() {
+        "enter" => Some(("Enter", "Enter", 13)),
+        "tab" => Some(("Tab", "Tab", 9)),
+        "escape" | "esc" => Some(("Escape", "Escape", 27)),
+        "backspace" => Some(("Backspace", "Backspace", 8)),
+        "delete" => Some(("Delete", "Delete", 46)),
+        "arrowdown" | "down" => Some(("ArrowDown", "ArrowDown", 40)),
+        "arrowup" | "up" => Some(("ArrowUp", "ArrowUp", 38)),
+        "arrowleft" | "left" => Some(("ArrowLeft", "ArrowLeft", 37)),
+        "arrowright" | "right" => Some(("ArrowRight", "ArrowRight", 39)),
+        "home" => Some(("Home", "Home", 36)),
+        "end" => Some(("End", "End", 35)),
+        "pagedown" => Some(("PageDown", "PageDown", 34)),
+        "pageup" => Some(("PageUp", "PageUp", 33)),
+        "space" | " " => Some((" ", "Space", 32)),
+        _ => None,
+    }
+}
+
+/// Build one CDP key event.
+fn key_event(
+    kind: &str,
+    key: &str,
+    code: &str,
+    vk: u32,
+    modifiers: u8,
+    text: Option<&str>,
+) -> serde_json::Value {
+    let mut ev = json!({
+        "type": kind,
+        "key": key,
+        "code": code,
+        "windowsVirtualKeyCode": vk,
+        "modifiers": modifiers,
+    });
+    if let Some(t) = text {
+        ev["text"] = json!(t);
+    }
+    ev
+}
+
+/// Resolve a chord's main key to (key, code, vk, text).
+fn resolve_combo_key(combo: &KeyCombo) -> std::result::Result<(String, String, u32, Option<String>), String> {
+    let key = combo.key.as_str();
+    if key.chars().count() == 1 {
+        let mut ch = key.chars().next().unwrap();
+        // Shift over a letter reports the shifted glyph, as real keyboards do.
+        if combo.shift && ch.is_ascii_alphabetic() {
+            ch = ch.to_ascii_uppercase();
+        }
+        let (code, vk, _) = char_to_key_code(ch);
+        if code == "Unidentified" {
+            return Err(format!("unsupported key '{key}' in combo"));
+        }
+        Ok((ch.to_string(), code, vk, Some(ch.to_string())))
+    } else {
+        let (kname, code, vk) = named_key(key)
+            .ok_or_else(|| format!("unsupported key '{key}' in combo"))?;
+        let text = match kname {
+            "Enter" => Some("\r".to_string()),
+            "Tab" => Some("\t".to_string()),
+            " " => Some(" ".to_string()),
+            _ => None,
+        };
+        Ok((kname.to_string(), code.to_string(), vk, text))
+    }
+}
+
+/// The CDP event sequence for a chord: modifier downs, main down, main up,
+/// modifier ups (each release drops its own bit, in reverse order). Returns
+/// the events and the index of the main keydown so the dispatcher can hold
+/// the key like the plain path does.
+fn combo_events(combo: &KeyCombo) -> std::result::Result<(Vec<serde_json::Value>, usize), String> {
+    let (kname, kcode, kvk, ktext) = resolve_combo_key(combo)?;
+    let mods = [
+        ("Control", "ControlLeft", 17u32, 2u8, combo.ctrl),
+        ("Alt", "AltLeft", 18, 1, combo.alt),
+        ("Shift", "ShiftLeft", 16, 8, combo.shift),
+        ("Meta", "MetaLeft", 91, 4, combo.meta),
+    ];
+    let mut bits: u8 = 0;
+    let mut evs: Vec<serde_json::Value> = Vec::new();
+    for (name, code, vk, bit, on) in mods {
+        if on {
+            bits |= bit;
+            evs.push(key_event("keyDown", name, code, vk, bits, None));
+        }
+    }
+    // Ctrl/Alt/Meta chords are shortcuts, never text; Shift keeps the glyph.
+    let text = if combo.ctrl || combo.alt || combo.meta { None } else { ktext };
+    let kind = if text.is_some() { "keyDown" } else { "rawKeyDown" };
+    let main_idx = evs.len();
+    evs.push(key_event(kind, &kname, &kcode, kvk, bits, text.as_deref()));
+    evs.push(key_event("keyUp", &kname, &kcode, kvk, bits, None));
+    for (name, code, vk, bit, on) in mods.into_iter().rev() {
+        if on {
+            bits &= !bit;
+            evs.push(key_event("keyUp", name, code, vk, bits, None));
+        }
+    }
+    Ok((evs, main_idx))
+}
+
 /// Dispatch a key press (keyDown + keyUp) via `Input.dispatchKeyEvent`.
+/// Accepts single characters, named keys, and chords ("Control+a").
 async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
+    if let Some(combo) = parse_key_combo(key).map_err(BladeError::Other)? {
+        return dispatch_combo(cdp, &combo, None).await;
+    }
     // Printable single character: full char event (code + VK + text).
     // `act press key="a"` used to dispatch key:"a" code:"Unidentified"
-    // vk:0 — a synthetic-looking no-op no page would act on.
+    // vk:0 - a synthetic-looking no-op no page would act on.
     if key.chars().count() == 1 {
         let ch = key.chars().next().unwrap();
         let (code, vk, shift) = char_to_key_code(ch);
@@ -907,7 +1422,7 @@ async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
             "windowsVirtualKeyCode": vk, "text": key, "modifiers": modifiers,
             "keyChar": key,
         }))).await?;
-        // Key press duration: 25-70ms — real humans hold before releasing.
+        // Key press duration: 25-70ms - real humans hold before releasing.
         let mut rng = crate::stealth::Rng::new();
         tokio::time::sleep(Duration::from_millis(25 + rng.range(0, 45) as u64)).await;
         cdp.send("Input.dispatchKeyEvent", Some(json!({
@@ -923,16 +1438,13 @@ async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
         return Ok(());
     }
 
-    let (code, vk) = key_code(key);
-    if code == "Unidentified" {
-        return Err(BladeError::Other(format!(
-            "unsupported key: '{key}'. Supported: single characters, Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space (or ' ')"
-        )));
-    }
-    // The `text` field is critical for keys that produce text — without it,
+    let (kname, code, vk) = named_key(key).ok_or_else(|| BladeError::Other(format!(
+        "unsupported key: '{key}'. Supported: single characters, named keys (Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space), and chords (Control+a, Meta+Enter, Shift+Tab)"
+    )))?;
+    // The `text` field is critical for keys that produce text - without it,
     // the browser fires keydown but doesn't process the default action
     // (e.g. Enter won't submit forms, Space won't scroll/click).
-    let text = match key {
+    let text = match kname {
         "Enter" => Some("\r"),
         "Tab" => Some("\t"),
         " " => Some(" "),
@@ -940,7 +1452,7 @@ async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
     };
     let mut key_down = json!({
         "type": "keyDown",
-        "key": key,
+        "key": kname,
         "code": code,
         "windowsVirtualKeyCode": vk,
     });
@@ -949,37 +1461,41 @@ async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
     }
     let key_up = json!({
         "type": "keyUp",
-        "key": key,
+        "key": kname,
         "code": code,
         "windowsVirtualKeyCode": vk,
     });
     cdp.send("Input.dispatchKeyEvent", Some(key_down)).await?;
-    // Key press duration: 40-110ms — real humans hold before releasing.
+    // Key press duration: 40-110ms - real humans hold before releasing.
     let mut rng = crate::stealth::Rng::new();
     tokio::time::sleep(Duration::from_millis(40 + rng.range(0, 70) as u64)).await;
     cdp.send("Input.dispatchKeyEvent", Some(key_up)).await?;
     Ok(())
 }
 
-/// Map a key name to (code, windowsVirtualKeyCode) for CDP.
-fn key_code(key: &str) -> (&'static str, u32) {
-    match key {
-        "Enter" => ("Enter", 13),
-        "Tab" => ("Tab", 9),
-        "Escape" => ("Escape", 27),
-        "Backspace" => ("Backspace", 8),
-        "Delete" => ("Delete", 46),
-        "ArrowDown" => ("ArrowDown", 40),
-        "ArrowUp" => ("ArrowUp", 38),
-        "ArrowLeft" => ("ArrowLeft", 37),
-        "ArrowRight" => ("ArrowRight", 39),
-        "Home" => ("Home", 36),
-        "End" => ("End", 35),
-        "PageDown" => ("PageDown", 34),
-        "PageUp" => ("PageUp", 33),
-        " " => ("Space", 32),
-        _ => ("Unidentified", 0),
+/// Dispatch a parsed chord, optionally attaching Chrome editing commands
+/// (e.g. ["selectAll"]) to the main keydown - the deterministic fallback
+/// when a framework swallows the plain shortcut.
+async fn dispatch_combo(
+    cdp: &CdpSession,
+    combo: &KeyCombo,
+    commands: Option<Vec<String>>,
+) -> Result<()> {
+    let (mut evs, main_idx) = combo_events(combo).map_err(BladeError::Other)?;
+    if let Some(cmds) = commands {
+        if let Some(obj) = evs.get_mut(main_idx).and_then(|v| v.as_object_mut()) {
+            obj.insert("commands".to_string(), json!(cmds));
+        }
     }
+    for (i, ev) in evs.into_iter().enumerate() {
+        cdp.send("Input.dispatchKeyEvent", Some(ev)).await?;
+        if i == main_idx {
+            // Hold the key like real fingers do (matches the plain path).
+            let mut rng = crate::stealth::Rng::new();
+            tokio::time::sleep(Duration::from_millis(25 + rng.range(0, 45) as u64)).await;
+        }
+    }
+    Ok(())
 }
 
 /// Type text with per-character key events and human cadence.
@@ -1147,6 +1663,11 @@ pub async fn perform_with_network(
         None => None,
     };
 
+    // Edit report (Type/Clear): what actually happened to the field. Filled
+    // by the arms; finalized after settle by `finalize_edit`; consumed by
+    // `compute_verdict` - the verdict never outclaims the readback.
+    let mut edit_report: Option<EditReport> = None;
+
     // Start listening for navigation before dispatching. Eager
     // subscribe — a lazy wait_for would miss events fired synchronously
     // during dispatch (see sub_fires).
@@ -1290,7 +1811,7 @@ pub async fn perform_with_network(
                     found.disabled.unwrap_or(false)
                 ));
             }
-            let mut verdict = compute_verdict(action, &delta, lpm, Some((via, &tried, &tgt_meta)));
+            let mut verdict = compute_verdict(action, &delta, lpm, Some((via, &tried, &tgt_meta)), None);
             if dialog_fired && !delta.navigated && delta.is_empty() && !delta.content_changed {
                 verdict = format!(
                     "outcome: dialog opened via {via} (auto-dismissed — see ambient)"
@@ -1320,60 +1841,105 @@ pub async fn perform_with_network(
                     text.chars().count()
                 )));
             }
-            // Focus + clear + get box in one eval — maintains focus state
-            // across the prepare→typing transition (fixes Enter-after-type).
-            let found = find_by_sig(cdp, sig, frame, "prepare", None).await?;
-            if !found.ok {
+            // Focus the target. Framework composers (facade textarea + a
+            // late-mounted contenteditable) mount their real editor here and
+            // may move focus into it - typing then lands where a human's
+            // would, and every readback below resolves the effective host.
+            let focus = find_by_sig(cdp, sig, frame, "prepare", None).await?;
+            let pre = check_editor(cdp, sig, frame).await;
+            if !focus.ok && pre.as_ref().and_then(|p| p.host_kind.clone()).unwrap_or_default().is_empty() {
+                // The addressed element is gone and no live editor took over.
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
             }
-            // v3.9 typing strategy (C3): SHORT text (≤120 chars — the
-            // usernames, passwords, search queries behavioral collectors
-            // actually watch) is typed with per-character key events and
-            // the full log-normal cadence: keydown/keyup pairs, Shift
-            // wrapping, hold-time between down and up. The old single
-            // Input.insertText produced ZERO keystroke events — the
-            // flagship biometrics were dead code in the common path.
-            // LONG text uses insertText (one CDP call, reads as a
-            // paste/IME commit — human-plausible and fast).
-            const PER_CHAR_MAX: usize = 120;
-            let char_count = text.chars().count();
-            let mut typed = false;
-            if char_count <= PER_CHAR_MAX {
-                typed = type_per_char(cdp, text).await;
+            let pre_read = pre.as_ref().and_then(|p| p.text.clone()).unwrap_or_default();
+            // Replace semantics: clear existing content first, VERIFIED. A
+            // clear that cannot empty a framework editor is not claimed -
+            // it flows into the report and the verdict says so.
+            let mut pre_cleared = pre_read.is_empty();
+            if !pre_read.is_empty() {
+                let cl = clear_editable(cdp, sig, frame).await?;
+                pre_cleared = cl.ok;
             }
-            if !typed {
-                typed = cdp.send("Input.insertText", Some(json!({
-                    "text": text,
-                }))).await.is_ok();
-            }
-            if !typed {
-                // Both CDP input paths failed (transport or rejected) —
-                // fall back to per-char once more; the verification below
-                // is the authority on whether anything landed.
-                let _ = type_per_char(cdp, text).await;
-            }
-            // Verify the value was actually set. Some inputs reject CDP
-            // key events (framework-controlled, certain focus states).
-            // If the value is empty or wrong, fall back to JS value
-            // setting with native setter + event dispatch.
-            let check = find_by_sig(cdp, sig, frame, "check", None).await?;
-            if check.ok && check.text.as_deref() != Some(text.as_str()) {
-                // Key events didn't insert text. Use JS fallback with
-                // native value setter (React/Vue/Angular compatible).
-                let fallback = find_by_sig(cdp, sig, frame, "type", Some(text)).await?;
-                if !fallback.ok {
-                    return Err(BladeError::Other(format!(
-                        "typing failed: key events did not insert text and JS fallback failed for {ref_id}"
-                    )));
+            // Type: short text via per-char key events (the biometrics
+            // path: Shift wrapping, hold-time cadence), long text via one
+            // insertText (a paste/IME commit - human-plausible and fast).
+            let _ = type_text(cdp, text).await;
+            // Readback with a bounded poll: framework editors (and late
+            // drafts) can surface their content after the keystrokes return.
+            let want = norm_text(text);
+            let mut last = check_editor(cdp, sig, frame).await;
+            let mut branch_text = last.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+            if norm_text(&branch_text) != want {
+                for _ in 0..6u8 {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    last = check_editor(cdp, sig, frame).await;
+                    branch_text = last.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+                    if norm_text(&branch_text) == want {
+                        break;
+                    }
                 }
             }
+            // Rescue for stubborn value fields: JS setter when key events
+            // did not register at all. Never for contenteditables - a DOM
+            // write desyncs a framework editor's internal state.
+            let mut set_via_js = false;
+            if norm_text(&branch_text) != want {
+                let kind = last.as_ref().and_then(|c| c.host_kind.clone()).unwrap_or_default();
+                if (kind == "input" || kind == "textarea")
+                    && norm_text(&branch_text) == norm_text(&pre_read)
+                {
+                    let js = find_by_sig(cdp, sig, frame, "type", Some(text)).await?;
+                    if js.ok {
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                        last = check_editor(cdp, sig, frame).await;
+                        branch_text = last.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+                        set_via_js = norm_text(&branch_text) == want;
+                    }
+                }
+            }
+            let host = last.as_ref();
+            let verified = norm_text(&branch_text) == want;
+            edit_report = Some(EditReport {
+                kind: EditKind::Type,
+                text: text.clone(),
+                final_text: branch_text.clone(),
+                branch_text,
+                host_kind: host.and_then(|c| c.host_kind.clone()).unwrap_or_default(),
+                host_is_tgt: host.and_then(|c| c.host_is_tgt).unwrap_or(false),
+                tgt_missing: host.and_then(|c| c.tgt_missing).unwrap_or(false),
+                pre_text_len: pre_read.chars().count(),
+                pre_cleared,
+                verified,
+                set_via_js,
+                corrected: false,
+            });
         }
         Action::Clear { ref_id } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
-            let found = find_by_sig(cdp, sig, frame, "clear", None).await?;
-            if !found.ok {
+            // Verified clear: the ladder (setter -> trusted keys -> JS path)
+            // reads back at every rung; the report carries the truth into
+            // the verdict - a clear that did not empty the field never
+            // reads "cleared".
+            let cl = clear_editable(cdp, sig, frame).await?;
+            if cl.missing {
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
             }
+            let cur = check_editor(cdp, sig, frame).await;
+            let host = cur.as_ref();
+            edit_report = Some(EditReport {
+                kind: EditKind::Clear,
+                text: String::new(),
+                final_text: cl.text.clone(),
+                branch_text: cl.text,
+                host_kind: host.and_then(|c| c.host_kind.clone()).unwrap_or_default(),
+                host_is_tgt: host.and_then(|c| c.host_is_tgt).unwrap_or(false),
+                tgt_missing: host.and_then(|c| c.tgt_missing).unwrap_or(false),
+                pre_text_len: 0,
+                pre_cleared: cl.was_empty,
+                verified: cl.ok,
+                set_via_js: false,
+                corrected: false,
+            });
         }
         Action::Select { ref_id, option } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
@@ -1636,10 +2202,18 @@ pub async fn perform_with_network(
     }
     wait_for_settle_with_network(cdp, Duration::from_millis(settle_ms), in_flight).await?;
 
+    // Final readback for editor actions (+ at most one bounded corrective
+    // pass) before the verdict: catches late draft hydration and clears
+    // whose content was restored after the action returned.
+    if let (Some(mut rep), Some((sig, frame))) = (edit_report.take(), sig_frame.as_ref()) {
+        finalize_edit(&mut rep, cdp, sig, frame).await?;
+        edit_report = Some(rep);
+    }
+
     // Recapture → delta.
     let cap = capture(cdp).await?;
     let delta = lpm.ingest(cap);
-    let verdict = compute_verdict(action, &delta, lpm, None);
+    let verdict = compute_verdict(action, &delta, lpm, None, edit_report.as_ref());
     Ok((delta, verdict))
 }
 
@@ -1726,6 +2300,7 @@ mod action_tests {
             ("check", None),
             ("type", Some("hello 'quoted' text")),
             ("clear", None),
+            ("selhost", None),
             ("select", Some("opt")),
             ("read", None),
             ("hover", None),
@@ -1746,6 +2321,137 @@ mod action_tests {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+        // The find-by-text script powers text addressing AND ref healing;
+        // guard it the same way.
+        for (q, rf, ih) in [
+            ("Post text", None, false),
+            ("Join the conversation", Some("textbox"), true),
+        ] {
+            let js = super::find_text_expr(q, rf, ih).expect("find-text expr builds");
+            let path = std::env::temp_dir().join("bladebro-findtext.js");
+            std::fs::write(&path, &js).expect("write js fixture");
+            let out = std::process::Command::new("node")
+                .arg("--check")
+                .arg(&path)
+                .output()
+                .expect("run node --check");
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                out.status.success(),
+                "find-text has a JS syntax error:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn key_combos_parse_and_reject_junk() {
+        use super::{parse_key_combo, KeyCombo};
+        let c = parse_key_combo("Control+a").unwrap().expect("combo");
+        assert_eq!(c, KeyCombo { ctrl: true, alt: false, shift: false, meta: false, key: "a".into() });
+        let c = parse_key_combo("Meta+Enter").unwrap().expect("combo");
+        assert!(c.meta && !c.ctrl && c.key == "Enter");
+        let c = parse_key_combo("ctrl+shift+z").unwrap().expect("combo");
+        assert!(c.ctrl && c.shift && c.key == "z");
+        // Single characters (including '+' itself) are never chords.
+        assert!(parse_key_combo("a").unwrap().is_none());
+        assert!(parse_key_combo("+").unwrap().is_none());
+        // Malformed chords are loud, not silently mis-dispatched.
+        assert!(parse_key_combo("Control+").is_err());
+        assert!(parse_key_combo("Foo+a").is_err());
+    }
+
+    #[test]
+    fn combo_events_shape_native_chords() {
+        use super::{combo_events, parse_key_combo};
+        // Ctrl+A: control down, 'a' rawKeyDown (shortcuts carry no text),
+        // 'a' up, control up - modifiers as a real keyboard reports them.
+        let c = parse_key_combo("Control+a").unwrap().expect("combo");
+        let (evs, main) = combo_events(&c).unwrap();
+        assert_eq!(evs.len(), 4);
+        assert_eq!(evs[0]["key"].as_str(), Some("Control"));
+        assert_eq!(evs[0]["modifiers"].as_u64(), Some(2));
+        assert_eq!(evs[main]["type"].as_str(), Some("rawKeyDown"));
+        assert_eq!(evs[main]["key"].as_str(), Some("a"));
+        assert_eq!(evs[main]["code"].as_str(), Some("KeyA"));
+        assert_eq!(evs[main]["windowsVirtualKeyCode"].as_u64(), Some(65));
+        assert_eq!(evs[main]["modifiers"].as_u64(), Some(2));
+        assert!(evs[main].get("text").is_none());
+        assert_eq!(evs[3]["key"].as_str(), Some("Control"));
+        assert_eq!(evs[3]["modifiers"].as_u64(), Some(0));
+        // Shift+A types the shifted glyph.
+        let c = parse_key_combo("Shift+a").unwrap().expect("combo");
+        let (evs, main) = combo_events(&c).unwrap();
+        assert_eq!(evs[main]["type"].as_str(), Some("keyDown"));
+        assert_eq!(evs[main]["key"].as_str(), Some("A"));
+        assert_eq!(evs[main]["text"].as_str(), Some("A"));
+        assert_eq!(evs[main]["modifiers"].as_u64(), Some(8));
+        // Meta+Enter is a shortcut: no text, meta bit set.
+        let c = parse_key_combo("Meta+Enter").unwrap().expect("combo");
+        let (evs, main) = combo_events(&c).unwrap();
+        assert_eq!(evs[main]["key"].as_str(), Some("Enter"));
+        assert_eq!(evs[main]["type"].as_str(), Some("rawKeyDown"));
+        assert!(evs[main].get("text").is_none());
+        assert_eq!(evs[main]["modifiers"].as_u64(), Some(4));
+    }
+
+    #[test]
+    fn verdicts_never_outclaim_the_readback() {
+        use super::{clear_verdict_text, type_verdict_text, EditKind, EditReport};
+        let lpm = super::LivePageModel::new();
+        let base = EditReport {
+            kind: EditKind::Type,
+            text: "hi".into(),
+            final_text: "hi".into(),
+            branch_text: "hi".into(),
+            host_kind: "ce".into(),
+            host_is_tgt: false,
+            tgt_missing: false,
+            pre_text_len: 4,
+            pre_cleared: true,
+            verified: true,
+            set_via_js: false,
+            corrected: false,
+        };
+        // Clean replace on a framework editor: honest value + where it landed.
+        let v = type_verdict_text("e4", "hi", &base, &lpm);
+        assert!(v.contains("value=\"hi\""), "{v}");
+        assert!(v.contains("replaced 4 chars"), "{v}");
+        assert!(v.contains("landed in the focused editor"), "{v}");
+        // Unverified: says so, never claims a value.
+        let rep = EditReport { final_text: String::new(), verified: false, ..base.clone() };
+        let v = type_verdict_text("e4", "hi", &rep, &lpm);
+        assert!(v.contains("unverified"), "{v}");
+        assert!(!v.contains("value=\"hi\""), "{v}");
+        // Late restore caught by the final readback.
+        let rep = EditReport { final_text: "DRAFT hi".into(), verified: false, ..base.clone() };
+        let v = type_verdict_text("e4", "hi", &rep, &lpm);
+        assert!(v.contains("DRAFT hi"), "{v}");
+        assert!(v.contains("late restore"), "{v}");
+        // A clear that failed never reads "cleared".
+        let rep = EditReport {
+            kind: EditKind::Clear,
+            text: String::new(),
+            final_text: "abc".into(),
+            branch_text: "abc".into(),
+            host_is_tgt: true,
+            pre_text_len: 0,
+            pre_cleared: false,
+            verified: false,
+            ..base.clone()
+        };
+        let v = clear_verdict_text("e3", &rep);
+        assert!(v.contains("clear failed"), "{v}");
+        assert!(!v.contains("cleared e3"), "{v}");
+        // Verified clear.
+        let rep = EditReport {
+            final_text: String::new(),
+            branch_text: String::new(),
+            verified: true,
+            ..base.clone()
+        };
+        let v = clear_verdict_text("e3", &rep);
+        assert!(v.contains("cleared e3 (verified empty)"), "{v}");
     }
 }
 

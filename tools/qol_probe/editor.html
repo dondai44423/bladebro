@@ -1,0 +1,105 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>QoL Probe Fixture</title>
+<style>
+  body{font:14px/1.5 sans-serif;margin:24px;max-width:860px;color:#222}
+  section{margin:16px 0;padding:12px 16px;border:1px solid #ccc;border-radius:6px}
+  h2{font-size:15px;margin:0 0 10px}
+  .note{color:#666;font-size:12px;margin-top:6px}
+  input,textarea{font:inherit;padding:8px;box-sizing:border-box;width:100%;max-width:520px}
+  .ce{min-height:40px;max-width:520px;border:1px solid #888;padding:8px;border-radius:4px}
+  #facade{height:46px}
+</style>
+</head>
+<body>
+<h1>Bladebro QoL probe</h1>
+
+<section id="plain">
+  <h2>1. Plain controls (regression)</h2>
+  <input id="plain-text" placeholder="Plain text input">
+  <p><textarea id="plain-area" placeholder="Plain textarea" rows="2"></textarea></p>
+  <div id="plain-ce" class="ce" contenteditable="true" aria-label="Plain editor"><p><br></p></div>
+  <div class="note">no framework: browser editing directly</div>
+</section>
+
+<section id="composer">
+  <h2>2. Facade composer (wrapper + late-mount editor + late draft)</h2>
+  <div id="cwrap">
+    <textarea id="facade" placeholder="Join the conversation"></textarea>
+    <div id="eslot"></div>
+  </div>
+  <div class="note">focus mounts the editor which takes focus and hides the
+    facade; a draft from localStorage prepends 600ms after mount (framework
+    editors do this)</div>
+</section>
+
+<section id="remount">
+  <h2>3. Remount stress (re-render swaps the editor node)</h2>
+  <div id="rm-slot"></div>
+  <div class="note">the editor replaces itself once after the first input —
+    models React/Lexical remounts that churn refs</div>
+</section>
+
+<script>
+"use strict";
+// Framework-editor contract modeled by this fixture (observed in the wild,
+// e.g. Lexical/Slate composers): programmatic document edits are ignored.
+// execCommand returns false and changes nothing; trusted keyboard input is
+// the only reliable path. A fix that relies on execCommand fails here.
+document.execCommand = function () { return false; };
+
+// ---- 2. facade composer ----
+(function () {
+  var mounted = false;
+  var facade = document.getElementById('facade');
+  var slot = document.getElementById('eslot');
+  function mount() {
+    if (mounted) return;
+    mounted = true;
+    var ed = document.createElement('div');
+    ed.id = 'editor';
+    ed.className = 'ce';
+    ed.setAttribute('contenteditable', 'true');
+    ed.setAttribute('aria-label', 'Comment editor');
+    ed.innerHTML = '<p><br></p>';
+    slot.appendChild(ed);
+    ed.focus();
+    // Real composers hide the facade once the rich editor is live; the
+    // editor owns focus from here on (models Reddit/Lexical behavior).
+    facade.style.display = 'none';
+    // late draft hydration: prepends 600ms after mount (framework behavior)
+    setTimeout(function () {
+      var draft = null;
+      try { draft = localStorage.getItem('comment-draft-items-probe'); } catch (e) {}
+      if (draft) ed.innerHTML = '<p>' + draft + '</p>' + ed.innerHTML;
+    }, 600);
+  }
+  facade.addEventListener('focus', mount);
+  facade.addEventListener('click', mount);
+})();
+
+// ---- 3. remount stress ----
+(function () {
+  function makeEditor() {
+    var d = document.createElement('div');
+    d.id = 'rm-ed';
+    d.className = 'ce';
+    d.setAttribute('contenteditable', 'true');
+    d.setAttribute('aria-label', 'Remount editor');
+    d.innerHTML = '<p><br></p>';
+    d.addEventListener('input', function once() {
+      d.removeEventListener('input', once);
+      var c = d.cloneNode(true);
+      c.innerHTML = d.innerHTML;
+      d.replaceWith(c);
+      c.focus();
+    });
+    return d;
+  }
+  document.getElementById('rm-slot').appendChild(makeEditor());
+})();
+</script>
+</body>
+</html>

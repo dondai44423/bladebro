@@ -2832,7 +2832,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--text": "value — text to type, file path (upload), wait match value",
                 "--role": "role filter for text/label resolution",
                 "--nth": "1-based pick among matches",
-                "--key": "press key",
+                "--key": "press key or chord (Control+a)",
                 "--url": "navigate first (any action), or the URL for navigate/download/collect",
                 "--option": "select option",
                 "--condition": "wait condition",
@@ -3149,7 +3149,7 @@ USAGE
 
 ACTIONS
   click <ref|label>        type <target> <text>      fill <fields> [--submit]
-  select <target> <option> clear <ref>               press <key>
+  select <target> <option> clear <ref>               press <key|chord>
   scroll <dx> <dy>         hover <target>            navigate <url> [--block]
   upload <target> <path>   download <url> [--path]  wait <condition> [value]
   eval <js> [--ref]        collect <url> [--max N]   read <ref>
@@ -3162,7 +3162,7 @@ UNIVERSAL FLAGS (mirror the MCP schema — accepted on every action)
   --dx --dy --js --submit --block --slim   (per-action: --path, --max, --x/--y…)
 
 Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
-payloads: @file or - (stdin). Unknown flags fail loudly (exit 2).
+payloads: @file or - (stdin). Unknown flags fail loudly (exit 2). Key chords: 'act press Control+a'.
 
 EXAMPLES
   bladebro act click e5                          click a ref

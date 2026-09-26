@@ -25,6 +25,7 @@ ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (f
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call.\n\
 fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit gets JS click fallback if mouse click fails.\n\
+EDITORS: type replaces the field (clear verified) and works on rich contenteditable editors - the verdict names where the text landed (e.g. the live editor) and catches late draft hydration; press takes key chords (Control+a).\n\
 batch: use text/label addressing in steps (not ref) — refs go stale after navigation. Auto-settles after navigation. A step may be {\"action\":\"see\", mode|extract|find, budget} — the read lands in a --- read --- section: navigate+interact+read in ONE call.\n\
 Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
             input_schema: json!({
@@ -40,7 +41,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "label": {"type": "string", "description": "Field label for click/type/fill/hover."},
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches."},
-                    "key": {"type": "string", "description": "Key: Enter, Tab, Escape, ArrowDown, etc."},
+                    "key": {"type": "string", "description": "Key or chord: Enter, Tab, Escape, Backspace, ArrowDown, Control+a, Meta+Enter, Shift+Tab."},
                     "url": {"type": "string", "description": "For navigate: target URL. For download: file URL. For collect: page to navigate to first. For other actions: navigates to this URL first, then performs the action."},
                     "dx": {"type": "integer"},
                     "dy": {"type": "integer"},
@@ -127,7 +128,7 @@ Truncation: model output over budget ends with '…(N more: X link, Y button)' �
             description: "Browser state: tabs, cookies, sessions, storage, resource blocking.\n\
 LOGIN PERSISTENCE: save <name> after login → load <name> in a later session (restores cookies+storage, then navigate to site).\n\
 TABS: tabs (list), open-tab <url> (returns tab ID — save it for switch-tab), switch-tab <id>, close-tab <id>.\n\
-COOKIES/STORAGE: cookies, set-cookie, ls/ss, set-ls/set-ss, clear-ls/clear-ss.\n\
+COOKIES/STORAGE: cookies, set-cookie, ls/ss, set-ls/set-ss, rm-ls/rm-ss, clear-ls/clear-ss.\n\
 BLOCKING: op=block classes=\"images,fonts,media,trackers\" (inert assets only, never first-party scripts).\n\
 State ops (open-tab, save, load, etc.) also work as steps in batch and run.",
             input_schema: json!({

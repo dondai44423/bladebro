@@ -1182,7 +1182,7 @@ async fn resolve_text_target(
 
     // Phase 3: Live DOM search via find_by_text. Used when the LPM
     // has no matches (page changed since last capture).
-    let matches = crate::action::find_by_text(page.cdp_ref(), query, role_filter).await?;
+    let matches = crate::action::find_by_text(page.cdp_ref(), query, role_filter, false).await?;
     if matches.is_empty() {
         let view = page.view(2000);
         return Err(BladeError::Other(format!(
@@ -1785,7 +1785,7 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
 
     // M11: find — search all actionable elements by text, return matches with refs.
     if !find.is_empty() {
-        let matches = crate::action::find_by_text(page.cdp_ref(), find, None).await?;
+        let matches = crate::action::find_by_text(page.cdp_ref(), find, None, false).await?;
         if matches.is_empty() {
             // M11 contract is full-page search: when no ACTIONABLE element
             // matches, probe the plain text. Returns a context snippet so

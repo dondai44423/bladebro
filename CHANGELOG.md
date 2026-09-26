@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Key chords in `press` — `Control+a`, `Meta+Enter`, `Shift+Tab`.** Full
+  modifier sequences: modifier keydowns carry a running bitmask, releases run
+  in reverse; shortcut chords carry no text, `Shift+a` types the shifted
+  glyph. Lowercase aliases work too (`enter`, `esc`, `space`). This is the
+  manual select-all + delete recipe the old build made impossible.
+- **`tools/qol_probe/` — the editor-input contract, locked.** A fixture that
+  models façade composers (a wrapper textarea + an editor that mounts on
+  focus and hides the wrapper), a localStorage draft hydrating 600ms AFTER
+  the mount, dead `execCommand` (Lexical-class editors ignore programmatic
+  edits), and node churn — plus a runner (18 assertions) that drives the
+  real CLI end to end. Wired into the gate battery.
 - **Real-browser lane — `bladebro rb on|off`.** The agent can now drive *your*
   own Chromium-family browser (Chrome, Chromium, Brave, Edge, Vivaldi, Opera)
   with your real profile data on your real display — and with the page-injection
@@ -81,6 +92,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     zero-port transport covered.
 
 ### Fixed
+- **The composer cascade is gone — type/clear on framework editors are
+  verified, honest, and land in the right node.** From a live report on
+  Reddit's Lexical composer: `type` "succeeded" while the text piled up in a
+  wrapper, `clear` claimed success without emptying anything, and a draft
+  hydrating after the mount scrambled the field. Root causes: the old
+  `prepare` cleared via `execCommand` (a no-op on framework editors), the
+  readback read the ADDRESSED wrapper (the façade) instead of the live
+  editor, the "rescue" path wrote the wrapper behind the framework's back,
+  and the verdict read stale capture data — three lies compounding into
+  duplicate typing. Now:
+  - the input path resolves the EFFECTIVE editing host: the focused editor
+    wins, and a hidden wrapper adopts its near live editor (check/prepare/
+    focus modes);
+  - replace semantics run through a VERIFIED clear ladder: JS setter (value
+    fields) -> trusted Ctrl+A + Backspace -> the same with the `selectAll`
+    editing command -> JS range-select + Backspace -> execCommand;
+  - the readback is taken from the live host with a bounded poll, and ONE
+    bounded corrective pass fixes a scrambled field (verified clear + one
+    retype);
+  - the verdict is built from the readback, never from wishful thinking:
+    `value="…"` only when actually read, plus `(replaced N chars)`,
+    `(landed in eN: the live editor)`, `(after a retry)`, `(settled late)`,
+    or an explicit `readback unverified`;
+  - `clear` is verified at every rung and never claims what it did not
+    prove; a draft that re-hydrates after a verified clear gets one bounded
+    re-clear;
+  - the JS DOM-overwrite fallback is gone for contenteditables (value fields
+    keep a setter rescue only when key events did not register at all);
+  - stale wrapper refs heal to hidden text fields (`find_by_text` gained a
+    scoped `include_hidden`, used by the ref heal only), so the next action
+    still lands in the live editor.
+  Live-validated on the Lexical playground (reddit's engine): an 877-char
+  welcome text replaced by a verified type, readback exact; clear verified
+  empty; and when a content-named editor remounts, the verdict names the
+  successor ref so the next call recovers in one step.
 - **The worker pipeline no longer freezes: `Runtime.evaluate` against a paused
   service worker deadlocked and stalled every attached worker.** Found from a
   live report — CreepJS's worker card read `lang/timezone/gpu/userAgent/
@@ -204,6 +250,11 @@ detectors flag exactly that (measured live: CreepJS `webDriverIsOn: true` →
   agree with each other and with the worker context.
 
 ### Changed
+- **Tool defs and help teach chords and editor semantics.** The `key` param
+  documents chords (`Control+a`, `Meta+Enter`, `Shift+Tab`); the `act`
+  description gained an EDITORS line (verified replace, landing notes,
+  late-draft catches); `state` storage lists `rm-ls`/`rm-ss`; `help act`
+  says `press <key|chord>` and shows the chord example.
 - **Launch is back to pre-stealth-v2 speed — with the GL truth check kept.**
   The cold browser-up went 2.35–2.62s (before stealth v2) → 3.01–3.23s, a
   regression Dondai felt as “a bit slower”. The safe half of that is now

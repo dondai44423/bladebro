@@ -1371,7 +1371,11 @@ impl Page {
                 "{ref_id} was an unnamed {role} — cannot re-resolve. Use see to view the current page."
             )));
         }
-        let matches = crate::action::find_by_text(&self.cdp, &name, Some(&role)).await?;
+        // Hidden text fields still heal: a facade composer's wrapper goes
+        // invisible when its rich editor mounts, and the input path adopts
+        // the live editor from the hidden wrapper (see find_sig "prepare").
+        let include_hidden = matches!(role.as_str(), "textbox" | "combobox");
+        let matches = crate::action::find_by_text(&self.cdp, &name, Some(&role), include_hidden).await?;
         // Precise heal: if exactly one candidate has the SAME sig as the
         // original element, that IS the original (not a same-named sibling).
         // Heals duplicate-named refs (header vs footer nav links) to the
