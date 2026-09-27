@@ -166,6 +166,12 @@ struct FoundElement {
     /// Total option count on the live element at failure time.
     #[serde(default, rename = "ototal")]
     options_total: Option<usize>,
+    /// "focus" mode: whether the focus call actually landed on the resolved
+    /// (possibly descendant) element. The space/enter activation rungs only
+    /// press when this is true — a failed focus must not press keys into the
+    /// page (Space would scroll it and read as a phantom effect).
+    #[serde(default)]
+    focused: Option<bool>,
 }
 
 /// Resolve a ref to its (signature, frame path) in the LPM.
@@ -1179,7 +1185,7 @@ fn find_sig_expr(sig: &str, mode: &str, text: Option<&str>, frame: &[usize]) -> 
         + "var _ltop=_ltopOk?null:(_lfc?_desc(_lfc):'outside the viewport');"
         + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:_ltopOk,hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),top_desc:_ltop};}"
         + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();var _ph=_hostOf(tgt);const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false};}"
-        + "if(mode==='focus'){tgt.focus();return{ok:true};}"
+        + "if(mode==='focus'){var _fc=tgt;try{if(tgt.tabIndex<0){var _cd=tgt.querySelector('[tabindex],button,a[href],input,select,textarea');if(_cd)_fc=_cd;}}catch(_e){}try{_fc.focus();}catch(_e){}var _fo=false;try{_fo=(_fc.getRootNode().activeElement===_fc)||(document.activeElement===_fc);}catch(_e){}return{ok:true,focused:_fo};}"
         + "if(mode==='clear'){var _ch=_hostOf(tgt);if(!_ch)return{ok:false,reason:'no editable host'};if(_ced(_ch)){_clr(_ch);}else if('value' in _ch){var _cpr=_ch.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _cd=Object.getOwnPropertyDescriptor(_cpr,'value');if(_cd&&_cd.set){_cd.set.call(_ch,'');}else{_ch.value='';}_ch.dispatchEvent(new Event('input',{bubbles:true}));_ch.dispatchEvent(new Event('change',{bubbles:true}));}else{return{ok:false,reason:'not an editable field'};}return{ok:true,text:_read(_ch)};}"
         // js-fallback click (W1): a bare n.click() fires ONE click event and
         // misses pointer-event components entirely (rpl dropdown items closed
@@ -2099,6 +2105,20 @@ async fn sub_fires(sub: &mut crate::cdp::SessionSubscription, method: &str) -> b
     }
 }
 
+/// Build the script that derives the CURRENT sig of the focused editable —
+/// same algorithm (deepAll order, `role|name|rank`) the model and
+/// find-by-sig use, so the result resolves in churn-free terms. Used after a
+/// collapsed composer expands: the strip unmounts and rank churn across
+/// hydrations would strand the captured strip sig.
+fn editor_sig_expr() -> String {
+    "(()=>{const d=document;const a=d.activeElement;if(!a)return '';".to_string()
+        + &JS_PREAMBLE
+        + "try{const ce=a.isContentEditable||(a.getAttribute&&a.getAttribute('contenteditable')==='true');const ta=a.tagName==='TEXTAREA';const ip=a.tagName==='INPUT'&&a.type!=='hidden';if(!ce&&!ta&&!ip)return '';}catch(_e){return '';}"
+        + "const all=deepAll(d,sel);const counts={};let hit='';"
+        + "for(let i=0;i<all.length;i++){const n=all[i];const r=role(n);if(r==='hidden')continue;const snm=name(n,false);const key=r+'\\u0000'+snm;counts[key]=(counts[key]||0)+1;if(n===a){hit='|'+r+'|'+snm+'|'+counts[key];}}"
+        + "return hit;})()"
+}
+
 /// Perform an action with optional network-aware settle.
 pub async fn perform_with_network(
     cdp: &CdpSession,
@@ -2154,10 +2174,20 @@ pub async fn perform_with_network(
             let _ = cdp.send("Runtime.evaluate", Some(json!({
                 "expression": MUT_WATCH,
             }))).await;
-            let strategies: &[&str] = if found.is_topmost == Some(true) {
-                &["mouse", "js", "enter"]
+            // Strategy order is role-aware (W5). Menu items get the KEYBOARD
+            // activation lane first: reddit's rpl-dropdown items ignore
+            // synthetic clicks (a trusted mouse click only closes the menu)
+            // but activate on Space over the item's own focusable element -
+            // exactly the lane a keyboard user takes. Everything else keeps
+            // mouse-first with Space as the last resort (it activates native
+            // buttons too).
+            let role = sig.split('|').nth(1).unwrap_or("");
+            let strategies: &[&str] = if role == "menuitem" {
+                &["space", "js", "mouse", "enter"]
+            } else if found.is_topmost == Some(true) {
+                &["mouse", "js", "enter", "space"]
             } else {
-                &["js", "mouse", "enter"]
+                &["js", "mouse", "enter", "space"]
             };
             let mut tried: Vec<&str> = Vec::new();
             let mut via = "";
@@ -2207,8 +2237,30 @@ pub async fn perform_with_network(
                         }
                     }
                     "enter" => {
-                        let _ = find_by_sig(cdp, sig, frame, "focus", None).await;
+                        let fr = find_by_sig(cdp, sig, frame, "focus", None).await;
+                        let focused = fr.map(|f| f.focused.unwrap_or(false)).unwrap_or(false);
+                        if !focused {
+                            continue;
+                        }
                         if let Err(e) = dispatch_key(cdp, "Enter").await {
+                            dispatch_errors += 1;
+                            last_dispatch_err = Some(e);
+                            continue;
+                        }
+                    }
+                    "space" => {
+                        // Space over the focused element - the activation key
+                        // for menu items and buttons alike. Focus resolves
+                        // through the item to its focusable inner element
+                        // (see the 'focus' mode) and is VERIFIED: a failed
+                        // focus must not press Space - the key would scroll
+                        // the page (observed live) and read as an effect.
+                        let fr = find_by_sig(cdp, sig, frame, "focus", None).await;
+                        let focused = fr.map(|f| f.focused.unwrap_or(false)).unwrap_or(false);
+                        if !focused {
+                            continue;
+                        }
+                        if let Err(e) = dispatch_key(cdp, "Space").await {
                             dispatch_errors += 1;
                             last_dispatch_err = Some(e);
                             continue;
@@ -2303,6 +2355,61 @@ pub async fn perform_with_network(
                     text.chars().count()
                 )));
             }
+            // Reddit collapsed-composer expansion (adapter-gated, best-effort,
+            // W5): reddit's comment box starts as a naive strip (a shadow
+            // textarea) that only exists to be CLICKED - the click expands the
+            // real editor and moves focus into it. The strip then UNMOUNTS, so
+            // the captured sig is dead; the hook re-derives the LIVE editor's
+            // sig from the focused element (same algorithm the model uses)
+            // and the flow below resolves against THAT. Any non-match is a
+            // no-op and the original sig stands.
+            let mut hook_sig: Option<String> = None;
+            if lpm.url().contains("reddit.") {
+                let is_strip = lpm
+                    .element(ref_id)
+                    .map(|e| e.raw.tag == "textarea" && e.raw.shadow && e.raw.role == "textbox")
+                    .unwrap_or(false);
+                if is_strip {
+                    if let Ok(f) = find_by_sig(cdp, sig, frame, "box", None).await {
+                        if let Some(bx) = f.box_ {
+                            let _ = dispatch_mouse_click(
+                                cdp,
+                                bx[0] + bx[2] / 2.0,
+                                bx[1] + bx[3] / 2.0,
+                                last_mouse,
+                            )
+                            .await;
+                            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                            if let Ok(v) = cdp
+                                .send(
+                                    "Runtime.evaluate",
+                                    Some(json!({"expression": editor_sig_expr(), "returnByValue": true})),
+                                )
+                                .await
+                            {
+                                if let Some(s2) = v
+                                    .get("result")
+                                    .and_then(|r| r.get("value"))
+                                    .and_then(|s| s.as_str())
+                                {
+                                    if !s2.is_empty() {
+                                        hook_sig = Some(s2.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Resolve the rest of the flow against the hook's live-editor sig
+            // when the expansion ran; otherwise the captured sig stands.
+            let (sig, frame): (&str, &[usize]) = match hook_sig.as_deref() {
+                Some(s) => (s, &[]),
+                None => {
+                    let (a, b) = sig_frame.as_ref().unwrap();
+                    (a.as_str(), b.as_slice())
+                }
+            };
             // Focus the target. Framework composers (facade textarea + a
             // late-mounted contenteditable) mount their real editor here and
             // may move focus into it - typing then lands where a human's

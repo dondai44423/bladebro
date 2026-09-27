@@ -52,10 +52,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matches when the scope matches ANY composed ancestor of the target —
   selectors cross shadow hosts (`shreddit-comment[thingid=…]
   button[aria-label="Open user actions"]` resolves that comment's own menu).
-- **qol_probe 61 → 75 checks** (S16 + `universal.html`): pending note +
-  mount transition + end-to-end typing, selector near-miss, multi-match +
-  nth, find container/nearby wording, '#' href, measured scroll (bottom
-  boundary + nested scroller), shadow-crossing scoped selector.
+- **qol_probe 61 → 76 checks** (S16 + `universal.html` + a reddit-shaped
+  keyboard-only menu item in shadow.html): pending note + mount transition
+  + end-to-end typing, selector near-miss, multi-match + nth, find
+  container/nearby wording, '#' href, measured scroll (bottom boundary +
+  nested scroller), shadow-crossing scoped selector, and the keyboard
+  activation lane (role=menuitem activates on Space over its focusable
+  inner element).
+- **Keyboard activation lane for menu items (`role=menuitem`).** Synthetic
+  clicks against reddit's rpl-dropdown items only close the menu; Space
+  over the item's own focusable element activates it (verified live: the
+  delete dialog opened). menuitem ref-clicks now try `space` first (then
+  js/mouse/enter); the focus step descends to the item's focusable
+  descendant and VERIFIES focus before pressing; Space joins every other
+  element's fallback chain as the last rung.
+- **Collapsed-composer expansion.** `act type` on reddit's folded comment
+  strip (a shadow textarea) now clicks it (expanding the real editor),
+  re-derives the live editor's sig from the focused element, and types
+  into the editor in ONE call. Verified live end to end.
 
 ## [4.0.0] - 2026-09-27
 

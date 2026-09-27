@@ -44,7 +44,8 @@ class MenuDropdown extends HTMLElement {
     this.__built = true;
     this.innerHTML = '<ul style="list-style:none;padding:0;margin:4px 0">' +
       '<li><button role="menuitem" id="mi-fake" style="display:block;width:100%;text-align:left">Delete comment</button></li>' +
-      '<li><button role="menuitem" id="mi-real" style="display:block;width:100%;text-align:left">Do the thing</button></li></ul>';
+      '<li><button role="menuitem" id="mi-real" style="display:block;width:100%;text-align:left">Do the thing</button></li>' +
+      '<li role="menuitem" id="mi-space-li"><div tabindex="-1" id="mi-space" style="display:block;width:100%;text-align:left;cursor:pointer">Keyboard only action</div></li></ul>';
   }
 }
 customElements.define('menu-dropdown', MenuDropdown);
@@ -76,6 +77,13 @@ class OverflowMenu extends HTMLElement {
       b.id = 'thing-done';
       b.textContent = 'THING DONE';
       document.getElementById('thingbox').appendChild(b);
+    });
+    // Keyboard-only item (models reddit's rpl-dropdown): clicks are inert;
+    // Space over the focused inner div activates it.
+    const ks = sr.querySelector('#mi-space');
+    ks.addEventListener('click', function () { /* intentionally inert */ });
+    ks.addEventListener('keydown', function (e) {
+      if (e.key === ' ') { window.__spaceActivated = true; }
     });
   }
 }

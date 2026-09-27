@@ -468,6 +468,14 @@ def main():
         opened = ev("(function(){var t=document.querySelector('shadow-menu-host').shadowRoot.querySelector('overflow-menu').shadowRoot.querySelector('#overflow-trigger');return t.getAttribute('aria-expanded');})()")
         check("scoped selector crosses shadow hosts (composed ancestors)",
               "dom-changed" in v and opened == "true", f"{v} | aria-expanded={opened}")
+
+        # The keyboard activation lane: reddit's rpl-dropdown items ignore
+        # clicks; Space over the item's focused inner element activates.
+        out = cli("act", "click", "--selector", "#mi-space-li")
+        v = first_line(out)
+        fired = ev("String(!!window.__spaceActivated)")
+        check("menu item activates via the keyboard lane (role=menuitem)",
+              ("via space" in v) and fired == "true", f"{v} | fired={fired}")
     finally:
         try:
             cli("stop", timeout=30)
