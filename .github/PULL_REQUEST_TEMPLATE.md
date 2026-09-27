@@ -22,7 +22,7 @@
 
 ## Stealth changes (if applicable)
 
-- [ ] `bladebro audit` still scores 36/36
+- [ ] `bladebro audit` still scores 61/61
 - [ ] bot.sannysoft.com still ALL PASS
 - [ ] Before/after scores included below
 

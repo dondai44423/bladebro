@@ -2,6 +2,8 @@
 
 Thanks for your interest in improving Bladebro. This is a small, focused project, keep PRs scoped.
 
+Working with a coding agent? Point it at [AGENTS.md](AGENTS.md) — the agent-facing repo guide (commands, house rules, verification instruments).
+
 ## Before you submit
 
 ```bash
