@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-09-27
+
 ### Added
 - **Agent-report unit — input parity, paged artifact read-back, ICE filtering,
   honest stop reasons.** Every item below came from a live report by an agent
