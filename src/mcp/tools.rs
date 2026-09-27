@@ -66,7 +66,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "label": {"type": "string", "description": "Field label for click/type/fill/hover."},
                     "selector": {"type": "string", "description": "CSS selector addressing for click/hover/type/select/clear/read/upload/eval (searches light DOM + open shadow roots). Use when a control has no usable ref or label, e.g. '#overflow-trigger', '[role=menuitem]'. nth= picks among matches; a hidden-only match errors with the reason instead of clicking nothing."},
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
-                    "nth": {"type": "integer", "description": "1-based index for multiple matches."},
+                    "nth": {"type": "integer", "description": "1-based index for multiple matches. An out-of-range nth errors with the real match count instead of falling back to the first match."},
                     "key": {"type": "string", "description": "Key or chord: Enter, Tab, Escape, Backspace, ArrowDown, Control+a, Meta+Enter, Shift+Tab."},
                     "url": {"type": "string", "description": "For navigate: target URL. For download: file URL. For collect: page to navigate to first. For other actions: navigates to this URL first, then performs the action."},
                     "dx": {"type": "integer"},

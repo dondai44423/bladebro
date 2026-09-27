@@ -420,10 +420,34 @@ detectors flag exactly that (measured live: CreepJS `webDriverIsOn: true` →
   observable effect is attribute-level state reads `dom-changed (state-only:
   N refs (...); no nodes added/removed)`; content-only effects say so; a
   click with no effect at all states the dispatch happened and what was
-  tried (`click dispatched via mouse, js, enter ... - no navigation, no DOM
+  tried (`click dispatched via mouse, js, enter ... - no navigation, no observable DOM
   or state change`). Press/hover/coordinate verdicts share the same
   classification. (The report burned two attempts on a plausible-looking
   success string.)
+- **Addressing honesty — invalid selectors and out-of-range `nth`.** An
+  invalid CSS selector now errors as `invalid selector "…": …` (it used to
+  read as a plain "no actionable element matches" because the per-element
+  `matches()` try/catch swallowed the parser's SyntaxError); an out-of-range
+  `nth` errors with the real count on BOTH the selector and text paths
+  (`nth=7 requested but … has only 1 visible match(es) …`) — it used to
+  silently fall back to the FIRST match and click that (verified live: both
+  paths clicked the wrong element pre-fix, both refuse with the count
+  post-fix; `nth` also now gates the form-positional fill fallback).
+  Selectors Chrome's parser auto-repairs (`[unclosed`) keep their true
+  no-match report.
+- **`run` steps honor `selector=` on `read` / `js` / `eval`.** The act
+  counterparts resolved selectors; the run runtime's own arms ignored it (a
+  missed read died on `stale ref: `, a missed eval on `el is not defined`).
+  Both arms now resolve `selector=` (+ `nth=`) first and run against the
+  matched element — same handler, same semantics as `act read` / `act eval`
+  — with a loud `read step requires 'ref' or 'selector'` when neither is
+  given.
+- **Scoped reads of `nav` / `aside` / `header` / `footer` roots render
+  instead of misfiring.** `see mode=content scope=<ref>` on one of those
+  elements skipped its whole subtree (the chrome-tag noise rule applied at
+  the root) and misreported "element found but has no readable text" while
+  the element visibly had text. The root is now exempt, like the existing
+  root exemptions.
 
 ### Changed
 - **Batch/run step vocabulary is derived, not hand-maintained** (`ACT_ACTIONS`
@@ -1661,6 +1685,7 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v3.9.6...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.0.0...HEAD
+[4.0.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.0
 [1.0.0]: https://github.com/dondai44423/bladebro/releases/tag/v1.0.0
 [0.9.0]: https://github.com/dondai44423/bladebro/releases/tag/v0.9.0

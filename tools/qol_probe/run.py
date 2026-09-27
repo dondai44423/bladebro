@@ -360,6 +360,38 @@ def main():
 
         out = cli("see", "content", "--budget", "1200")
         check("content mode still reads the page", "Shadow fixture" in out, first_line(out))
+
+        # S15: addressing honesty + run-step selector parity (v4 hard pass:
+        # an out-of-range nth used to silently click the FIRST match; an
+        # invalid CSS selector read as a plain "no match"; run steps ignored
+        # selector=; a scoped read of a nav/aside/header/footer root
+        # misreported "no readable text").
+        rc, out = cli_rc("act", "click", "--selector", ":bar")
+        check("invalid CSS selector errors as invalid, not as a miss",
+              rc != 0 and "invalid selector" in out, f"rc={rc} {first_line(out)}")
+
+        rc, out = cli_rc("act", "click", "--selector", "#aside-panel", "--nth", "7")
+        check("out-of-range nth (selector path) errors with the real count",
+              rc != 0 and "nth=7 requested" in out and "only 1 visible match" in out,
+              f"rc={rc} {first_line(out)}")
+
+        rc, out = cli_rc("act", "click", "--label", "Aside panel details for scoped read.", "--nth", "7")
+        check("out-of-range nth (text path) errors with the real count",
+              rc != 0 and "nth=7 requested" in out and "only 1 visible match" in out,
+              f"rc={rc} {first_line(out)}")
+
+        out = cli("run", '[{"action":"read","selector":"#aside-panel"}]')
+        check("run read step honors selector=",
+              "text:" in out and "Aside panel details for scoped read." in out, first_line(out))
+
+        out = cli("run", '[{"action":"eval","selector":"#aside-panel","js":"el.id"}]')
+        check("run eval step honors selector= (el is the match)",
+              "aside-panel" in out, first_line(out))
+
+        aside_ref = see_ref_any("Aside panel details for scoped read.")
+        out = cli("see", "content", "--scope", aside_ref)
+        check("scoped read renders a nav/aside/header/footer root",
+              "Aside panel details for scoped read." in out, first_line(out))
     finally:
         try:
             cli("stop", timeout=30)

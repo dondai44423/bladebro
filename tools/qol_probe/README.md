@@ -46,6 +46,12 @@ no display leakage. Exit 0 = all passed. Takes ~10s.
     occluded click names what receives it; one `batch` call opens the menu
     and reads it; `see find` misses name hidden matches; `scope=eN` content
     reads exactly one subtree (budget honored).
+12. the **addressing-honesty + run-parity suite** (v4 hard pass): an invalid
+    CSS selector errors as `invalid selector "…"` — not as a "no match"
+    miss; an out-of-range `nth` errors with the real match count on the
+    selector AND text paths (never a silent first-match click); `run` steps
+    `read`/`eval` honor `selector=`; a scoped content read renders a
+    `nav`/`aside`/`header`/`footer` root (`shadow.html`'s aside).
 
 ## The fixture models
 

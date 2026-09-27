@@ -305,7 +305,8 @@ fn find_selector_expr(selector: &str) -> Result<String> {
     let sel_js = serde_json::to_string(selector)?;
     Ok("((sel_user)=>{ "
         .to_string()
-        + "const d=document;if(!d||!d.body)return[];"
+        + "const d=document;if(!d||!d.body)return{matches:[]};"
+        + "try{d.querySelector(sel_user);}catch(e){return{invalid:String((e&&e.message)||e)};}"
         + &JS_PREAMBLE
         + "const _vrs=function(n){let e=n;for(let i=0;i<14&&e;i++){try{const cs=getComputedStyle(e);if(cs.display==='none')return 'display:none'+(e!==n?' (ancestor '+e.tagName.toLowerCase()+')':'');if(cs.visibility==='hidden')return 'visibility:hidden'+(e!==n?' (ancestor '+e.tagName.toLowerCase()+')':'');}catch(_e){}e=e.parentElement||(e.getRootNode&&e.getRootNode().host);}const r=n.getBoundingClientRect();if(!r.width||!r.height)return 'zero-size';return 'not visible';};"
         + "const all=deepAll(d,sel);const results=[];const counts={};"
@@ -318,7 +319,7 @@ fn find_selector_expr(selector: &str) -> Result<String> {
         + "const v=vis(n);"
         + "results.push({sig:'|'+r+'|'+snm+'|'+counts[key],score:0,role:r,name:name(n,true),frame:[],hidden:!v,reason:v?'':_vrs(n)});"
         + "}"
-        + "return results.slice(0,30);})("
+        + "return{matches:results.slice(0,30)};})("
         + &sel_js
         + ")")
 }
@@ -354,7 +355,11 @@ pub async fn find_by_selector(cdp: &CdpSession, selector: &str) -> Result<Vec<Te
         .get("result")
         .and_then(|r| r.get("value"))
         .ok_or_else(|| BladeError::Other("selector match returned no value".to_string()))?;
-    let matches: Vec<TextMatch> = serde_json::from_value(value.clone())?;
+    if let Some(inv) = value.get("invalid").and_then(|v| v.as_str()) {
+        return Err(BladeError::Other(format!("invalid selector \"{selector}\": {inv}")));
+    }
+    let matches: Vec<TextMatch> =
+        serde_json::from_value(value.get("matches").cloned().unwrap_or_else(|| json!([])))?;
     Ok(matches)
 }
 
@@ -905,12 +910,12 @@ const LEAF_TARGET_JS: &str = concat!(
 fn no_effect_verdict(tried: &[&str], target_meta: &str) -> String {
     if target_meta.is_empty() {
         format!(
-            "outcome: no-effect (click dispatched via {} - no navigation, no DOM or state change; the element may be disabled, hidden, or hover-gated)",
+            "outcome: no-effect (click dispatched via {} - no navigation, no observable DOM or state change; the element may be disabled, hidden, or hover-gated)",
             tried.join(", ")
         )
     } else {
         format!(
-            "outcome: no-effect (click dispatched via {} on {} - no navigation, no DOM or state change)",
+            "outcome: no-effect (click dispatched via {} on {} - no navigation, no observable DOM or state change)",
             tried.join(", "),
             target_meta
         )
@@ -2487,7 +2492,7 @@ mod action_tests {
         );
         assert_eq!(
             msg,
-            "outcome: no-effect (click dispatched via mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - no navigation, no DOM or state change)"
+            "outcome: no-effect (click dispatched via mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - no navigation, no observable DOM or state change)"
         );
         assert!(!msg.contains('\u{2014}'), "no em-dash in public verdict");
     }
@@ -2515,7 +2520,7 @@ mod action_tests {
     fn no_effect_verdict_falls_back_when_target_unknown() {
         let msg = super::no_effect_verdict(&["mouse"], "");
         assert!(
-            msg.ends_with("- no navigation, no DOM or state change; the element may be disabled, hidden, or hover-gated)"),
+            msg.ends_with("- no navigation, no observable DOM or state change; the element may be disabled, hidden, or hover-gated)"),
             "unexpected fallback: {msg}"
         );
         assert!(!msg.contains('\u{2014}'), "no em-dash in fallback verdict");

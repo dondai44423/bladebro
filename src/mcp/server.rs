@@ -1184,19 +1184,27 @@ async fn resolve_text_target(
     }
     if !lpm_matches.is_empty() {
         lpm_matches.sort_by_key(|b| std::cmp::Reverse(b.4));
-        if let Some(n) = nth {
-            if n >= 1 && n <= lpm_matches.len() {
+        match nth {
+            Some(n) if n >= 1 && n <= lpm_matches.len() => {
                 return Ok(lpm_matches[n - 1].0.clone());
             }
+            Some(_) => {
+                // Out of range against the captured model - the page may have
+                // grown since the capture (late hydration, lazy render), so
+                // fall through to the live DOM search and error only if the
+                // live page is short too. Never silently pick the first match.
+            }
+            None => return Ok(lpm_matches[0].0.clone()),
         }
-        return Ok(lpm_matches[0].0.clone());
     }
 
     // Phase 2: Positional fallback for forms. If the query is a common
     // field type (username/password/email) and there are textboxes in
     // the model, pick the first textbox for username/email and the
-    // password-typed one for password.
-    if let Some(group) = alias_group {
+    // password-typed one for password. Guarded to nth-less calls: a
+    // positional guess is a "no matches, cope" heuristic, and answering
+    // nth=3 with the first password box would be a silent wrong target.
+    if let Some(group) = alias_group.filter(|_| nth.is_none()) {
         let is_username_like = group.iter().any(|a| {
             *a == "username" || *a == "user" || *a == "login" || *a == "acct"
         });
@@ -1243,6 +1251,10 @@ async fn resolve_text_target(
             let m = &matches[n - 1];
             return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
         }
+        return Err(BladeError::Other(format!(
+            "nth={n} requested but \"{query}\" has only {} visible match(es) (nth is 1-based; omit nth to use the top match)",
+            matches.len()
+        )));
     }
     if matches.len() == 1 {
         let m = &matches[0];
@@ -1275,7 +1287,7 @@ fn miss_diag_note(diag: Option<crate::action::MissDiag>) -> String {
             if d.shadow > 0 {
                 s.push_str(&format!("; {} in open shadow roots", d.shadow));
             }
-            s.push_str(" - hidden controls are not clickable by a mouse; if the site wires them programmatically use act eval (el.click()))");
+            s.push_str(" - hidden controls are not clickable by a mouse; if the site wires them programmatically use act eval (el.click())");
             s
         }
         _ => String::new(),
@@ -1318,6 +1330,21 @@ async fn resolve_selector_target(
             let m = visible[n - 1];
             return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
         }
+        // An out-of-range ordinal must not silently fall back to the first
+        // match: answering "7" with position 1 is the silent-wrong-target
+        // class this addressing exists to kill.
+        let hidden_note = if matches.len() > visible.len() {
+            format!(
+                "; {} more match(es) exist but are hidden",
+                matches.len() - visible.len()
+            )
+        } else {
+            String::new()
+        };
+        return Err(BladeError::Other(format!(
+            "nth={n} requested but selector \"{selector}\" has only {} visible match(es){hidden_note} (nth is 1-based; omit nth to use the top match)",
+            visible.len()
+        )));
     }
     if visible.len() == 1 {
         let m = visible[0];
@@ -3655,11 +3682,24 @@ async fn execute_step(
             observations.push(format!("step {path}: {}", page.delta_view(&delta, 4000)));
         }
         "read" => {
-            let ref_id = step.get("ref").and_then(|r| r.as_str()).unwrap_or("");
-            let text_content = crate::action::read_text(page.cdp_ref(), page.model(), ref_id).await?;
+            let mut ref_id = step.get("ref").and_then(|r| r.as_str()).unwrap_or("").to_string();
+            if ref_id.is_empty() {
+                // Parity with `act read`: a run step must accept selector
+                // addressing too (it used to ignore selector= and fail on
+                // the empty ref with "stale ref: ").
+                let selector = step.get("selector").and_then(|s| s.as_str()).unwrap_or("");
+                if selector.is_empty() {
+                    return Err(crate::error::BladeError::Other(
+                        "read step requires 'ref' or 'selector'".into(),
+                    ));
+                }
+                let nth = step.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
+                ref_id = resolve_selector_target(page, selector, nth).await?;
+            }
+            let text_content = crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
             let (role, name) = page
                 .model()
-                .element(ref_id)
+                .element(&ref_id)
                 .map(|e| (e.raw.role.clone(), e.raw.name.clone()))
                 .unwrap_or_default();
             let truncated: String = text_content.chars().take(200).collect();
@@ -3679,7 +3719,17 @@ async fn execute_step(
                 ));
             }
             let step_ref = step.get("ref").and_then(|r| r.as_str()).unwrap_or("");
-            match handle_eval(page, js_code, step_ref).await {
+            let eval_ref = if !step_ref.is_empty() {
+                step_ref.to_string()
+            } else if let Some(sel) = step.get("selector").and_then(|s| s.as_str()) {
+                // Parity with `act eval`: selector addressing resolves the
+                // element the JS runs against (the step used to run unscoped).
+                let nth = step.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
+                resolve_selector_target(page, sel, nth).await?
+            } else {
+                String::new()
+            };
+            match handle_eval(page, js_code, &eval_ref).await {
                 Ok(result) => {
                     let capped: String = result.chars().take(500).collect();
                     observations.push(format!("step {path}: js → {capped}"));
