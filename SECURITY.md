@@ -20,5 +20,5 @@ You will receive a response within 48 hours. If the vulnerability is confirmed, 
 ## Out of scope
 
 - Using Bladebro to bypass website terms of service
-- Bot detection on sites that require CAPTCHA solving (Bladebro detects and reports honestly — it does not solve)
+- Bot detection on sites that require CAPTCHA solving (Bladebro detects and reports honestly — it does not solve as a general capability; the one exception is adapter-specific and human-trivial, e.g. reddit's one-time humanity checkbox)
 - Vulnerabilities in Chromium itself (report to the Chromium project)

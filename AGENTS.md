@@ -49,7 +49,7 @@ Other places: `tests/` (integration tests + fixtures; unit tests live inline as 
 
 1. **Five tools. Forever.** `act`, `see`, `state`, `run`, `vision`. New capabilities are parameters or behaviors of those five — never a sixth tool. The tool definitions (~1,900 tokens) are the entire interface budget of every agent using bladebro.
 2. **No LLM inside the driver.** Deterministic machinery only. The agent is the intelligence; bladebro never calls a model.
-3. **No CAPTCHA solving.** Detect, report an honest `blocked:` verdict, apply the remediation ladder where one exists. Never fake-solve.
+3. **No CAPTCHA solving as a capability — with one narrow, adapter-only exception.** The standing rule: detect, report an honest `blocked:` verdict, apply the remediation ladder; nothing is ever fake-solved. The exception: a site adapter may pass a challenge that is trivial for a human — a single check-the-box click through the normal humanized input path, as the reddit adapter does for reddit's one-time "prove your humanity" gate. Conditions that keep it honest: adapter-specific and site-gated (never a universal solver), and if the challenge escalates beyond the simple check (an image grid), that is reported honestly and never solved.
 4. **No Chromium fork.** The engine is stock system Chrome/Chromium. Everything else is built here.
 5. **Adapters are pure optimization.** The `extract=auto` site paths make existing commands smarter on their site — zero new tools, zero new params, live-tested on the real site.
 6. **Honest verdicts.** Never claim success — a value written, a field cleared, a click's effect — without a readback that proves it. When proof is impossible, the verdict says so ("readback unverified"). Errors carry current page state so an agent can recover without an extra call.
@@ -93,7 +93,7 @@ Match the surrounding code. Specific to this repo:
 
 - ✅ **Always:** run clippy + tests; add the regression test; use a scratch data dir for manual experiments (`BLADE_HOME=$(mktemp -d) ./target/release/bladebro …`) so a real browser profile is never touched; state exactly how you verified (commands + output) in the PR.
 - ⚠️ **Ask first** (open an issue or draft PR): adding a dependency (binary size + supply chain — it ships ~7 MB and we like it); changing MCP tool schemas (every word is billed to every user's context); changing capture/perception output formats (agents parse them); touching the stealth injection *architecture*; anything in `npm/`.
-- 🚫 **Never:** a 6th tool; an LLM call in the driver; CAPTCHA solving; a Chromium fork; a `Function.prototype.toString` patch; launch flags that mark the browser as automated; committing secrets, tokens or real browsing-profile data; committing build artifacts; npm install scripts (the packages ship zero — keep it that way); version bumps or publishing.
+- 🚫 **Never:** a 6th tool; an LLM call in the driver; CAPTCHA solving beyond the adapter-only human-trivial exception (non-negotiable #3); a Chromium fork; a `Function.prototype.toString` patch; launch flags that mark the browser as automated; committing secrets, tokens or real browsing-profile data; committing build artifacts; npm install scripts (the packages ship zero — keep it that way); version bumps or publishing.
 
 ## Gotchas worth knowing (each one cost real debugging time)
 

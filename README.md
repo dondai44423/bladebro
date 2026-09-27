@@ -463,7 +463,7 @@ Honest boundaries: what surprises people, and what Bladebro deliberately does no
 
 | Situation | What happens — and why |
 |---|---|
-| **CAPTCHA / Turnstile challenges** | Not solved, deliberately. You get a `blocked:` verdict with a remediation ladder — hand off to a solver if needed. |
+| **CAPTCHA / Turnstile challenges** | Not solved as a general capability, deliberately — you get a `blocked:` verdict with a remediation ladder; hand off to a solver if needed. One narrow exception: a site adapter may pass a challenge that is trivial for a human (reddit's one-time "prove your humanity" checkbox gets one humanized click); image grids stay unsolved and are reported honestly. |
 | **Datacenter / VPS IPs** | Flagged regardless of fingerprint. Use `BLADE_PROXY` with a residential proxy — with a proxy set, WebRTC ICE candidates are filtered (no srflx / raw-IP host candidates reach the page) so the real IP cannot leak around it. |
 | **Cross-origin iframe content** | Invisible (`SecurityError`). Deliberate: access would need `Runtime.enable`, which defuses the protocol stealth layer. |
 | **Browser extensions** | Not supported — CDP cannot load them, and they would break the stealth profile. |

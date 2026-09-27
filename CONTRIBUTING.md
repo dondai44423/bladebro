@@ -34,7 +34,7 @@ If any of these fail, fix them before opening a PR.
 
 - More tools. The surface is 5 tools. New capabilities go as params/behaviors of existing tools, More tools only are added if the new tool helps massively instead of little.
 - An LLM inside the driver. Deterministic machinery only.
-- CAPTCHA solving. Detect + honest `blocked:` verdict only.
+- CAPTCHA solving as a general capability. Detect + honest `blocked:` verdict + remediation ladder. One exception, kept deliberately narrow: a site adapter may pass a challenge that is trivial for a human — a single checkbox click, like reddit's humanity gate; image grids are never solved.
 - Chromium source forks. Stock Chrome stays the engine.
 
 ## Commit style
