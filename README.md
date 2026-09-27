@@ -66,7 +66,7 @@ npm install -g bladebro
 bladebro mcp
 ```
 
-No Rust, no compilation, no dependencies. npm resolves the prebuilt binary for your platform — zero postinstall scripts.
+No Rust, no compilation, no dependencies. npm resolves the prebuilt binary for your platform — zero postinstall scripts. Update later with `npm update -g bladebro`.
 
 | Platform | Package | Size | Status |
 |---|---|---|---|
@@ -96,6 +96,8 @@ cd bladebro
 cargo build --release
 ./target/release/bladebro mcp
 ```
+
+Source builds self-update too: `bladebro -u` swaps in the official released binary for your platform (it doesn't rebuild — for that: `git pull && cargo build --release`).
 
 ## 🎯 The 5 tools
 
@@ -522,12 +524,14 @@ Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME
 |---|---|
 | `bladebro -doc` / `bladebro doctor` | System check — Chrome, display, profile hygiene, logins, data root, network, version |
 | `bladebro audit` | Stealth audit — 61-check suite + boot self-check + cross-restart drift stamp, against your setup |
-| `bladebro -v` | Version + update status |
-| `bladebro -u` | Self-update: check, download, SHA-256-verify, swap (source installs) |
-| `bladebro --rollback` | Restore the previous version |
-| `npm update -g bladebro` | Update npm installs |
+| `bladebro -v` | Version + update status (check only) |
+| `bladebro -u` | Self-update: check, download, SHA-256-verify, swap — non-npm installs |
+| `bladebro --rollback` | Restore the previous version (from the pre-update backup) |
+| `npm update -g bladebro` | Update an npm install |
 
-`BLADE_NO_UPDATE_CHECK=1` skips update checks entirely.
+**One updater per install — use the one that matches how you installed.** npm-managed (`npm install -g bladebro`) → `npm update -g bladebro`, which keeps the shim, the platform package and npm's bookkeeping in sync. Everything else — a downloaded binary, a manual copy, a `cargo build` — → `bladebro -u`: it downloads the official released binary for your platform, SHA-256-verifies it against the published checksum, confirms it starts, backs up the old one and swaps it in; `bladebro --rollback` undoes it. (`-u` never rebuilds from source — for that: `git pull && cargo build --release`.)
+
+`bladebro -u` knows which install it's on: under npm it refuses to touch npm's files and points you to npm (`--force` overrides — at the cost of npm's metadata going stale); on a build that's ahead of the latest release it won't downgrade without `--force`. `BLADE_NO_UPDATE_CHECK=1` skips update checks entirely.
 
 ## 💖 Sponsors
 
