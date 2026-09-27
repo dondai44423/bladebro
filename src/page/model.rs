@@ -182,6 +182,8 @@ impl LivePageModel {
             frame: frame.to_vec(),
             shadow: false,
             fingerprint: 0,
+            pending: false,
+            ctx: String::new(),
         };
         if let Some(&i) = self.by_ref.get(id) {
             self.elements[i] = PageElement { ref_id: id.to_string(), raw };
@@ -415,7 +417,10 @@ impl LivePageModel {
             out.push_str(&format!("title: {}\n", truncate(&self.title, 80)));
         }
         for (printed, el) in matching.iter().enumerate() {
-            let line = format_element(el);
+            let mut line = format_element(el);
+            if !el.raw.ctx.is_empty() {
+                line.push_str(&format!(" (in {})", truncate(&el.raw.ctx, 90)));
+            }
             if out.len() + line.len() > budget {
                 out.push_str(&format!("…({} more matching)\n", matching.len() - printed));
                 break;
@@ -639,6 +644,9 @@ fn format_element(el: &PageElement) -> String {
             s.push_str(&format!(" [{lm}]"));
         }
     }
+    if el.raw.pending {
+        s.push_str(" (not rendered yet - site component still mounting)");
+    }
     s
 }
 
@@ -729,6 +737,8 @@ mod tests {
                 frame: Vec::new(),
                 shadow: false,
                 fingerprint: 0,
+                pending: false,
+                ctx: String::new(),
             },
         }
     }

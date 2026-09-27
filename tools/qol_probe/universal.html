@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Universal probe fixture</title>
+<style>
+  body { margin: 0; }
+  x-host { display: block; width: 320px; height: 40px; margin: 8px; border: 1px solid #888; }
+  #pending-editor { min-height: 20px; outline: none; }
+  #confirm-row { margin: 8px; }
+  #hash-row { margin: 8px; }
+  #inner-scroll { display: none; position: fixed; left: calc(50% - 200px); top: calc(50% - 100px); width: 400px; height: 200px; overflow: auto; border: 2px solid #666; background: #fff; z-index: 5; }
+  .tall { height: 2600px; }
+</style>
+<h2>Universal probe fixture</h2>
+
+<!-- Selector diagnostics + multi-match: two "yes" links in distinct
+     containers (the reddit disable-inbox/delete shape). -->
+<div data-probe="scope1">
+  <span class="option main active"><a href="#action" class="yes" id="yes-main" onclick="window.__yesClicked='main'">yes</a></span>
+  <form class="toggle del-button"><span class="option error active"><a href="#action" class="yes" id="yes-del" onclick="window.__yesClicked='del'">yes</a></span></form>
+</div>
+
+<!-- find text-present: no actionable element matches the phrase itself. -->
+<div id="confirm-row">are you sure? <a href="#no" class="yes2" onclick="return false">yes</a> / <a href="#no" class="no" onclick="return false">no</a></div>
+
+<!-- href="#" honesty + filter container context. -->
+<div id="hash-row"><a href="#" id="hash-link">hash action</a></div>
+
+<!-- Pending-mount capture: a slot-pending light child (connected, not
+     rendered - the empty-computed-style signature); the mount button
+     reassigns the slot so the editor renders. -->
+<x-host id="phost">
+  <x-form id="pform" slot="pending">
+    <div id="pending-editor" contenteditable="true" role="textbox" aria-placeholder="Join the conversation"></div>
+  </x-form>
+</x-host>
+<button id="mount-composer" onclick="document.getElementById('pform').setAttribute('slot','ready');">mount</button>
+
+<!-- Scroll measurement: nested scroller (centered on the wheel point once
+     shown) + tall body for the page-level boundary cases. -->
+<div id="inner-scroll"><div style="height:600px">inner scroll content</div></div>
+<div class="tall">tall content</div>
+
+<script>
+  document.getElementById('phost').attachShadow({mode:'open'}).innerHTML = '<slot name="ready"></slot>';
+</script>

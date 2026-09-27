@@ -25,6 +25,8 @@ fn el(role: &str, name: &str, sig: &str, value: Option<&str>, disabled: bool) ->
         frame: Vec::new(),
         shadow: false,
         fingerprint: 0,
+        pending: false,
+        ctx: String::new(),
     }
 }
 

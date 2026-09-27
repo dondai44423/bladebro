@@ -89,6 +89,18 @@ pub struct RawElement {
     /// Zero for scars from pre-fingerprint builds (backwards compat).
     #[serde(default)]
     pub fingerprint: u64,
+    /// Connected but NOT rendered yet: the empty-computed-style signature of
+    /// a light-DOM child not assigned to any slot (site components mid-mount,
+    /// e.g. reddit's composer). `box` is the nearest rendered ancestor's; the
+    /// element is surfaced so the agent knows it is coming, but it cannot be
+    /// clicked until it mounts.
+    #[serde(default)]
+    pub pending: bool,
+    /// Nearest distinguishing container chain (`span.option.error <
+    /// form.toggle.del-button`). Shown in filter/find output to disambiguate
+    /// identical names; computed live, never part of the sig.
+    #[serde(default)]
+    pub ctx: String,
 }
 
 /// Options of a `<select>` element as captured for the agent (#21): the
@@ -200,7 +212,15 @@ pub const JS_ROLE_FN: &str = r#"const roleMap={button:'button',link:'link',check
 // capture compute names for ALL elements (needed for stable sigs) cheaply.
 pub const JS_LABEL_CACHE: &str = r#"const __BLC=new WeakMap();function getLabels(doc){let m=__BLC.get(doc);if(!m){m={};try{for(const l of doc.querySelectorAll('label[for]')){const f=l.getAttribute('for');if(f&&!(f in m)){const t=(l.textContent||'').trim();if(t)m[f]=t.replace(/\s+/g,' ').slice(0,120);}}}catch(e){}__BLC.set(doc,m);}return m;}"#;
 
-pub const JS_NAME_FN: &str = r#"function textNoScripts(n){let s='';for(const c of n.childNodes){if(c.nodeType===3){s+=c.textContent;}else if(c.nodeType===1){const t=c.tagName;if(t==='SCRIPT'||t==='STYLE'||t==='NOSCRIPT'||t==='TEMPLATE')continue;s+=textNoScripts(c);}}return s;}function name(n,includeValue){const al=n.getAttribute('aria-label');if(al&&al.trim())return al.trim().replace(/\s+/g,' ').slice(0,120);const doc=n.ownerDocument;const lb=n.getAttribute('aria-labelledby');if(lb&&doc){const e=doc.getElementById(lb);if(e&&(e.textContent||' ').trim())return e.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const id=n.id;if(id&&doc){const lt=getLabels(doc)[id];if(lt)return lt;}const cl=n.closest('label');if(cl&&(cl.textContent||' ').trim())return cl.textContent.trim().replace(/\s+/g,' ').slice(0,120);const ti=n.title;if(ti&&ti.trim())return ti.trim().slice(0,120);const ph=n.placeholder;if(ph&&ph.trim())return ph.trim().slice(0,120);const ac=n.getAttribute('autocomplete');if(ac&&ac.trim()){const tok=ac.trim().split(/\s+/).pop();if(tok&&tok!=='off'&&tok!=='on')return tok.replace(/-/g,' ').slice(0,80);}const ty=n.type;if(ty==='password')return'password';if(ty==='email')return'email';if(ty==='search')return'search';if(ty==='tel')return'phone';if(ty==='url')return'url';const nm=n.getAttribute('name');if(nm&&nm.trim()){const h=nm.trim().replace(/[_\-]/g,' ').replace(/\s+/g,' ').trim();if(h.length>1&&h.length<=60)return h.slice(0,60);}if(n.tagName==='SELECT'){const oo=n.options;if(oo&&oo.length){const ft=(oo[0].label||oo[0].text||'').trim();if(ft)return ft.replace(/\s+/g,' ').slice(0,120);if(n.selectedIndex>=0){const sv=(oo[n.selectedIndex].label||oo[n.selectedIndex].text||'').trim();if(sv)return sv.replace(/\s+/g,' ').slice(0,120);}}return'';}const tc=textNoScripts(n);if(tc&&tc.trim())return tc.trim().replace(/\s+/g,' ').slice(0,120);const alt=n.getAttribute('alt');if(alt&&alt.trim())return alt.trim().slice(0,120);if(includeValue){const val=n.value;if(val&&typeof val==='string'&&val.trim()&&n.tagName==='INPUT')return val.trim().slice(0,60);}return'';}"#;
+pub const JS_NAME_FN: &str = r#"function textNoScripts(n){let s='';for(const c of n.childNodes){if(c.nodeType===3){s+=c.textContent;}else if(c.nodeType===1){const t=c.tagName;if(t==='SCRIPT'||t==='STYLE'||t==='NOSCRIPT'||t==='TEMPLATE')continue;s+=textNoScripts(c);}}return s;}function name(n,includeValue){const al=n.getAttribute('aria-label');if(al&&al.trim())return al.trim().replace(/\s+/g,' ').slice(0,120);const doc=n.ownerDocument;const lb=n.getAttribute('aria-labelledby');if(lb&&doc){const e=doc.getElementById(lb);if(e&&(e.textContent||' ').trim())return e.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const id=n.id;if(id&&doc){const lt=getLabels(doc)[id];if(lt)return lt;}const cl=n.closest('label');if(cl&&(cl.textContent||' ').trim())return cl.textContent.trim().replace(/\s+/g,' ').slice(0,120);const ti=n.title;if(ti&&ti.trim())return ti.trim().slice(0,120);const ph=n.placeholder;if(ph&&ph.trim())return ph.trim().slice(0,120);const ap=n.getAttribute&&n.getAttribute('aria-placeholder');if(ap&&ap.trim())return ap.trim().slice(0,120);const ac=n.getAttribute('autocomplete');if(ac&&ac.trim()){const tok=ac.trim().split(/\s+/).pop();if(tok&&tok!=='off'&&tok!=='on')return tok.replace(/-/g,' ').slice(0,80);}const ty=n.type;if(ty==='password')return'password';if(ty==='email')return'email';if(ty==='search')return'search';if(ty==='tel')return'phone';if(ty==='url')return'url';const nm=n.getAttribute('name');if(nm&&nm.trim()){const h=nm.trim().replace(/[_\-]/g,' ').replace(/\s+/g,' ').trim();if(h.length>1&&h.length<=60)return h.slice(0,60);}if(n.tagName==='SELECT'){const oo=n.options;if(oo&&oo.length){const ft=(oo[0].label||oo[0].text||'').trim();if(ft)return ft.replace(/\s+/g,' ').slice(0,120);if(n.selectedIndex>=0){const sv=(oo[n.selectedIndex].label||oo[n.selectedIndex].text||'').trim();if(sv)return sv.replace(/\s+/g,' ').slice(0,120);}}return'';}const tc=textNoScripts(n);if(tc&&tc.trim())return tc.trim().replace(/\s+/g,' ').slice(0,120);const alt=n.getAttribute('alt');if(alt&&alt.trim())return alt.trim().slice(0,120);if(includeValue){const val=n.value;if(val&&typeof val==='string'&&val.trim()&&n.tagName==='INPUT')return val.trim().slice(0,60);}return'';}"#;
+
+/// Nearest distinguishing container chain ("ctx"): up to two hops of
+/// notable ancestors (data-*/id/aria-label/class), used to disambiguate
+/// identical names - `a.yes` under `form.toggle.del-button` vs under
+/// `form.toggle.sendreplies-button`. Rendered in filter/find output only;
+/// the default model view stays lean. Composed-tree walk (crosses shadow
+/// hosts), capped, best-effort.
+pub const JS_CTX_FN: &str = r#"const ctxOf=function(n){try{var parts=[];var cur=n?n.parentElement:null;for(var i=0;i<30&&cur&&cur!==document.body&&cur!==document.documentElement;i++){var tag=cur.tagName?cur.tagName.toLowerCase():'';var d=cur.getAttribute&&(cur.getAttribute('data-fullname')||cur.getAttribute('thingid')||cur.getAttribute('data-testid'));var desc='';var _cid=cur.getAttribute&&cur.getAttribute('id');if(d){desc=tag+'['+((cur.hasAttribute('thingid')?'thingid':(cur.hasAttribute('data-testid')?'data-testid':'data-fullname'))+'=')+String(d).slice(0,24)+']';}else if(_cid){desc=tag+'#'+String(_cid).slice(0,28);}else{var al=cur.getAttribute&&cur.getAttribute('aria-label');if(al&&al.trim()){desc=tag+'["'+al.trim().slice(0,24)+'"]';}else{var cl=(typeof cur.className==='string'&&cur.className.trim())?cur.className.trim().split(/\s+/).slice(0,2).join('.'):'';if(cl&&(tag.length+cl.length)<=42)desc=tag+'.'+cl;}}if(desc){parts.push(desc);if(d||_cid)break;if(parts.length>=2)break;}cur=cur.parentElement||(cur.getRootNode&&cur.getRootNode().host);}return parts.join(' < ').slice(0,90);}catch(e){return '';}};"#;
 
 /// The shared preamble: just the selector + helper functions.
 /// Each script (capture, find-by-sig) sets up its own document context,
@@ -216,6 +236,7 @@ pub static JS_PREAMBLE: LazyLock<String> = LazyLock::new(|| {
         + JS_LABEL_CACHE
         + JS_NAME_FN
         + JS_LANDMARK_FN
+        + JS_CTX_FN
         + JS_DEEP_ALL
         + JS_FNV_FN
         + JS_NC_FN
@@ -280,6 +301,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         // unique across frames and matches find_by_sig.
         + "const fps=fp.join(',');"
         + "const all=deepAll(doc,sel);"
+        + "var pendN=0;"
         + "const counts={};"
         + "for(let i=0;i<all.length;i++){"
         + "const n=all[i];"
@@ -292,7 +314,23 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "const rect=n.getBoundingClientRect();"
         + "const ay=rect.y+oy;"
         + "if(ay+rect.height<-VM||ay>VH+VM)continue;"
-        + "if(!vis(n))continue;"
+        // Pending-mount capture (W3): an editable control that is CONNECTED
+        // but not rendered - the empty-computed-style signature of a light
+        // child not assigned to any slot (site components mid-hydration,
+        // e.g. reddit's shreddit-composer). Anchor it to the nearest rendered
+        // ancestor and surface it with pending:true so the agent knows the
+        // control exists and is coming (it cannot be clicked yet). Capped:
+        // the class is transient and must never flood the model.
+        + "if(!vis(n)){"
+        + "if(pendN<5&&r==='textbox'){try{var _pd='';try{_pd=getComputedStyle(n).display;}catch(_e){}"
+        + "if(_pd===''){var _anc=n,_ab=null;for(var _ai=0;_ai<8&&_anc;_ai++){var _ar=null;try{_ar=_anc.getBoundingClientRect();}catch(_e2){}if(_ar&&_ar.width>0&&_ar.height>0){_ab=_ar;break;}_anc=_anc.parentElement||(_anc.getRootNode&&_anc.getRootNode().host)||null;}"
+        + "if(_ab){var _ayp=_ab.y+oy;if(_ayp+_ab.height>=-VM&&_ayp<=VH+VM){var _pnm=name(n,true);if(_pnm){"
+        + "var _pkids=n.children&&n.children.length?Array.from(n.children).slice(0,3).map(function(c){return c.tagName.toLowerCase();}).join(','):'';"
+        + "var _pcst=(n.type||'')+','+(n.name||'')+','+(n.getAttribute('data-testid')||'');"
+        + "var _pfp=fnv(nc(n)+','+n.tagName.toLowerCase()+','+_pkids+'|'+_pcst);pendN++;"
+        + "out.push({tag:n.tagName.toLowerCase(),role:r,name:_pnm,type:n.type||null,value:null,disabled:false,checked:null,href:null,placeholder:n.placeholder||null,required:false,haspopup:false,landmark:landmarkOf(n),box:[Math.round(_ab.x+ox)||0,Math.round(_ab.y+oy)||0,Math.round(_ab.width)||0,Math.round(_ab.height)||0],sig:fps+'|'+r+'|'+snm+'|'+rank,fingerprint:_pfp,shadow:n.getRootNode()!==doc,frame:fp,ctx:ctxOf(n),pending:true});"
+        + "}}}}}catch(_e3){}}"
+        + "continue;}"
         + "const nm=name(n,true);"
         // Structural identity fingerprint (D48): hash of ancestor chain +
         // tag + first children + identity attrs. Survives re-renders that
@@ -305,7 +343,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "value:n.isContentEditable?((n.innerText||n.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200)||null):(n.value&&n.value.length<=200?n.value:null),"
         + "disabled:!!n.disabled,"
         + "checked:(r==='checkbox'||r==='radio')?!!n.checked:null,"
-        + "href:n.href||null,placeholder:n.placeholder||null,"
+        + "href:(function(){var h=n.getAttribute&&n.getAttribute('href');if(h==null)return null;if(h.charAt(0)==='#')return h;return n.href||null;})(),placeholder:n.placeholder||null,"
         + "options:n.tagName==='SELECT'?{sel:n.selectedIndex,total:n.options.length,items:[...n.options].slice(0,80).map(o=>[(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦').slice(0,60),(o.value||'').split('|').join('¦').slice(0,40)]).filter(p=>p[0]||p[1])}:null,"
         + "required:!!n.required||n.getAttribute('aria-required')==='true',"
         + "haspopup:!!n.getAttribute('aria-haspopup'),"
@@ -314,7 +352,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "sig:fps+'|'+r+'|'+snm+'|'+rank,"
         + "fingerprint:_fp,"
         + "shadow:n.getRootNode()!==doc,"
-        + "frame:fp});"
+        + "frame:fp,ctx:ctxOf(n),pending:false});"
         + "}"
         + "const ifs=doc.querySelectorAll('iframe');"
         + "for(let i=0;i<ifs.length;i++){"

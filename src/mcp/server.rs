@@ -1294,6 +1294,39 @@ fn miss_diag_note(diag: Option<crate::action::MissDiag>) -> String {
     }
 }
 
+/// Format the near-miss diagnostic for a selector that matched nothing
+/// actionable: the raw light-DOM count, or the closest live matches for the
+/// looser suffix that DID match - one-step recovery instead of a dead end.
+fn selector_diag_note(diag: Option<&crate::action::SelectorDiag>) -> String {
+    let d = match diag {
+        Some(d) => d,
+        None => return String::new(),
+    };
+    if d.raw > 0 {
+        let ex = if d.raw_samples.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", d.raw_samples.join("; "))
+        };
+        return format!(
+            " - {} element(s) match the full selector but are not actionable{ex}",
+            d.raw
+        );
+    }
+    if d.sub_count > 0 {
+        let ex = if d.samples.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", d.samples.join("; "))
+        };
+        return format!(
+            " - closest live matches for \"{}\" ({} found){ex} - adjust the selector (a tag or class in the path may have changed)",
+            d.sub, d.sub_count
+        );
+    }
+    String::new()
+}
+
 /// Resolve a CSS selector to a ref. Mirrors [`resolve_text_target`]: match
 /// against actionable elements (open shadow roots included), adopt the live
 /// sig into the model, return the ref - every action downstream (real mouse
@@ -1306,14 +1339,22 @@ async fn resolve_selector_target(
     selector: &str,
     nth: Option<usize>,
 ) -> Result<String> {
-    let matches = crate::action::find_by_selector(page.cdp_ref(), selector).await?;
+    let lookup = crate::action::find_by_selector(page.cdp_ref(), selector).await?;
+    let matches = &lookup.matches;
     let visible: Vec<&crate::action::TextMatch> = matches.iter().filter(|m| !m.hidden).collect();
     if visible.is_empty() {
         if !matches.is_empty() {
             let ex: Vec<String> = matches
                 .iter()
                 .take(3)
-                .map(|m| format!("{} \"{}\" [{}]", m.role, m.name, m.reason))
+                .map(|m| {
+                    let ctx = if m.ctx.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (in {})", m.ctx)
+                    };
+                    format!("{} \"{}\" [{}]{}", m.role, m.name, m.reason, ctx)
+                })
                 .collect();
             return Err(BladeError::Other(format!(
                 "selector \"{selector}\" matched {} element(s) but none is visible: {} - a hidden control cannot be clicked by a mouse; if the site wires it programmatically, drive it with act eval (el.click())",
@@ -1321,8 +1362,9 @@ async fn resolve_selector_target(
                 ex.join("; ")
             )));
         }
+        let diag_note = selector_diag_note(lookup.diag.as_ref());
         return Err(BladeError::Other(format!(
-            "no actionable element matches selector \"{selector}\" (searched light DOM + open shadow roots)"
+            "no actionable element matches selector \"{selector}\" (searched light DOM + open shadow roots){diag_note}"
         )));
     }
     if let Some(n) = nth {
@@ -1342,7 +1384,7 @@ async fn resolve_selector_target(
             String::new()
         };
         return Err(BladeError::Other(format!(
-            "nth={n} requested but selector \"{selector}\" has only {} visible match(es){hidden_note} (nth is 1-based; omit nth to use the top match)",
+            "nth={n} requested but selector \"{selector}\" has only {} visible match(es){hidden_note} (nth is 1-based among visible matches)",
             visible.len()
         )));
     }
@@ -1350,12 +1392,27 @@ async fn resolve_selector_target(
         let m = visible[0];
         return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
     }
-    let top = visible[0];
-    let id = page.model_mut().adopt(&top.sig, &top.role, &top.name, &top.frame);
-    for m in visible.iter().skip(1) {
-        let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
+    // Multiple visible matches are NOT silently resolved to the first: an
+    // agent that wrote "a.yes" while two different yes-confirmations exist
+    // (disable-inbox vs delete) must choose deliberately - the silent
+    // top-pick clicked the wrong action with no signal. List them; nth picks.
+    let mut lines: Vec<String> = Vec::new();
+    for (i, m) in visible.iter().enumerate().take(5) {
+        let ctx = if m.ctx.is_empty() {
+            String::new()
+        } else {
+            format!(" (in {})", m.ctx)
+        };
+        lines.push(format!("{}) {} \"{}\"{}", i + 1, m.role, m.name, ctx));
     }
-    Ok(id)
+    if visible.len() > 5 {
+        lines.push(format!("…(+{} more)", visible.len() - 5));
+    }
+    Err(BladeError::Other(format!(
+        "selector \"{selector}\" matches {} visible elements - add nth=N (1-based) to pick one:\n  {}",
+        visible.len(),
+        lines.join("\n  ")
+    )))
 }
 
 /// `fill` — multi-field forms in ONE call (type/select/checkbox-aware, with
@@ -2038,18 +2095,25 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
             // raw eval for a desktop-hidden trigger.
             let diag_note = miss_diag_note(crate::action::find_miss_diag(page.cdp_ref(), find).await.ok());
             // M11 contract is full-page search: when no ACTIONABLE element
-            // matches, probe the plain text. Returns a context snippet so
-            // agents can verify outcomes ("Order confirmed") without
-            // dumping full page content.
-            let q_json = serde_json::to_string(&find.to_lowercase()).unwrap_or_else(|_| "''".into());
-            let probe = page.cdp_ref().send("Runtime.evaluate", Some(json!({
-                "expression": format!("(function(){{var q={q_json};var t=(document.body&&document.body.innerText)||'';var i=t.toLowerCase().indexOf(q);if(i<0)return null;return t.slice(Math.max(0,i-60),i+q.length+60).replace(/\\s+/g,' ').trim();}})()"),
-                "returnByValue": true,
-            }))).await.ok()
-                .and_then(|r| r.get("result").and_then(|x| x.get("value")).cloned());
-            if let Some(serde_json::Value::String(snip)) = probe {
+            // matches, locate the text itself - the deepest containing
+            // element with its container chain plus the actionables inside
+            // it. "Leftover body text" then explains WHERE it lives (the
+            // header pill, a draft editor, a closed confirm row) instead of
+            // costing the agent an ancestor-walk to find out.
+            if let Some(loc) = crate::action::locate_text(page.cdp_ref(), find).await {
+                let near = if loc.near.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (nearby actionables: {})", loc.near.join(", "))
+                };
+                let where_ = if loc.desc.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - text found in {}{}", loc.desc, near)
+                };
                 return Ok(format!(
-                    "no actionable elements matching \"{find}\"{diag_note}, but text present in page:\n  \"…{snip}…\"\n  (see content=true to read full context)"
+                    "no actionable elements matching \"{find}\"{diag_note}, but text present in page{where_}:\n  \"…{}…\"\n  (see content=true to read full context)",
+                    loc.snippet
                 ));
             }
             return Ok(format!("no elements matching \"{find}\" found{diag_note}"));
@@ -2057,7 +2121,15 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
         let mut out = format!("find \"{}\": {} match{}\n", find, matches.len(), if matches.len() > 1 { "es" } else { "" });
         for m in &matches {
             let ref_id = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
-            out.push_str(&format!("{} {} \"{}\" (score: {})\n", ref_id, m.role, m.name, m.score));
+            let ctx = if m.ctx.is_empty() {
+                String::new()
+            } else {
+                format!(" (in {})", m.ctx)
+            };
+            out.push_str(&format!(
+                "{} {} \"{}\"{} (score: {})\n",
+                ref_id, m.role, m.name, ctx, m.score
+            ));
         }
         return Ok(out);
     }

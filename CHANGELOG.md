@@ -8,6 +8,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The nine-finding reddit-friction fix — universal, not site-specific.**
+  Every item was reproduced live first (opencode-agent report: posting and
+  deleting a comment on r/SillyTavernAI) and re-verified live after the fix:
+  - **Pending-mount capture.** A connected editable control that is not
+    rendered yet (reddit's composer during hydration: a light child not
+    assigned to any shadow slot — empty computed styles, 0×0 rect) is now
+    surfaced with an honest `(not rendered yet - site component still
+    mounting)` note, its box anchored to the nearest rendered ancestor; the
+    same ref survives the mount and drops the note. `aria-placeholder` joins
+    the accessible-name fallback chain.
+  - **Scroll verdicts are measured.** The wheel arm samples the window
+    scroller and the scrollable under the pointer before/after each burst:
+    `scrolled page delta+4700 (y 0 -> 4700)` / `no movement - page already
+    at the bottom (y 4746 of 4746)` / `scrolled <scroller> delta+N (page
+    unchanged)`. The old unconditional `scrolled (dx, dy)` printed success
+    even when nothing moved.
+  - **Click dispatch honesty.** `is_topmost` now walks the composed tree (a
+    retargeted shadow host no longer reads as an occluder and no longer
+    forces the js-only path — reddit's dropdown menus open via mouse now);
+    the js fallback dispatches a full composed pointer sequence
+    (pointerdown/mousedown/pointerup/mouseup/click) instead of a bare
+    `.click()`.
+  - **Selector misses explain themselves; multi-matches must be chosen.**
+    A zero-match selector reports the closest live matches for its loosest
+    matching suffix, with container context; multiple VISIBLE matches now
+    error with a numbered, context-tagged list (`a.yes` under
+    `form.toggle.sendreplies-button` vs `form.toggle.del-button`) instead of
+    silently clicking the first — nth picks deliberately.
+  - **find names locations.** Actionable matches carry container context
+    (`(in span.user < div#header-bottom-right)`); text-present misses name
+    the deepest containing element and the actionables inside it
+    (`text found in span.option.error (in form.toggle.del-button <
+    ul.flat-list.buttons) (nearby actionables: a "yes", a "no")`).
+  - **`href="#"` renders as `#`** (it used to resolve to the page URL and
+    read as a navigation link); `see --filter` output carries container
+    context; the `form.id` named-access wart (forms expose a child input
+    named "id") no longer corrupts element descriptors.
+
+### Added
+- **Composed-scope selector addressing.** `outer-scope inner-control`
+  matches when the scope matches ANY composed ancestor of the target —
+  selectors cross shadow hosts (`shreddit-comment[thingid=…]
+  button[aria-label="Open user actions"]` resolves that comment's own menu).
+- **qol_probe 61 → 75 checks** (S16 + `universal.html`): pending note +
+  mount transition + end-to-end typing, selector near-miss, multi-match +
+  nth, find container/nearby wording, '#' href, measured scroll (bottom
+  boundary + nested scroller), shadow-crossing scoped selector.
+
 ## [4.0.0] - 2026-09-27
 
 ### Added

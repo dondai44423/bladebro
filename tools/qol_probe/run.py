@@ -37,6 +37,13 @@ Asserted behaviors (the contract):
       reasons; a state-only click never reads as real DOM change; coordinate
       and occluded clicks name what actually receives the click; scoped
       content reads one subtree
+ 12. universal fixes (unit 2): pending-mount editables surface with an honest
+      note and become typable once mounted (the reddit 0x0 composer class);
+      selector misses name the closest live matches; multiple visible
+      matches require nth (context-listed, never a silent top-pick); find
+      text-present names the container + nearby actionables; '#' hrefs
+      render honestly; scroll verdicts come from MEASURED movement
+      (bottom boundary / nested scroller honesty).
 
 Environment is isolated (own BLADE_HOME, own fixture port, no display leak).
 Run:  python3 tools/qol_probe/run.py            (uses target/release/bladebro)
@@ -392,6 +399,75 @@ def main():
         out = cli("see", "content", "--scope", aside_ref)
         check("scoped read renders a nav/aside/header/footer root",
               "Aside panel details for scoped read." in out, first_line(out))
+
+        # S16: universal fixes (unit 2): pending-mount capture with an honest
+        # note (reddit's 0x0 composer class: a slot-pending light child that
+        # is CONNECTED but not rendered), aria-placeholder naming, selector
+        # misses that name the closest live matches, multi visible matches
+        # requiring nth (context-listed, never a silent top-pick), find
+        # text-present naming the container + nearby actionables, honest '#'
+        # hrefs, and scroll verdicts built from MEASURED movement.
+        cli("nav", f"http://127.0.0.1:{PORT}/universal.html")
+
+        out = cli("see", "--filter", "Join the conversation")
+        check("pending-mount editable surfaces with an honest note",
+              "textbox" in out and "(not rendered yet" in out, first_line(out))
+        check("pending name resolves from aria-placeholder",
+              '"Join the conversation"' in out, first_line(out))
+
+        cli("act", "click", "--selector", "#mount-composer")
+        out = cli("see", "--filter", "Join the conversation")
+        check("mounted composer loses the pending note",
+              "textbox" in out and "(not rendered yet" not in out, first_line(out))
+        out = cli("act", "type", "--selector", "#pending-editor", "composer text")
+        v = first_line(out)
+        got = ev('(document.getElementById("pending-editor")||{innerText:""}).innerText')
+        check("mounted composer is typable (end to end)",
+              'value="composer text"' in v and norm(got) == "composer text", f"{v} | {got!r}")
+
+        rc, out = cli_rc("act", "click", "--selector", "[data-probe=scope1] span.toggle.del-button a.yes")
+        check("selector miss names the closest live matches",
+              rc != 0 and "closest live matches" in out and 'for "a.yes" (2 found)' in out
+              and "form.toggle.del-button" in out, f"rc={rc} {first_line(out)}")
+
+        rc, out = cli_rc("act", "click", "--selector", "[data-probe=scope1] a.yes")
+        check("multi visible matches require nth (context-listed)",
+              rc != 0 and "matches 2 visible elements" in out and "1)" in out and "2)" in out
+              and "add nth=N" in out, f"rc={rc} {first_line(out)}")
+
+        out = cli("act", "click", "--selector", "[data-probe=scope1] a.yes", "--nth", "2")
+        clicked = ev("window.__yesClicked||''")
+        check("nth picks deliberately among visible matches",
+              clicked == "del", f"clicked={clicked!r} {first_line(out)}")
+
+        out = cli("see", "--find", "are you sure? yes")
+        check("find text-present names the container and nearby actionables",
+              "text found in div#confirm-row" in out and 'nearby actionables: a "yes", a "no"' in out,
+              first_line(out))
+
+        out = cli("see", "--filter", "hash action")
+        check("href='#' renders honestly (no fake destination)",
+              '"hash action" → #' in out, first_line(out))
+        check("filter output carries container context", "(in div#hash-row)" in out, first_line(out))
+
+        out = cli("act", "scroll", "0", "999999")
+        check("scroll reports measured page movement", "scrolled page delta" in out, first_line(out))
+        out = cli("act", "scroll", "0", "999999")
+        check("scroll at the bottom says so (no false success)",
+              "no movement - page already at the bottom" in out, first_line(out))
+        cli("act", "eval", "document.getElementById('inner-scroll').style.display='block';window.scrollTo(0,0);1")
+        out = cli("act", "scroll", "0", "300")
+        check("nested scroller movement is reported as such",
+              "scrolled div#inner-scroll" in out and "page unchanged" in out, first_line(out))
+
+        # Scoped selectors cross shadow hosts (composed ancestors):
+        # `host-scope inner-control` matches inside the host's shadow tree.
+        cli("nav", f"http://127.0.0.1:{PORT}/shadow.html")
+        out = cli("act", "click", "--selector", "shadow-menu-host #overflow-trigger")
+        v = first_line(out)
+        opened = ev("(function(){var t=document.querySelector('shadow-menu-host').shadowRoot.querySelector('overflow-menu').shadowRoot.querySelector('#overflow-trigger');return t.getAttribute('aria-expanded');})()")
+        check("scoped selector crosses shadow hosts (composed ancestors)",
+              "dom-changed" in v and opened == "true", f"{v} | aria-expanded={opened}")
     finally:
         try:
             cli("stop", timeout=30)
