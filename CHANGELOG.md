@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     read as a navigation link); `see --filter` output carries container
     context; the `form.id` named-access wart (forms expose a child input
     named "id") no longer corrupts element descriptors.
+- **Post-review hardening of the same unit.** A scroll burst whose
+  before/after measurement probe fails no longer degrades into zeroes (it
+  could print `no movement - page already at the top` with no measurement
+  behind it — the class this unit exists to kill); the unmeasured case now
+  reports `scroll dispatched (dx, dy) - movement not measured`. The
+  composer-hook sig derivation descends `shadowRoot.activeElement` chains,
+  so a shadow-internal focus resolves to the real editor, not its host.
 
 ### Added
 - **Composed-scope selector addressing.** `outer-scope inner-control`

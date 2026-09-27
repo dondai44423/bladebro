@@ -775,7 +775,10 @@ fn compute_verdict(
                     )
                 }
             }
-            None => format!("outcome: scrolled ({dx}, {dy})"),
+            // Probe failed on this burst: claim the dispatch, not movement.
+            None => format!(
+                "outcome: scroll dispatched ({dx}, {dy}) - movement not measured (probe unavailable)"
+            ),
         },
         Action::Read { .. } => "outcome: read".to_string(),
         Action::Wait { condition, .. } => format!("outcome: waited ({condition})"),
@@ -2109,9 +2112,11 @@ async fn sub_fires(sub: &mut crate::cdp::SessionSubscription, method: &str) -> b
 /// same algorithm (deepAll order, `role|name|rank`) the model and
 /// find-by-sig use, so the result resolves in churn-free terms. Used after a
 /// collapsed composer expands: the strip unmounts and rank churn across
-/// hydrations would strand the captured strip sig.
+/// hydrations would strand the captured strip sig. Descends
+/// `shadowRoot.activeElement` chains: a shadow-internal focus resolves to
+/// the real editor, not its host.
 fn editor_sig_expr() -> String {
-    "(()=>{const d=document;const a=d.activeElement;if(!a)return '';".to_string()
+    "(()=>{const d=document;var a=d.activeElement;var _g=0;while(a&&a.shadowRoot&&a.shadowRoot.activeElement&&_g<20){a=a.shadowRoot.activeElement;_g++;}if(!a)return '';".to_string()
         + &JS_PREAMBLE
         + "try{const ce=a.isContentEditable||(a.getAttribute&&a.getAttribute('contenteditable')==='true');const ta=a.tagName==='TEXTAREA';const ip=a.tagName==='INPUT'&&a.type!=='hidden';if(!ce&&!ta&&!ip)return '';}catch(_e){return '';}"
         + "const all=deepAll(d,sel);const counts={};let hit='';"
@@ -2640,19 +2645,25 @@ pub async fn perform_with_network(
             let jnum = |v: &Option<serde_json::Value>, k: &str| {
                 v.as_ref().and_then(|o| o.get(k)).and_then(|n| n.as_f64())
             };
-            scroll_report = Some(ScrollReport {
-                before_y: jnum(&before_v, "y").unwrap_or(0.0),
-                after_y: jnum(&after_v, "y").unwrap_or(0.0),
-                max_y: jnum(&after_v, "max").unwrap_or(0.0),
-                scroller: after_v
-                    .as_ref()
-                    .and_then(|o| o.get("el"))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                scroller_before: jnum(&before_v, "elTop"),
-                scroller_after: jnum(&after_v, "elTop"),
-            });
+            // Both samples must be real measurements: a failed probe must not
+            // degrade into zeroes, or the verdict would say "already at the
+            // top" with no measurement behind it - exactly the class this
+            // report exists to kill. Unmeasured stays unmeasured (None arm).
+            if let (Some(before_y), Some(after_y)) = (jnum(&before_v, "y"), jnum(&after_v, "y")) {
+                scroll_report = Some(ScrollReport {
+                    before_y,
+                    after_y,
+                    max_y: jnum(&after_v, "max").unwrap_or(0.0),
+                    scroller: after_v
+                        .as_ref()
+                        .and_then(|o| o.get("el"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    scroller_before: jnum(&before_v, "elTop"),
+                    scroller_after: jnum(&after_v, "elTop"),
+                });
+            }
         }
         Action::Read { .. } => {
             // Read is handled by handle_act directly (returns text, not delta).
