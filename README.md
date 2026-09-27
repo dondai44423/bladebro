@@ -4,7 +4,7 @@
 
 **Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
 
-Re-render-immune refs · batch actions · auto-extract · self-improving · 6-layer stealth
+Re-render-immune refs · batch actions · auto-extract · self-improving · 6-layer stealth · drive your own browser
 
 One MCP server · one CLI · one persistent page model · no Node.js · one binary · Linux · macOS · Windows
 
@@ -16,13 +16,15 @@ One MCP server · one CLI · one persistent page model · no Node.js · one bina
 npm install -g bladebro && bladebro mcp
 ```
 
-[Demo](#-demo) · [Install](#-install) · [The 5 tools](#-the-5-tools) · [Usage](#-usage) · [Stealth Bench V1](#-stealth-bench-v1) · [Stealth](#-stealth) · [Adapters](#-site-adapters) · [Comparison](#-comparison) · [Gotchas & limits](#-gotchas--limits)
+[Demo](#-demo) · [Install](#-install) · [The 5 tools](#-the-5-tools) · [Usage](#-usage) · [Your browser](#-real-browser-mode) · [Stealth Bench V1](#-stealth-bench-v1) · [Stealth](#-stealth) · [Adapters](#-site-adapters) · [Comparison](#-comparison) · [Gotchas & limits](#-gotchas--limits)
 
 </div>
 
 ---
 
 **Bladebro is an agentic browser driver** — it gives an AI agent full control of a real browser through **5 tools**, not thirty. Built in Rust on a self-built CDP transport: one static binary, no Node.js, no Playwright, no runtime. It holds a persistent **Live Page Model** across tool calls, so every action returns **what changed** — never the whole page again.
+
+> **⭐ New — drive *your* browser.** `bladebro rb on` switches every surface to your own Chromium-family browser — your profile, your logins, your display — with the page-injection layer **off entirely**: a real environment has no manufactured tells to catch. Everything driver-side stays on. **[Real-browser mode →](#-real-browser-mode)**
 
 ## 🎬 Demo
 
@@ -51,6 +53,7 @@ Run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benc
 | **Auto-extract + adapters** | Template-free list extraction, site-aware: Reddit comment trees, X.com threads, GitHub repos, product pages. |
 | **Infinite-scroll collect** | `act collect` scrolls, dedupes and returns a whole feed as one artifact, in one call. |
 | **6-layer stealth** | Protocol, environment, behavior, coherence, residue, seasoning — on by default, verified against real detectors. |
+| **Real-browser lane** | `bladebro rb on` drives your real Chrome-family browser — your profile, your display — with zero page patches and every driver feature on. |
 | **Self-improving** | Learns consent selectors, block choices and settle timing per domain; one behavioral fingerprint forever. |
 | **Self-healing** | Dead refs re-resolve, dead tabs reopen, crashed Chrome relaunches — transparently. |
 
@@ -67,11 +70,11 @@ No Rust, no compilation, no dependencies. npm resolves the prebuilt binary for y
 
 | Platform | Package | Size | Status |
 |---|---|---|---|
-| Linux x86_64 | `bladebro-linux-x64` | 6.5 MB | Live-verified |
-| Linux ARM64 | `bladebro-linux-arm64` | 5.6 MB | Not live-verified |
-| Windows x86_64 | `bladebro-windows-x64` | 6.0 MB | Live-verified |
-| macOS Intel | `bladebro-darwin-x64` | 6.0 MB | CI-verified |
-| macOS Apple Silicon | `bladebro-darwin-arm64` | 5.5 MB | CI-verified |
+| Linux x86_64 | `bladebro-linux-x64` | 7.3 MB | Live-verified |
+| Linux ARM64 | `bladebro-linux-arm64` | 6.3 MB | Not live-verified |
+| Windows x86_64 | `bladebro-windows-x64` | 6.7 MB | Live-verified |
+| macOS Intel | `bladebro-darwin-x64` | 6.7 MB | CI-verified |
+| macOS Apple Silicon | `bladebro-darwin-arm64` | 6.2 MB | CI-verified |
 
 <sub>Every release builds and passes CI on Ubuntu, macOS and Windows. Linux ARM64 and macOS binaries are cross-compiled from Linux with cargo-zigbuild.</sub>
 
@@ -102,7 +105,7 @@ Every call returns an **outcome verdict + page delta**. Click auto-escalates mou
 
 | Action | Example | What it does |
 |---|---|---|
-| `click` | `act click e5` / `act click text="Sign in"` / `act click selector="#menu li"` | Mouse, JS, Enter escalation; `selector=` reaches controls inside open shadow roots |
+| `click` | `act click e5` / `act click text="Sign in"` / `act click selector="#menu li"` | Mouse, JS, Enter escalation; `selector=` reaches controls inside open shadow roots — a bad selector errors as invalid, an out-of-range `nth` errors with the real match count |
 | `type` | `act type label="Search" text="hello"` | Cadenced typing into textboxes |
 | `fill` | `act fill fields=[...] submit="Go"` | Multi-field forms in ONE call, auto-detects field type |
 | `batch` | `act batch steps=[...]` | Multi-step workflows in ONE call |
@@ -112,7 +115,7 @@ Every call returns an **outcome verdict + page delta**. Click auto-escalates mou
 | `eval` | `act eval js="document.title"` | Console-style JS; `el` in scope when a ref is given |
 | `scroll` | `act scroll dy=800` | Smooth, eased wheel events |
 | `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
-| `press` | `act press key=Enter` | Real key event |
+| `press` | `act press key=Enter` / `key=Control+a` | Real key event; full chords (`Control+a`, `Meta+Enter`, `Shift+Tab`) |
 | `select` | `act select e4 option="Nepal"` | Dropdown by option text or value |
 | `read` | `act read e5` | Element text content |
 | `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
@@ -123,6 +126,7 @@ Every call returns an **outcome verdict + page delta**. Click auto-escalates mou
 
 - **Self-healing refs** — a dead ref re-resolves by identity: `act click e5` after navigation finds the new "Sign in" and reports `[ref e5 healed]`.
 - **Batch** — one call fills, submits, clicks; it continues through navigation and stops on the first error with step number + page state.
+- **`selector=` everywhere** — click, hover, type, select, clear, read, upload, eval, `fill` fields, and `batch`/`run` steps all accept a CSS selector (light DOM + open shadow roots); `nth=` picks among matches.
 - **`url=` on any action** — navigate first, then act: `act fill url="https://..." fields=[...]` reaches a page and fills it in one call.
 - **`slim=true`** — verdict only, no delta.
 
@@ -167,7 +171,7 @@ Every call returns an **outcome verdict + page delta**. Click auto-escalates mou
 ]}
 ```
 
-Use instead of `act batch` when you need branching (`if`/`else`), loops (`while`), or state ops that change tabs. `see` steps read inline — nav + loop + read across pages in ONE call.
+Use instead of `act batch` when you need branching (`if`/`else`), loops (`while`), or state ops that change tabs. `see` steps read inline — nav + loop + read across pages in ONE call. Steps take `optional: true` (a tolerated failure reports `failed (optional)` and the run continues), and `wait` accepts an `else: [...]` fallback branch when its condition times out.
 
 ### `vision` — screenshot (last resort)
 
@@ -259,6 +263,9 @@ bladebro see extract auto --json
 bladebro state cookies
 bladebro state open-tab https://example.com
 
+# Drive your own browser
+bladebro rb on && bladebro nav https://news.ycombinator.com
+
 # Screenshot with ref badges
 bladebro vision --marks --json | jq -r .image_path
 ```
@@ -330,7 +337,7 @@ Six layers, all on by default, no config needed:
 | Test | Result |
 |---|---|
 | 61-check local suite + boot self-check + drift stamp (`bladebro audit`) | 61/61 pass, stamps stable |
-| Differential oracle vs stock Chrome on the same display (`tools/diff_oracle`) | 67 probes: 49 identical, 18 documented mask surface, **0 divergent** |
+| Differential oracle vs stock Chrome on the same display (`tools/diff_oracle`) | 67 probes: identical or documented mask surface in every profile state, **0 divergent** |
 | Real-browser lane vs stock Chrome (`oracle.py --lane real`) | 67 probes: **all identical, 0 expected, 0 divergent** — the lane carries no page patches |
 | CreepJS | **headless: 0%, stealth: 0%** (stock Chrome on the same lane: 0%/0%) |
 | bot.sannysoft.com | All pass |
@@ -341,6 +348,8 @@ Six layers, all on by default, no config needed:
 Run `bladebro audit` to verify your own setup; run `python3 tools/diff_oracle/oracle.py` before any release.
 
 ## 🌐 Real-browser mode
+
+> **The strongest fingerprint is a real one.** No manufactured coherence to maintain — this lane simply *is* your browser, on your machine, with your history.
 
 The stealth layers above manufacture coherence inside an isolated browser. The
 real-browser lane deletes the problem instead: it drives **your own**
@@ -381,7 +390,7 @@ browser is left running, untouched. No host restart anywhere.
 
 Built-in, automatic, zero config — and zero cost to the tool definitions. Adapters are runtime heuristics: they add no tools and no parameters, and their extra fields appear only on pages that have them.
 
-- **Reddit** — `see extract=auto` on a post returns the FULL comment tree in ONE call: every reply (collapsed included), thread-ordered with depth, author/score/date, full text, an `op` flag on the submitter's comments, and honest `count`/`total`/`complete` fields. On feeds: typed posts (title, score, comments, author, subreddit, date, domain). `see mode=content` gives clean title/meta/body markdown.
+- **Reddit** — `see extract=auto` on a post returns the FULL comment tree in ONE call: every reply (collapsed included), thread-ordered with depth, author/date, `fuzzed_score` (Reddit's displayed values, labeled as such), full text, an `op` flag on the submitter's comments, and honest `count`/`total`/`complete` fields. On feeds: typed posts (title, `fuzzed_score`, comments, author, subreddit, date, domain). `see mode=content` gives clean title/meta/body markdown.
 - **X.com (Twitter)** — `see extract=auto` on a status page returns the FULL conversation in ONE call: the focal post plus every reply and nested reply, thread-ordered with depth, author/date/counts, media and an `op` flag — read from the page's own API traffic (query ids captured live, self-healing across deploys). Profile/search/home return timelines the same way; search falls back to bounded in-page collection when X gates its API. The composer works through the normal tools: `act click` Reply → `act type` → `act click` Post.
 - **GitHub** — repo pages: description, stars, forks, language, topics; issue/PR lists: number, title, status, labels, author per row.
 - **Product pages** — price (with strikethrough original), rating, availability, key features — on any shop, not a fixed list of stores.
@@ -406,6 +415,7 @@ Learns from every session, persists in `knowledge/` under your data root, surviv
 | Tool defs | **~1,900 tokens** | 0 (CLI) | ~13,700 tokens | ~8,000 tokens |
 | Per-click result | **60–570 tokens** (delta) | ~1,400 (snapshot) | 2,000+ | 2,000+ |
 | Stealth | **6 layers + biometrics** | None | None | None |
+| Drive your own browser | **Yes (`rb on`)** | No | No | No |
 | Re-render immunity | **Yes** | No | No | No |
 | Self-improvement | **Yes** | No | No | No |
 | Auto-extraction | **Template-free, site-aware** | No | No | No |
@@ -413,7 +423,7 @@ Learns from every session, persists in `knowledge/` under your data root, surviv
 | Infinite-scroll collect | **Yes** | No | No | No |
 | Runtime | **None (static binary)** | Node.js daemon | Node.js | Node.js |
 | Page model | **Persistent, ref-stable, diff-first** | A11y snapshot | None | None |
-| Binary size | **6.5 MB** | ~50 MB (node + deps) | ~50 MB | ~50 MB |
+| Binary size | **7.3 MB** | ~50 MB (node + deps) | ~50 MB | ~50 MB |
 | Platforms | **Linux, macOS, Windows** | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
 ### Head-to-head: Bladebro vs agent-browser
