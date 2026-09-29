@@ -238,17 +238,21 @@ impl SessionProfile {
         }
     }
 
-    /// Copy a session profile into the template without removing the session
-    /// dir. Used by the orphan reaper to rescue a dead session's state on the
-    /// next launch (graceful-kill the orphan, flush, then copy). The template
-    /// is only replaced after Chrome is dead, so the copy is never taken from
-    /// a live, un-flushed profile.
-    pub fn sync_back_only(dir: &Path) {
-        let root = platform::blade_dir();
+    /// Copy a session profile into the template at `root` without removing
+    /// the session dir. Used by the orphan reaper to rescue a dead session's
+    /// state on the next launch (graceful-kill the orphan, flush, then copy).
+    /// The template is only replaced after Chrome is dead, so the copy is
+    /// never taken from a live, un-flushed profile.
+    ///
+    /// `root` is passed in rather than re-resolved: `blade_dir()` reads the
+    /// process-global env, and a second resolution could land in a different
+    /// directory than the reap that called us (the test suite flips
+    /// BLADE_HOME on other threads).
+    fn sync_back_only_at(root: &Path, dir: &Path) {
         if other_live_sessions_at(&root.join("profiles")) {
             return;
         }
-        if !Self::acquire_lock_at(&root) {
+        if !Self::acquire_lock_at(root) {
             return;
         }
         let tmp = root.join(".profile.sync");
@@ -462,13 +466,27 @@ fn restore_interrupted_swap(blade_dir: &Path) -> bool {
 }
 
 pub fn reap_orphans() {
-    let blade_dir = platform::blade_dir();
+    reap_orphans_at(&platform::blade_dir());
+
+    // Stale Xvfb locks + orphan Xvfb processes (Linux).
+    #[cfg(target_os = "linux")]
+    {
+        reap_xvfb();
+    }
+}
+
+/// The reaper core, parameterized on the data root. The root is resolved
+/// ONCE by the caller: everything below must operate on the same directory —
+/// a mid-reap `blade_dir()` re-resolution could be redirected by the
+/// process-global env changing on another thread (tests flip BLADE_HOME in
+/// parallel), which is the split-brain this signature exists to prevent.
+fn reap_orphans_at(blade_dir: &Path) {
     // `.profile.sync` is just the staging copy, safe to drop.
     let _ = std::fs::remove_dir_all(blade_dir.join(".profile.sync"));
-    restore_interrupted_swap(&blade_dir);
+    restore_interrupted_swap(blade_dir);
 
     // 1. Dead session profiles + their Chromes (agent lane).
-    reap_session_root(&blade_dir.join("profiles"), None);
+    reap_session_root(blade_dir, None);
 
     // 1b. Real-lane (clone) roots: swap leftovers + dead sessions. A dead
     // MCP/daemon process must not leak its Chrome or lose the clone's state.
@@ -481,22 +499,17 @@ pub fn reap_orphans() {
             }
             restore_interrupted_real_swap(&root);
             let _ = std::fs::remove_dir_all(root.join("template.sync"));
-            reap_session_root(&root.join("profiles"), Some(&root));
+            reap_session_root(&root, Some(&root));
         }
-    }
-
-    // 2. Stale Xvfb locks + orphan Xvfb processes (Linux).
-    #[cfg(target_os = "linux")]
-    {
-        reap_xvfb();
     }
 }
 
-/// Reap dead session dirs under `profiles`; `real_root` selects the
-/// sync-back destination (`None` = the agent-lane template).
-fn reap_session_root(profiles: &Path, real_root: Option<&Path>) {
+/// Reap dead session dirs under `root/profiles`; `real_root` selects the
+/// sync-back destination (`None` = the agent-lane template at `root`,
+/// `Some` = the browser-root's own `template/`).
+fn reap_session_root(root: &Path, real_root: Option<&Path>) {
     let my_pid = std::process::id();
-    let entries = match std::fs::read_dir(profiles) {
+    let entries = match std::fs::read_dir(root.join("profiles")) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -528,8 +541,8 @@ fn reap_session_root(profiles: &Path, real_root: Option<&Path>) {
         // graceful shutdown lose all their state — the reaper just deleted
         // the dir.
         match real_root {
-            Some(root) => SessionProfile::sync_back_real(root, &dir),
-            None => SessionProfile::sync_back_only(&dir),
+            Some(real_root) => SessionProfile::sync_back_real(real_root, &dir),
+            None => SessionProfile::sync_back_only_at(root, &dir),
         }
         let _ = std::fs::remove_dir_all(&dir);
         eprintln!("[bladebro] reaped dead session profile {name}");
@@ -824,22 +837,24 @@ mod tests {
 
     #[test]
     fn stale_lock_with_dead_owner_is_broken_and_acquired() {
-        let _ = std::fs::create_dir_all(platform::blade_dir());
-        let lock = platform::blade_dir().join(".template.lock.test-dead");
+        // Hermetic: locks live in a temp dir, never the shared real one.
+        let dir = std::env::temp_dir().join(format!("bladebro-lock-dead-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let lock = dir.join(".template.lock.test-dead");
         let _ = std::fs::remove_file(&lock);
-        // A dead pid must never wedge sync: acquiring should break the lock.
+        // A dead pid must never wedge sync: the lock must read as stale.
         std::fs::write(&lock, "999999999 0\n").unwrap();
-        // Redirect acquire to the test path by temporarily using a helper
-        // that reads this exact file name.
-        let stale = template_lock_stale(&lock);
-        assert!(stale, "lock owned by a dead pid must be stale");
+        assert!(template_lock_stale(&lock), "lock owned by a dead pid must be stale");
         let _ = std::fs::remove_file(&lock);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn stale_lock_with_live_owner_is_not_stale() {
-        let _ = std::fs::create_dir_all(platform::blade_dir());
-        let lock = platform::blade_dir().join(".template.lock.test-live");
+        // Hermetic: locks live in a temp dir, never the shared real one.
+        let dir = std::env::temp_dir().join(format!("bladebro-lock-live-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let lock = dir.join(".template.lock.test-live");
         let _ = std::fs::remove_file(&lock);
         let me = std::process::id();
         let now = std::time::SystemTime::now()
@@ -847,29 +862,26 @@ mod tests {
         std::fs::write(&lock, format!("{me} {now}\n")).unwrap();
         assert!(!template_lock_stale(&lock), "live owner lock must not be stale");
         let _ = std::fs::remove_file(&lock);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn reaper_syncs_back_before_delete() {
-        let blade_dir = platform::blade_dir();        let profiles_dir = blade_dir.join("profiles");
-        let template_dir = blade_dir.join("profile");
+        // Hermetic: a temp root, never the shared real data dir. The env is
+        // process-global and parallel tests flip BLADE_HOME; the pre-fix
+        // version resolved the root twice (reap entry + sync) and could be
+        // split across two directories by a flip — and it mutated the real
+        // install (deleted its session dirs, swapped its template).
+        let root =
+            std::env::temp_dir().join(format!("bladebro-test-reaper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let profiles_dir = root.join("profiles");
+        let template_dir = root.join("profile");
 
-        // Clean ALL stale session dirs + locks so they don't interfere.
-        // (Live testing leaves orphaned session dirs with dead owners.)
-        if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
-        }
-        let _ = std::fs::remove_file(blade_dir.join(".template.lock"));
-        let _ = std::fs::remove_dir_all(blade_dir.join(".profile.sync"));
-
-        // Snapshot the entire template so we can restore it after.
-        let template_backup = std::env::temp_dir().join("bladebro-test-template-backup");
-        let _ = std::fs::remove_dir_all(&template_backup);
-        if template_dir.is_dir() {
-            copy_profile(&template_dir, &template_backup);
-        }
+        // Template with a marker file the sync must REPLACE, not merge into.
+        std::fs::create_dir_all(template_dir.join("Default")).unwrap();
+        std::fs::write(template_dir.join("Default/Cookies"), b"template-cookie-db").unwrap();
+        std::fs::write(template_dir.join("stale-marker"), b"old-template").unwrap();
 
         // Create a fake dead session with a marker file.
         let test_pid = 999_999_999u32; // guaranteed dead pid
@@ -881,8 +893,8 @@ mod tests {
             b"fake-cookie-db-data",
         ).unwrap();
 
-        // Run the reaper.
-        reap_orphans();
+        // Run the reaper against the temp root.
+        reap_orphans_at(&root);
 
         // Session dir should be gone.
         assert!(!sess_dir.exists(), "reaper should have removed session dir");
@@ -899,16 +911,12 @@ mod tests {
             content, b"fake-cookie-db-data",
             "template cookie DB should contain session data"
         );
+        assert!(
+            !template_dir.join("stale-marker").exists(),
+            "template must be replaced by the sync, not merged into"
+        );
 
-        // Restore the original template.
-        let _ = std::fs::remove_dir_all(&template_dir);
-        if template_backup.is_dir() {
-            let tmp = blade_dir.join(".profile.restore");
-            let _ = std::fs::remove_dir_all(&tmp);
-            copy_profile(&template_backup, &tmp);
-            let _ = std::fs::rename(&tmp, &template_dir);
-        }
-        let _ = std::fs::remove_dir_all(&template_backup);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The reaper must not delete the template when a sync-swap was SIGKILLed

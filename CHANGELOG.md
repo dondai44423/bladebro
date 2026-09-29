@@ -54,7 +54,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path.
 - **`validate_write_path` resolves symlinked ancestors** — a path spelled
   through `~/drop → /etc` is blocked like `/etc` itself — and blocks
-  `/var/spool`.
+  `/var/spool`. A blocked directory matches under every spelling: what the
+  caller wrote, what the path resolves to, and the platform's own real
+  spelling of the directory (macOS `/etc` → `/private/etc`; Windows
+  `canonicalize` verbatim paths `\\?\C:\…` are normalized before
+  comparison — the first CI run after this audit caught the macOS hole,
+  and the Windows arm carried the same class). The rc-file gate matches
+  both spellings as well, so a symlinked home root cannot unlock
+  `~/.bashrc` and friends.
+- **The orphan reaper resolves its data root once.** `reap_orphans` called
+  `blade_dir()` again inside its sync-back path; with the process env
+  changing mid-reap (the parallel test suite flips `BLADE_HOME`), one reap
+  could read session dirs from one root and write the sync-back into
+  another — the macOS CI red on the audit commits was a test reading the
+  real template after exactly this split. The root is now resolved once and
+  threaded through (`reap_orphans_at` / `sync_back_only_at`), and the
+  reaper/lock tests are hermetic: temp roots, never a real `~/.blade`.
 
 ## [4.0.1] - 2026-09-27
 
