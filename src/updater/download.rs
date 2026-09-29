@@ -205,9 +205,11 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
             }
             Err(e) => {
                 last_err = e.to_string();
-                // Clean partial file on error so next retry starts fresh
-                // (unless it's a resume-able network error).
-                let _ = std::fs::remove_file(&tmp);
+                // KEEP the partial file: the next attempt resumes from it
+                // with a Range request. Deleting it here (as this used to)
+                // made the advertised resume support dead code — every
+                // retry was a full re-download. SHA256 verification still
+                // gates whatever a resumed download produces.
             }
         }
     }
@@ -377,6 +379,39 @@ fn check_disk_space(_dir: &std::path::Path, _needed: u64) -> Result<()> {
     Ok(())
 }
 
+/// Mach-O / fat-archive magic, accepting EVERY standard spelling. Modern
+/// macOS builds are little-endian 64-bit Mach-O — file bytes `cf fa ed fe`
+/// (MH_CIGAM_64), which is what every darwin asset in this repo starts
+/// with. The pre-fix check compared a big-endian u32 against only the
+/// big-endian spellings, so it rejected every real darwin binary: macOS
+/// `bladebro -u` and `--rollback` failed with "not a valid binary for this
+/// platform". Split from `binary_magic_ok` so the bytes stay unit-testable
+/// on every OS.
+pub(crate) fn macho_magic_ok(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let m = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    m == 0xFEEDFACE || m == 0xCEFAEDFE // 32-bit, big/little endian
+        || m == 0xFEEDFACF || m == 0xCFFAEDFE // 64-bit, big/little endian
+        || m == 0xCAFEBABE || m == 0xBEBAFECA // fat archives
+}
+
+/// Platform magic-byte check for a candidate binary. Single definition,
+/// shared by `verify_binary` and the rollback's `verify_backup` — the two
+/// used to carry duplicated (and equally wrong) copies.
+pub(crate) fn binary_magic_ok(data: &[u8]) -> bool {
+    if cfg!(target_os = "linux") {
+        data.len() >= 4 && data[..4] == [0x7F, b'E', b'L', b'F']
+    } else if cfg!(target_os = "macos") {
+        macho_magic_ok(data)
+    } else if cfg!(windows) {
+        data.len() >= 2 && data[..2] == *b"MZ"
+    } else {
+        true
+    }
+}
+
 /// Verify a downloaded binary is valid:
 /// 1. Correct magic bytes for the platform
 /// 2. Reasonable file size (1MB–500MB)
@@ -390,16 +425,7 @@ pub fn verify_binary(dl: &DownloadedBinary) -> Result<()> {
         return Err(BladeError::Other("downloaded file too small".into()));
     }
 
-    let magic_ok = if cfg!(target_os = "linux") {
-        data[..4] == [0x7F, b'E', b'L', b'F']
-    } else if cfg!(target_os = "macos") {
-        let m = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        m == 0xFEEDFACE || m == 0xFEEDFACF || m == 0xCAFEBABE || m == 0xBEBAFECA
-    } else if cfg!(windows) {
-        data[..2] == *b"MZ"
-    } else {
-        true
-    };
+    let magic_ok = binary_magic_ok(&data);
 
     if !magic_ok {
         return Err(BladeError::Other(
@@ -575,5 +601,48 @@ mod tests {
         // So this should pass magic (we wrote ELF header) but fail on size.
         assert!(verify_binary(&dl).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod magic_tests {
+    use super::*;
+
+    /// First 4 bytes of the shipped v4.0.1 darwin assets (od -t x1): both
+    /// darwin-arm64 and darwin-x64 start `cf fa ed fe` — little-endian
+    /// 64-bit Mach-O (MH_CIGAM_64). The pre-fix check accepted only the
+    /// big-endian spellings and rejected these, so every macOS self-update
+    /// and rollback failed with "not a valid binary for this platform".
+    #[test]
+    fn macho_magic_accepts_the_real_artifact_headers() {
+        assert!(macho_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01]));
+        assert!(macho_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE, 0x07, 0x00, 0x00, 0x01]));
+        // The other standard spellings stay accepted.
+        assert!(macho_magic_ok(&[0xFE, 0xED, 0xFA, 0xCF]));
+        assert!(macho_magic_ok(&[0xFE, 0xED, 0xFA, 0xCE]));
+        assert!(macho_magic_ok(&[0xCE, 0xFA, 0xED, 0xFE]));
+        assert!(macho_magic_ok(&[0xCA, 0xFE, 0xBA, 0xBE]));
+        assert!(macho_magic_ok(&[0xBE, 0xBA, 0xFE, 0xCA]));
+        // Foreign formats and short inputs are refused.
+        assert!(!macho_magic_ok(&[0x7F, b'E', b'L', b'F']));
+        assert!(!macho_magic_ok(b"MZ\x90\x00"));
+        assert!(!macho_magic_ok(&[]));
+        assert!(!macho_magic_ok(&[0xCF, 0xFA]));
+    }
+
+    /// The platform dispatch picks the right magic family per OS; the
+    /// target-specific arm must accept the same bytes the release assets use.
+    #[test]
+    fn binary_magic_matches_the_platform() {
+        if cfg!(target_os = "linux") {
+            assert!(binary_magic_ok(&[0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00]));
+            assert!(!binary_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE]));
+        } else if cfg!(target_os = "macos") {
+            assert!(binary_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01]));
+            assert!(!binary_magic_ok(&[0x7F, b'E', b'L', b'F']));
+        } else if cfg!(windows) {
+            assert!(binary_magic_ok(b"MZ\x90\x00"));
+            assert!(!binary_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE]));
+        }
     }
 }

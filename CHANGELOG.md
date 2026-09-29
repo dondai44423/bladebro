@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **macOS self-update and rollback were broken on every darwin build —
+  root-caused and fixed.** The downloaded-binary magic check compared a
+  big-endian `u32` against only the big-endian Mach-O spellings, so the
+  little-endian 64-bit bytes every real darwin asset starts with
+  (`cf fa ed fe`, MH_CIGAM_64 — verified against the shipped v4.0.1 assets)
+  were rejected as "not a valid binary for this platform": `bladebro -u`
+  aborted after the download and `--rollback` refused every valid backup.
+  The check now accepts both byte orders of the 32/64-bit and fat-archive
+  magics, lives in one place (`download::binary_magic_ok`) shared with
+  `verify_backup` (the two copies carried the same bug), and is pinned by
+  tests against the real artifact bytes.
+- **A failed copy during swap/rollback no longer leaves the install empty.**
+  If installing the downloaded binary (Windows) or restoring a backup (both
+  platforms) failed after the current binary had been renamed aside, the old
+  binary is now renamed back before the error is reported.
+- **Self-update resume actually resumes.** The retry loop deleted the partial
+  download on every failure — the advertised Range-resume support was dead
+  code; retries were full re-downloads. The partial file is kept now (SHA256
+  verification still gates whatever a resumed download produces).
+- **`release.sh` refuses to publish a partial release.** The five platform
+  binaries are gated before anything is committed, tagged or published (the
+  old warn-and-skip left a GitHub release missing a platform and failed
+  inside npm publish after the tag already existed). The push no longer
+  embeds the gh token into `origin`'s URL — a one-shot authenticated push
+  URL is used, so a hard-killed script can never leave the token in
+  `.git/config`.
+- **The npm shim fails loudly.** `bin.js` exited 0 when the platform binary
+  could not be spawned (missing exec bit, wrong arch, deleted file) — a
+  silent no-op scripts read as success; it now prints the launch error and
+  exits 1. The `bladebro-linux-arm64` package also ships its LICENSE like
+  the other five (tarball parity).
+- **CLI `--host`/`--port` errors are loud.** A missing or non-numeric value
+  used to be silently dropped and re-injected as `--port 0`; both the global
+  parser and the CLI endpoint extraction now answer `usage:` + exit 2
+  (missing values, bad numbers, port 0 on a connect-only endpoint).
+- **The CLI daemon can no longer be stalled by a silent client.** The
+  request read is bounded (30s): a local client that connects and never
+  writes used to wedge the whole daemon (no accepts, deferred signals, idle
+  timer halted) until SIGKILL.
+- **Data-dir fallback.** With `HOME` unset or empty, the data dir resolves
+  via the password database (`getpwuid_r`) instead of falling through to a
+  shared `/tmp` location; an empty `HOME` can no longer produce a relative
+  path.
+- **`validate_write_path` resolves symlinked ancestors** — a path spelled
+  through `~/drop → /etc` is blocked like `/etc` itself — and blocks
+  `/var/spool`.
+
 ## [4.0.1] - 2026-09-27
 
 ### Fixed

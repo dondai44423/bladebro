@@ -90,16 +90,30 @@ fn run() -> Result<()> {
         match args[i].as_str() {
             "--host" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    host = v.clone();
+                match args.get(i) {
+                    Some(v) if !v.is_empty() => host = v.clone(),
+                    _ => {
+                        return Err(bladebro::BladeError::Usage(
+                            "--host needs a value (e.g. --host 127.0.0.1)".into(),
+                        ));
+                    }
                 }
                 host_given = true;
             }
             "--port" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    port = v.parse().unwrap_or(0);
-                }
+                // Missing/invalid values are loud usage errors (exit 2). They
+                // used to fall back to 0 and get silently re-injected as
+                // `--port 0` — the user saw an unrelated error, or the run
+                // targeted the wrong endpoint.
+                let v = args.get(i).ok_or_else(|| {
+                    bladebro::BladeError::Usage(
+                        "--port needs a value (e.g. --port 9222; 0 = auto-launch)".into(),
+                    )
+                })?;
+                port = v.parse().map_err(|_| {
+                    bladebro::BladeError::Usage(format!("--port needs a number, got '{v}'"))
+                })?;
                 port_given = true;
             }
             "-h" | "--help" => {

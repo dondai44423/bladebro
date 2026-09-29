@@ -13,9 +13,36 @@ use std::time::Duration;
 pub fn home_dir() -> PathBuf {
     #[cfg(unix)]
     {
-        std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        if let Ok(h) = std::env::var("HOME") {
+            if !h.trim().is_empty() {
+                return PathBuf::from(h);
+            }
+        }
+        // HOME unset or empty (cron, services, sanitized envs): ask the
+        // password database for the account's real home. Falling straight
+        // to /tmp put the cookie-bearing data dir in a shared directory.
+        // getpwuid_r (not getpwuid): home_dir may run on any tokio worker.
+        unsafe {
+            let mut buf = [0 as libc::c_char; 1024];
+            let mut pwd: libc::passwd = std::mem::zeroed();
+            let mut result: *mut libc::passwd = std::ptr::null_mut();
+            if libc::getpwuid_r(
+                libc::getuid(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            ) == 0
+                && !result.is_null()
+                && !pwd.pw_dir.is_null()
+            {
+                let dir = std::ffi::CStr::from_ptr(pwd.pw_dir).to_string_lossy().to_string();
+                if !dir.trim().is_empty() {
+                    return PathBuf::from(dir);
+                }
+            }
+        }
+        PathBuf::from("/tmp")
     }
     #[cfg(windows)]
     {
@@ -172,6 +199,32 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
             other => normalized.push(other.as_os_str()),
         }
     }
+    // Symlink resolution: canonicalize the deepest EXISTING ancestor and
+    // re-append the untouched tail. A path spelled through a symlink
+    // (~/drop → /etc) must not pass on its harmless-looking spelling — the
+    // pre-fix check never resolved symlinks. An existing FINAL symlink
+    // resolves too, so the write target itself is what gets checked.
+    let mut probe = normalized.clone();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !probe.exists() {
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) if parent != probe => {
+                tail.push(name.to_os_string());
+                probe = parent.to_path_buf();
+            }
+            _ => break,
+        }
+    }
+    let normalized = match std::fs::canonicalize(&probe) {
+        Ok(base) => {
+            let mut p = base;
+            for c in tail.iter().rev() {
+                p.push(c);
+            }
+            p
+        }
+        Err(_) => normalized,
+    };
     let path_str = normalized.to_string_lossy().replace('\\', "/");
     let lower = path_str.to_lowercase();
 
@@ -179,7 +232,7 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
     {
         let blocked_prefixes: &[&str] = &[
             "/etc", "/usr", "/bin", "/sbin", "/boot", "/dev",
-            "/proc", "/sys", "/var/log", "/root", "/lib", "/lib64",
+            "/proc", "/sys", "/var/log", "/var/spool", "/root", "/lib", "/lib64",
             "/run", "/snap",
         ];
         for prefix in blocked_prefixes {
@@ -544,5 +597,26 @@ mod tests {
             resolve_blade_dir(home, &env_of(&over), false, true),
             std::path::PathBuf::from("D:\\blade")
         );
+    }
+}
+
+#[cfg(test)]
+mod write_path_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_path_resolves_symlinked_ancestors() {
+        let dir = std::env::temp_dir().join(format!("blade-vwp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("drop");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        // Spelled through the symlink, this resolves into /etc — blocked.
+        // The pre-fix check only saw the harmless-looking spelling.
+        assert!(validate_write_path(&link.join("bladebro-test")).is_err());
+        // A plain path under the same dir still passes.
+        assert!(validate_write_path(&dir.join("ok.txt")).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

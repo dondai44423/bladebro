@@ -277,7 +277,18 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     // --host / --port override the browser endpoint: drive an already-running
     // Chrome instead of the local daemon / a freshly launched one. main.rs
     // parses these globally and (since issue #16's fix) re-injects them here.
-    let (args, external) = extract_endpoint(args);
+    let (args, external) = match extract_endpoint(args) {
+        Ok(v) => v,
+        Err(e) => {
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({ "ok": false, "is_error": true, "text": e.to_string() })
+                );
+            }
+            return Err(e);
+        }
+    };
     let args: Vec<String> = args
         .iter()
         .filter(|a| a != &"--json" && a != &"--no-daemon")
@@ -638,7 +649,7 @@ async fn warm_profile(page: &mut Page) {
 /// forwarded to the CLI, so `state --port 9222` silently ignored the port.
 /// Position-independent — works regardless of whether the flags precede or
 /// follow the command.
-fn extract_endpoint(args: &[String]) -> (Vec<String>, Option<String>) {
+fn extract_endpoint(args: &[String]) -> Result<(Vec<String>, Option<String>)> {
     let mut host = String::from("127.0.0.1");
     let mut port: Option<u16> = None;
     let mut cleaned: Vec<String> = Vec::with_capacity(args.len());
@@ -646,16 +657,24 @@ fn extract_endpoint(args: &[String]) -> (Vec<String>, Option<String>) {
     while i < args.len() {
         match args[i].as_str() {
             "--host" => {
-                if let Some(v) = args.get(i + 1) {
-                    host = v.clone();
-                }
+                let v = args.get(i + 1).ok_or_else(|| {
+                    BladeError::Usage("--host needs a value (e.g. --host 127.0.0.1)".into())
+                })?;
+                host = v.clone();
                 i += 2;
                 continue;
             }
             "--port" => {
-                if let Some(v) = args.get(i + 1) {
-                    port = v.parse().ok();
+                let v = args.get(i + 1).ok_or_else(|| {
+                    BladeError::Usage("--port needs a value (e.g. --port 9222)".into())
+                })?;
+                let p: u16 = v.parse().map_err(|_| {
+                    BladeError::Usage(format!("--port needs a number, got '{v}'"))
+                })?;
+                if p == 0 {
+                    return Err(BladeError::Usage("--port 0 is not a usable debug port".into()));
                 }
+                port = Some(p);
                 i += 2;
                 continue;
             }
@@ -665,7 +684,7 @@ fn extract_endpoint(args: &[String]) -> (Vec<String>, Option<String>) {
         i += 1;
     }
     let external = port.map(|p| format!("{host}:{p}"));
-    (cleaned, external)
+    Ok((cleaned, external))
 }
 
 // ── Arg Parsing ────────────────────────────────────────────────────────
@@ -2257,8 +2276,17 @@ pub async fn run_daemon() -> Result<()> {
 
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
-                if reader.read_line(&mut line).await.is_err() {
-                    continue;
+                // Bounded read: a client that connects and never writes (or
+                // dies mid-request) must not stall the whole daemon — accepts,
+                // signals and the idle timer all sit behind this await.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    reader.read_line(&mut line),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    _ => continue, // io error, or a silent client — drop it
                 }
                 let line = line.trim();
                 if line.is_empty() { continue; }
@@ -3448,7 +3476,8 @@ mod tests {
     fn port_maps_to_default_host_endpoint() {
         let (cleaned, external) = extract_endpoint(&[
             "state".into(), "tabs".into(), "--port".into(), "9223".into(),
-        ]);
+        ])
+        .expect("valid endpoint");
         assert_eq!(cleaned, vec!["state".to_string(), "tabs".to_string()]);
         assert_eq!(external.as_deref(), Some("127.0.0.1:9223"));
     }
@@ -3458,7 +3487,8 @@ mod tests {
         let (cleaned, external) = extract_endpoint(&[
             "--host".into(), "192.168.1.50".into(),
             "see".into(), "content".into(), "--port".into(), "9222".into(),
-        ]);
+        ])
+        .expect("valid endpoint");
         assert_eq!(cleaned, vec!["see".to_string(), "content".to_string()]);
         assert_eq!(external.as_deref(), Some("192.168.1.50:9222"));
     }
@@ -3467,7 +3497,8 @@ mod tests {
     fn no_port_means_no_external_endpoint() {
         let (cleaned, external) = extract_endpoint(&[
             "state".into(), "cookies".into(), "--host".into(), "127.0.0.1".into(),
-        ]);
+        ])
+        .expect("host without port is still fine");
         assert_eq!(cleaned, vec!["state".to_string(), "cookies".to_string()]);
         assert!(external.is_none(), "host alone must not pin an endpoint");
     }
@@ -3476,7 +3507,8 @@ mod tests {
     fn flags_before_command_still_parse() {
         let (cleaned, external) = extract_endpoint(&[
             "--port".into(), "9333".into(), "vision".into(), "--marks".into(),
-        ]);
+        ])
+        .expect("valid endpoint");
         assert_eq!(cleaned, vec!["vision".to_string(), "--marks".to_string()]);
         assert_eq!(external.as_deref(), Some("127.0.0.1:9333"));
     }
@@ -3906,5 +3938,51 @@ mod tests {
         assert!(t.contains(env!("CARGO_PKG_VERSION")));
         assert!(t.contains("EXIT CODES"));
         assert!(t.contains("help --json"));
+    }
+}
+
+#[cfg(test)]
+mod endpoint_args_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn endpoint_flags_parse_and_strip() {
+        let (cleaned, ext) = extract_endpoint(&args(&["see", "--port", "9222"])).expect("valid port");
+        assert_eq!(cleaned, vec!["see"]);
+        assert_eq!(ext.as_deref(), Some("127.0.0.1:9222"));
+        let (cleaned, ext) =
+            extract_endpoint(&args(&["--host", "10.0.0.5", "state", "--port", "7"])).expect("valid");
+        assert_eq!(cleaned, vec!["state"]);
+        assert_eq!(ext.as_deref(), Some("10.0.0.5:7"));
+        // No --port: no external endpoint, daemon flow untouched.
+        let (cleaned, ext) = extract_endpoint(&args(&["nav", "example.com"])).expect("no endpoint");
+        assert_eq!(cleaned, vec!["nav", "example.com"]);
+        assert!(ext.is_none());
+    }
+
+    #[test]
+    fn endpoint_missing_or_bad_values_are_usage_errors() {
+        // Both used to be silently dropped and the call fell back to the
+        // daemon — against the loud-flag-error contract.
+        assert!(matches!(
+            extract_endpoint(&args(&["see", "--port"])),
+            Err(BladeError::Usage(_))
+        ));
+        assert!(matches!(
+            extract_endpoint(&args(&["see", "--port", "abc"])),
+            Err(BladeError::Usage(_))
+        ));
+        assert!(matches!(
+            extract_endpoint(&args(&["see", "--port", "0"])),
+            Err(BladeError::Usage(_))
+        ));
+        assert!(matches!(
+            extract_endpoint(&args(&["see", "--host"])),
+            Err(BladeError::Usage(_))
+        ));
     }
 }

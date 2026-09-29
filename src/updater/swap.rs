@@ -48,8 +48,12 @@ pub fn swap_binary(downloaded: &Path) -> Result<PathBuf> {
                 "cannot rename current exe (is bladebro running?). Close it first. Error: {e}"
             ))
         })?;
-        std::fs::copy(downloaded, &current)
-            .map_err(|e| BladeError::Other(format!("cannot install new binary: {e}")))?;
+        if let Err(e) = std::fs::copy(downloaded, &current) {
+            // Put the old binary back: without this a failed copy left the
+            // install with NO binary at the original path.
+            let _ = std::fs::rename(&old_path, &current);
+            return Err(BladeError::Other(format!("cannot install new binary: {e}")));
+        }
         std::fs::copy(&old_path, &backup)
             .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
         let _ = std::fs::remove_file(downloaded);
@@ -281,8 +285,12 @@ async fn do_rollback(backup_path: &Path, backup_name: &str) -> Result<()> {
                 "cannot rename current exe (is bladebro running?). Close it first. Error: {e}"
             ))
         })?;
-        std::fs::copy(backup_path, &current)
-            .map_err(|e| BladeError::Other(format!("cannot restore backup: {e}")))?;
+        if let Err(e) = std::fs::copy(backup_path, &current) {
+            // The current binary was already renamed aside — put it back so
+            // a failed restore never leaves the install empty.
+            let _ = std::fs::rename(&old_path, &current);
+            return Err(BladeError::Other(format!("cannot restore backup: {e}")));
+        }
         let _ = std::fs::remove_file(&old_path);
     }
 
@@ -298,8 +306,12 @@ async fn do_rollback(backup_path: &Path, backup_name: &str) -> Result<()> {
         }
         std::fs::rename(&current, &old_path)
             .map_err(|e| BladeError::Other(format!("cannot move current binary: {e}")))?;
-        std::fs::copy(backup_path, &current)
-            .map_err(|e| BladeError::Other(format!("cannot restore backup: {e}")))?;
+        if let Err(e) = std::fs::copy(backup_path, &current) {
+            // The current binary was already renamed aside — put it back so
+            // a failed restore never leaves the install empty.
+            let _ = std::fs::rename(&old_path, &current);
+            return Err(BladeError::Other(format!("cannot restore backup: {e}")));
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -327,16 +339,10 @@ fn verify_backup(path: &Path) -> Result<()> {
         return Err(BladeError::Other("backup file too small".into()));
     }
 
-    let magic_ok = if cfg!(target_os = "linux") {
-        data[..4] == [0x7F, b'E', b'L', b'F']
-    } else if cfg!(target_os = "macos") {
-        let m = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        m == 0xFEEDFACE || m == 0xFEEDFACF || m == 0xCAFEBABE || m == 0xBEBAFECA
-    } else if cfg!(windows) {
-        data[..2] == *b"MZ"
-    } else {
-        true
-    };
+    // Shared with the download verifier (updater/download.rs) — one
+    // definition, so the macOS byte-order bug fixed there cannot survive
+    // here (this copy rejected every real darwin backup too).
+    let magic_ok = crate::updater::download::binary_magic_ok(&data);
 
     if !magic_ok {
         return Err(BladeError::Other("invalid magic bytes".into()));
@@ -350,4 +356,39 @@ fn verify_backup(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod backup_verify_tests {
+    use super::*;
+
+    /// `verify_backup` must accept a file whose magic matches this
+    /// platform's real release artifacts (via the shared
+    /// `download::binary_magic_ok`). Regression: the macOS arm used to
+    /// reject the little-endian Mach-O bytes every darwin asset starts
+    /// with, so rollback refused every valid backup on macOS.
+    #[test]
+    fn verify_backup_accepts_platform_real_magic() {
+        let dir = std::env::temp_dir().join(format!("blade-swap-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("backup");
+        let mut data = vec![0u8; 1_000_100];
+        if cfg!(target_os = "linux") {
+            data[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        } else if cfg!(target_os = "macos") {
+            // Real darwin artifact header: MH_CIGAM_64.
+            data[..4].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]);
+        } else if cfg!(windows) {
+            data[..2].copy_from_slice(b"MZ");
+        }
+        std::fs::write(&path, &data).unwrap();
+        assert!(verify_backup(&path).is_ok(), "a real-artifact-magic backup must verify");
+        // Corrupting the magic must refuse it.
+        let mut bad = data.clone();
+        bad[0] ^= 0xFF;
+        std::fs::write(&path, &bad).unwrap();
+        assert!(verify_backup(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
