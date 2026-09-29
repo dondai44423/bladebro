@@ -1824,7 +1824,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.0.1...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.0.2...HEAD
+[4.0.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.2
 [4.0.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.1
 [4.0.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.0
 [1.0.0]: https://github.com/dondai44423/bladebro/releases/tag/v1.0.0
