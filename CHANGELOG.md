@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Reddit search pages have a dedicated `extract auto` path
+  (`container:"reddit-search"`).** Search results are client-rendered SDUI
+  components — `shreddit-post` never appears on a search page — so the feed
+  fast path never fired and the structural fallback returned items under a
+  generic `container:"div"`: one of reddit's most common task types running
+  on a heuristic, with output indistinguishable from the confident path. The
+  search sweep reads reddit's own listing JSON from page context (the same
+  loid-gated session the comment sweep uses): exact scores (not reddit's
+  fuzzed display values), author/date/url/subreddit, a self-post excerpt, the
+  query it actually answered echoed back (`query`, plus `sort`/`t` when set —
+  something the rendered DOM cannot prove), a paging note when more results
+  exist, and promoted posts skipped with a disclosed count. Covers `/search/`
+  and `/r/<sub>/search/` for the All/Posts/Links tabs; community/user
+  searches keep the DOM path.
+
+### Fixed
+- **Reads no longer answer with the previous route's content after a
+  client-side navigation.** An SPA router moves the URL before the new route
+  renders — the old route's DOM stays mounted and a DOM-quiet settle reads
+  "settled" the whole window — so `extract auto` could return the previous
+  query's results with `phase: ready`, real scores, and no signal at all
+  (reproduced live on reddit search; a deterministic fixture now pins it in
+  the QoL probe). The driver turns CDP's `Page.navigatedWithinDocument` into a
+  route epoch; before any read (`extract`, `collect`, `see`, and the capture
+  after every `act`) it waits for the transition to actually render —
+  DOM-quiet plus the in-flight drain, a minimum patience measured from the
+  navigation event, and a content signature that must hold still — and when it
+  cannot confirm stability inside the budget it says so
+  (`note: the page was still rendering a client-side navigation when this was
+  read`) instead of pretending. Reddit search additionally sidesteps the DOM
+  race by fetching by URL. Idle pages pay one atomic load.
+
 ### Changed
 - **Internal refactor — no behavior change.** The largest sources were split
   into thin cores plus focused submodules (`cli/`, `cli/args/`, `mcp/server/`

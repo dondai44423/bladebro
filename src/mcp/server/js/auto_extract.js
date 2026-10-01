@@ -63,6 +63,11 @@ const SKIP_TAGS=new Set(['STYLE','SCRIPT','HEAD','NOSCRIPT','SVG','TEMPLATE','LI
  // thread's own JSON endpoints and returns EVERY comment (collapsed replies
  // included) in one call. The DOM path below remains as the fallback.
  if(__POST_MARKER__&&isCp){var rbase=(location.pathname.match(/^(.*?\/comments\/[a-z0-9]+)/i)||[])[1];if(rbase){var rsort='confidence';var rsel=document.querySelector('[aria-selected=true],[aria-checked=true]');if(rsel){var rp=rsel;for(var ri=0;ri<6&&rp&&rp!==document.body;ri++){if(rp.tagName==='DATA'&&rp.getAttribute('value')){rsort=rp.getAttribute('value').toLowerCase();break;}rp=rp.parentElement;}}return JSON.stringify({container:'reddit-post-page',permalink:rbase,sort:rsort});}}
+ // Search pages: fully client-rendered SDUI units (no `shreddit-post` ever
+ // appears here), and the router swaps the results AFTER the url moves —
+ // reading the mounted DOM is exactly the stale window. Hand off to the Rust
+ // listing sweep, which reads reddit's own JSON (exact scores, query echo).
+ if(__POST_MARKER__){var spath=location.pathname;if(/\/search\/?$/.test(spath)){var sqs=new URLSearchParams(location.search);var sty=sqs.get('type')||'';if((sty===''||sty==='posts'||sty==='links'||sty==='all')&&(sqs.get('q')||'').trim()){return JSON.stringify({container:'reddit-search-page',path:spath,params:location.search});}}}
  const cmts=[...document.querySelectorAll('shreddit-comment')];
  const posts=[...document.querySelectorAll('shreddit-post')];
  if(isCp&&cmts.length>=3){

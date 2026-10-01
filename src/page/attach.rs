@@ -534,6 +534,9 @@ impl Page {
         });
 
         let in_flight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        // Client-side route-transition epoch: `Page.navigatedWithinDocument`
+        // events bump it (a router moved the url before the content painted).
+        let route = Arc::new(RouteEpoch::new());
         let net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let xhr_log: Arc<Mutex<std::collections::VecDeque<XhrEntry>>> =
@@ -542,6 +545,7 @@ impl Page {
         let net_counter = in_flight.clone();
         let net_log_t = net_log.clone();
         let xhr_log_t = xhr_log.clone();
+        let route_t = route.clone();
         let network_task = tokio::spawn(async move {
             use std::collections::HashMap;
             let mut rx = cdp_for_net.subscribe();
@@ -734,6 +738,13 @@ impl Page {
                             }
                         }
                     }
+                    // A client-side route change: the url has moved but the
+                    // previous route's DOM is still mounted. Arm the guard so
+                    // the next read waits for the swap instead of answering
+                    // with the old route's content.
+                    Some(Ok(ev)) if ev.method == "Page.navigatedWithinDocument" => {
+                        route_t.note_nav();
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                         // Events were dropped — the set may now hold stale IDs.
@@ -818,6 +829,7 @@ impl Page {
             dialogs,
             dialog_task: Some(dialog_task),
             in_flight,
+            route,
             net_log,
             xhr_log,
             network_task: Some(network_task),

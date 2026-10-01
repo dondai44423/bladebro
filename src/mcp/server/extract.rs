@@ -147,6 +147,11 @@ async fn run_auto_extract(
     limit: usize,
     post_marker: bool,
 ) -> Result<serde_json::Value> {
+    // A client-side route change leaves the PREVIOUS route's DOM mounted while
+    // the new route is still rendering (the router moves the url first). The
+    // detector would answer with stale items that look perfectly healthy, so
+    // wait the transition out before reading anything.
+    page.settle_route(crate::page::ROUTE_BUDGET).await;
     let expr = auto_extract_expr(limit, post_marker);
     let mut val = auto_extract_eval(page, &expr).await?;
     for _ in 0..2 {
@@ -213,6 +218,16 @@ fn auto_extract_output(json_str: &str) -> Result<String> {
     }
     Ok(format!("extract auto:\n{json_str}"))
 }
+/// Honest note when the read raced a client-side route transition — the page
+/// was still rendering the new route while the DOM was read.
+fn route_note(page: &Page) -> &'static str {
+    if page.take_route_unsettled() {
+        "\nnote: the page was still rendering a client-side navigation when this was read — items may predate it; re-run to refresh"
+    } else {
+        ""
+    }
+}
+
 pub async fn handle_auto_extract(
     page: &mut Page,
     limit: usize,
@@ -243,6 +258,7 @@ pub async fn handle_auto_extract(
             match crate::reddit::fetch_comments(page.cdp_ref(), &permalink, &sort, cap).await {
                 Ok(payload) => {
                     let json_str = serde_json::to_string(&payload)?;
+                    let _ = page.take_route_unsettled();
                     return auto_extract_output(&json_str);
                 }
                 Err(e) => {
@@ -262,6 +278,49 @@ pub async fn handle_auto_extract(
                     out.push_str(&format!(
                         "\nnote: full-thread fetch failed ({e}); items above are a DOM fallback and may miss collapsed replies{hint}"
                     ));
+                    out.push_str(route_note(page));
+                    return Ok(out);
+                }
+            }
+        }
+    }
+
+    // Reddit SEARCH pages: results are client-rendered SDUI units (no
+    // `shreddit-post` exists, so the feed fast path cannot see them) and the
+    // page's router swaps the feed AFTER the url moves — a DOM read here can
+    // answer the previous query. Hand off to reddit's own listing JSON: exact
+    // scores, the query it answered, and freshness independent of what the
+    // router has painted yet.
+    if val.get("container").and_then(|c| c.as_str()) == Some("reddit-search-page") {
+        let pathname = val.get("path").and_then(|p| p.as_str()).unwrap_or("");
+        let params = val.get("params").and_then(|p| p.as_str()).unwrap_or("");
+        if let Some((path, query)) = crate::reddit::search_target(pathname, params) {
+            let cap = if limit_explicit {
+                limit.clamp(1, crate::reddit::MAX_SEARCH_PAGE)
+            } else {
+                crate::reddit::DEFAULT_SEARCH_LIMIT
+            };
+            match crate::reddit::fetch_search(page.cdp_ref(), &path, &query, cap).await {
+                Ok(payload) => {
+                    let json_str = serde_json::to_string(&payload)?;
+                    let _ = page.take_route_unsettled();
+                    return auto_extract_output(&json_str);
+                }
+                Err(e) => {
+                    // Wall / cold profile: fall back to the mounted DOM, and
+                    // say so — the DOM cannot prove which query it shows.
+                    let val = run_auto_extract(page, limit, false).await?;
+                    let json_str = serde_json::to_string(&val)?;
+                    let mut out = auto_extract_output(&json_str)?;
+                    let hint = if crate::reddit::is_security_block(&e) {
+                        " (reddit's network-security wall is transient — retrying the extract in a few seconds usually returns the full listing)"
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!(
+                        "\nnote: reddit search listing fetch failed ({e}); items above are a DOM fallback{hint}"
+                    ));
+                    out.push_str(route_note(page));
                     return Ok(out);
                 }
             }
@@ -281,6 +340,7 @@ pub async fn handle_auto_extract(
         match crate::x::extract(page, kind, cap).await {
             Ok(payload) => {
                 let json_str = serde_json::to_string(&payload)?;
+                let _ = page.take_route_unsettled();
                 return auto_extract_output(&json_str);
             }
             Err(e) => {
@@ -292,13 +352,16 @@ pub async fn handle_auto_extract(
                 out.push_str(&format!(
                     "\nnote: x.com fast path failed ({e}); items above are a DOM fallback"
                 ));
+                out.push_str(route_note(page));
                 return Ok(out);
             }
         }
     }
 
     let json_str = serde_json::to_string(&val)?;
-    auto_extract_output(&json_str)
+    let mut out = auto_extract_output(&json_str)?;
+    out.push_str(route_note(page));
+    Ok(out)
 }
 /// V22: collect — auto-extract + scroll + dedupe loop. ONE call collects
 /// an entire infinite-scroll feed into a single artifact. The result names
@@ -386,7 +449,11 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     }
 
-    let status = format!("collected {} items — {stop}", all_items.len());
+    let status = format!(
+        "collected {} items — {stop}{}",
+        all_items.len(),
+        route_note(page)
+    );
     let json = serde_json::to_string_pretty(&all_items)?;
     if json.len() <= 12000 {
         return Ok(format!("{status}:\n{json}"));
@@ -424,6 +491,10 @@ mod extract_script_tests {
                 assert!(
                     js.contains("reddit-post-page"),
                     "post marker present when enabled"
+                );
+                assert!(
+                    js.contains("reddit-search-page"),
+                    "search handoff marker present when enabled"
                 );
             }
             let has_node = std::process::Command::new("node")

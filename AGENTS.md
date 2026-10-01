@@ -32,7 +32,7 @@ Rust: edition 2021, MSRV 1.86. Requirements: Chrome/Chromium installed. On headl
 | click/type/fill/select/press, find-by-sig, action conditions | `src/action.rs` + `src/action/` (perform, find, input, verdict, edit) |
 | capture, markdown, settle, block detection | `src/page/perception.rs` + `src/page/perception/` (wait, consent, block, content), `src/page/mod.rs` (JS in `src/page/js/`) |
 | refs, Live Page Model, deltas | `src/page/refs.rs`, `src/page/model.rs` |
-| navigation, tabs, attach, heal, page logs | `src/page/` (navigate, tabs, attach, heal, logs) |
+| navigation, tabs, attach, heal, page logs, client-side route guard | `src/page/` (navigate, tabs, attach, heal, logs, route) |
 | stealth injection (every page-side override) | `src/stealth/inject.rs` + `src/stealth/inject/` (gpu), `src/stealth/js/` |
 | mouse/typing biometrics, idle hum | `src/stealth/biometrics.rs`, `src/stealth/hum.rs` |
 | Chrome discovery, launch flags, CDP transports, Xvfb | `src/browser.rs` + `src/browser/`, `src/platform.rs` |
@@ -65,7 +65,7 @@ House rules: **reproduce before you fix** (don't "fix" what you haven't seen fai
 
 - `./target/release/bladebro audit` — 61 stealth vectors + cross-restart stability stamps. Must stay 61/61 after any stealth-adjacent change.
 - `python3 tools/diff_oracle/oracle.py` — stock Chrome vs bladebro, same display, identical probe battery; every difference classified EXPECTED (a documented mask, with its reason) or DIVERGENT. **`divergent: 0` is required — a DIVERGENT line is a STOP, not a note.** `--lane real` checks the real-browser lane (bar: 0 expected, 0 divergent).
-- `python3 tools/qol_probe/run.py` — the input/action behavior suite against local fixtures (`editor.html`, `shadow.html`, `extract.html`); 76 checks. The fastest way to validate click/type/fill/select changes, and the right place to add a repro when you fix an input bug.
+- `python3 tools/qol_probe/run.py` — the input/action behavior suite against local fixtures (`editor.html`, `shadow.html`, `extract.html`, `universal.html`, `router.html`); 79 checks. Runs on a local HTTP fixture server with its own `BLADE_HOME`. The fastest way to validate click/type/fill/select changes, and the right place to add a repro when you fix an input bug.
 - `python3 tools/lane_matrix.py all 5` — cold-start matrix across all five lanes (daemon / one-shot / MCP / MCP-pipe / real), 5 rounds each.
 - `python3 tools/rb_live/attach_drift.py` — real-lane attach drift check; run after touching `src/realbrowser.rs`.
 

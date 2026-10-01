@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
 use crate::page::perception::JS_PREAMBLE;
-use crate::page::{capture, wait_for_settle_with_network, LivePageModel, PageDelta};
+use crate::page::{capture, wait_for_settle_with_network, LivePageModel, PageDelta, RouteSettle};
 
 use super::edit::*;
 use super::find::*;
@@ -35,7 +35,7 @@ pub async fn perform(
     action: &Action,
     last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> Result<(PageDelta, String)> {
-    perform_with_network(cdp, lpm, action, None, last_mouse).await
+    perform_with_network(cdp, lpm, action, None, None, last_mouse).await
 }
 
 /// Mutation watcher: installed before an action dispatch so the next
@@ -71,6 +71,7 @@ pub async fn perform_with_network(
     lpm: &mut LivePageModel,
     action: &Action,
     in_flight: Option<&AtomicUsize>,
+    route: Option<&crate::page::RouteEpoch>,
     last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> Result<(PageDelta, String)> {
     // Resolve ref → (sig, frame) for ref-targeted actions.
@@ -847,7 +848,18 @@ pub async fn perform_with_network(
     if let Ok(true) = nav_result {
         crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
     }
-    wait_for_settle_with_network(cdp, Duration::from_millis(settle_ms), in_flight).await?;
+    // A client-side route change (SPA router) can be mid-swap right here:
+    // the previous route's DOM is still mounted and DOM-quiet reads
+    // "settled", so the capture below would enshrine a stale page at the new
+    // url. The guard waits for the transition to render; when it did the
+    // waiting, the plain settle would only repeat the cost.
+    let route_state = match route {
+        Some(r) => r.settle(cdp, in_flight, crate::page::ROUTE_BUDGET).await,
+        None => RouteSettle::Unchanged,
+    };
+    if route_state == RouteSettle::Unchanged {
+        wait_for_settle_with_network(cdp, Duration::from_millis(settle_ms), in_flight).await?;
+    }
 
     // Final readback for editor actions (+ at most one bounded corrective
     // pass) before the verdict: catches late draft hydration and clears

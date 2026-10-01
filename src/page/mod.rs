@@ -5,9 +5,10 @@
 //! It owns the LPM across captures so refs stay stable and diffs accumulate.
 //!
 //! Module map: this file is the Page struct + observation accessors and the
-//! Drop contract; `attach` builds it, `tabs` / `navigate` / `heal` / `logs` hold
-//! the method families, and `model` / `perception` / `refs` / `intercept` are the
-//! capture pipeline.
+//! Drop contract; `attach` builds it, `tabs` / `navigate` / `heal` / `logs` /
+//! `route` hold the method families (`route` is the client-side route-
+//! transition guard), and `model` / `perception` / `refs` / `intercept` are
+//! the capture pipeline.
 
 pub mod intercept;
 pub mod model;
@@ -20,8 +21,11 @@ pub mod logs;
 pub mod navigate;
 pub mod tabs;
 
+mod route;
+
 pub use self::logs::{NetEntry, XhrEntry};
 pub(crate) use self::navigate::with_scheme;
+pub use self::route::{RouteEpoch, RouteSettle, ROUTE_BUDGET};
 
 use std::time::Duration;
 
@@ -93,6 +97,10 @@ pub struct Page {
     dialog_task: Option<tokio::task::JoinHandle<()>>,
     /// Count of in-flight network requests (for settle + header display).
     in_flight: Arc<AtomicUsize>,
+    /// Client-side route-transition epoch (see [`route`](self::route)):
+    /// bumped by the `Page.navigatedWithinDocument` tap, consumed by the
+    /// guard before reads that would otherwise race a router swap.
+    route: Arc<RouteEpoch>,
     /// Ring buffer of the last 50 completed/failed requests (V8).
     net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>>,
     /// Ring of the last 128 XHR/fetch requests (start-observed, full URLs) —
@@ -212,8 +220,27 @@ impl Page {
 }
 
 impl Page {
+    /// Route-transition guard (see `route`): when a client-side navigation
+    /// landed since the last pass, wait for the new route's content to render
+    /// before the caller reads the DOM. One atomic load when nothing moved.
+    pub(crate) async fn settle_route(&self, budget: Duration) -> RouteSettle {
+        self.route
+            .settle(&self.cdp, Some(&self.in_flight), budget)
+            .await
+    }
+
+    /// Consume a fresh "the page was still rendering a client-side navigation"
+    /// observation, so the read it belongs to can say so.
+    pub(crate) fn take_route_unsettled(&self) -> bool {
+        self.route.take_unsettled()
+    }
+
     /// Re-capture the page and return the delta since the last capture.
     pub async fn recapture(&mut self) -> Result<PageDelta> {
+        // A router swap keeps the OLD route's DOM mounted while its own fetch
+        // and render settle — capturing here would enshrine the previous
+        // route's content as the new url's state.
+        self.settle_route(ROUTE_BUDGET).await;
         let cap = capture(&self.cdp).await?;
         // Keep the interception third-party baseline in sync with the
         // current page (covers SPA navigations that bypass navigate()).
@@ -300,6 +327,7 @@ impl Page {
 
     /// Extract visible text content from the page body.
     pub async fn content(&self, budget: usize) -> Result<String> {
+        self.settle_route(ROUTE_BUDGET).await;
         capture_content(&self.cdp, budget).await
     }
 
@@ -307,6 +335,7 @@ impl Page {
     /// Returns headings, paragraphs, links, lists, code — no ref IDs, no
     /// actionability markers. For reading, not acting.
     pub async fn markdown(&self, budget: usize) -> Result<String> {
+        self.settle_route(ROUTE_BUDGET).await;
         crate::page::perception::capture_markdown(&self.cdp, budget).await
     }
 
@@ -318,11 +347,13 @@ impl Page {
         sig: &str,
         frame: &[usize],
     ) -> Result<String> {
+        self.settle_route(ROUTE_BUDGET).await;
         crate::page::perception::capture_markdown_scoped(&self.cdp, budget, sig, frame).await
     }
 
     /// Extract just the page title + heading hierarchy. Ultra-minimal.
     pub async fn outline(&self) -> Result<String> {
+        self.settle_route(ROUTE_BUDGET).await;
         crate::page::perception::capture_outline(&self.cdp).await
     }
 
@@ -417,6 +448,7 @@ impl Page {
             &mut self.lpm,
             &action,
             Some(&self.in_flight),
+            Some(&self.route),
             &self.last_mouse,
         )
         .await;
@@ -435,6 +467,7 @@ impl Page {
                             &mut self.lpm,
                             &action,
                             Some(&self.in_flight),
+                            Some(&self.route),
                             &self.last_mouse,
                         )
                         .await?

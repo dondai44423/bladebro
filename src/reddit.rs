@@ -1,5 +1,5 @@
-//! Reddit comment-tree extraction — the `extract auto` fast path on
-//! reddit.com post pages.
+//! Reddit extraction — the `extract auto` fast path: the comment tree on
+//! reddit.com post pages, and the result listing on reddit search pages.
 //!
 //! Comments come from Reddit's own JSON endpoints, fetched from inside the
 //! page (same origin, same cookies, same session — exactly the traffic the
@@ -24,10 +24,11 @@
 //! and wall/challenge bodies that do slip through are classified as
 //! stop-signals (partial results + honest note), never hammered.
 //!
-//! Module map: this file is the sweep orchestrator ([`fetch_comments`]),
-//! payload assembly, and the shared types; `net` is the in-page HTTP layer
-//! (loid gate, JSON fetches, gate classification); `tree` is the listing
-//! parser + thread renderer.
+//! Module map: this file is the sweep orchestrator ([`fetch_comments`]) and
+//! the search sweep's entry points ([`fetch_search`] / [`search_target`]);
+//! `net` is the in-page HTTP layer (loid gate, JSON fetches, gate
+//! classification); `tree` is the listing parser + thread renderer; `search`
+//! is the search-listing path (query sanitizing + parse).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -39,10 +40,14 @@ use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
 
 mod net;
+mod search;
 mod tree;
 
 pub use self::net::is_security_block;
 use self::net::{ensure_loid, fetch_json, fetch_json_many, is_rate_limit};
+pub use self::search::{
+    fetch_search, search_target, SearchItem, SearchPayload, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_PAGE,
+};
 use self::tree::{
     attach_info_things, cut_chars, merge_subtree, parse_discussion, parse_subtree, render_items,
     stub_hides_comments,
