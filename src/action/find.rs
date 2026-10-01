@@ -24,12 +24,6 @@ pub(super) struct FoundElement {
     #[serde(default, rename = "box")]
     pub(super) box_: Option<[f64; 4]>,
     #[serde(default)]
-    #[allow(dead_code)]
-    pub(super) tag: Option<String>,
-    #[serde(default, rename = "type")]
-    #[allow(dead_code)]
-    pub(super) element_type: Option<String>,
-    #[serde(default)]
     pub(super) disabled: Option<bool>,
     /// Whether the element is the topmost element at its center point.
     /// False when something (e.g. autocomplete overlay) covers it.
