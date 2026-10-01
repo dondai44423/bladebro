@@ -1,0 +1,1 @@
+function nc(n){const c=[];let cur=n;for(let d=0;d<10&&cur;d++){c.push(cur.tagName?cur.tagName.toLowerCase():'unk');const p=cur.parentElement;if(p){c.push(''+Array.prototype.indexOf.call(p.children,cur));cur=p}else break}return c.join('>')}

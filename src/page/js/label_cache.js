@@ -1,0 +1,1 @@
+const __BLC=new WeakMap();function getLabels(doc){let m=__BLC.get(doc);if(!m){m={};try{for(const l of doc.querySelectorAll('label[for]')){const f=l.getAttribute('for');if(f&&!(f in m)){const t=(l.textContent||'').trim();if(t)m[f]=t.replace(/\s+/g,' ').slice(0,120);}}}catch(e){}__BLC.set(doc,m);}return m;}

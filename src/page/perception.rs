@@ -11,6 +11,9 @@
 //! element, filters to visible+actionable ones, and returns a compact array.
 //! This is a single CDP round-trip and lets us compute the stability signature
 //! in-page (where the real DOM lives), not re-derive it in Rust from a raw tree.
+//!
+//! The page-side JS lives in `js/` — one file per `JS_*` const, embedded with
+//! `include_str!`; the tests `node --check` every assembled script.
 
 use serde::Deserialize;
 use serde_json::json;
@@ -187,32 +190,32 @@ impl PageCapture {
 pub const JS_SELECTOR: &str = r#"a[href], button, input, select, textarea, summary, [contenteditable=""], [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [role="switch"], [role="textbox"], [role="combobox"], [onclick]"#;
 
 /// Visibility check: returns false for zero-size, display:none, visibility:hidden, opacity:0.
-pub const JS_VIS_FN: &str = r#"const vis=n=>{const r=n.getBoundingClientRect();if(r.width===0||r.height===0)return false;const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;return true;};"#;
+pub const JS_VIS_FN: &str = include_str!("js/vis_fn.js");
 
 /// Escapes a string for safe interpolation into a CSS attribute selector.
-pub const JS_ESC_FN: &str = r#"const esc=s=>(s||'').replace(/["\\]/g,c=>'\\'+c);"#;
+pub const JS_ESC_FN: &str = include_str!("js/esc_fn.js");
 
 /// Resolves the nearest ancestor landmark role for an element.
 /// Returns a short label (nav/main/banner/footer/aside/search/dialog) or
 /// an aria-label for labelled regions, or null for the default content area.
-pub const JS_LANDMARK_FN: &str = r#"const landmarkOf=n=>{let el=n;while(el&&el!==document.body&&el!==document.documentElement){const tag=el.tagName.toLowerCase();const role=el.getAttribute('role');if(tag==='nav'||role==='navigation')return'nav';if(tag==='main'||role==='main')return'main';if(tag==='header'||role==='banner')return'banner';if(tag==='footer'||role==='contentinfo')return'footer';if(tag==='aside'||role==='complementary')return'aside';if(role==='search')return'search';if(tag==='dialog'||role==='dialog'||role==='alertdialog')return'dialog';if(tag==='section'&&el.getAttribute('aria-label'))return el.getAttribute('aria-label').trim().slice(0,20);el=el.parentElement;}return null;};"#;
+pub const JS_LANDMARK_FN: &str = include_str!("js/landmark_fn.js");
 
 /// Infers semantic role from markup (tag + role attribute + input type).
-pub const JS_ROLE_FN: &str = r#"const roleMap={button:'button',link:'link',checkbox:'checkbox',radio:'radio',tab:'tab',menuitem:'menuitem',switch:'switch',textbox:'textbox',combobox:'combobox',listbox:'listbox',option:'option'};function role(n){const a=n.getAttribute('role');if(a&&roleMap[a])return roleMap[a];const t=n.tagName.toLowerCase();if(t==='a')return'link';if(t==='button'||t==='summary')return'button';if(t==='select')return'combobox';if(t==='textarea'||n.isContentEditable)return'textbox';if(t==='input'){const ty=(n.type||'text').toLowerCase();if(ty==='checkbox')return'checkbox';if(ty==='radio')return'radio';if(ty==='submit'||ty==='button'||ty==='reset'||ty==='image')return'button';if(ty==='range')return'slider';if(ty==='file')return'file';if(ty==='color')return'color';if(ty==='hidden')return'hidden';return'textbox';}return'generic';}"#;
+pub const JS_ROLE_FN: &str = include_str!("js/role_fn.js");
+
+// Label map cache, one per document, held in a WeakMap so nothing is added
+// to the DOM (an expando would be a stealth tell). Built lazily on first use
+// and reused — this removes the per-element `querySelector('label[for=…]')`
+// that made name resolution O(n²) on id-heavy pages, which is what lets the
+// capture compute names for ALL elements (needed for stable sigs) cheaply.
+pub const JS_LABEL_CACHE: &str = include_str!("js/label_cache.js");
 
 /// Resolves an element's accessible name through the full fallback chain.
 /// `includeValue` controls whether the element's `value` is used as a last
 /// resort — it should be `true` for display (the agent sees the current value)
 /// but `false` for the stability signature (typing changes the value, which
 /// must NOT change the element's identity).
-// Label map cache, one per document, held in a WeakMap so nothing is added
-// to the DOM (an expando would be a stealth tell). Built lazily on first use
-// and reused — this removes the per-element `querySelector('label[for=…]')`
-// that made name resolution O(n²) on id-heavy pages, which is what lets the
-// capture compute names for ALL elements (needed for stable sigs) cheaply.
-pub const JS_LABEL_CACHE: &str = r#"const __BLC=new WeakMap();function getLabels(doc){let m=__BLC.get(doc);if(!m){m={};try{for(const l of doc.querySelectorAll('label[for]')){const f=l.getAttribute('for');if(f&&!(f in m)){const t=(l.textContent||'').trim();if(t)m[f]=t.replace(/\s+/g,' ').slice(0,120);}}}catch(e){}__BLC.set(doc,m);}return m;}"#;
-
-pub const JS_NAME_FN: &str = r#"function textNoScripts(n){let s='';for(const c of n.childNodes){if(c.nodeType===3){s+=c.textContent;}else if(c.nodeType===1){const t=c.tagName;if(t==='SCRIPT'||t==='STYLE'||t==='NOSCRIPT'||t==='TEMPLATE')continue;s+=textNoScripts(c);}}return s;}function name(n,includeValue){const al=n.getAttribute('aria-label');if(al&&al.trim())return al.trim().replace(/\s+/g,' ').slice(0,120);const doc=n.ownerDocument;const lb=n.getAttribute('aria-labelledby');if(lb&&doc){const e=doc.getElementById(lb);if(e&&(e.textContent||' ').trim())return e.textContent.trim().replace(/\s+/g,' ').slice(0,120);}const id=n.id;if(id&&doc){const lt=getLabels(doc)[id];if(lt)return lt;}const cl=n.closest('label');if(cl&&(cl.textContent||' ').trim())return cl.textContent.trim().replace(/\s+/g,' ').slice(0,120);const ti=n.title;if(ti&&ti.trim())return ti.trim().slice(0,120);const ph=n.placeholder;if(ph&&ph.trim())return ph.trim().slice(0,120);const ap=n.getAttribute&&n.getAttribute('aria-placeholder');if(ap&&ap.trim())return ap.trim().slice(0,120);const ac=n.getAttribute('autocomplete');if(ac&&ac.trim()){const tok=ac.trim().split(/\s+/).pop();if(tok&&tok!=='off'&&tok!=='on')return tok.replace(/-/g,' ').slice(0,80);}const ty=n.type;if(ty==='password')return'password';if(ty==='email')return'email';if(ty==='search')return'search';if(ty==='tel')return'phone';if(ty==='url')return'url';const nm=n.getAttribute('name');if(nm&&nm.trim()){const h=nm.trim().replace(/[_\-]/g,' ').replace(/\s+/g,' ').trim();if(h.length>1&&h.length<=60)return h.slice(0,60);}if(n.tagName==='SELECT'){const oo=n.options;if(oo&&oo.length){const ft=(oo[0].label||oo[0].text||'').trim();if(ft)return ft.replace(/\s+/g,' ').slice(0,120);if(n.selectedIndex>=0){const sv=(oo[n.selectedIndex].label||oo[n.selectedIndex].text||'').trim();if(sv)return sv.replace(/\s+/g,' ').slice(0,120);}}return'';}const tc=textNoScripts(n);if(tc&&tc.trim())return tc.trim().replace(/\s+/g,' ').slice(0,120);const alt=n.getAttribute('alt');if(alt&&alt.trim())return alt.trim().slice(0,120);if(includeValue){const val=n.value;if(val&&typeof val==='string'&&val.trim()&&n.tagName==='INPUT')return val.trim().slice(0,60);}return'';}"#;
+pub const JS_NAME_FN: &str = include_str!("js/name_fn.js");
 
 /// Nearest distinguishing container chain ("ctx"): up to two hops of
 /// notable ancestors (data-*/id/aria-label/class), used to disambiguate
@@ -220,7 +223,7 @@ pub const JS_NAME_FN: &str = r#"function textNoScripts(n){let s='';for(const c o
 /// `form.toggle.sendreplies-button`. Rendered in filter/find output only;
 /// the default model view stays lean. Composed-tree walk (crosses shadow
 /// hosts), capped, best-effort.
-pub const JS_CTX_FN: &str = r#"const ctxOf=function(n){try{var parts=[];var cur=n?n.parentElement:null;for(var i=0;i<30&&cur&&cur!==document.body&&cur!==document.documentElement;i++){var tag=cur.tagName?cur.tagName.toLowerCase():'';var d=cur.getAttribute&&(cur.getAttribute('data-fullname')||cur.getAttribute('thingid')||cur.getAttribute('data-testid'));var desc='';var _cid=cur.getAttribute&&cur.getAttribute('id');if(d){desc=tag+'['+((cur.hasAttribute('thingid')?'thingid':(cur.hasAttribute('data-testid')?'data-testid':'data-fullname'))+'=')+String(d).slice(0,24)+']';}else if(_cid){desc=tag+'#'+String(_cid).slice(0,28);}else{var al=cur.getAttribute&&cur.getAttribute('aria-label');if(al&&al.trim()){desc=tag+'["'+al.trim().slice(0,24)+'"]';}else{var cl=(typeof cur.className==='string'&&cur.className.trim())?cur.className.trim().split(/\s+/).slice(0,2).join('.'):'';if(cl&&(tag.length+cl.length)<=42)desc=tag+'.'+cl;}}if(desc){parts.push(desc);if(d||_cid)break;if(parts.length>=2)break;}cur=cur.parentElement||(cur.getRootNode&&cur.getRootNode().host);}return parts.join(' < ').slice(0,90);}catch(e){return '';}};"#;
+pub const JS_CTX_FN: &str = include_str!("js/ctx_fn.js");
 
 /// The shared preamble: just the selector + helper functions.
 /// Each script (capture, find-by-sig) sets up its own document context,
@@ -252,19 +255,19 @@ pub static JS_PREAMBLE: LazyLock<String> = LazyLock::new(|| {
 // consumer (capture, find_by_sig, find_by_text, marks) uses deepAll, so per-name
 // rank sigs stay consistent. Shadow elements share the top document's
 // coordinate space, so no iframe-style offset is needed.
-pub const JS_DEEP_ALL: &str = r#"function deepAll(root,sel){const out=[];const visit=(c)=>{const m=c.querySelectorAll(sel);for(let i=0;i<m.length;i++)out.push(m[i]);const all=c.querySelectorAll('*');for(let i=0;i<all.length;i++){const s=all[i].shadowRoot;if(s)visit(s);}};visit(root);return out;}"#;
+pub const JS_DEEP_ALL: &str = include_str!("js/deep_all.js");
 
 /// FNV-1a 32-bit hash — fast, deterministic, good enough for identity.
 /// Chosen over SHA/MD5 because it is pure arithmetic (no string lookup
 /// tables), inlined into the capture loop (one pass over the input), and
 /// 32 bits is sufficient since the sig ranks are the primary identity.
-pub const JS_FNV_FN: &str = r#"function fnv(s){let h=0x811c9dc5;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0}return h}"#;
+pub const JS_FNV_FN: &str = include_str!("js/fnv_fn.js");
 
 /// Ancestor chain string: `tag[index]>tag[index]>...` up to 10 levels.
 /// Captures the element's structural position in the DOM so that a re-render
 /// preserving structure (React/Vue) leaves the fingerprint unchanged even
 /// when the element's text, class, or id mutates.
-pub const JS_NC_FN: &str = r#"function nc(n){const c=[];let cur=n;for(let d=0;d<10&&cur;d++){c.push(cur.tagName?cur.tagName.toLowerCase():'unk');const p=cur.parentElement;if(p){c.push(''+Array.prototype.indexOf.call(p.children,cur));cur=p}else break}return c.join('>')}"#;
+pub const JS_NC_FN: &str = include_str!("js/nc_fn.js");
 
 // ---- capture script ----
 
@@ -787,40 +790,7 @@ pub fn remediation_ladder(block_type: &str) -> Vec<String> {
 /// Real block/challenge pages are SMALL (a title, a spinner, a form) — the
 /// body-length gate is the strongest discriminator between "the page is a
 /// wall" and "the page discusses walls".
-const DETECT_BLOCK_SCRIPT: &str = r#"(()=>{const d=document;if(!d)return null;const t=(d.title||'').toLowerCase();const h=(location.hostname||'').toLowerCase();const raw=(()=>{if(!d.body)return'';if(d.querySelectorAll('*').length<=1500)return d.body.innerText||d.body.textContent||'';let s='';const w=n=>{if(s.length>1600)return;for(const c of n.childNodes){if(s.length>1600)return;if(c.nodeType===3)s+=c.textContent;else if(c.nodeType===1){const tg=c.tagName;if(tg==='SCRIPT'||tg==='STYLE'||tg==='NOSCRIPT'||tg==='TEMPLATE')continue;if(c.shadowRoot)w(c.shadowRoot);w(c);}}};w(d.body);return s;})();const body=raw.toLowerCase();const bl=body.length;const q=s=>!!d.querySelector(s);
-// Cloudflare interstitial: the title is the strongest signal. A bare
-// turnstile/challenge-platform SCRIPT is NOT — sites embed Turnstile
-// widgets in ordinary forms. Only call it a block when the title matches
-// or the classic challenge form is present or (widget present AND the
-// page is nearly empty — a real interstitial).
-if(t.includes('just a moment'))return 'cloudflare';
-if(q('#challenge-form'))return 'cloudflare';
-if(q('cf-turnstile')||q('script[src*=challenge-platform]')){if(bl<800)return 'cloudflare';return null;}
-if(q('iframe[src*=captcha-delivery]')&&bl<1200)return 'datadome';
-if(bl<1200&&body.includes('datadome')&&q('iframe'))return 'datadome';
-if((q('#px-captcha')||q('script[src*=px-captcha]'))&&bl<1500)return 'perimeterx';
-// Reddit JS challenge — a tiny hidden auto-submitting form (a real browser
-// solves it in ~1s; solution = the token doubled). Not a wall: it clears
-// itself, so nav waits it out instead of reporting a block.
-if(bl<2000&&(q('input[name=js_challenge]')||q('input[name=jsc_token]')))return 'js-challenge';
-// Reddit network-security wall — small page, no title: "You've been
-// blocked by network security" / classic "whoa there, pardner!". Soft and
-// transient (its 403 carries retry-after: 0); a reload clears it.
-if(bl<1500&&(body.includes('blocked by network security')||body.includes('whoa there')))return 'reddit';
-// Reddit's one-time humanity check: a reCAPTCHA v2 checkbox on a small
-// reddit page ("Prove your humanity"). One humanized click passes it
-// (verified live); the solve grants `loid` and the wall does not return
-// for that profile. Host-gated so other sites' recaptchas stay untouched.
-if(bl<1500&&h.indexOf('reddit.com')>=0&&(q('.g-recaptcha')||q('iframe[src*=recaptcha]'))&&(t.includes('humanity')||body.includes('prove your humanity')))return 'reddit-humanity';
-// reCAPTCHA wall: needs BOTH the widget AND the "prove you're human"
-// phrasing on a SMALL page (a contact page with a recaptcha + an FAQ
-// mentioning robots is a normal page).
-if((q('.g-recaptcha')||q('iframe[src*=recaptcha]'))&&(t.includes('prove')||t.includes('humanity')||t.includes('robot')||body.includes('prove your humanity')||body.includes('are you human'))&&bl<1500)return 'recaptcha';
-if(bl<1000&&body.includes('access denied')&&(body.includes('reference')||body.includes('akamai')))return 'akamai';
-// Rate limit: API docs routinely contain the phrase "rate limit" in long
-// bodies. A real 429 wall is tiny.
-if(bl<800&&(body.includes('too many requests')||body.includes('rate limit')))return 'rate-limit';
-return null;})()"#;
+const DETECT_BLOCK_SCRIPT: &str = include_str!("js/detect_block.js");
 
 /// M6: Detect block/challenge pages from their live DOM (small-page gated —
 /// the body-length gate is the strongest wall-vs-prose discriminator).
@@ -922,11 +892,7 @@ fn markdown_expr(budget: usize, scoped: Option<(&str, &[usize])>) -> Result<Stri
                 .replace("__SIG__", &sig_js)
         }
     };
-    Ok(r#"(function(){var __isProd=(function(){var b=document.body;if(!b)return false;var t=(b.innerText||'').toLowerCase();var hp=/[$€£¥₹]\s?\d/.test(t);var cb=document.querySelector('#add-to-cart-button,#buy-now-button,[data-testid*="add-to-cart"],[data-testid*="buy-now"],button[name*="cart"],input[name*="cart"],#add-to-cart,#buy-now');var hc=/add to cart|buy now|add to basket|add to bag|in winkelwagen|au panier/i.test(t);var u=location.href.toLowerCase();var pu=/\/dp\/|\/gp\/product\/|\/product\/|\/itm\/|\/products\/|\/p\//.test(u);var h1=document.querySelector('h1');var hh=h1&&h1.innerText.trim().length>5;return hp&&hh&&(pu||cb||hc);})();if(!__scoped&&__isProd){var h1=document.querySelector('h1');var title=h1?h1.innerText.trim():document.title;var md='# '+title+'\n\n';var pe=document.querySelector('#priceblock_ourprice,#priceblock_dealprice,.a-price .a-offscreen,[data-testid*="price"],[class*="price"]:not([class*="was"]):not([class*="original"]):not([class*="save"]),[id*="price"]:not([id*="was"]):not([id*="original"])');var price=null;if(pe){var pm=(pe.innerText||'').match(/[$€£¥₹]\s?\d[\d,]*(?:[.,]\d{1,2})?/);if(pm)price=pm[0];}if(!price){var pm2=(document.body.innerText||'').match(/[$€£¥₹]\s?\d[\d,]*(?:[.,]\d{1,2})?/);if(pm2)price=pm2[0];}if(price)md+='**Price:** '+price;var del=document.querySelector('del,s,[data-testid*="original"],[class*="was-price"],[class*="list-price"],[class*="original-price"]');if(del){var opm=(del.innerText||'').match(/[$€£¥₹]\s?\d[\d,]*(?:[.,]\d{1,2})?/);if(opm)md+=' ~~'+opm[0]+'~~';}if(price)md+='\n';var re=document.querySelector('[aria-label*="star"],[aria-label*="rating"],[data-testid*="rating"],[class*="rating"],[class*="star"],[data-hook*="rating"]');if(re){var al=re.getAttribute('aria-label')||'';var rm=al.match(/(\d+\.?\d*)\s*out of\s*\d+/i)||al.match(/(\d+\.?\d*)/)||(re.innerText||'').match(/(\d+\.?\d*)/);if(rm){md+='**Rating:** '+parseFloat(rm[1])+'/5';var rve=document.querySelector('#acrCustomerReviewText,[data-testid*="review-count"],[class*="review-count"],[data-hook*="review"]');if(rve){var rvm=(rve.innerText||'').match(/(\d[\d,]*)/);if(rvm)md+=' ('+rvm[1]+' ratings)';}md+='\n';}}var bt=(document.body.innerText||'').toLowerCase();if(/in stock|in-store only/.test(bt))md+='**Availability:** In Stock\n';else if(/out of stock|currently unavailable/.test(bt))md+='**Availability:** Out of Stock\n';else{var ol=bt.match(/only\s+(\d+)\s+left/i);if(ol)md+='**Availability:** Only '+ol[1]+' left\n';}var sec=document.querySelector('#feature-bullets,#productOverview_feature_div,#detailBullets_feature_div,[data-feature-name="productDescription"],#productDescription,#aplus,.product-facts-details,[data-testid="featureBullets"]')||(h1||pe||document.body).closest('section,div,main,[role="main"]')||document.body;if(sec){var bullets=sec.querySelectorAll('li,[role="listitem"],span.a-list-item');var fs=[];for(var i=0;i<bullets.length;i++){var bt2=(bullets[i].innerText||'').trim();if(bt2.length>10&&bt2.length<300&&fs.length<10&&!/add to cart|buy now|sign in|subscribe|follow|see more|show more/i.test(bt2))fs.push(bt2);}if(fs.length>0){md+='\n**Key Features:**\n';for(var j=0;j<fs.length;j++)md+='- '+fs[j]+'\n';}}var img=document.querySelector('#landingImage,#imgBlkFront,[data-testid*="product-image"],.product-image img,img[class*="product"]:not([src*="logo"]):not([src*="icon"]):not([src*="sprite"])');if(img&&img.src)md+='\n!['+(img.alt||'product')+']('+img.src+')\n';return md.slice(0,__BUDGET__);}var MAX=__BUDGET__;var __scoped=__SCOPE_FLAG__;var SKIP=['SCRIPT','STYLE','NOSCRIPT','SVG','TEMPLATE','META','LINK','BUTTON','INPUT','SELECT','TEXTAREA'];var NOISE=['NAV','FOOTER','HEADER','ASIDE'];var __isRedditPost=(function(){var h=location.hostname;if(!h.includes('reddit.com'))return false;if(!location.href.includes('/comments/'))return false;var h1=document.querySelector('h1');return h1&&h1.innerText.trim().length>5;})();
-if(!__scoped&&__isRedditPost){var rh1=document.querySelector('h1');var rtitle=rh1?rh1.innerText.trim():document.title;var rmd='# '+rtitle+'\n\n';var rsub=(location.href.match(/\/r\/([\w-]+)/)||[])[1];var rau=document.querySelector('a[href*="/user/"]');var rauthor=rau?(rau.href.match(/\/user\/([\w-]+)/)||[])[1]:null;var rsp0=document.querySelector('shreddit-post');var rmeta=[];if(rsub)rmeta.push('**r/'+rsub+'**');if(rsp0){var rss0=rsp0.getAttribute('score');if(rss0)rmeta.push('**'+rss0+' points** (fuzzed)');var rcc0=rsp0.getAttribute('comment-count');if(rcc0)rmeta.push('**'+rcc0+' comments**');}if(rauthor)rmeta.push('**u/'+rauthor+'**');if(rmeta.length)rmd+=rmeta.join(' | ')+'\n\n';var rmain=findMain(document);if(rmain){var rads=rmain.querySelectorAll('[data-testid="ad"],[class*="promoted"],[class*="Promoted"]');rads.forEach(function(e){e.remove();});var rcb=Math.min(3000,__BUDGET__-rmd.length-100);var rc=toMd(rmain,rcb);if(rc.length>0)rmd+=rc;if(rcb>0&&(rmain.innerText||'').length>rcb)rmd+='\n\n[comment area truncated - extract=auto has the full tree; find="<text>" checks one text cheaply]';}return rmd.slice(0,__BUDGET__);}
-var __isGithubRepo=(function(){if(location.hostname!=='github.com')return false;var p=location.pathname.split('/').filter(Boolean);if(p.length<2)return false;if(['search','trending','explore','login','signup','settings','notifications','pulls','issues','orgs','features','marketplace','pricing','about','customer-stories','sessions','collections','topics','sponsors','new','dashboard','stars','pull','commit'].includes(p[0]))return false;if(p.length===2)return true;if(p.length>2&&['tree','blob'].includes(p[2]))return true;return false;})();
-if(!__scoped&&__isGithubRepo){var gp=location.pathname.split('/').filter(Boolean);var gname=gp.length>=2?gp[0]+'/'+gp[1]:'Repository';var gmd='# '+gname+'\n\n';var gdesc=document.querySelector('p.f4,.f4.my-3,.BorderGrid-cell p,[data-pjax] p,[itemprop="about"]');if(!gdesc){var gog=document.querySelector('meta[property="og:description"]');if(gog&&(gog.content||'').trim().length>5)gdesc={innerText:gog.content.trim()};}if(!gdesc){var gdm=document.title.match(/:\s*(.+?)\s*·\s*GitHub/);if(gdm)gdesc={innerText:gdm[1]};}if(gdesc&&gdesc.innerText.trim().length>5)gmd+='**Description:** '+gdesc.innerText.trim()+'\n\n';var gsl=document.querySelector('#repo-stars-counter-star')||document.querySelector('a[href*="/stargazers"]');if(!gsl){var gsb=document.querySelector('button[aria-label*="star"],a[aria-label*="star"]');if(gsb){var gal=gsb.getAttribute('aria-label')||'';var gsm2=gal.match(/(\d[\d.,]*[KkMm]?)/);if(gsm2)gsl={innerText:gsm2[1]};}}var gfl=document.querySelector('#repo-network-counter')||document.querySelector('a[href*="/forks"]');var gstats=[];if(gsl){var gnm=(gsl.innerText||gsl.textContent||'').match(/([0-9.,]+[KkMm]?)/);if(gnm)gstats.push('**Stars:** '+gnm[1]);}if(gfl){var gfn=(gfl.innerText||gfl.textContent||'').match(/([0-9.,]+[KkMm]?)/);if(gfn)gstats.push('**Forks:** '+gfn[1]);}var glg=document.querySelector('[itemprop="programmingLanguage"]')||document.querySelector('a[href*="/search?l="]');if(glg){var glt=(glg.innerText||'').trim();if(glt&&glt.length<30)gstats.push('**Language:** '+glt);}if(gstats.length>0)gmd+=gstats.join(' | ')+'\n\n';var gtopics=document.querySelectorAll('a[href^="/topics/"],.topic-tag');if(gtopics.length>0){var gtl=[];for(var gi=0;gi<gtopics.length;gi++){var gt=(gtopics[gi].innerText||'').trim().replace(/^#/,'');if(gt.length>1)gtl.push(gt);}if(gtl.length>0)gmd+='**Topics:** '+gtl.join(', ')+'\n\n';}var greadme=document.querySelector('article.markdown-body,#readme .markdown-body,.markdown-body');if(greadme){var grt=toMd(greadme,Math.min(4000,__BUDGET__-gmd.length-50));if(grt.length>20)gmd+='## README\n\n'+grt;}return gmd.slice(0,__BUDGET__);}
-function findMain(d){var m=d.querySelector('main,[role=\"main\"]');if(m&&(m.innerText||'').length>200)return m;var a=d.querySelector('article');if(a&&(a.innerText||'').length>200)return a;var sels=['#content','.content','#main-content','.main-content','.post','.article','.entry-content','.post-body','.article-body','.story-body','#article-body'];for(var i=0;i<sels.length;i++){var el=d.querySelector(sels[i]);if(el&&(el.innerText||'').length>200)return el;}var best=null,bs=0;var c=d.querySelectorAll('div,section,table');for(var j=0;j<c.length;j++){var el=c[j];var t=(el.innerText||'');if(t.length<200)continue;var l=el.querySelectorAll('a');var lt=0;for(var k=0;k<l.length;k++)lt+=(l[k].innerText||'').length;var sc=t.length-lt*2;if(sc>bs){bs=sc;best=el;}}return best||d.body;}function isAd(n){var cl=(typeof n.className==='string'?n.className:'').toLowerCase();var id=(n.id||'').toLowerCase();if(/dfp|advert|sponsored|ad-container|ad-wrapper|ad-slot|ad-banner|ad-feedback|adbanner|adsense|adblock|ad-label|ads-label|ads-container|mol-ads|promoted|adsbygoogle|google-ad|doubleclick|adfeedback/.test(cl))return true;if(/dfp|advert|sponsored|google_ads|doubleclick/.test(id))return true;if(n.hasAttribute('data-ad')||n.hasAttribute('data-ad-slot')||n.hasAttribute('data-ad-client')||n.hasAttribute('data-google-query-id'))return true;if(n.tagName==='INS'&&/adsbygoogle/.test(cl))return true;var al=(n.getAttribute('aria-label')||'').toLowerCase();if(/advertisement/.test(al))return true;return false;}function toMd(root,max){var out='',len=0;function add(s){if(len+s.length>max)s=s.slice(0,max-len);out+=s;len+=s.length;}function walk(n,isRoot){if(len>=max)return;if(n.nodeType===3){var t=n.textContent.replace(/\s+/g,' ').trim();if(t)add(t+' ');return;}if(n.nodeType!==1)return;var tag=n.tagName;if(SKIP.indexOf(tag)>=0&&!isRoot)return;if(n.hidden)return;var st=n.style;if(st&&(st.display==='none'||st.visibility==='hidden'))return;if(NOISE.indexOf(tag)>=0&&!isRoot)return;if(isAd(n))return;switch(tag){case 'H1':add('\n# '+n.innerText.trim()+'\n\n');return;case 'H2':add('\n## '+n.innerText.trim()+'\n\n');return;case 'H3':add('\n### '+n.innerText.trim()+'\n\n');return;case 'H4':add('\n#### '+n.innerText.trim()+'\n\n');return;case 'H5':add('\n##### '+n.innerText.trim()+'\n\n');return;case 'H6':add('\n###### '+n.innerText.trim()+'\n\n');return;case 'P':for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n\n');return;case 'A':var tx=n.innerText.trim();var hr=n.href;if(tx&&hr&&hr!=='#'&&hr.indexOf('javascript:')!==0){if(tx===hr)add(tx);else add('['+tx+']('+hr+')');}else if(tx)add(tx);return;case 'LI':add('- ');for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n');return;case 'UL':case 'OL':for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n');return;case 'CODE':if(n.parentElement&&n.parentElement.tagName==='PRE')return;add('`'+n.innerText+'`');return;case 'PRE':add('\n```\n'+n.innerText.trim()+'\n```\n\n');return;case 'BLOCKQUOTE':add('\n> '+n.innerText.trim().replace(/\n/g,'\n> ')+'\n\n');return;case 'IMG':var al=n.alt||'';var sr=n.src||'';if(al)add('!['+al+']('+sr+')');return;case 'TABLE':if(n.querySelector('th,thead')){var rows=n.querySelectorAll('tr');if(rows.length>0&&rows.length<50){for(var i=0;i<rows.length;i++){var cells=rows[i].querySelectorAll('th,td');var row=[];for(var j=0;j<cells.length;j++)row.push(cells[j].innerText.trim().replace(/\|/g,'\\|'));add('| '+row.join(' | ')+' |\n');if(i===0)add('|'+row.map(function(){return'---';}).join('|')+'|\n');}add('\n\n');return;}}for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n');return;case 'BR':add('\n');return;case 'HR':add('\n---\n\n');return;case 'STRONG':case 'B':add('**');for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('**');return;case 'EM':case 'I':add('*');for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('*');return;case 'TR':case 'THEAD':case 'TBODY':case 'TFOOT':for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add('\n');return;case 'TD':case 'TH':for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);add(' ');return;default:for(var c=0;c<n.childNodes.length;c++)walk(n.childNodes[c]);}}walk(root,true);return out.replace(/\n{3,}/g,'\n\n').trim();}var main=__SCOPE_MAIN__;if(!main||!main.innerHTML)return'';var md=toMd(main,MAX);var fl=(main.innerText||'').length;if(fl>MAX)md+='\n\n[truncated: '+fl+' chars total, showed '+MAX+']';return md;})()"#
+    Ok(include_str!("js/markdown.js")
         .replace("__BUDGET__", &budget.to_string())
         .replace("__SCOPE_FLAG__", scope_flag)
         .replace("__SCOPE_MAIN__", &scope_main))
