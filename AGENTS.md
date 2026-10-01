@@ -37,7 +37,7 @@ Rust: edition 2021, MSRV 1.86. Requirements: Chrome/Chromium installed. On headl
 | mouse/typing biometrics, idle hum | `src/stealth/biometrics.rs`, `src/stealth/hum.rs` |
 | Chrome discovery, launch flags, CDP transports, Xvfb | `src/browser.rs` + `src/browser/`, `src/platform.rs` |
 | MCP tool schemas and dispatch | `src/mcp/tools.rs`, `src/mcp/server.rs` + `src/mcp/server/` |
-| CLI commands, daemon, help text | `src/cli.rs` + `src/cli/` (args, daemon, help, rb) |
+| CLI commands, daemon, help text | `src/cli.rs` + `src/cli/` (args/ per-command parsers, daemon, help, rb) |
 | sessions/profiles, seasoning, orphan reaper | `src/session_profile.rs` |
 | cookies/storage/tabs, session save-load | `src/state.rs` |
 | site adapters (`extract=auto` fast paths) | `src/reddit.rs` + `src/reddit/`, `src/x.rs` + `src/x/` |
@@ -82,7 +82,7 @@ Match the surrounding code. Specific to this repo:
 - **`src/cli/help.rs` help blocks are raw strings** (`r#"…"#`). A `"#` sequence inside one (a CSS `"#id"` example, say) terminates the string early and the compiler error appears dozens of lines away. Don't put it there.
 - **stdout is a machine contract.** `--json` prints a single JSON object; MCP stdout is pure JSON-RPC. Logs go to stderr. Human styling (`src/ui.rs`) is TTY-gated — piped output must stay plain.
 - **Keep outputs lean.** Delta-first responses, big payloads offloaded to artifact files. Don't add a field an agent doesn't need.
-- **Thin cores + focused children.** Big modules split as `foo.rs` (public surface + a `Module map:` header, re-exports) plus a `foo/` folder — `cli/`, `mcp/server/`, `action/`, `page/`, `browser/`, `realbrowser/`, `reddit/`, `x/`. When moving code, keep public paths stable via re-exports. Embedded JS lives in `src/**/js/*.js` (`include_str!`) — edit the `.js`, never paste a payload back into a Rust string.
+- **Thin cores + focused children.** Big modules split as `foo.rs` (public surface + a `Module map:` header, re-exports) plus a `foo/` folder — `cli/`, `cli/args/`, `mcp/server/`, `action/`, `page/`, `browser/`, `realbrowser/`, `reddit/`, `x/`. When moving code, keep public paths stable via re-exports. Embedded JS lives in `src/**/js/*.js` (`include_str!`) — edit the `.js`, never paste a payload back into a Rust string.
 
 ## Git / PR workflow
 

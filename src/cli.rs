@@ -23,10 +23,11 @@
 //!   …) and are accepted anywhere; unknown flags are loud errors, never
 //!   silently dropped.
 //!
-//! Module map: `args` (the six command parsers + endpoint extraction),
-//! `daemon` (socket server + lifecycle), `rb` (the real-browser lane switch),
-//! `help` (help text + typo suggestions). This file is the shared core:
-//! dispatch, the daemon client, and the daemon/one-shot run paths.
+//! Module map: `args` (endpoint extraction + the six per-command parsers in
+//! `args/{nav,see,act,state,run,vision}`), `daemon` (socket server +
+//! lifecycle), `rb` (the real-browser lane switch), `help` (help text + typo
+//! suggestions). This file is the shared core: dispatch, the daemon client,
+//! and the daemon/one-shot run paths.
 
 use serde_json::{json, Value};
 
