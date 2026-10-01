@@ -118,15 +118,18 @@ else
 fi
 
 # macOS x86_64 (via cargo-zigbuild)
+# Darwin targets build `ring`'s C through cargo-zigbuild's cc wrapper, which
+# sccache (0.17.0) rejects — run the apple builds with the wrapper disabled
+# (the toolchain note in status.md; the battery has always done this).
 if command -v cargo-zigbuild &>/dev/null; then
-    cargo zigbuild --release --target x86_64-apple-darwin 2>&1 | tail -1
+    RUSTC_WRAPPER= cargo zigbuild --release --target x86_64-apple-darwin 2>&1 | tail -1
 else
     echo "  WARNING: cargo-zigbuild not found, skipping macOS x64 build"
 fi
 
 # macOS arm64 (via cargo-zigbuild)
 if command -v cargo-zigbuild &>/dev/null; then
-    cargo zigbuild --release --target aarch64-apple-darwin 2>&1 | tail -1
+    RUSTC_WRAPPER= cargo zigbuild --release --target aarch64-apple-darwin 2>&1 | tail -1
 else
     echo "  WARNING: cargo-zigbuild not found, skipping macOS arm64 build"
 fi
