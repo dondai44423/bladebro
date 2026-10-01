@@ -172,6 +172,7 @@ fn secure_tmp_rejects_preplaced_symlink_and_file() {
     // existing path — file or symlink — must FAIL, not write through.
     let victim = dir.join("victim.txt");
     std::fs::write(&victim, b"ORIGINAL").unwrap();
+    #[cfg(unix)]
     let link = dir.join(".bladebro-update-link-test");
     #[cfg(unix)]
     std::os::unix::fs::symlink(&victim, &link).unwrap();
