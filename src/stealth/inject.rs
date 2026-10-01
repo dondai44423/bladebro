@@ -19,6 +19,9 @@
 //! 5. Biometrics: Bezier mouse paths, log-normal typing cadence — in action.rs.
 //! 6. Xvfb: Headful mode on virtual display (eliminates headless signals at root).
 //!
+//! The JS payloads live in `js/` — one file per block, assembled here with
+//! `include_str!`; the test suite `node --check`s the assembled script.
+//!
 //! Phase 3 changes (S9):
 //! - Every override is registered in a "native lie" registry and one patched
 //!   Function.prototype.toString serves "function name() { [native code] }"

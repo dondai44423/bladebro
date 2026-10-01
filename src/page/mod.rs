@@ -1,7 +1,7 @@
 //! The page layer: a [`Page`] handle ties a [`CdpClient`](crate::cdp::CdpClient)
 //! connection to a [`LivePageModel`] and exposes the capture / observe loop.
 //!
-//! `Page` is what the future `act` / `see` / `run` MCP tools will operate on.
+//! `Page` is what the `act` / `see` / `run` MCP tools operate on.
 //! It owns the LPM across captures so refs stay stable and diffs accumulate.
 //!
 //! Module map: this file is the Page struct + observation accessors and the

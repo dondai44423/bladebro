@@ -15,6 +15,12 @@
 //!   mouse-based option selection is fragile across select implementations.
 //! - **Press** dispatches keyDown + keyUp via `Input.dispatchKeyEvent`.
 //! - **Scroll** uses `window.scrollBy` via evaluate.
+//!
+//! Module map: this file is the shared core — the `Action` enum, `perform`,
+//! and `perform_with_network`; children: `find` (element location + miss
+//! diagnostics), `input` (mouse/keyboard dispatch + combos), `edit`
+//! (type/clear ladders + edit verdicts), `verdict` (conditions + scroll
+//! reports).
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
