@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-10-02
+
 ### Added
 - **Reddit search pages have a dedicated `extract auto` path
   (`container:"reddit-search"`).** Search results are client-rendered SDUI
