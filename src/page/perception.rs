@@ -14,15 +14,33 @@
 //!
 //! The page-side JS lives in `js/` — one file per `JS_*` const, embedded with
 //! `include_str!`; the tests `node --check` every assembled script.
+//!
+//! Module map: this file is the capture core — the descriptor types
+//! (`RawElement` / `SelectOptions` / `PageCapture`), the shared JS fragments,
+//! the capture script and `capture`. Children: `wait` (load / DOM-quiet /
+//! network-aware settles), `consent` (cookie-wall handling), `block`
+//! (challenge detection + remediation ladder), `content` (text / markdown /
+//! outline read modes).
 
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
+
+mod block;
+mod consent;
+mod content;
+mod wait;
+
+pub use self::{
+    block::{detect_block, remediation_ladder},
+    consent::{dismiss_consent, dismiss_consent_with_stored},
+    content::{capture_content, capture_markdown, capture_markdown_scoped, capture_outline},
+    wait::{re_settle, wait_for_load, wait_for_settle, wait_for_settle_with_network},
+};
 
 /// The compact descriptor of one actionable element as captured from the page.
 ///
@@ -372,164 +390,6 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
 
 // ---- capture function ----
 
-/// Wait for the page to reach at least `interactive` readyState (S18).
-/// ONE `Runtime.evaluate` with `awaitPromise` — the wait self-drives in-page
-/// via the DOMContentLoaded event instead of N CDP polling round-trips.
-/// On main-thread-saturated pages (fingerprint collectors) the old polling
-/// loop queued one evaluate per 200ms tick behind long tasks; this queues
-/// exactly one. Best-effort: any failure resolves as "proceed".
-pub async fn wait_for_load(cdp: &CdpSession, timeout: Duration) -> Result<()> {
-    let ms = timeout.as_millis() as u64;
-    let expr = format!(
-        "new Promise(function(res){{\
-            if(document.readyState!=='loading'){{res('ready');return;}}\
-            var done=false;function fin(v){{if(!done){{done=true;res(v);}}}}\
-            document.addEventListener('DOMContentLoaded',function(){{fin('ready');}},{{once:true}});\
-            setTimeout(function(){{fin('timeout');}},{ms});\
-        }})",
-    );
-    let _ = cdp
-        .send_with_timeout(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-            timeout + Duration::from_secs(3),
-        )
-        .await;
-    Ok(())
-}
-
-/// Wait for the DOM to settle after an action (S18). ONE `awaitPromise`
-/// evaluate installs a MutationObserver and resolves after ~110ms of DOM
-/// quiet (v3.10 speed pass; the 4s of silence before was dead waiting
-/// time), or timeout. Replaces the Rust-side polling loop — on heavy-JS
-/// pages this cut per-action latency from ~2 minutes to seconds.
-///
-/// Note: observes childList + characterData only — NOT attributes, since
-/// CSS animations mutate style every frame and would perpetually reset the
-/// quiet timer, forcing full-timeout waits on every animated page.
-pub async fn wait_for_settle(cdp: &CdpSession, timeout: Duration) -> Result<()> {
-    wait_for_settle_with_network(cdp, timeout, None).await
-}
-
-/// Network-aware settle: in-page DOM quiet (one round-trip), then the
-/// in-flight request count drains on the LOCAL atomic (no CDP traffic).
-/// `in_flight` is maintained by a background task on [`Page`](crate::page::Page).
-/// When `None`, falls back to DOM-only settle.
-pub async fn wait_for_settle_with_network(
-    cdp: &CdpSession,
-    timeout: Duration,
-    in_flight: Option<&AtomicUsize>,
-) -> Result<()> {
-    let ms = timeout.as_millis() as u64;
-    let expr = format!(
-        "new Promise(function(res){{\
-            var t0=performance.now();var last=t0;var done=false;\
-            var mo=null;\
-            try{{mo=new MutationObserver(function(){{last=performance.now();}});\
-            mo.observe(document.documentElement||document,{{childList:true,subtree:true,characterData:true}});}}catch(e){{}}\
-            function fin(v){{if(done)return;done=true;try{{if(mo)mo.disconnect();}}catch(e){{}}res(v);}}\
-            (function tick(){{\
-                var now=performance.now();\
-                if(document.readyState!=='loading'&&(now-last)>=110){{fin('settled');return;}}\
-                if((now-t0)>={ms}){{fin('timeout');return;}}\
-                setTimeout(tick,40);\
-            }})();\
-        }})",
-    );
-    let _ = cdp
-        .send_with_timeout(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-            timeout + Duration::from_secs(3),
-        )
-        .await;
-
-    // DOM quiet (or we gave up waiting on a saturated page). Now drain the
-    // network counter locally — no CDP round-trips, just an atomic read.
-    if let Some(counter) = in_flight {
-        // Network drain: wait for the post-load burst to finish. We do
-        // NOT wait for a fully-quiet network — modern pages never go
-        // quiet (analytics beacons, websockets, long-poll) and the count
-        // keeps fluctuating, which used to burn the whole 5s deadline
-        // (measured: Wikipedia/BBC navigated in 8.5s, floor is 2.5s).
-        // Instead: keep waiting only while the count makes progress
-        // toward zero (each new low resets the grace timer); break once
-        // it has plateaued for GRACE, when it hits zero, or at the hard
-        // deadline. Fast by default; agents needing full network quiet
-        // can `act wait condition=network` explicitly.
-        const GRACE: Duration = Duration::from_millis(280);
-        // The drain is a SHORT confirmation window, not a second full
-        // settle: on chirpy sites (x.com keeps ~14 requests in flight)
-        // trickle completions keep resetting the grace timer, which used
-        // to burn the whole learned cap here — on top of the DOM-quiet wait.
-        const DRAIN_MAX: Duration = Duration::from_millis(800);
-        let hard_deadline = tokio::time::Instant::now() + timeout.min(DRAIN_MAX);
-        let mut lowest = counter.load(Ordering::Relaxed);
-        let mut last_new_low = tokio::time::Instant::now();
-        loop {
-            let cur = counter.load(Ordering::Relaxed);
-            if cur == 0 {
-                break;
-            }
-            let now = tokio::time::Instant::now();
-            if now >= hard_deadline {
-                break;
-            }
-            if cur < lowest {
-                lowest = cur;
-                last_new_low = now;
-            } else if now.duration_since(last_new_low) > GRACE {
-                // Plateaued: no new low in GRACE. Either stragglers
-                // finished or only persistent connections remain.
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-    }
-    Ok(())
-}
-
-/// Bounded post-drain re-quiet for NAVIGATIONS: the drain window can run
-/// while a late fetch is still in flight, and the response then mounts a
-/// moment later (the "nav returned an empty shell" class). Resolves after
-/// ~110ms of DOM quiet; extends (bounded ≤700ms) while a mount is in
-/// progress. Nav-only — interaction settles stay snappy.
-pub async fn re_settle(cdp: &CdpSession) -> Result<()> {
-    const CAP_MS: u64 = 700;
-    let expr = format!(
-        "new Promise(function(res){{\
-         var t0=performance.now();var last=t0;var done=false;var mo=null;\
-         try{{mo=new MutationObserver(function(){{last=performance.now();}});\
-         mo.observe(document.documentElement||document,{{childList:true,subtree:true,characterData:true}});}}catch(e){{}}\
-         function fin(v){{if(done)return;done=true;try{{if(mo)mo.disconnect();}}catch(e){{}}res(v);}}\
-         (function tick(){{var now=performance.now();\
-           if((now-last)>=110){{fin('quiet');return;}}\
-           if((now-t0)>={CAP_MS}){{fin('timeout');return;}}\
-           setTimeout(tick,40);}})();\
-         }})"
-    );
-    let _ = cdp
-        .send_with_timeout(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-            Duration::from_millis(CAP_MS + 3000),
-        )
-        .await;
-    Ok(())
-}
-
 /// Run the capture script against `cdp` and parse the result.
 ///
 /// Assumes `Runtime` is enabled (the [`Page`](super::Page) handle enables it on
@@ -614,331 +474,6 @@ fn is_internal_page(url: &str) -> bool {
         || url.starts_with("about:") && url != "about:blank"
 }
 
-/// M4: Detect and dismiss consent/cookie banners. Policy: reject (default),
-/// accept, or off (via BLADE_CONSENT env). Returns the framework name if dismissed.
-///
-/// v3.9 false-positive hardening: the old generic pass queried
-/// `[role=dialog],[role=banner],[class*=cookie],...` — `[role=banner]` is
-/// the site HEADER, so any header containing the word "privacy" (a Privacy
-/// Policy nav link — extremely common) plus any header button matching
-/// /necessary|essential/ ("Essential Books"!) got CLICKED. Now:
-///   - candidates must have cookie/consent/gdpr/cmp-flavored class/id, or
-///     be a [role=dialog]
-///   - candidates must be VISIBLE (zero-size / display:none banners are
-///     stale DOM, not a live wall)
-///   - text must match cookie/consent/GDPR vocabulary ("privacy" alone is
-///     too weak — it's a footer/header staple)
-pub async fn dismiss_consent(cdp: &CdpSession) -> Result<Option<String>> {
-    let policy = std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
-    if policy == "off" {
-        return Ok(None);
-    }
-    let reject = policy != "accept";
-    let reject_js = if reject { "true" } else { "false" };
-
-    let expression = "(()=>{const reject=".to_string()
-        + reject_js
-        + ";const rs=['#onetrust-reject-all-handler','#CybotCookiebotDialogBodyButtonDecline','#didomi-notice-disagree-button','.qc-cmp2-summary-buttons button[mode=secondary]','#truste-consent-reject'];"
-        + "const as=['#onetrust-accept-btn-handler','#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll','#didomi-notice-agree-button','.qc-cmp2-summary-buttons button[mode=primary]','#truste-consent-button'];"
-        + "const sels=reject?rs:as;for(const sel of sels){const btn=document.querySelector(sel);if(btn&&btn.offsetWidth+btn.offsetHeight>0){btn.click();return sel;}}"
-        // Generic pass — see the doc comment for why each filter exists.
-        + "const dialogs=document.querySelectorAll('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');"
-        + "for(const d of dialogs){"
-        + "if(d.offsetWidth+d.offsetHeight===0)continue;"
-        + "const text=(d.textContent||'').toLowerCase();"
-        + "if(!(/cookie|consent|gdpr/.test(text)))continue;"
-        + "const buttons=[...d.querySelectorAll('button,a')];"
-        + "if(buttons.length>12)continue;" // real consent walls are compact; a matching mega-container is site chrome
-        + "const pattern=reject?/reject|decline|refuse|deny|necessary|essential/i:/accept|agree|allow|consent/i;"
-        + "const btn=buttons.find(b=>pattern.test(b.textContent||'')&&b.offsetWidth+b.offsetHeight>0);"
-        + "if(btn){btn.click();return 'generic';}}"
-        + "return null;})()";
-
-    let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expression,
-                "returnByValue": true,
-            })),
-        )
-        .await?;
-
-    if res.get("exceptionDetails").is_some() {
-        return Ok(None);
-    }
-    let framework = res
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    Ok(framework)
-}
-
-/// Try a stored consent selector first (one cheap querySelector+click),
-/// fall back to full [`dismiss_consent`] detection if it doesn't match.
-///
-/// This is the knowledge-base integration point: on known sites, a trusted
-/// CSS selector (confidence >= 0.7) skips the full 20-line detection JS,
-/// saving one large `Runtime.evaluate`. On unknown or changed sites, the
-/// full detection runs as usual — zero regression for cold starts.
-///
-/// Returns the selector that was clicked (stored selector, new selector, or
-/// `"generic"`), or `None` if no consent dialog was found.
-pub async fn dismiss_consent_with_stored(
-    cdp: &CdpSession,
-    stored: Option<&str>,
-) -> Result<Option<String>> {
-    let policy = std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
-    if policy == "off" {
-        return Ok(None);
-    }
-
-    // Try the stored selector first — skip the full detection JS if it works.
-    if let Some(sel) = stored.filter(|s| !s.is_empty() && *s != "generic") {
-        let sel_json = serde_json::to_string(sel).unwrap_or_default();
-        let expr = format!(
-            "(()={{const b=document.querySelector({sel_json});if(b){{b.click();return {sel_json};}}return null;}})()"
-        );
-        let res = cdp
-            .send(
-                "Runtime.evaluate",
-                Some(json!({
-                    "expression": expr,
-                    "returnByValue": true,
-                })),
-            )
-            .await?;
-        if res.get("exceptionDetails").is_none() {
-            if let Some(v) = res
-                .get("result")
-                .and_then(|r| r.get("value"))
-                .and_then(|v| v.as_str())
-            {
-                if !v.is_empty() {
-                    return Ok(Some(v.to_string()));
-                }
-            }
-        }
-    }
-
-    // Fall through to full detection.
-    dismiss_consent(cdp).await
-}
-
-/// M6: Detect block/challenge pages (Cloudflare, DataDome, PerimeterX, reCAPTCHA, Akamai, Reddit).
-/// Returns the block type if detected, or None.
-/// S12: remediation ladder — actionable steps for each block type.
-/// Appended to ambient events so the agent knows what to try next.
-pub fn remediation_ladder(block_type: &str) -> Vec<String> {
-    match block_type {
-        "cloudflare" => vec![
-            "wait 10s \u{2014} Turnstile often auto-passes non-interactively".into(),
-            "see \u{2014} check for a visible checkbox, use act click x=X y=Y if found".into(),
-            "if interactive challenge: solve manually or use coordinate click on checkbox".into(),
-        ],
-        "datadome" => vec![
-            "blocked by DataDome (ML-based per-site detection)".into(),
-            "try: navigate away, wait 30s, return (rate cooldown)".into(),
-            "if captcha wall: needs external solver".into(),
-        ],
-        "perimeterx" => vec![
-            "blocked by PerimeterX (behavioral analysis)".into(),
-            "try: slower pacing, longer idle hum, more natural session".into(),
-            "if captcha: needs external solver".into(),
-        ],
-        "recaptcha" => vec![
-            "reCAPTCHA challenge (v3 score-based or v2 checkbox)".into(),
-            "v3: improve score via longer session with human-like behavior".into(),
-            "v2: click checkbox via act click x=X y=Y".into(),
-        ],
-        "akamai" => vec![
-            "blocked by Akamai (IP reputation + TLS fingerprint)".into(),
-            "try: BLADE_PROXY for a different IP, BLADE_TZ for matching timezone".into(),
-        ],
-        "rate-limit" => vec![
-            "rate limited \u{2014} wait 30-60s before retrying".into(),
-            "consider: BLADE_PROXY for a different IP".into(),
-        ],
-        "reddit-humanity" => vec![
-            "reddit's one-time humanity check (reCAPTCHA v2 checkbox)".into(),
-            "solved automatically when detected \u{2014} one humanized click grants the profile token".into(),
-            "if it persists: an image challenge may be showing \u{2014} solve it manually once in the browser, or retry later; the wall does not return after a pass".into(),
-        ],
-        "reddit" => vec![
-            "reddit's network-security wall (soft, transient \u{2014} its own retry-after is 0)".into(),
-            "auto-recovery already reloaded; if it persists, wait ~30s and retry".into(),
-            "persistent walls usually mean a flagged IP (VPN/datacenter) \u{2014} use a residential connection; signed-in sessions are trusted more".into(),
-        ],
-        "js-challenge" => vec![
-            "reddit's JS challenge did not auto-resolve \u{2014} a reload usually completes it".into(),
-            "retry the same navigation; a cold profile gets the challenge once, then `loid` is stored".into(),
-        ],
-        _ => vec!["unknown block \u{2014} try waiting and retrying".into()],
-    }
-}
-
-/// v3.9: block heuristics are gated to avoid false "blocked:" verdicts on
-/// perfectly good pages. The old rules matched bare substrings anywhere in
-/// the first 2000 chars of body text:
-///
-/// - any docs page mentioning "rate limit" → blocked:rate-limit
-/// - any site embedding a Turnstile widget (login/signup forms do this
-///   LEGITIMATELY) → blocked:cloudflare
-/// - any page mentioning "datadome" (tech blogs!) → blocked:datadome
-///
-/// Real block/challenge pages are SMALL (a title, a spinner, a form) — the
-/// body-length gate is the strongest discriminator between "the page is a
-/// wall" and "the page discusses walls".
-const DETECT_BLOCK_SCRIPT: &str = include_str!("js/detect_block.js");
-
-/// M6: Detect block/challenge pages from their live DOM (small-page gated —
-/// the body-length gate is the strongest wall-vs-prose discriminator).
-/// Returns the block type if detected, or None.
-pub async fn detect_block(cdp: &CdpSession) -> Result<Option<String>> {
-    let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": DETECT_BLOCK_SCRIPT,
-                "returnByValue": true,
-            })),
-        )
-        .await?;
-
-    if res.get("exceptionDetails").is_some() {
-        return Ok(None);
-    }
-    let block = res
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    Ok(block)
-}
-
-/// Extract visible text content from the page body, excluding scripts,
-/// styles, and hidden elements. Returns at most `budget` characters.
-///
-/// Uses `innerText` which respects CSS visibility (unlike `textContent`).
-/// The text is collapsed to single spaces and truncated to the budget.
-pub async fn capture_content(cdp: &CdpSession, budget: usize) -> Result<String> {
-    let expr = r#"(()=>{const d=document;if(!d||!d.body)return'';const c=d.body.cloneNode(true);c.querySelectorAll("script,style,noscript,svg,template,link,meta,[class*='dfp'],[id*='dfp'],[class*='advert'],[id*='advert'],[class*='sponsored'],[data-sponsored],[data-ad],[data-ad-slot],[data-ad-client],[data-google-query-id],ins.adsbygoogle,[id*='google_ads'],[class*='ad-container'],[class*='ad-wrapper'],[class*='ad-slot'],[class*='ad-banner'],[class*='ad-feedback'],[class*='adBanner'],[class*='adSense'],[class*='adBlock'],[class*='ad-label'],[class*='ads-label'],[class*='ads-container'],[class*='mol-ads'],[class*='promoted'],[aria-label*='advertisement' i]").forEach(e=>e.remove());c.querySelectorAll('select').forEach(s=>{const ts=[...s.options].map(o=>(o.label||o.text||'').trim()).filter(Boolean).slice(0,12);if(ts.length){const extra=Math.max(0,s.options.length-ts.length);s.replaceChildren(document.createTextNode('['+ts.join(' | ')+(extra?' | +'+extra+' more':'')+'] '));}});const t=(c.innerText||c.textContent||'').replace(/\s+/g,' ').trim();return t.slice(0,__BUDGET__);})()"#.replace("__BUDGET__", &budget.to_string());
-    let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-            })),
-        )
-        .await?;
-
-    let text = res
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Ok(text.to_string())
-}
-
-/// Semantic content extraction: find the main content area and convert it
-/// to clean, token-efficient markdown. Strips navigation, footers, ads,
-/// scripts, and other noise. Preserves headings, paragraphs, links, lists,
-/// code blocks, tables, blockquotes, and images.
-///
-/// Main content detection: semantic HTML5 (<main>, <article>, [role=main])
-/// → common content selectors → text density analysis (highest text-to-link
-/// ratio). Layout tables (no <th>) are walked as content; data tables
-/// (with <th>) are converted to markdown tables.
-///
-/// This is the `see mode=content` path: the agent gets clean markdown to
-/// READ, not 9KB of ref IDs to parse. Designed for articles, docs, search
-/// results — any page where the agent wants the text, not the interactive
-/// elements.
-pub async fn capture_markdown(cdp: &CdpSession, budget: usize) -> Result<String> {
-    let expr = markdown_expr(budget, None)?;
-    run_markdown(cdp, expr).await
-}
-
-/// Scoped variant: markdown of ONE element's subtree (resolved by its
-/// canonical sig), used by `see mode=content scope=eN`. Site-specific
-/// branches are bypassed - the caller asked for exactly this element.
-pub async fn capture_markdown_scoped(
-    cdp: &CdpSession,
-    budget: usize,
-    sig: &str,
-    frame: &[usize],
-) -> Result<String> {
-    let expr = markdown_expr(budget, Some((sig, frame)))?;
-    run_markdown(cdp, expr).await
-}
-
-/// Assemble the markdown script. `scoped` = (sig, frame): resolve that one
-/// element (shadow-piercing deepAll, same sig scheme as capture) and render
-/// only its subtree. `None` = whole-page (findMain) with the site branches.
-fn markdown_expr(budget: usize, scoped: Option<(&str, &[usize])>) -> Result<String> {
-    let scope_flag = if scoped.is_some() { "true" } else { "false" };
-    let scope_main = match scoped {
-        None => "findMain(document)".to_string(),
-        Some((sig, frame)) => {
-            let sig_js = serde_json::to_string(sig)?;
-            let frame_js = serde_json::to_string(frame)?;
-            ("(function(){const frame=__FRAME__;"
-                .to_string()
-                + &JS_PREAMBLE
-                + "const d=document;let doc=d;for(const idx of frame){const ifr=[...doc.querySelectorAll('iframe')][idx];if(!ifr)return null;try{doc=ifr.contentDocument;if(!doc)return null;}catch(e){return null;}}const all=deepAll(doc,sel);const fps=frame.join(',');const counts={};for(const n of all){const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;const s=fps+'|'+r+'|'+nm+'|'+counts[key];if(s===__SIG__)return n;}return null;})()")
-                .replace("__FRAME__", &frame_js)
-                .replace("__SIG__", &sig_js)
-        }
-    };
-    Ok(include_str!("js/markdown.js")
-        .replace("__BUDGET__", &budget.to_string())
-        .replace("__SCOPE_FLAG__", scope_flag)
-        .replace("__SCOPE_MAIN__", &scope_main))
-}
-
-/// Run an assembled markdown expression and return its text.
-async fn run_markdown(cdp: &CdpSession, expr: String) -> Result<String> {
-    let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-            })),
-        )
-        .await?;
-    let text = res
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Ok(text.to_string())
-}
-
-/// Outline extraction: return just the page title + heading hierarchy.
-/// Ultra-minimal output for "what's on this page" without reading everything.
-/// ~50-200 bytes typically. If no headings, suggests mode=content.
-pub async fn capture_outline(cdp: &CdpSession) -> Result<String> {
-    let expr = r#"(function(){var title=document.title||'';var hs=document.querySelectorAll('h1,h2,h3,h4,h5,h6');var out='';if(title)out+=title+'\n';if(!hs.length)return out+'(no headings — use see mode=content to read)';for(var i=0;i<hs.length;i++){var h=hs[i];var lvl=parseInt(h.tagName.charAt(1));var txt=h.innerText.trim();if(!txt)continue;for(var j=0;j<lvl-1;j++)out+='  ';out+=txt+'\n';}return out.trim();})()"#;
-    let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-            })),
-        )
-        .await?;
-    let text = res
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Ok(text.to_string())
-}
-
 #[cfg(test)]
 mod script_syntax_tests {
     //! Guards the injected page scripts against syntax errors. A broken
@@ -1002,7 +537,7 @@ mod script_syntax_tests {
 
     #[test]
     fn detect_block_script_is_valid_js() {
-        node_check("detect-block", super::DETECT_BLOCK_SCRIPT);
+        node_check("detect-block", super::block::DETECT_BLOCK_SCRIPT);
     }
 
     #[test]
@@ -1011,11 +546,11 @@ mod script_syntax_tests {
         // findMain, toMd); a syntax slip would break every content read.
         node_check(
             "markdown",
-            &super::markdown_expr(8000, None).expect("markdown expr builds"),
+            &super::content::markdown_expr(8000, None).expect("markdown expr builds"),
         );
         node_check(
             "markdown-scoped",
-            &super::markdown_expr(3000, Some(("0|generic|Aside panel|1", &[0])))
+            &super::content::markdown_expr(3000, Some(("0|generic|Aside panel|1", &[0])))
                 .expect("scoped markdown expr builds"),
         );
     }
@@ -1025,7 +560,8 @@ mod script_syntax_tests {
         // Runs the REAL detector against fixture documents (stubbed DOM):
         // the reddit wall, the reddit challenge, Cloudflare, a normal page,
         // and a long prose page that MENTIONS the wall (must not classify).
-        let src = serde_json::to_string(super::DETECT_BLOCK_SCRIPT).expect("serialize detector");
+        let src =
+            serde_json::to_string(super::block::DETECT_BLOCK_SCRIPT).expect("serialize detector");
         let mut js = String::from("const S = ");
         js.push_str(&src);
         js.push_str(
