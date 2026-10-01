@@ -309,3 +309,18 @@ pub(super) fn cut_chars(s: &str, max: usize) -> String {
     out.push('…');
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::cut_chars;
+
+    #[test]
+    fn cut_chars_caps_on_char_boundaries() {
+        assert_eq!(cut_chars("short", 10), "short");
+        assert_eq!(cut_chars("exact", 5), "exact");
+        assert_eq!(cut_chars("hello world", 5), "hello…");
+        // Multibyte input never splits a codepoint.
+        assert_eq!(cut_chars("héllo wörld", 7), "héllo w…");
+        assert_eq!(cut_chars("日本語テキスト", 3), "日本語…");
+    }
+}

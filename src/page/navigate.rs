@@ -655,3 +655,32 @@ fn normalize_url(url: &str) -> String {
     };
     s.strip_suffix('/').unwrap_or(&s).to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_domain, normalize_url};
+
+    #[test]
+    fn extract_domain_strips_scheme_port_and_www() {
+        assert_eq!(
+            extract_domain("https://www.example.com/a/b?q=1"),
+            "example.com"
+        );
+        assert_eq!(extract_domain("http://localhost:3000/x"), "localhost");
+        assert_eq!(extract_domain("example.com/path"), "example.com");
+    }
+
+    #[test]
+    fn normalize_url_strips_scheme_fragment_and_default_port() {
+        assert_eq!(normalize_url("https://example.com/"), "example.com");
+        assert_eq!(
+            normalize_url("https://example.com:443/x#frag"),
+            "example.com/x"
+        );
+        assert_eq!(normalize_url("http://example.com:80"), "example.com");
+        assert_eq!(
+            normalize_url("http://example.com:8080/x/"),
+            "example.com:8080/x"
+        );
+    }
+}

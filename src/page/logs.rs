@@ -113,3 +113,30 @@ impl Page {
             .unwrap_or(serde_json::json!([])))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{is_media_url, xhr_key};
+
+    #[test]
+    fn xhr_key_strips_query_and_fragment() {
+        assert_eq!(
+            xhr_key("https://x.com/i/api/graphql/abc?q=1#frag"),
+            "https://x.com/i/api/graphql/abc"
+        );
+        assert_eq!(xhr_key("https://x.com/i/api"), "https://x.com/i/api");
+        assert_eq!(xhr_key(""), "");
+    }
+
+    #[test]
+    fn media_urls_are_filtered_from_the_ring() {
+        // Opaque playback sources and HLS/DASH chunks are ring noise.
+        assert!(is_media_url("blob:https://x.com/00-11-22-33"));
+        assert!(is_media_url("data:video/mp4;base64,AAAA"));
+        assert!(is_media_url("https://video.twimg.com/seg.m4s?tag=1"));
+        assert!(is_media_url("https://cdn.example.com/CHUNK.MP4"));
+        // API traffic stays visible.
+        assert!(!is_media_url("https://x.com/i/api/graphql/abc"));
+        assert!(!is_media_url("https://cdn.example.com/data.json"));
+    }
+}
