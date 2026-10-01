@@ -394,8 +394,8 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
             .iter()
             .any(|p| p.as_str() == h.as_str() || p.as_str().starts_with(prefix.as_str()))
     };
-    let in_home = std::env::var("HOME").map(&under).unwrap_or(false)
-        || std::env::var("USERPROFILE").map(&under).unwrap_or(false);
+    let in_home = std::env::var("HOME").map(under).unwrap_or(false)
+        || std::env::var("USERPROFILE").map(under).unwrap_or(false);
     if in_home && RC_FILES.contains(&file_name.as_str()) {
         return Err(format!(
             "blocked: writing to shell/config startup file ({file_name}) is not allowed"

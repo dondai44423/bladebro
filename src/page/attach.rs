@@ -112,7 +112,7 @@ impl Page {
                 )
                 .await
             {
-                eprintln!["[bladebro] WARNING: UA override failed: {e}"];
+                eprintln!("[bladebro] WARNING: UA override failed: {e}");
             }
         }
         // S6: geo-consistent identity — timezone and locale must match the
@@ -130,13 +130,13 @@ impl Page {
                         )
                         .await
                     {
-                        eprintln!["[bladebro] WARNING: timezone override failed: {e}"];
+                        eprintln!("[bladebro] WARNING: timezone override failed: {e}");
                     } else {
-                        eprintln!["[bladebro] timezone override: {tz}"];
+                        eprintln!("[bladebro] timezone override: {tz}");
                     }
                 }
             } else if std::env::var("BLADE_PROXY").is_ok() {
-                eprintln!["[bladebro] WARNING: BLADE_PROXY set but BLADE_TZ not set — timezone/IP mismatch will be detected"];
+                eprintln!("[bladebro] WARNING: BLADE_PROXY set but BLADE_TZ not set — timezone/IP mismatch will be detected");
             }
             if let Ok(locale) = std::env::var("BLADE_LOCALE") {
                 if !locale.is_empty() {
@@ -155,7 +155,7 @@ impl Page {
                             })),
                         )
                         .await;
-                    eprintln!["[bladebro] locale override: {locale}"];
+                    eprintln!("[bladebro] locale override: {locale}");
                 }
             }
         }
@@ -164,7 +164,7 @@ impl Page {
         let stealth_script_id = match crate::stealth::apply_stealth(&cdp, None).await {
             Ok(id) => Some(id),
             Err(e) => {
-                eprintln!["[bladebro] WARNING: stealth injection failed: {e}"];
+                eprintln!("[bladebro] WARNING: stealth injection failed: {e}");
                 None
             }
         };
