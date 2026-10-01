@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Internal refactor — no behavior change.** The largest sources were split
-  into thin cores plus focused submodules (`cli/`, `cli/args/`, `mcp/server/`,
-  `action/`, `page/`, `browser/`, `realbrowser/`, `reddit/`, `x/`); embedded
-  stealth/page JS payloads moved to `src/**/js/*.js` assembled with
-  `include_str!`; dead legacy CLI code and never-read payload fields removed.
-  The tree is now `cargo fmt`-clean (CI checks formatting).
+  into thin cores plus focused submodules (`cli/`, `cli/args/`, `mcp/server/`
+  with boot/serve/proto, `action/` (+ `action/perform`), `page/`,
+  `page/perception/`, `session_profile/`, `stealth/inject/`, `browser/`,
+  `realbrowser/`, `reddit/`, `x/`); embedded stealth/page JS payloads moved
+  to `src/**/js/*.js` assembled with `include_str!`; dead legacy CLI code and
+  never-read payload fields removed. The tree is now `cargo fmt`-clean (CI
+  checks formatting).
 
 ## [4.0.2] - 2026-09-29
 
