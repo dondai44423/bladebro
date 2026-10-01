@@ -59,9 +59,7 @@ fn rotate_artifacts(dir: &std::path::Path) {
     let mut files: Vec<_> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .flatten()
-            .filter(|e| {
-                e.file_name().to_string_lossy().starts_with("blade-")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("blade-"))
             .filter_map(|e| {
                 let modified = e.metadata().ok()?.modified().ok()?;
                 Some((e.path(), modified))
@@ -89,9 +87,9 @@ pub fn read_artifact(path: &str, offset: usize, limit: usize) -> Result<String> 
     let dir_canon = dir
         .canonicalize()
         .map_err(|e| crate::error::BladeError::Other(format!("artifact dir: {e}")))?;
-    let canon = std::path::Path::new(path)
-        .canonicalize()
-        .map_err(|e| crate::error::BladeError::Other(format!("artifact not found: {path} ({e})")))?;
+    let canon = std::path::Path::new(path).canonicalize().map_err(|e| {
+        crate::error::BladeError::Other(format!("artifact not found: {path} ({e})"))
+    })?;
     if !canon.starts_with(&dir_canon) {
         return Err(crate::error::BladeError::Other(format!(
             "artifact read refused: {path} is outside the artifacts directory ({}) — use the CLI or any file tool for arbitrary paths",

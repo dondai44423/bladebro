@@ -142,7 +142,9 @@ pub(super) fn parse_thread_page(j: &Value, focal_id: &str) -> ThreadPage {
     let mut focal = None;
     let mut tweets = Vec::new();
     for (_eid, ic) in &bits.items {
-        let Some(t) = tweet_from_item(ic) else { continue };
+        let Some(t) = tweet_from_item(ic) else {
+            continue;
+        };
         if t.id == focal_id && focal.is_none() {
             focal = Some(t);
         } else {
@@ -212,8 +214,12 @@ fn tweet_from_item(ic: &Value) -> Option<T> {
         .and_then(|s| s.as_str())
         .map(format_x_date)
         .unwrap_or_default();
-    let replies = legacy.and_then(|l| l.get("reply_count")).and_then(|v| v.as_i64());
-    let reposts = legacy.and_then(|l| l.get("retweet_count")).and_then(|v| v.as_i64());
+    let replies = legacy
+        .and_then(|l| l.get("reply_count"))
+        .and_then(|v| v.as_i64());
+    let reposts = legacy
+        .and_then(|l| l.get("retweet_count"))
+        .and_then(|v| v.as_i64());
     let likes = legacy
         .and_then(|l| l.get("favorite_count"))
         .and_then(|v| v.as_i64());

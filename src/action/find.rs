@@ -126,7 +126,11 @@ pub struct TextMatch {
 /// matches in the results - the ref HEAL path needs them (a facade
 /// composer's hidden wrapper resolves to its live editor downstream),
 /// while text addressing and `see find` stay visible-only.
-pub(super) fn find_text_expr(query: &str, role_filter: Option<&str>, include_hidden: bool) -> Result<String> {
+pub(super) fn find_text_expr(
+    query: &str,
+    role_filter: Option<&str>,
+    include_hidden: bool,
+) -> Result<String> {
     let query_js = serde_json::to_string(query)?;
     let role_js = match role_filter {
         Some(r) => serde_json::to_string(r)?,
@@ -319,7 +323,9 @@ pub async fn find_by_selector(cdp: &CdpSession, selector: &str) -> Result<Select
         .and_then(|r| r.get("value"))
         .ok_or_else(|| BladeError::Other("selector match returned no value".to_string()))?;
     if let Some(inv) = value.get("invalid").and_then(|v| v.as_str()) {
-        return Err(BladeError::Other(format!("invalid selector \"{selector}\": {inv}")));
+        return Err(BladeError::Other(format!(
+            "invalid selector \"{selector}\": {inv}"
+        )));
     }
     let matches: Vec<TextMatch> =
         serde_json::from_value(value.get("matches").cloned().unwrap_or_else(|| json!([])))?;
@@ -481,7 +487,12 @@ pub async fn locate_text(cdp: &CdpSession, query: &str) -> Option<TextLocation> 
 /// (`prepare`/`focus`/`clear`/`type`/`select`/`click`), or reads it
 /// (`check`/`read`/`hover`). Separate from `find_by_sig` so tests can
 /// syntax-check it without a live browser.
-pub(super) fn find_sig_expr(sig: &str, mode: &str, text: Option<&str>, frame: &[usize]) -> Result<String> {
+pub(super) fn find_sig_expr(
+    sig: &str,
+    mode: &str,
+    text: Option<&str>,
+    frame: &[usize],
+) -> Result<String> {
     let sig_js = serde_json::to_string(sig)?;
     let mode_js = serde_json::to_string(mode)?;
     let text_js = match text {

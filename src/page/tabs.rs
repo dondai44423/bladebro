@@ -19,12 +19,18 @@ impl Page {
 
         if let Some(id) = ctx_id {
             // Try the isolated world first.
-            let res = self.cdp.send("Runtime.callFunctionOn", Some(json!({
-                "executionContextId": id,
-                "functionDeclaration": format!("function() {{ return ({expr}); }}"),
-                "returnByValue": true,
-                "awaitPromise": true,
-            }))).await;
+            let res = self
+                .cdp
+                .send(
+                    "Runtime.callFunctionOn",
+                    Some(json!({
+                        "executionContextId": id,
+                        "functionDeclaration": format!("function() {{ return ({expr}); }}"),
+                        "returnByValue": true,
+                        "awaitPromise": true,
+                    })),
+                )
+                .await;
 
             match res {
                 Ok(v) => return Ok(v),
@@ -36,32 +42,59 @@ impl Page {
         }
 
         // Lazily create the isolated world.
-        let frame_id = self.cdp.send("Page.getFrameTree", None).await
+        let frame_id = self
+            .cdp
+            .send("Page.getFrameTree", None)
+            .await
             .ok()
-            .and_then(|v| v.get("frameTree")?.get("frame")?.get("id")?.as_str().map(String::from))
+            .and_then(|v| {
+                v.get("frameTree")?
+                    .get("frame")?
+                    .get("id")?
+                    .as_str()
+                    .map(String::from)
+            })
             .unwrap_or_default();
-        if let Ok(v) = self.cdp.send("Page.createIsolatedWorld", Some(json!({
-            "frameId": frame_id,
-            "worldName": "",
-            "grantUniveralAccess": true,
-        }))).await {
+        if let Ok(v) = self
+            .cdp
+            .send(
+                "Page.createIsolatedWorld",
+                Some(json!({
+                    "frameId": frame_id,
+                    "worldName": "",
+                    "grantUniveralAccess": true,
+                })),
+            )
+            .await
+        {
             if let Some(id) = v.get("executionContextId").and_then(|i| i.as_i64()) {
                 *self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
-                return self.cdp.send("Runtime.callFunctionOn", Some(json!({
-                    "executionContextId": id,
-                    "functionDeclaration": format!("function() {{ return ({expr}); }}"),
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                }))).await;
+                return self
+                    .cdp
+                    .send(
+                        "Runtime.callFunctionOn",
+                        Some(json!({
+                            "executionContextId": id,
+                            "functionDeclaration": format!("function() {{ return ({expr}); }}"),
+                            "returnByValue": true,
+                            "awaitPromise": true,
+                        })),
+                    )
+                    .await;
             }
         }
 
         // Fallback: regular Runtime.evaluate.
-        self.cdp.send("Runtime.evaluate", Some(json!({
-            "expression": expr,
-            "returnByValue": true,
-            "awaitPromise": true,
-        }))).await
+        self.cdp
+            .send(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": expr,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+            )
+            .await
     }
 
     /// Reset the isolated world context (call on navigation).
@@ -77,7 +110,10 @@ impl Page {
             // return in <10ms. If Chrome is busy (page navigating, pipe
             // congested), don't block the click flow for 30s — skip tab
             // detection instead.
-            match bc.send_with_timeout("Target.getTargets", None, Duration::from_secs(3)).await {
+            match bc
+                .send_with_timeout("Target.getTargets", None, Duration::from_secs(3))
+                .await
+            {
                 Ok(res) => res
                     .get("targetInfos")
                     .and_then(|t| t.as_array())
@@ -90,7 +126,10 @@ impl Page {
                                     kind: "page".to_string(),
                                     title: t.get("title")?.as_str()?.to_string(),
                                     url: t.get("url")?.as_str()?.to_string(),
-                                    attached: t.get("attached").and_then(|a| a.as_bool()).unwrap_or(false),
+                                    attached: t
+                                        .get("attached")
+                                        .and_then(|a| a.as_bool())
+                                        .unwrap_or(false),
                                     web_socket_debugger_url: None,
                                 })
                             })
@@ -168,7 +207,9 @@ impl Page {
             let sid = res
                 .get("sessionId")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| BladeError::Other("Target.attachToTarget returned no sessionId".into()))?;
+                .ok_or_else(|| {
+                    BladeError::Other("Target.attachToTarget returned no sessionId".into())
+                })?;
             CdpSession::child(client.clone(), sid)
         } else {
             // WS mode: connect to the target's own WebSocket URL.

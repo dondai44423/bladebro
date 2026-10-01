@@ -28,9 +28,9 @@ pub async fn handle_template_extract(
     template: &Value,
     limit: usize,
 ) -> Result<String> {
-    let obj = template.as_object().ok_or_else(|| {
-        BladeError::Other("template must be a JSON object".into())
-    })?;
+    let obj = template
+        .as_object()
+        .ok_or_else(|| BladeError::Other("template must be a JSON object".into()))?;
 
     // Build ONE JS expression covering all lists.
     let mut list_builders = Vec::new();
@@ -41,7 +41,11 @@ pub async fn handle_template_extract(
                 "template list '{list_name}' needs a 'container' selector"
             )));
         }
-        let fields = spec.get("fields").and_then(|f| f.as_object()).cloned().unwrap_or_default();
+        let fields = spec
+            .get("fields")
+            .and_then(|f| f.as_object())
+            .cloned()
+            .unwrap_or_default();
         let mut field_parts = Vec::new();
         for (fname, fsel) in &fields {
             let sel = fsel.as_str().unwrap_or("");
@@ -65,25 +69,44 @@ pub async fn handle_template_extract(
         list_builders.join(",")
     );
 
-    let res = page.cdp_ref().send("Runtime.evaluate", Some(json!({
-        "expression": expr,
-        "returnByValue": true,
-    }))).await?;
+    let res = page
+        .cdp_ref()
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expr,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
 
     if let Some(exc) = res.get("exceptionDetails") {
-        let msg = exc.get("exception")
+        let msg = exc
+            .get("exception")
             .and_then(|e| e.get("description"))
             .and_then(|d| d.as_str())
             .unwrap_or("template extraction failed");
-        return Err(BladeError::Other(format!("extract failed: {}", crate::platform::truncate_utf8(msg, 200))));
+        return Err(BladeError::Other(format!(
+            "extract failed: {}",
+            crate::platform::truncate_utf8(msg, 200)
+        )));
     }
 
-    let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(json!({}));
+    let value = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(json!({}));
     let json_str = serde_json::to_string_pretty(&value)?;
 
     // Count total items across lists.
-    let total: usize = value.as_object()
-        .map(|o| o.values().filter_map(|v| v.as_array().map(|a| a.len())).sum())
+    let total: usize = value
+        .as_object()
+        .map(|o| {
+            o.values()
+                .filter_map(|v| v.as_array().map(|a| a.len()))
+                .sum()
+        })
         .unwrap_or(0);
 
     if json_str.len() > 6000 {
@@ -305,11 +328,19 @@ return JSON.stringify(lowConf?{container:best.tagName.toLowerCase(),count:items.
 /// find no list yet, or only the first few items. When the result is empty
 /// OR tiny (<8 items) and requests are still in flight, settle briefly and
 /// re-run (bounded: 2 retries). Quiet pages pay zero extra latency.
-async fn run_auto_extract(page: &Page, limit: usize, post_marker: bool) -> Result<serde_json::Value> {
+async fn run_auto_extract(
+    page: &Page,
+    limit: usize,
+    post_marker: bool,
+) -> Result<serde_json::Value> {
     let expr = auto_extract_expr(limit, post_marker);
     let mut val = auto_extract_eval(page, &expr).await?;
     for _ in 0..2 {
-        let items_len = val.get("items").and_then(|i| i.as_array()).map(|a| a.len()).unwrap_or(0);
+        let items_len = val
+            .get("items")
+            .and_then(|i| i.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
         if items_len >= 8 || page.in_flight() == 0 {
             break;
         }
@@ -317,26 +348,43 @@ async fn run_auto_extract(page: &Page, limit: usize, post_marker: bool) -> Resul
             page.cdp_ref(),
             std::time::Duration::from_millis(800),
             Some(page.in_flight_ref()),
-        ).await.ok();
+        )
+        .await
+        .ok();
         val = auto_extract_eval(page, &expr).await?;
     }
     Ok(val)
 }
 
 async fn auto_extract_eval(page: &Page, expr: &str) -> Result<serde_json::Value> {
-    let res = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
-        "expression": expr,
-        "returnByValue": true,
-    }))).await?;
+    let res = page
+        .cdp_ref()
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": expr,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
     if let Some(exc) = res.get("exceptionDetails") {
-        let msg = exc.get("exception")
+        let msg = exc
+            .get("exception")
             .and_then(|e| e.get("description"))
             .and_then(|d| d.as_str())
             .unwrap_or("auto-extract eval failed");
-        return Err(BladeError::Other(format!("auto-extract: {}", crate::platform::truncate_utf8(msg, 200))));
+        return Err(BladeError::Other(format!(
+            "auto-extract: {}",
+            crate::platform::truncate_utf8(msg, 200)
+        )));
     }
-    let json_str = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("{}");
-    Ok(serde_json::from_str(json_str).unwrap_or_else(|_| serde_json::json!({"error": "parse failed", "items": []})))
+    let json_str = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
+    Ok(serde_json::from_str(json_str)
+        .unwrap_or_else(|_| serde_json::json!({"error": "parse failed", "items": []})))
 }
 /// Offload big extract payloads to an artifact; render inline otherwise.
 fn auto_extract_output(json_str: &str) -> Result<String> {
@@ -351,15 +399,27 @@ fn auto_extract_output(json_str: &str) -> Result<String> {
     }
     Ok(format!("extract auto:\n{json_str}"))
 }
-pub async fn handle_auto_extract(page: &mut Page, limit: usize, limit_explicit: bool) -> Result<String> {
+pub async fn handle_auto_extract(
+    page: &mut Page,
+    limit: usize,
+    limit_explicit: bool,
+) -> Result<String> {
     let val = run_auto_extract(page, limit, true).await?;
 
     // Reddit post pages: the marker hands off to the comment-tree sweep — one
     // in-page API pass returns every comment (collapsed replies included),
     // thread-ordered and structured, instead of scraping the rendered DOM.
     if val.get("container").and_then(|c| c.as_str()) == Some("reddit-post-page") {
-        let permalink = val.get("permalink").and_then(|p| p.as_str()).unwrap_or("").to_string();
-        let sort = val.get("sort").and_then(|s| s.as_str()).unwrap_or("confidence").to_string();
+        let permalink = val
+            .get("permalink")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
+        let sort = val
+            .get("sort")
+            .and_then(|s| s.as_str())
+            .unwrap_or("confidence")
+            .to_string();
         if !permalink.is_empty() {
             let cap = if limit_explicit {
                 limit.clamp(1, crate::reddit::MAX_COMMENT_CAP)
@@ -457,13 +517,20 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
 
     loop {
         let val = run_auto_extract(page, 500, false).await?;
-        let items = val.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default();
+        let items = val
+            .get("items")
+            .and_then(|i| i.as_array())
+            .cloned()
+            .unwrap_or_default();
         let mut new_count = 0usize;
         for item in items {
             // Keyless items dedupe by their JSON — the old empty-key branch
             // re-pushed them every scroll iteration.
-            let key = item.get("url").or_else(|| item.get("title"))
-                .and_then(|v| v.as_str()).map(String::from)
+            let key = item
+                .get("url")
+                .or_else(|| item.get("title"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
                 .unwrap_or_else(|| item.to_string());
             if seen.insert(key) {
                 all_items.push(item);
@@ -485,14 +552,22 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
             no_new_streak = 0;
         }
         if std::time::Instant::now() > deadline {
-            stop = format!("timeout {timeout_secs}s — the feed may have more; raise timeout or re-run");
+            stop = format!(
+                "timeout {timeout_secs}s — the feed may have more; raise timeout or re-run"
+            );
             break;
         }
 
-        let _ = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
-            "expression": "window.scrollBy(0, Math.floor(window.innerHeight*0.9))",
-            "returnByValue": true,
-        }))).await;
+        let _ = page
+            .cdp_ref()
+            .send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": "window.scrollBy(0, Math.floor(window.innerHeight*0.9))",
+                    "returnByValue": true,
+                })),
+            )
+            .await;
 
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     }
@@ -504,7 +579,10 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
     }
     let path = crate::artifacts::write_artifact(&json, "json")?;
     let preview: String = json.chars().take(1000).collect();
-    Ok(format!("{status}\n{}\npreview: {preview}…", artifact_hint(&path)))
+    Ok(format!(
+        "{status}\n{}\npreview: {preview}…",
+        artifact_hint(&path)
+    ))
 }
 #[cfg(test)]
 mod extract_script_tests {
@@ -516,11 +594,23 @@ mod extract_script_tests {
     fn extract_script_is_valid_js() {
         for post_marker in [false, true] {
             let js = super::auto_extract_expr(50, post_marker);
-            assert!(js.contains("Quality gate"), "quality gate must survive placeholder substitution");
-            assert!(!js.contains("__LIMIT__"), "limit placeholder must be substituted everywhere");
-            assert!(!js.contains("__POST_MARKER__"), "marker placeholder must be substituted everywhere");
+            assert!(
+                js.contains("Quality gate"),
+                "quality gate must survive placeholder substitution"
+            );
+            assert!(
+                !js.contains("__LIMIT__"),
+                "limit placeholder must be substituted everywhere"
+            );
+            assert!(
+                !js.contains("__POST_MARKER__"),
+                "marker placeholder must be substituted everywhere"
+            );
             if post_marker {
-                assert!(js.contains("reddit-post-page"), "post marker present when enabled");
+                assert!(
+                    js.contains("reddit-post-page"),
+                    "post marker present when enabled"
+                );
             }
             let has_node = std::process::Command::new("node")
                 .arg("--version")
@@ -533,7 +623,8 @@ mod extract_script_tests {
                 eprintln!("node not available — skipping extract script syntax check");
                 return;
             }
-            let path = std::env::temp_dir().join(format!("bladebro-js-check-extract-{post_marker}.js"));
+            let path =
+                std::env::temp_dir().join(format!("bladebro-js-check-extract-{post_marker}.js"));
             std::fs::write(&path, &js).expect("write js fixture");
             let out = std::process::Command::new("node")
                 .arg("--check")
@@ -541,7 +632,11 @@ mod extract_script_tests {
                 .output()
                 .expect("run node --check");
             let _ = std::fs::remove_file(&path);
-            assert!(out.status.success(), "node --check failed: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "node --check failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 }

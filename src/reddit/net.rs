@@ -41,7 +41,10 @@ pub(super) async fn ensure_loid(cdp: &CdpSession) -> bool {
     // Still tokenless — re-serve the page; the challenge resolves in ~1s
     // and its solved response sets `loid`.
     let _ = cdp
-        .send("Page.reload", Some(serde_json::json!({ "ignoreCache": false })))
+        .send(
+            "Page.reload",
+            Some(serde_json::json!({ "ignoreCache": false })),
+        )
         .await;
     let _ = crate::page::wait_for_load(cdp, Duration::from_secs(10)).await;
     for _ in 0..8 {
@@ -96,9 +99,16 @@ return {{s:r.status,t:x}};}}catch(e){{return {{s:0,t:String(e)}}}}}})()"
             .and_then(|e| e.get("description"))
             .and_then(|d| d.as_str())
             .unwrap_or("fetch failed");
-        return Err(BladeError::Other(format!("reddit: {}", crate::platform::truncate_utf8(msg, 200))));
+        return Err(BladeError::Other(format!(
+            "reddit: {}",
+            crate::platform::truncate_utf8(msg, 200)
+        )));
     }
-    let val = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
+    let val = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null);
     let status = val["s"].as_i64().unwrap_or(0);
     let text = val["t"].as_str().unwrap_or_default();
     if status == 429 {
@@ -109,17 +119,23 @@ return {{s:r.status,t:x}};}}catch(e){{return {{s:0,t:String(e)}}}}}})()"
             .unwrap_or_else(|| BladeError::Other(format!("reddit: GET {path} → HTTP {status}"))));
     }
     if text.trim().is_empty() {
-        return Err(BladeError::Other("reddit: empty response (throttled?)".into()));
+        return Err(BladeError::Other(
+            "reddit: empty response (throttled?)".into(),
+        ));
     }
     serde_json::from_str(text).map_err(|e| {
-        classify_gate_body(path, text)
-            .unwrap_or_else(|| BladeError::Other(format!("reddit: non-JSON response from {path} ({e})")))
+        classify_gate_body(path, text).unwrap_or_else(|| {
+            BladeError::Other(format!("reddit: non-JSON response from {path} ({e})"))
+        })
     })
 }
 
 /// Fetch several reddit JSON paths concurrently in one CDP round-trip.
 /// Each URL resolves to `Ok(value)` / `Err(reason)` independently.
-pub(super) async fn fetch_json_many(cdp: &CdpSession, urls: &[String]) -> Result<Vec<Result<Value>>> {
+pub(super) async fn fetch_json_many(
+    cdp: &CdpSession,
+    urls: &[String],
+) -> Result<Vec<Result<Value>>> {
     let urls_js = serde_json::to_string(urls)?;
     let expr = format!(
         "(async()=>{{const us={urls_js};return await Promise.all(us.map(u=>{{const c=new AbortController();\
@@ -143,9 +159,16 @@ return fetch(u,{{credentials:'include',signal:c.signal}}).then(r=>r.text().then(
             .and_then(|e| e.get("description"))
             .and_then(|d| d.as_str())
             .unwrap_or("batch fetch failed");
-        return Err(BladeError::Other(format!("reddit: {}", crate::platform::truncate_utf8(msg, 200))));
+        return Err(BladeError::Other(format!(
+            "reddit: {}",
+            crate::platform::truncate_utf8(msg, 200)
+        )));
     }
-    let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
+    let value = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null);
     let arr = value.as_array().cloned().unwrap_or_default();
     let mut out = Vec::with_capacity(arr.len());
     for (item, url) in arr.iter().zip(urls) {

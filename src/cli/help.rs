@@ -117,8 +117,24 @@ pub fn suggest_command(cmd: &str) -> Option<&'static str> {
         return Some(target);
     }
     const COMMANDS: &[&str] = &[
-        "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help", "rb",
-        "realbrowser", "mcp", "audit", "probe", "targets", "update", "doctor", "rollback",
+        "nav",
+        "see",
+        "act",
+        "state",
+        "run",
+        "vision",
+        "daemon",
+        "stop",
+        "help",
+        "rb",
+        "realbrowser",
+        "mcp",
+        "audit",
+        "probe",
+        "targets",
+        "update",
+        "doctor",
+        "rollback",
         "version",
     ];
     let mut best: Option<(usize, &'static str)> = None;
@@ -414,8 +430,8 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
 
     let mut commands = serde_json::Map::new();
     for c in [
-        "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help",
-        "rb", "mcp", "audit", "update", "doctor", "rollback", "version",
+        "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help", "rb", "mcp",
+        "audit", "update", "doctor", "rollback", "version",
     ] {
         if let Some(d) = command_help_json(c) {
             commands.insert(c.to_string(), d);
@@ -469,7 +485,8 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
 pub fn command_help_text(cmd: &str) -> Option<String> {
     let cmd = normalize_cmd(cmd);
     let text = match cmd {
-        "nav" => r#"bladebro nav — navigate
+        "nav" => {
+            r#"bladebro nav — navigate
 
 USAGE
   bladebro nav <url> [--block <classes>] [--json]
@@ -486,8 +503,10 @@ EXAMPLES
   bladebro nav example.com
   bladebro nav https://x.com --block images,fonts
   bladebro nav example.com --json | jq .text
-"#,
-        "see" => r#"bladebro see — read the page without acting
+"#
+        }
+        "see" => {
+            r#"bladebro see — read the page without acting
 
 USAGE
   bladebro see [mode] [url] [extract <type>] [flags]
@@ -523,8 +542,10 @@ EXAMPLES
   bladebro see example.com content        navigate + read in one call
   bladebro see --find "Submit"            refs by text
   bladebro see --logs network             recent requests
-"#,
-        "act" => r#"bladebro act — interact with the page
+"#
+        }
+        "act" => {
+            r#"bladebro act — interact with the page
 
 USAGE
   bladebro act <action> [target] [value] [--flags]
@@ -559,8 +580,10 @@ EXAMPLES
   bladebro act eval "document.title"             evaluate JS
   bladebro act batch '[{"action":"reload"}]'     sequential steps in ONE call
   bladebro act collect https://x.com/list --max 100   infinite-scroll collect
-"#,
-        "state" => r#"bladebro state — cookies, storage, tabs, sessions, blocking
+"#
+        }
+        "state" => {
+            r#"bladebro state — cookies, storage, tabs, sessions, blocking
 
 USAGE
   bladebro state <op> [args] [flags]
@@ -591,8 +614,10 @@ EXAMPLES
   bladebro state set-cookie token abc --domain example.com --secure
   bladebro state tabs
   bladebro state save my-session
-"#,
-        "run" => r#"bladebro run — batch actions with branching and loops
+"#
+        }
+        "run" => {
+            r#"bladebro run — batch actions with branching and loops
 
 USAGE
   bladebro run '<json-steps>'      (or @file / - for stdin)
@@ -610,8 +635,10 @@ EXAMPLES
   bladebro run '[{"action":"navigate","url":"example.com"},{"action":"see","mode":"content"}]'
   bladebro run @steps.json
   cat steps.json | bladebro run -
-"#,
-        "vision" => r#"bladebro vision — screenshot
+"#
+        }
+        "vision" => {
+            r#"bladebro vision — screenshot
 
 USAGE
   bladebro vision [--marks]
@@ -624,8 +651,10 @@ after looking at the image. Vision is the LAST RESORT: the structural model
 EXAMPLES
   bladebro vision
   bladebro vision --marks --json | jq -r .image_path
-"#,
-        "daemon" => r#"bladebro daemon — persistent Chrome session
+"#
+        }
+        "daemon" => {
+            r#"bladebro daemon — persistent Chrome session
 
 USAGE
   bladebro daemon
@@ -634,8 +663,10 @@ Auto-starts on the first command — run it manually only to watch startup
 errors. One Chrome instance serves every later command (Unix socket under the
 data dir; socket + pid file are 0600). Idle timeout: BLADE_IDLE_TIMEOUT
 seconds (default 600), then Chrome shuts down; the next command relaunches it.
-"#,
-        "rb" | "realbrowser" => r#"bladebro rb — the real-browser lane
+"#
+        }
+        "rb" | "realbrowser" => {
+            r#"bladebro rb — the real-browser lane
 
 USAGE
   bladebro rb                     status (same as `rb status`)
@@ -679,8 +710,10 @@ port for a false reading. The lane never masks Chrome's own value.
 The switch applies to the CLI daemon and to MCP sessions — the daemon
 restarts immediately, and a running MCP relaunches its browser at the next
 call; no host restart is ever needed.
-"#,
-        "stop" => r#"bladebro stop — shut the daemon down
+"#
+        }
+        "stop" => {
+            r#"bladebro stop — shut the daemon down
 
 USAGE
   bladebro stop
@@ -688,8 +721,10 @@ USAGE
 Graceful: flushes logins + domain knowledge, kills Chrome, removes the
 socket. Idempotent — exit 0 even when nothing is running. If the daemon is
 wedged, falls back to terminating the pid from the pid file.
-"#,
-        "help" => r#"bladebro help — the single self-teaching surface
+"#
+        }
+        "help" => {
+            r#"bladebro help — the single self-teaching surface
 
 USAGE
   bladebro help              this manual
@@ -699,8 +734,10 @@ USAGE
                              payload conventions, examples — call ONCE and
                              you know the whole CLI
   bladebro help <cmd> --json per-command machine help
-"#,
-        "mcp" => r#"bladebro mcp — MCP server (stdio JSON-RPC)
+"#
+        }
+        "mcp" => {
+            r#"bladebro mcp — MCP server (stdio JSON-RPC)
 
 USAGE
   bladebro mcp
@@ -715,8 +752,10 @@ the 2026-07-28 stateless dialect). Drives Chrome over WebSocket by default
 BLADE_TRANSPORT=pipe opts into the zero-port pipe transport instead (its
 automation flag is masked — lie-engine-style detectors can see the mask).
 Chrome launches lazily on the first tool call.
-"#,
-        "audit" => r#"bladebro audit — stealth audit
+"#
+        }
+        "audit" => {
+            r#"bladebro audit — stealth audit
 
 USAGE
   bladebro audit
@@ -727,8 +766,10 @@ checks, worker/iframe propagation) plus a boot self-check and a
 cross-restart consistency stamp (canvas/audio/geometry/UA/GL must not
 drift between runs). Run it after any stealth-affecting change; 61/61
 is the bar.
-"#,
-        "update" => r#"bladebro -u / update — self-update
+"#
+        }
+        "update" => {
+            r#"bladebro -u / update — self-update
 
 USAGE
   bladebro -u [--check | -c] [--force | -f]
@@ -738,8 +779,10 @@ GitHub releases. --check is a dry run; --force reinstalls the current
 version. npm installs are detected (path contains node_modules) and
 redirected to `npm update -g bladebro`; --force overrides. After an
 update: restart your MCP client. Regret it: bladebro --rollback.
-"#,
-        "doctor" => r#"bladebro doctor / -doc — system diagnostics
+"#
+        }
+        "doctor" => {
+            r#"bladebro doctor / -doc — system diagnostics
 
 USAGE
   bladebro doctor
@@ -747,8 +790,10 @@ USAGE
 13 checks: data directory, Chrome (+version), Xvfb, profile dir, login
 persistence, profile hygiene, stale locks, GitHub reachability, binary
 integrity, disk space, version-vs-latest. Failures print a fix.
-"#,
-        "rollback" => r#"bladebro --rollback — restore the previous binary
+"#
+        }
+        "rollback" => {
+            r#"bladebro --rollback — restore the previous binary
 
 USAGE
   bladebro --rollback
@@ -756,8 +801,10 @@ USAGE
 Restores the most recent backup from <data dir>/backups (written by every
 self-update). The backup is verified as a valid binary first — a corrupted
 newest backup falls through to the next one.
-"#,
-        "version" => r#"bladebro -v / --version — version + update status
+"#
+        }
+        "version" => {
+            r#"bladebro -v / --version — version + update status
 
 USAGE
   bladebro -v
@@ -765,7 +812,8 @@ USAGE
 Version + build id, install method (npm / source / binary) and update
 state: behind (with the hint), on the latest release, or ahead of it
 (dev builds). Never a misleading "up to date" when the check failed.
-"#,
+"#
+        }
         _ => return None,
     };
     Some(crate::ui::style_help(text))
@@ -783,7 +831,10 @@ mod tests {
         assert_eq!(v["tools"].as_array().unwrap().len(), 5);
         assert!(v["commands"]["act"]["usage"].as_str().is_some());
         assert!(v["commands"]["nav"].is_object());
-        assert!(v["commands"]["mcp"].is_object(), "help --json must cover mcp");
+        assert!(
+            v["commands"]["mcp"].is_object(),
+            "help --json must cover mcp"
+        );
         assert!(v["commands"]["rb"].is_object(), "help --json must cover rb");
         assert!(v["commands"]["doctor"].is_object());
         assert!(v["exit_codes"]["2"].as_str().unwrap().contains("usage"));
@@ -799,8 +850,8 @@ mod tests {
     #[test]
     fn every_command_has_help_text_and_json() {
         for c in [
-            "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help",
-            "rb", "mcp", "audit", "update", "doctor", "rollback", "version",
+            "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help", "rb", "mcp",
+            "audit", "update", "doctor", "rollback", "version",
         ] {
             let text = command_help_text(c).unwrap_or_else(|| panic!("{c} human help"));
             assert!(text.contains("USAGE"), "{c} help lacks USAGE");
@@ -809,7 +860,9 @@ mod tests {
         }
         // Aliases resolve to the canonical command (v3.9.10: `help mcp` etc. work).
         assert!(command_help_text("-u").is_some() && command_help_text("-doc").is_some());
-        assert!(command_help_text("--version").is_some() && command_help_text("--rollback").is_some());
+        assert!(
+            command_help_text("--version").is_some() && command_help_text("--rollback").is_some()
+        );
         assert!(command_help_json("-u").is_some() && command_help_json("-v").is_some());
         assert!(command_help_text("bogus").is_none());
         assert!(command_help_json("bogus").is_none());
@@ -821,7 +874,11 @@ mod tests {
         assert_eq!(suggest_command("stte"), Some("state"));
         assert_eq!(suggest_command("visio"), Some("vision"));
         assert_eq!(suggest_command("realbrwoser"), Some("realbrowser"));
-        assert_eq!(suggest_command("browser"), Some("rb use"), "the word users reach for");
+        assert_eq!(
+            suggest_command("browser"),
+            Some("rb use"),
+            "the word users reach for"
+        );
         assert_eq!(suggest_command("browsers"), Some("rb use"));
         assert_eq!(suggest_command("completely-unrelated"), None);
     }

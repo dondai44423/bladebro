@@ -50,9 +50,11 @@ pub(super) fn is_media_url(url: &str) -> bool {
         return true;
     }
     let pl = url.split('?').next().unwrap_or("").to_ascii_lowercase();
-    [".m4s", ".m4a", ".mp4", ".m4v", ".mpd", ".webm", ".vtt", ".ts"]
-        .iter()
-        .any(|e| pl.ends_with(e))
+    [
+        ".m4s", ".m4a", ".mp4", ".m4v", ".mpd", ".webm", ".vtt", ".ts",
+    ]
+    .iter()
+    .any(|e| pl.ends_with(e))
 }
 
 impl Page {
@@ -94,10 +96,20 @@ impl Page {
     /// the same Symbol.for('q') slot the injection script defines — a
     /// string-keyed window property was a page-readable detection marker.
     pub async fn console_log(&self) -> Result<serde_json::Value> {
-        let res = self.cdp.send("Runtime.evaluate", Some(serde_json::json!({
-            "expression": "window[Symbol.for('q')]||[]",
-            "returnByValue": true,
-        }))).await?;
-        Ok(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(serde_json::json!([])))
+        let res = self
+            .cdp
+            .send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": "window[Symbol.for('q')]||[]",
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
+        Ok(res
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .unwrap_or(serde_json::json!([])))
     }
 }

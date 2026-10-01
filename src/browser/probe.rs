@@ -28,7 +28,9 @@ pub(super) async fn probe_gl_ws(base: &str) -> Option<String> {
 
 async fn probe_gl_ws_once(base: &str) -> Option<String> {
     let target = crate::cdp::first_page_target(base).await.ok()?;
-    let client = crate::cdp::CdpClient::connect(target.ws_url().ok()?).await.ok()?;
+    let client = crate::cdp::CdpClient::connect(target.ws_url().ok()?)
+        .await
+        .ok()?;
     let session = crate::cdp::CdpSession::root(client);
     // The probe needs a normal document (the startup tab may be a WebUI where
     // canvas access is restricted) — but when it is already blank, skip the

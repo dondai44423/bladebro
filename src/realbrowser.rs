@@ -54,12 +54,27 @@ mod profiles;
 mod select;
 mod template;
 
-pub use self::browsers::{brand_from_version, discover, find_browser, requires_non_default_dir, Brand, BrowserSpec};
-pub use self::config::{config, config_from, config_path, save_config, save_config_to, Config, Mode};
-pub use self::controls::{hum_enabled, input_paused, pause_path, paused_error, set_paused, should_idle_shutdown};
-pub use self::profiles::{devtools_port, list_profiles, parse_devtools_active_port, parse_singleton_owner, profile_in_use, profile_owner_pid, same_dir, ProfileInfo};
-pub use self::select::{effective_mode, ensure_import, resolve_selection, session_drifted, sole_root_id, validate_binary_override};
-pub use self::template::{forget, has_template, human_bytes, import_template, root_for, source_meta_path, template_dir, template_source, template_stats, ImportStats};
+pub use self::browsers::{
+    brand_from_version, discover, find_browser, requires_non_default_dir, Brand, BrowserSpec,
+};
+pub use self::config::{
+    config, config_from, config_path, save_config, save_config_to, Config, Mode,
+};
+pub use self::controls::{
+    hum_enabled, input_paused, pause_path, paused_error, set_paused, should_idle_shutdown,
+};
+pub use self::profiles::{
+    devtools_port, list_profiles, parse_devtools_active_port, parse_singleton_owner,
+    profile_in_use, profile_owner_pid, same_dir, ProfileInfo,
+};
+pub use self::select::{
+    effective_mode, ensure_import, resolve_selection, session_drifted, sole_root_id,
+    validate_binary_override,
+};
+pub use self::template::{
+    forget, has_template, human_bytes, import_template, root_for, source_meta_path, template_dir,
+    template_source, template_stats, ImportStats,
+};
 
 // ── Lane switch ─────────────────────────────────────────────────────────
 
@@ -149,8 +164,8 @@ pub fn launch_fingerprint_from(env_override: Option<&str>, cfg: &Config) -> u64 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::select::pick_recency_index;
+    use super::*;
 
     #[test]
     fn brand_from_version_parses_every_family() {
@@ -158,10 +173,22 @@ mod tests {
             brand_from_version("Google Chrome 151.0.7922.108"),
             Some(Brand::Chrome)
         );
-        assert_eq!(brand_from_version("Chromium 151.0.7922.108"), Some(Brand::Chromium));
-        assert_eq!(brand_from_version("Brave Browser 1.79.126"), Some(Brand::Brave));
-        assert_eq!(brand_from_version("Microsoft Edge 151.0.0.0"), Some(Brand::Edge));
-        assert_eq!(brand_from_version("Vivaldi 7.5.3735.58"), Some(Brand::Vivaldi));
+        assert_eq!(
+            brand_from_version("Chromium 151.0.7922.108"),
+            Some(Brand::Chromium)
+        );
+        assert_eq!(
+            brand_from_version("Brave Browser 1.79.126"),
+            Some(Brand::Brave)
+        );
+        assert_eq!(
+            brand_from_version("Microsoft Edge 151.0.0.0"),
+            Some(Brand::Edge)
+        );
+        assert_eq!(
+            brand_from_version("Vivaldi 7.5.3735.58"),
+            Some(Brand::Vivaldi)
+        );
         assert_eq!(brand_from_version("Opera 118.0.0.0"), Some(Brand::Opera));
         assert_eq!(brand_from_version("Mozilla Firefox 141"), None);
     }
@@ -182,7 +209,10 @@ mod tests {
 
     #[test]
     fn devtools_active_port_parses_first_line_only() {
-        assert_eq!(parse_devtools_active_port("9222\n/devtools/browser/abc\n"), Some(9222));
+        assert_eq!(
+            parse_devtools_active_port("9222\n/devtools/browser/abc\n"),
+            Some(9222)
+        );
         assert_eq!(parse_devtools_active_port("0\n"), None);
         assert_eq!(parse_devtools_active_port(""), None);
         assert_eq!(parse_devtools_active_port("not-a-port\n"), None);
@@ -221,14 +251,26 @@ mod tests {
 
     #[test]
     fn lane_decision_prefers_env_over_config() {
-        assert!(lane_from(Some("real"), false), "env real beats a disabled config");
-        assert!(!lane_from(Some("agent"), true), "env agent beats an enabled config");
+        assert!(
+            lane_from(Some("real"), false),
+            "env real beats a disabled config"
+        );
+        assert!(
+            !lane_from(Some("agent"), true),
+            "env agent beats an enabled config"
+        );
         assert!(lane_from(None, true));
         assert!(!lane_from(None, false));
         // Anything that is not exactly real|agent falls through to the
         // config — a typo must never silently flip the lane.
-        assert!(!lane_from(Some("Real"), false), "a typo does not force the real lane");
-        assert!(lane_from(Some("agentx"), true), "a typo does not force the agent lane either");
+        assert!(
+            !lane_from(Some("Real"), false),
+            "a typo does not force the real lane"
+        );
+        assert!(
+            lane_from(Some("agentx"), true),
+            "a typo does not force the agent lane either"
+        );
     }
 
     #[test]
@@ -238,26 +280,57 @@ mod tests {
             ..Default::default()
         };
         let fp = launch_fingerprint_from(None, &base);
-        assert_eq!(fp, launch_fingerprint_from(None, &base), "stable across reads");
+        assert_eq!(
+            fp,
+            launch_fingerprint_from(None, &base),
+            "stable across reads"
+        );
 
         let mut other = base.clone();
         other.visible = false;
-        assert_ne!(fp, launch_fingerprint_from(None, &other), "visible is a launch input");
+        assert_ne!(
+            fp,
+            launch_fingerprint_from(None, &other),
+            "visible is a launch input"
+        );
         let mut other = base.clone();
         other.mode = Mode::Profile;
-        assert_ne!(fp, launch_fingerprint_from(None, &other), "mode is a launch input");
+        assert_ne!(
+            fp,
+            launch_fingerprint_from(None, &other),
+            "mode is a launch input"
+        );
         let mut other = base.clone();
         other.profile = Some("Work".into());
-        assert_ne!(fp, launch_fingerprint_from(None, &other), "profile is a launch input");
+        assert_ne!(
+            fp,
+            launch_fingerprint_from(None, &other),
+            "profile is a launch input"
+        );
 
         // The lane itself is part of the fingerprint: on→off must drift.
-        let off = Config { enabled: false, ..base.clone() };
+        let off = Config {
+            enabled: false,
+            ..base.clone()
+        };
         assert_ne!(fp, launch_fingerprint_from(None, &off));
 
         // Agent lane (env override): the real-lane fields cannot affect an
         // agent browser, so the fingerprint stays put — no pointless relaunch.
-        let a1 = Config { enabled: true, mode: Mode::Clone, visible: true, profile: Some("Work".into()), ..Default::default() };
-        let a2 = Config { enabled: true, mode: Mode::Profile, visible: false, profile: None, ..Default::default() };
+        let a1 = Config {
+            enabled: true,
+            mode: Mode::Clone,
+            visible: true,
+            profile: Some("Work".into()),
+            ..Default::default()
+        };
+        let a2 = Config {
+            enabled: true,
+            mode: Mode::Profile,
+            visible: false,
+            profile: None,
+            ..Default::default()
+        };
         assert_eq!(
             launch_fingerprint_from(Some("agent"), &a1),
             launch_fingerprint_from(Some("agent"), &a2)
@@ -271,16 +344,36 @@ mod tests {
         // `visible` shapes launches we OWN only: under Attach (never a
         // launch) toggling it must NOT drift — an attached page must not be
         // reset for a setting that cannot affect it...
-        let at1 = Config { enabled: true, mode: Mode::Attach, visible: true, ..Default::default() };
-        let at2 = Config { enabled: true, mode: Mode::Attach, visible: false, ..Default::default() };
+        let at1 = Config {
+            enabled: true,
+            mode: Mode::Attach,
+            visible: true,
+            ..Default::default()
+        };
+        let at2 = Config {
+            enabled: true,
+            mode: Mode::Attach,
+            visible: false,
+            ..Default::default()
+        };
         assert_eq!(
             launch_fingerprint_from(None, &at1),
             launch_fingerprint_from(None, &at2),
             "visible cannot affect an attach session"
         );
         // ...while every owned mode still gets the relaunch on a toggle.
-        let cl1 = Config { enabled: true, mode: Mode::Clone, visible: true, ..Default::default() };
-        let cl2 = Config { enabled: true, mode: Mode::Clone, visible: false, ..Default::default() };
+        let cl1 = Config {
+            enabled: true,
+            mode: Mode::Clone,
+            visible: true,
+            ..Default::default()
+        };
+        let cl2 = Config {
+            enabled: true,
+            mode: Mode::Clone,
+            visible: false,
+            ..Default::default()
+        };
         assert_ne!(
             launch_fingerprint_from(None, &cl1),
             launch_fingerprint_from(None, &cl2)
@@ -352,8 +445,13 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let got = validate_binary_override("target/rb-bin-rel-test/chrome").expect("relative override");
-        assert!(got.is_absolute(), "stored path must be absolute, got {}", got.display());
+        let got =
+            validate_binary_override("target/rb-bin-rel-test/chrome").expect("relative override");
+        assert!(
+            got.is_absolute(),
+            "stored path must be absolute, got {}",
+            got.display()
+        );
         assert!(got.exists());
         let _ = std::fs::remove_dir_all(&rel);
     }
@@ -375,11 +473,16 @@ mod tests {
         cfg.browser = Some("brave".into());
         save_config_to(&path, &cfg).expect("save");
         let back = config_from(&path);
-        assert!(back.enabled && back.mode == Mode::Clone && back.browser.as_deref() == Some("brave"));
+        assert!(
+            back.enabled && back.mode == Mode::Clone && back.browser.as_deref() == Some("brave")
+        );
 
         std::fs::write(&path, b"{ not json").unwrap();
         let corrupt = config_from(&path);
-        assert!(!corrupt.enabled, "corruption reads as default-off, never a crash");
+        assert!(
+            !corrupt.enabled,
+            "corruption reads as default-off, never a crash"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -406,11 +509,15 @@ mod tests {
         .unwrap();
 
         let got = list_profiles(&root);
-        let keys: Vec<(&str, &str)> = got.iter().map(|p| (p.key.as_str(), p.name.as_str())).collect();
+        let keys: Vec<(&str, &str)> = got
+            .iter()
+            .map(|p| (p.key.as_str(), p.name.as_str()))
+            .collect();
         assert!(keys.contains(&("Default", "Main")), "got {keys:?}");
         assert!(keys.contains(&("Profile 1", "Work")), "got {keys:?}");
         assert!(
-            keys.iter().all(|(k, _)| *k != "System Profile" && *k != "Guest Profile"),
+            keys.iter()
+                .all(|(k, _)| *k != "System Profile" && *k != "Guest Profile"),
             "internal profiles must never be listed: got {keys:?}"
         );
 
@@ -435,7 +542,10 @@ mod tests {
         assert!(input_paused());
         // ...and the pause marker silences the hum on EVERY lane, not just
         // the real one (the pre-fix order let agent sessions keep humming).
-        assert!(!hum_enabled(), "pause must silence the hum on the agent lane");
+        assert!(
+            !hum_enabled(),
+            "pause must silence the hum on the agent lane"
+        );
         set_paused(false).expect("resume");
         assert!(!input_paused());
         assert!(hum_enabled(), "resume restores the hum");

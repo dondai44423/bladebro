@@ -90,9 +90,7 @@ pub fn swap_binary(downloaded: &Path) -> Result<PathBuf> {
 /// Check if the current binary's location is writable.
 /// Returns a clear error with a fix if not.
 fn check_writable(current: &Path) -> Result<()> {
-    let parent = current
-        .parent()
-        .unwrap_or(std::path::Path::new("."));
+    let parent = current.parent().unwrap_or(std::path::Path::new("."));
 
     // Try creating a temp file in the same directory. Random suffix +
     // O_EXCL: a fixed name let a local attacker pre-place a symlink and
@@ -101,8 +99,15 @@ fn check_writable(current: &Path) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let test_file = parent.join(format!(".bladebro-write-test-{}-{nanos}", std::process::id()));
-    match std::fs::OpenOptions::new().create_new(true).write(true).open(&test_file) {
+    let test_file = parent.join(format!(
+        ".bladebro-write-test-{}-{nanos}",
+        std::process::id()
+    ));
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&test_file)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(&test_file);
             Ok(())
@@ -125,15 +130,14 @@ fn check_writable(current: &Path) -> Result<()> {
                             .to_string()
                     } else {
                         "Permission denied. Try: sudo bladebro -u\n\
-                             Or update via npm: npm install -g bladebro".to_string()
+                             Or update via npm: npm install -g bladebro"
+                            .to_string()
                     }
                 }
-                std::io::ErrorKind::ReadOnlyFilesystem => {
-                    "Filesystem is read-only. \
+                std::io::ErrorKind::ReadOnlyFilesystem => "Filesystem is read-only. \
                      Cannot update in place. \
                      Use: npm install -g bladebro"
-                        .to_string()
-                }
+                    .to_string(),
                 _ => format!("cannot write to {}: {e}", parent.display()),
             };
             Err(BladeError::Other(format!(
@@ -152,11 +156,7 @@ fn prune_backups(backup_dir: &Path) {
     };
 
     // Filter to bladebro-v* files.
-    backups.retain(|e| {
-        e.file_name()
-            .to_string_lossy()
-            .starts_with("bladebro-v")
-    });
+    backups.retain(|e| e.file_name().to_string_lossy().starts_with("bladebro-v"));
 
     if backups.len() <= MAX_BACKUPS {
         return;
@@ -185,11 +185,7 @@ fn list_backups(backup_dir: &Path) -> Vec<(PathBuf, String)> {
 
     let mut backups: Vec<(PathBuf, String)> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("bladebro-v")
-        })
+        .filter(|e| e.file_name().to_string_lossy().starts_with("bladebro-v"))
         .map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             (e.path(), name)
@@ -258,7 +254,8 @@ pub async fn rollback() -> Result<()> {
             }
             return Err(BladeError::Other(
                 "all backups are corrupted. Nothing to roll back to.\n\
-                 Reinstall: npm install -g bladebro".into(),
+                 Reinstall: npm install -g bladebro"
+                    .into(),
             ));
         }
         return Err(BladeError::Other(format!(
@@ -332,8 +329,8 @@ async fn do_rollback(backup_path: &Path, backup_name: &str) -> Result<()> {
 
 /// Verify a backup file is a valid binary (magic bytes + size).
 fn verify_backup(path: &Path) -> Result<()> {
-    let data = std::fs::read(path)
-        .map_err(|e| BladeError::Other(format!("cannot read backup: {e}")))?;
+    let data =
+        std::fs::read(path).map_err(|e| BladeError::Other(format!("cannot read backup: {e}")))?;
 
     if data.len() < 4 {
         return Err(BladeError::Other("backup file too small".into()));
@@ -383,7 +380,10 @@ mod backup_verify_tests {
             data[..2].copy_from_slice(b"MZ");
         }
         std::fs::write(&path, &data).unwrap();
-        assert!(verify_backup(&path).is_ok(), "a real-artifact-magic backup must verify");
+        assert!(
+            verify_backup(&path).is_ok(),
+            "a real-artifact-magic backup must verify"
+        );
         // Corrupting the magic must refuse it.
         let mut bad = data.clone();
         bad[0] ^= 0xFF;

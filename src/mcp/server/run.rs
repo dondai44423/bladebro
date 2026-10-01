@@ -19,9 +19,10 @@ use super::see::handle_see;
 use super::state::handle_state;
 
 pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
-    let steps = args.get("steps").and_then(|s| s.as_array()).ok_or_else(|| {
-        crate::error::BladeError::Other("run requires 'steps' array".into())
-    })?;
+    let steps = args
+        .get("steps")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| crate::error::BladeError::Other("run requires 'steps' array".into()))?;
 
     let mut observations = Vec::new();
     // Track page moves: a navigation mid-run can consume a later step's
@@ -33,7 +34,10 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
     let mut last_nav: Option<(usize, String)> = None;
     for (i, step) in steps.iter().enumerate() {
         let step_num = i + 1; // 1-based for human-readable error messages
-        let optional = step.get("optional").and_then(|o| o.as_bool()).unwrap_or(false);
+        let optional = step
+            .get("optional")
+            .and_then(|o| o.as_bool())
+            .unwrap_or(false);
         match execute_step(page, step, &step_num.to_string(), &mut observations).await {
             Ok(()) => {
                 let curr_url = page.model().url().to_string();
@@ -100,10 +104,18 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !text.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, text, rf, nth).await?
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, label, rf, nth).await?
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
@@ -118,7 +130,11 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, label, rf, nth).await?
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
@@ -127,7 +143,10 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
                     "type step requires 'ref', 'label', or 'selector'".into(),
                 ));
             };
-            Ok(Action::Type { ref_id: resolved, text: text.into() })
+            Ok(Action::Type {
+                ref_id: resolved,
+                text: text.into(),
+            })
         }
         "clear" => {
             let resolved = if !ref_id.is_empty() {
@@ -142,13 +161,19 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             Ok(Action::Clear { ref_id: resolved })
         }
         "select" => {
-            let opt = step.get("option").and_then(|o| o.as_str())
+            let opt = step
+                .get("option")
+                .and_then(|o| o.as_str())
                 .or_else(|| step.get("text").and_then(|t| t.as_str()))
                 .unwrap_or("");
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, label, rf, nth).await?
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
@@ -157,7 +182,10 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
                     "select step requires 'ref', 'label', or 'selector'".into(),
                 ));
             };
-            Ok(Action::Select { ref_id: resolved, option: opt.into() })
+            Ok(Action::Select {
+                ref_id: resolved,
+                option: opt.into(),
+            })
         }
         "press" => Ok(Action::Press { key: key.into() }),
         "scroll" => Ok(Action::Scroll { dx, dy }),
@@ -167,10 +195,18 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !text.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, text, rf, nth).await?
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, label, rf, nth).await?
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
@@ -191,7 +227,10 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
                     "upload step requires 'ref' or 'selector'".into(),
                 ));
             };
-            Ok(Action::Upload { ref_id: resolved, path: text.into() })
+            Ok(Action::Upload {
+                ref_id: resolved,
+                path: text.into(),
+            })
         }
         "wait" => {
             let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
@@ -229,11 +268,22 @@ async fn execute_step(
 
     match action_str {
         "if" => {
-            let condition = step.get("condition").and_then(|c| c.as_str()).unwrap_or("settle");
+            let condition = step
+                .get("condition")
+                .and_then(|c| c.as_str())
+                .unwrap_or("settle");
             let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(5);
             let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            let then_steps = step.get("then").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-            let else_steps = step.get("else").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+            let then_steps = step
+                .get("then")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let else_steps = step
+                .get("else")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
 
             // Evaluate the condition (waits up to timeout).
             let met = crate::action::check_condition(
@@ -253,12 +303,16 @@ async fn execute_step(
 
             if branch.is_empty() {
                 if met {
-                    observations.push(format!("step {path}: if({condition} \"{match_text}\") → then (no steps)"));
+                    observations.push(format!(
+                        "step {path}: if({condition} \"{match_text}\") → then (no steps)"
+                    ));
                 } else {
                     observations.push(format!("step {path}: if({condition} \"{match_text}\") → skipped (timeout {timeout_secs}s)"));
                 }
             } else {
-                observations.push(format!("step {path}: if({condition} \"{match_text}\") → {label}"));
+                observations.push(format!(
+                    "step {path}: if({condition} \"{match_text}\") → {label}"
+                ));
                 // If the condition was met, the page may have just changed —
                 // wait for settle before recapturing for fresh refs.
                 if met {
@@ -278,29 +332,43 @@ async fn execute_step(
             }
         }
         "while" => {
-            let condition = step.get("condition").and_then(|c| c.as_str()).unwrap_or("element");
+            let condition = step
+                .get("condition")
+                .and_then(|c| c.as_str())
+                .unwrap_or("element");
             let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
             let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(5);
             let max = step.get("max").and_then(|m| m.as_u64()).unwrap_or(10) as usize;
-            let body = step.get("steps").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+            let body = step
+                .get("steps")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
             for i in 0..max {
                 let met = crate::action::check_condition(
-                    page.cdp_ref(), condition, match_text,
+                    page.cdp_ref(),
+                    condition,
+                    match_text,
                     std::time::Duration::from_secs(timeout_secs),
                     Some(page.in_flight_ref()),
-                ).await;
+                )
+                .await;
                 if !met {
                     observations.push(format!("step {path}: while({condition} \"{match_text}\") \u{2192} done after {i} iterations"));
                     break;
                 }
-                observations.push(format!("step {path}: while({condition} \"{match_text}\") iteration {i}"));
+                observations.push(format!(
+                    "step {path}: while({condition} \"{match_text}\") iteration {i}"
+                ));
                 let _ = page.recapture().await?;
                 for (j, sub_step) in body.iter().enumerate() {
                     let sub_path = format!("{path}.{i}.{j}");
                     Box::pin(execute_step(page, sub_step, &sub_path, observations)).await?;
                 }
                 if i + 1 == max {
-                    observations.push(format!("step {path}: while \u{2192} reached max ({max}) iterations"));
+                    observations.push(format!(
+                        "step {path}: while \u{2192} reached max ({max}) iterations"
+                    ));
                 }
             }
         }
@@ -324,7 +392,11 @@ async fn execute_step(
             observations.push(format!("step {path}: {}", page.delta_view(&delta, 4000)));
         }
         "read" => {
-            let mut ref_id = step.get("ref").and_then(|r| r.as_str()).unwrap_or("").to_string();
+            let mut ref_id = step
+                .get("ref")
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string();
             if ref_id.is_empty() {
                 // Parity with `act read`: a run step must accept selector
                 // addressing too (it used to ignore selector= and fail on
@@ -338,7 +410,8 @@ async fn execute_step(
                 let nth = step.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
                 ref_id = resolve_selector_target(page, selector, nth).await?;
             }
-            let text_content = crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
+            let text_content =
+                crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
             let (role, name) = page
                 .model()
                 .element(&ref_id)
@@ -352,7 +425,9 @@ async fn execute_step(
         "js" | "eval" => {
             // V7: JS eval step. Result is captured as an
             // observation, capped inline.
-            let js_code = step.get("js").and_then(|j| j.as_str())
+            let js_code = step
+                .get("js")
+                .and_then(|j| j.as_str())
                 .or_else(|| step.get("text").and_then(|t| t.as_str()))
                 .unwrap_or("");
             if js_code.is_empty() {
@@ -401,12 +476,16 @@ async fn execute_step(
             let chars = out.chars().count();
             observations.push(format!("step {path}: see ({chars} chars):\n{out}"));
         }
-        "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies" | "set-cookie" => {
+        "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies"
+        | "set-cookie" => {
             let mut state_args = step.clone();
             if action_str != "state" {
                 if let Some(obj) = state_args.as_object_mut() {
                     if !obj.contains_key("op") {
-                        obj.insert("op".to_string(), serde_json::Value::String(action_str.to_string()));
+                        obj.insert(
+                            "op".to_string(),
+                            serde_json::Value::String(action_str.to_string()),
+                        );
                     }
                 }
             }
@@ -425,21 +504,19 @@ async fn execute_step(
                 }
             }
         }
-        "download" => {
-            match handle_download(page, step).await {
-                Ok(result) => {
-                    observations.push(format!("step {path}: {result}"));
-                }
-                Err(BladeError::Closed) => return Err(BladeError::Closed),
-                Err(e) => {
-                    let _ = page.recapture().await;
-                    let view = page.view(2000);
-                    return Err(crate::error::BladeError::Other(format!(
-                        "step {path} download failed: {e}\n\n--- current page state ---\n{view}"
-                    )));
-                }
+        "download" => match handle_download(page, step).await {
+            Ok(result) => {
+                observations.push(format!("step {path}: {result}"));
             }
-        }
+            Err(BladeError::Closed) => return Err(BladeError::Closed),
+            Err(e) => {
+                let _ = page.recapture().await;
+                let view = page.view(2000);
+                return Err(crate::error::BladeError::Other(format!(
+                    "step {path} download failed: {e}\n\n--- current page state ---\n{view}"
+                )));
+            }
+        },
         "wait" => {
             let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
             let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
@@ -447,7 +524,11 @@ async fn execute_step(
                 step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
                 match_text,
             );
-            let else_steps = step.get("else").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+            let else_steps = step
+                .get("else")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
             if else_steps.is_empty() {
                 // Gate semantics (unchanged): a timeout is a real error that
                 // carries the page state, so the agent can recover.
@@ -458,7 +539,10 @@ async fn execute_step(
                 };
                 match page.act(action).await {
                     Ok((delta, verdict)) => {
-                        observations.push(format!("step {path}: {verdict}\n{}", page.delta_view(&delta, 4000)));
+                        observations.push(format!(
+                            "step {path}: {verdict}\n{}",
+                            page.delta_view(&delta, 4000)
+                        ));
                     }
                     Err(BladeError::Closed) => return Err(BladeError::Closed),
                     Err(e) => {
@@ -487,7 +571,9 @@ async fn execute_step(
                 )
                 .await;
                 if met {
-                    observations.push(format!("step {path}: wait({condition} \"{match_text}\") → matched"));
+                    observations.push(format!(
+                        "step {path}: wait({condition} \"{match_text}\") → matched"
+                    ));
                     let _ = crate::page::wait_for_settle_with_network(
                         page.cdp_ref(),
                         std::time::Duration::from_secs(1),
@@ -553,21 +639,19 @@ async fn execute_step(
                 }
             }
         }
-        "collect" => {
-            match handle_collect(page, step).await {
-                Ok(result) => {
-                    observations.push(format!("step {path}: {result}"));
-                }
-                Err(BladeError::Closed) => return Err(BladeError::Closed),
-                Err(e) => {
-                    let _ = page.recapture().await;
-                    let view = page.view(2000);
-                    return Err(crate::error::BladeError::Other(format!(
-                        "step {path} collect failed: {e}\n\n--- current page state ---\n{view}"
-                    )));
-                }
+        "collect" => match handle_collect(page, step).await {
+            Ok(result) => {
+                observations.push(format!("step {path}: {result}"));
             }
-        }
+            Err(BladeError::Closed) => return Err(BladeError::Closed),
+            Err(e) => {
+                let _ = page.recapture().await;
+                let view = page.view(2000);
+                return Err(crate::error::BladeError::Other(format!(
+                    "step {path} collect failed: {e}\n\n--- current page state ---\n{view}"
+                )));
+            }
+        },
         _ => {
             // Navigate first if url is given for a non-navigate action.
             let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
@@ -593,7 +677,10 @@ async fn execute_step(
                         .await;
                         let _ = page.recapture().await;
                     }
-                    observations.push(format!("step {path}: {verdict}\n{}", page.delta_view(&delta, 4000)));
+                    observations.push(format!(
+                        "step {path}: {verdict}\n{}",
+                        page.delta_view(&delta, 4000)
+                    ));
                 }
                 // Closed propagates unwrapped so serve() self-heals.
                 Err(BladeError::Closed) => return Err(BladeError::Closed),

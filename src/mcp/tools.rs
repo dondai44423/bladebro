@@ -21,10 +21,31 @@ pub struct ToolDef {
 /// batch was a confusing schema rejection and inside `run` an "unknown
 /// action". Keep this list in lockstep with `handle_act`'s match arms.
 const ACT_ACTIONS: &[&str] = &[
-    "click", "type", "clear", "select", "press", "scroll", "navigate", "read",
-    "wait", "back", "forward", "reload", "hover", "upload", "fill", "batch",
-    "eval", "pdf", "download", "collect", "open-tab", "close-tab",
-    "switch-tab", "save", "load",
+    "click",
+    "type",
+    "clear",
+    "select",
+    "press",
+    "scroll",
+    "navigate",
+    "read",
+    "wait",
+    "back",
+    "forward",
+    "reload",
+    "hover",
+    "upload",
+    "fill",
+    "batch",
+    "eval",
+    "pdf",
+    "download",
+    "collect",
+    "open-tab",
+    "close-tab",
+    "switch-tab",
+    "save",
+    "load",
 ];
 
 /// Batch steps: everything act accepts except `batch` itself (no nesting),
@@ -258,14 +279,27 @@ mod tests {
         let top: Vec<String> = enum_of(&act.input_schema, &["properties", "action", "enum"]);
         assert_eq!(
             top,
-            ACT_ACTIONS.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            ACT_ACTIONS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
         );
         let steps: Vec<String> = enum_of(
             &act.input_schema,
-            &["properties", "steps", "items", "properties", "action", "enum"],
+            &[
+                "properties",
+                "steps",
+                "items",
+                "properties",
+                "action",
+                "enum",
+            ],
         );
         for a in ACT_ACTIONS.iter().filter(|a| **a != "batch") {
-            assert!(steps.contains(&a.to_string()), "batch steps must include {a}");
+            assert!(
+                steps.contains(&a.to_string()),
+                "batch steps must include {a}"
+            );
         }
         assert!(steps.contains(&"see".to_string()));
         assert!(!steps.contains(&"batch".to_string()), "no nested batch");

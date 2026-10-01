@@ -42,8 +42,16 @@ fn truncate_utf8_short_and_exact_inputs() {
 #[cfg(unix)]
 #[test]
 fn write_path_blocks_system_dirs() {
-    for p in ["/etc/passwd", "/etc/cron.d/x", "/usr/bin/ls", "/boot/vmlinuz"] {
-        assert!(validate_write_path(std::path::Path::new(p)).is_err(), "{p} must be blocked");
+    for p in [
+        "/etc/passwd",
+        "/etc/cron.d/x",
+        "/usr/bin/ls",
+        "/boot/vmlinuz",
+    ] {
+        assert!(
+            validate_write_path(std::path::Path::new(p)).is_err(),
+            "{p} must be blocked"
+        );
     }
 }
 
@@ -153,7 +161,11 @@ fn secure_tmp_rejects_preplaced_symlink_and_file() {
     let a = create_secure_tmp(&dir).expect("first temp");
     let b = create_secure_tmp(&dir).expect("second temp");
     assert_ne!(a, b);
-    assert!(a.file_name().unwrap().to_string_lossy().starts_with(".bladebro-update"));
+    assert!(a
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with(".bladebro-update"));
 
     // Pre-place a symlink + a regular file and verify O_EXCL semantics
     // hold for the API the updater uses (create_new): creation at an
@@ -164,7 +176,11 @@ fn secure_tmp_rejects_preplaced_symlink_and_file() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&victim, &link).unwrap();
     let probe = |p: &std::path::Path| {
-        std::fs::OpenOptions::new().create_new(true).write(true).open(p).is_err()
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(p)
+            .is_err()
     };
     assert!(probe(&dir.join("victim.txt")));
     #[cfg(unix)]
@@ -209,7 +225,11 @@ fn secure_dir_all_chmods_created_components() {
     bladebro::platform::secure_create_dir_all(&base.join("four")).unwrap();
     let base_mode = std::fs::metadata(&base).unwrap().permissions().mode() & 0o777;
     assert_eq!(base_mode, 0o755, "pre-existing dir must not be chmodded");
-    let four_mode = std::fs::metadata(base.join("four")).unwrap().permissions().mode() & 0o777;
+    let four_mode = std::fs::metadata(base.join("four"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(four_mode, 0o700);
     let _ = std::fs::remove_dir_all(&base);
 }

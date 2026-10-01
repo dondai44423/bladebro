@@ -15,11 +15,7 @@ use crate::ui;
 pub async fn run_audit(base: &str) -> Result<()> {
     let target = cdp::first_page_target(base).await?;
     let client = cdp::CdpClient::connect(target.ws_url()?).await?;
-    let mut page = Page::attach(
-        cdp::CdpSession::root(client),
-        base,
-        None,
-    ).await?;
+    let mut page = Page::attach(cdp::CdpSession::root(client), base, None).await?;
 
     // Find vectors.html — project root or CARGO_MANIFEST_DIR.
     let vectors_url = {
@@ -27,11 +23,13 @@ pub async fn run_audit(base: &str) -> Result<()> {
             std::path::PathBuf::from("tests/vectors.html"),
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors.html"),
         ];
-        let path = candidates
-            .iter()
-            .find(|p| p.exists())
-            .ok_or_else(|| BladeError::Other("vectors.html not found. Run from project root.".into()))?;
-        format!("file://{}", path.canonicalize().unwrap_or(path.clone()).display())
+        let path = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
+            BladeError::Other("vectors.html not found. Run from project root.".into())
+        })?;
+        format!(
+            "file://{}",
+            path.canonicalize().unwrap_or(path.clone()).display()
+        )
     };
 
     if crate::realbrowser::real_lane() {
@@ -85,10 +83,24 @@ pub async fn run_audit(base: &str) -> Result<()> {
         let plugins = v.get("plugins").and_then(|x| x.as_i64()).unwrap_or(0);
         let native = v.get("native").and_then(|x| x.as_bool()).unwrap_or(false);
         println!("\n  Self-check:");
-        println!("    navigator.webdriver: {}", if wd { "FAIL (true)" } else { "OK (false)" });
-        println!("    window.cdc_:         {} ({})", if cdc == "undefined" { "OK" } else { "FAIL" }, cdc);
-        println!("    navigator.plugins:   {} ({} plugins)", if plugins > 0 { "OK" } else { "WARN" }, plugins);
-        println!("    toString integrity:  {}", if native { "OK (native)" } else { "FAIL" });
+        println!(
+            "    navigator.webdriver: {}",
+            if wd { "FAIL (true)" } else { "OK (false)" }
+        );
+        println!(
+            "    window.cdc_:         {} ({})",
+            if cdc == "undefined" { "OK" } else { "FAIL" },
+            cdc
+        );
+        println!(
+            "    navigator.plugins:   {} ({} plugins)",
+            if plugins > 0 { "OK" } else { "WARN" },
+            plugins
+        );
+        println!(
+            "    toString integrity:  {}",
+            if native { "OK (native)" } else { "FAIL" }
+        );
     }
 
     // v3.9.12: cross-restart consistency stamp — the fingerprint that must
@@ -123,7 +135,12 @@ return JSON.stringify(out);
         )
         .await
         .ok()
-        .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).map(String::from));
+        .and_then(|r| {
+            r.get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
     if let Some(ref s) = stamp {
         let stamp_path = crate::platform::blade_dir().join("audit-stamp.json");
         let prev = std::fs::read_to_string(&stamp_path)

@@ -108,10 +108,8 @@ async fn hum_loop(
         // movementX/movementY deltas — PerimeterX/HUMAN tracks these.
         let (dmx, dmy) = {
             let lm = last_mouse.lock().unwrap_or_else(|e| e.into_inner());
-            lm.map(|(lx, ly)| (
-                (new_x - lx).round() as i64,
-                (new_y - ly).round() as i64,
-            )).unwrap_or((jx as i64, jy as i64))
+            lm.map(|(lx, ly)| ((new_x - lx).round() as i64, (new_y - ly).round() as i64))
+                .unwrap_or((jx as i64, jy as i64))
         };
         let _ = cdp
             .send(

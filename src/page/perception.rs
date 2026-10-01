@@ -14,9 +14,9 @@
 
 use serde::Deserialize;
 use serde_json::json;
-use std::time::Duration;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::LazyLock;
+use std::time::Duration;
 
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
@@ -574,9 +574,7 @@ pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
         return Err(BladeError::Other(format!("page capture failed: {msg}")));
     }
 
-    let value = res
-        .get("result")
-        .and_then(|r| r.get("value"));
+    let value = res.get("result").and_then(|r| r.get("value"));
 
     // The capture script returns null when the page isn't ready yet (no
     // document.body). Return an empty loading capture instead of erroring.
@@ -688,8 +686,7 @@ pub async fn dismiss_consent_with_stored(
     cdp: &CdpSession,
     stored: Option<&str>,
 ) -> Result<Option<String>> {
-    let policy =
-        std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
+    let policy = std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
     if policy == "off" {
         return Ok(None);
     }
@@ -1027,10 +1024,7 @@ mod script_syntax_tests {
         }
         let path = std::env::temp_dir().join(format!("bladebro-js-run-{name}.js"));
         std::fs::write(&path, js).expect("write js fixture");
-        let out = Command::new("node")
-            .arg(&path)
-            .output()
-            .expect("run node");
+        let out = Command::new("node").arg(&path).output().expect("run node");
         let _ = std::fs::remove_file(&path);
         Some(out)
     }

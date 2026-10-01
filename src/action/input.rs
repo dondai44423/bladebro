@@ -28,7 +28,10 @@ pub(super) async fn dispatch_mouse_move(
         } else {
             let angle = rng.uniform() * 2.0 * std::f64::consts::PI;
             let start_dist = 100.0 + rng.uniform() * 200.0;
-            (target.0 + angle.cos() * start_dist, target.1 + angle.sin() * start_dist)
+            (
+                target.0 + angle.cos() * start_dist,
+                target.1 + angle.sin() * start_dist,
+            )
         }
     };
 
@@ -44,10 +47,8 @@ pub(super) async fn dispatch_mouse_move(
     for pt in &path {
         let (mx, my) = {
             let lm = last_mouse.lock().unwrap_or_else(|e| e.into_inner());
-            lm.map(|(lx, ly)| (
-                (pt.x - lx).round() as i64,
-                (pt.y - ly).round() as i64,
-            )).unwrap_or((0, 0))
+            lm.map(|(lx, ly)| ((pt.x - lx).round() as i64, (pt.y - ly).round() as i64))
+                .unwrap_or((0, 0))
         };
         cdp.send_with_timeout(
             "Input.dispatchMouseEvent",
@@ -90,10 +91,8 @@ pub(crate) async fn dispatch_mouse_click(
         let ty = cy + jy;
         let (mx, my) = {
             let lm = last_mouse.lock().unwrap_or_else(|e| e.into_inner());
-            lm.map(|(lx, ly)| (
-                (tx - lx).round() as i64,
-                (ty - ly).round() as i64,
-            )).unwrap_or((0, 0))
+            lm.map(|(lx, ly)| ((tx - lx).round() as i64, (ty - ly).round() as i64))
+                .unwrap_or((0, 0))
         };
         cdp.send_with_timeout(
             "Input.dispatchMouseEvent",
@@ -221,7 +220,9 @@ pub(super) fn key_event(
 }
 
 /// Resolve a chord's main key to (key, code, vk, text).
-pub(super) fn resolve_combo_key(combo: &KeyCombo) -> std::result::Result<(String, String, u32, Option<String>), String> {
+pub(super) fn resolve_combo_key(
+    combo: &KeyCombo,
+) -> std::result::Result<(String, String, u32, Option<String>), String> {
     let key = combo.key.as_str();
     if key.chars().count() == 1 {
         let mut ch = key.chars().next().unwrap();
@@ -235,8 +236,8 @@ pub(super) fn resolve_combo_key(combo: &KeyCombo) -> std::result::Result<(String
         }
         Ok((ch.to_string(), code, vk, Some(ch.to_string())))
     } else {
-        let (kname, code, vk) = named_key(key)
-            .ok_or_else(|| format!("unsupported key '{key}' in combo"))?;
+        let (kname, code, vk) =
+            named_key(key).ok_or_else(|| format!("unsupported key '{key}' in combo"))?;
         let text = match kname {
             "Enter" => Some("\r".to_string()),
             "Tab" => Some("\t".to_string()),
@@ -251,7 +252,9 @@ pub(super) fn resolve_combo_key(combo: &KeyCombo) -> std::result::Result<(String
 /// modifier ups (each release drops its own bit, in reverse order). Returns
 /// the events and the index of the main keydown so the dispatcher can hold
 /// the key like the plain path does.
-pub(super) fn combo_events(combo: &KeyCombo) -> std::result::Result<(Vec<serde_json::Value>, usize), String> {
+pub(super) fn combo_events(
+    combo: &KeyCombo,
+) -> std::result::Result<(Vec<serde_json::Value>, usize), String> {
     let (kname, kcode, kvk, ktext) = resolve_combo_key(combo)?;
     let mods = [
         ("Control", "ControlLeft", 17u32, 2u8, combo.ctrl),
@@ -268,8 +271,16 @@ pub(super) fn combo_events(combo: &KeyCombo) -> std::result::Result<(Vec<serde_j
         }
     }
     // Ctrl/Alt/Meta chords are shortcuts, never text; Shift keeps the glyph.
-    let text = if combo.ctrl || combo.alt || combo.meta { None } else { ktext };
-    let kind = if text.is_some() { "keyDown" } else { "rawKeyDown" };
+    let text = if combo.ctrl || combo.alt || combo.meta {
+        None
+    } else {
+        ktext
+    };
+    let kind = if text.is_some() {
+        "keyDown"
+    } else {
+        "rawKeyDown"
+    };
     let main_idx = evs.len();
     evs.push(key_event(kind, &kname, &kcode, kvk, bits, text.as_deref()));
     evs.push(key_event("keyUp", &kname, &kcode, kvk, bits, None));
@@ -296,28 +307,44 @@ pub(super) async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
         let (code, vk, shift) = char_to_key_code(ch);
         let modifiers: u8 = if shift { 8 } else { 0 };
         if shift {
-            cdp.send("Input.dispatchKeyEvent", Some(json!({
-                "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
-                "windowsVirtualKeyCode": 16, "modifiers": 8,
-            }))).await?;
+            cdp.send(
+                "Input.dispatchKeyEvent",
+                Some(json!({
+                    "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
+                    "windowsVirtualKeyCode": 16, "modifiers": 8,
+                })),
+            )
+            .await?;
         }
-        cdp.send("Input.dispatchKeyEvent", Some(json!({
-            "type": "keyDown", "key": key, "code": code,
-            "windowsVirtualKeyCode": vk, "text": key, "modifiers": modifiers,
-            "keyChar": key,
-        }))).await?;
+        cdp.send(
+            "Input.dispatchKeyEvent",
+            Some(json!({
+                "type": "keyDown", "key": key, "code": code,
+                "windowsVirtualKeyCode": vk, "text": key, "modifiers": modifiers,
+                "keyChar": key,
+            })),
+        )
+        .await?;
         // Key press duration: 25-70ms - real humans hold before releasing.
         let mut rng = crate::stealth::Rng::new();
         tokio::time::sleep(Duration::from_millis(25 + rng.range(0, 45) as u64)).await;
-        cdp.send("Input.dispatchKeyEvent", Some(json!({
-            "type": "keyUp", "key": key, "code": code,
-            "windowsVirtualKeyCode": vk, "modifiers": modifiers,
-        }))).await?;
+        cdp.send(
+            "Input.dispatchKeyEvent",
+            Some(json!({
+                "type": "keyUp", "key": key, "code": code,
+                "windowsVirtualKeyCode": vk, "modifiers": modifiers,
+            })),
+        )
+        .await?;
         if shift {
-            cdp.send("Input.dispatchKeyEvent", Some(json!({
-                "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
-                "windowsVirtualKeyCode": 16, "modifiers": 0,
-            }))).await?;
+            cdp.send(
+                "Input.dispatchKeyEvent",
+                Some(json!({
+                    "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+                    "windowsVirtualKeyCode": 16, "modifiers": 0,
+                })),
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -397,10 +424,18 @@ pub(super) async fn type_per_char(cdp: &CdpSession, text: &str) -> bool {
         let ch_str = ch.to_string();
         let (code, vk, shift) = char_to_key_code(ch);
         let modifiers: u8 = if shift { 8 } else { 0 };
-        if shift && cdp.send("Input.dispatchKeyEvent", Some(json!({
-            "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
-            "windowsVirtualKeyCode": 16, "modifiers": 8,
-        }))).await.is_err() {
+        if shift
+            && cdp
+                .send(
+                    "Input.dispatchKeyEvent",
+                    Some(json!({
+                        "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
+                        "windowsVirtualKeyCode": 16, "modifiers": 8,
+                    })),
+                )
+                .await
+                .is_err()
+        {
             return false;
         }
         let mut down = json!({
@@ -415,7 +450,11 @@ pub(super) async fn type_per_char(cdp: &CdpSession, text: &str) -> bool {
         if ch.is_ascii() {
             down["text"] = json!(ch_str);
         }
-        if cdp.send("Input.dispatchKeyEvent", Some(down)).await.is_err() {
+        if cdp
+            .send("Input.dispatchKeyEvent", Some(down))
+            .await
+            .is_err()
+        {
             return false;
         }
         // HOLD the key for the inter-key interval.
@@ -424,19 +463,34 @@ pub(super) async fn type_per_char(cdp: &CdpSession, text: &str) -> bool {
         } else {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if cdp.send("Input.dispatchKeyEvent", Some(json!({
-            "type": "keyUp",
-            "key": ch_str,
-            "code": code,
-            "windowsVirtualKeyCode": vk,
-            "modifiers": modifiers,
-        }))).await.is_err() {
+        if cdp
+            .send(
+                "Input.dispatchKeyEvent",
+                Some(json!({
+                    "type": "keyUp",
+                    "key": ch_str,
+                    "code": code,
+                    "windowsVirtualKeyCode": vk,
+                    "modifiers": modifiers,
+                })),
+            )
+            .await
+            .is_err()
+        {
             return false;
         }
-        if shift && cdp.send("Input.dispatchKeyEvent", Some(json!({
-            "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
-            "windowsVirtualKeyCode": 16, "modifiers": 0,
-        }))).await.is_err() {
+        if shift
+            && cdp
+                .send(
+                    "Input.dispatchKeyEvent",
+                    Some(json!({
+                        "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+                        "windowsVirtualKeyCode": 16, "modifiers": 0,
+                    })),
+                )
+                .await
+                .is_err()
+        {
             return false;
         }
     }

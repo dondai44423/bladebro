@@ -4,15 +4,19 @@
 //! interceptors, stealth apply, the idle hum and the worker patch path —
 //! everything a live Page owns for its lifetime.
 
-use super::*;
 use super::logs::{is_media_url, xhr_key};
+use super::*;
 
 impl Page {
     /// Attach to an existing page target over `cdp`, enable the core domains,
     /// and run an initial capture to seed the model.
     /// `browser_client` is the browser-level connection in pipe mode (S1) —
     /// used for tab listing since pipe mode has no HTTP debug endpoint.
-    pub async fn attach(cdp: CdpSession, base: &str, browser_client: Option<CdpClient>) -> Result<Self> {
+    pub async fn attach(
+        cdp: CdpSession,
+        base: &str,
+        browser_client: Option<CdpClient>,
+    ) -> Result<Self> {
         #[allow(unused_assignments)]
         let mut worker_task: Option<tokio::task::JoinHandle<()>> = None;
         cdp.enable("Page").await?;
@@ -58,7 +62,8 @@ impl Page {
             );
         }
 
-        let need_override = ua_info.as_ref()
+        let need_override = ua_info
+            .as_ref()
             .and_then(|v| v.get("ua").and_then(|u| u.as_str()))
             .map(|ua| ua.contains("HeadlessChrome"))
             .unwrap_or(true);
@@ -76,13 +81,18 @@ impl Page {
                     { "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36" }
                 });
             let fixed_ua = real_ua.replace("HeadlessChrome", "Chrome");
-            let real_platform = ua_info.as_ref()
+            let real_platform = ua_info
+                .as_ref()
                 .and_then(|v| v.get("plt").and_then(|p| p.as_str()))
                 .unwrap_or({
                     #[cfg(target_arch = "aarch64")]
-                    { "Linux aarch64" }
+                    {
+                        "Linux aarch64"
+                    }
                     #[cfg(not(target_arch = "aarch64"))]
-                    { "Linux x86_64" }
+                    {
+                        "Linux x86_64"
+                    }
                 });
 
             // Override ONLY userAgent + platform. The previous version also
@@ -92,10 +102,16 @@ impl Page {
             // generating coherent metadata (brands, GREASE, full versions)
             // from its true version, which matches the fixed UA string
             // (only "HeadlessChrome" → "Chrome" differs).
-            if let Err(e) = cdp.send("Network.setUserAgentOverride", Some(serde_json::json!({
-                "userAgent": fixed_ua,
-                "platform": real_platform,
-            }))).await {
+            if let Err(e) = cdp
+                .send(
+                    "Network.setUserAgentOverride",
+                    Some(serde_json::json!({
+                        "userAgent": fixed_ua,
+                        "platform": real_platform,
+                    })),
+                )
+                .await
+            {
                 eprintln!["[bladebro] WARNING: UA override failed: {e}"];
             }
         }
@@ -107,8 +123,12 @@ impl Page {
         if !crate::realbrowser::real_lane() {
             if let Ok(tz) = std::env::var("BLADE_TZ") {
                 if !tz.is_empty() {
-                    if let Err(e) = cdp.send("Emulation.setTimezoneOverride",
-                        Some(serde_json::json!({ "timezoneId": tz }))).await
+                    if let Err(e) = cdp
+                        .send(
+                            "Emulation.setTimezoneOverride",
+                            Some(serde_json::json!({ "timezoneId": tz })),
+                        )
+                        .await
                     {
                         eprintln!["[bladebro] WARNING: timezone override failed: {e}"];
                     } else {
@@ -121,12 +141,20 @@ impl Page {
             if let Ok(locale) = std::env::var("BLADE_LOCALE") {
                 if !locale.is_empty() {
                     let base = locale.split('-').next().unwrap_or(&locale).to_string();
-                    let _ = cdp.send("Emulation.setLocaleOverride",
-                        Some(serde_json::json!({ "locale": locale }))).await;
-                    let _ = cdp.send("Network.setExtraHTTPHeaders",
-                        Some(serde_json::json!({
-                            "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
-                        }))).await;
+                    let _ = cdp
+                        .send(
+                            "Emulation.setLocaleOverride",
+                            Some(serde_json::json!({ "locale": locale })),
+                        )
+                        .await;
+                    let _ = cdp
+                        .send(
+                            "Network.setExtraHTTPHeaders",
+                            Some(serde_json::json!({
+                                "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
+                            })),
+                        )
+                        .await;
                     eprintln!["[bladebro] locale override: {locale}"];
                 }
             }
@@ -165,11 +193,16 @@ impl Page {
         //   used to kill the handler, freezing every later worker.
         let worker_gl = crate::stealth::worker_gl_spoof(active_locale.as_deref());
         if worker_gl.is_some() || crate::stealth::has_full_script() {
-            let _ = cdp.send("Target.setAutoAttach", Some(serde_json::json!({
-                "autoAttach": true,
-                "flatten": true,
-                "waitForDebuggerOnStart": true
-            }))).await;
+            let _ = cdp
+                .send(
+                    "Target.setAutoAttach",
+                    Some(serde_json::json!({
+                        "autoAttach": true,
+                        "flatten": true,
+                        "waitForDebuggerOnStart": true
+                    })),
+                )
+                .await;
             let client = cdp.client().clone();
             let worker_script = worker_gl.clone();
             let full_script = crate::stealth::full_script();
@@ -185,7 +218,8 @@ impl Page {
                                 .and_then(|t| t.get("type"))
                                 .and_then(|t| t.as_str())
                                 .unwrap_or("");
-                            let session_id = event.params
+                            let session_id = event
+                                .params
                                 .get("sessionId")
                                 .and_then(|s| s.as_str())
                                 .unwrap_or("");
@@ -205,9 +239,18 @@ impl Page {
                             // workers are resumed FIRST, then patched best-effort.
                             let is_sw = target_type == "service_worker";
                             if is_sw {
-                                let res = worker_session.send("Runtime.runIfWaitingForDebugger", None).await;
+                                let res = worker_session
+                                    .send("Runtime.runIfWaitingForDebugger", None)
+                                    .await;
                                 if dbg {
-                                    eprintln!("[workers] resume(sw-first) {target_type}: {}", if res.is_ok() { "ok".to_string() } else { format!("ERR {:?}", res.err()) });
+                                    eprintln!(
+                                        "[workers] resume(sw-first) {target_type}: {}",
+                                        if res.is_ok() {
+                                            "ok".to_string()
+                                        } else {
+                                            format!("ERR {:?}", res.err())
+                                        }
+                                    );
                                 }
                             }
                             match target_type {
@@ -215,12 +258,25 @@ impl Page {
                                     if let Some(ref script) = worker_script {
                                         // Bounded: a pathological target must not
                                         // stall the attach pipeline.
-                                        let res = worker_session.send_with_timeout("Runtime.evaluate", Some(serde_json::json!({
-                                            "expression": script,
-                                            "returnByValue": true,
-                                        })), std::time::Duration::from_secs(5)).await;
+                                        let res = worker_session
+                                            .send_with_timeout(
+                                                "Runtime.evaluate",
+                                                Some(serde_json::json!({
+                                                    "expression": script,
+                                                    "returnByValue": true,
+                                                })),
+                                                std::time::Duration::from_secs(5),
+                                            )
+                                            .await;
                                         if dbg {
-                                            eprintln!("[workers] eval {target_type}: {}", if res.is_ok() { "ok".to_string() } else { format!("ERR {:?}", res.err()) });
+                                            eprintln!(
+                                                "[workers] eval {target_type}: {}",
+                                                if res.is_ok() {
+                                                    "ok".to_string()
+                                                } else {
+                                                    format!("ERR {:?}", res.err())
+                                                }
+                                            );
                                         }
                                     }
                                 }
@@ -229,12 +285,25 @@ impl Page {
                                     // WebGL; this only matters for the locale
                                     // patch — best-effort, bounded.
                                     if let Some(ref script) = worker_script {
-                                        let res = worker_session.send_with_timeout("Runtime.evaluate", Some(serde_json::json!({
-                                            "expression": script,
-                                            "returnByValue": true,
-                                        })), std::time::Duration::from_secs(3)).await;
+                                        let res = worker_session
+                                            .send_with_timeout(
+                                                "Runtime.evaluate",
+                                                Some(serde_json::json!({
+                                                    "expression": script,
+                                                    "returnByValue": true,
+                                                })),
+                                                std::time::Duration::from_secs(3),
+                                            )
+                                            .await;
                                         if dbg {
-                                            eprintln!("[workers] eval {target_type}: {}", if res.is_ok() { "ok".to_string() } else { format!("ERR {:?}", res.err()) });
+                                            eprintln!(
+                                                "[workers] eval {target_type}: {}",
+                                                if res.is_ok() {
+                                                    "ok".to_string()
+                                                } else {
+                                                    format!("ERR {:?}", res.err())
+                                                }
+                                            );
                                         }
                                     }
                                 }
@@ -244,10 +313,16 @@ impl Page {
                                     // before resume, so the frame's scripts
                                     // run against the patched environment.
                                     if let Some(ref script) = full_script {
-                                        let _ = worker_session.send_with_timeout("Runtime.evaluate", Some(serde_json::json!({
-                                            "expression": script,
-                                            "returnByValue": true,
-                                        })), std::time::Duration::from_secs(5)).await;
+                                        let _ = worker_session
+                                            .send_with_timeout(
+                                                "Runtime.evaluate",
+                                                Some(serde_json::json!({
+                                                    "expression": script,
+                                                    "returnByValue": true,
+                                                })),
+                                                std::time::Duration::from_secs(5),
+                                            )
+                                            .await;
                                     }
                                 }
                                 _ => {}
@@ -255,9 +330,18 @@ impl Page {
                             // ALWAYS resume — an unresumed target stays frozen.
                             // (Service workers were already resumed above.)
                             if !is_sw {
-                                let res = worker_session.send("Runtime.runIfWaitingForDebugger", None).await;
+                                let res = worker_session
+                                    .send("Runtime.runIfWaitingForDebugger", None)
+                                    .await;
                                 if dbg {
-                                    eprintln!("[workers] resume {target_type}: {}", if res.is_ok() { "ok".to_string() } else { format!("ERR {:?}", res.err()) });
+                                    eprintln!(
+                                        "[workers] resume {target_type}: {}",
+                                        if res.is_ok() {
+                                            "ok".to_string()
+                                        } else {
+                                            format!("ERR {:?}", res.err())
+                                        }
+                                    );
                                 }
                             }
                         }
@@ -284,10 +368,15 @@ impl Page {
         // the agent in the download result, so nothing depends on /tmp.
         let download_dir = crate::platform::blade_dir().join("downloads");
         let _ = crate::platform::secure_create_dir_all(&download_dir);
-        let _ = cdp.send("Page.setDownloadBehavior", Some(serde_json::json!({
-            "behavior": "allow",
-            "downloadPath": download_dir.display().to_string(),
-        }))).await;
+        let _ = cdp
+            .send(
+                "Page.setDownloadBehavior",
+                Some(serde_json::json!({
+                    "behavior": "allow",
+                    "downloadPath": download_dir.display().to_string(),
+                })),
+            )
+            .await;
 
         // Spawn the dialog-handler background task. It subscribes to
         // `Page.javascriptDialogOpening` events and auto-dismisses them so
@@ -368,27 +457,67 @@ impl Page {
             loop {
                 match rx.recv().await {
                     Ok(ev) if ev.method == "Page.downloadWillBegin" => {
-                        let guid = ev.params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let url = ev.params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let filename = ev.params.get("suggestedFilename").and_then(|v| v.as_str()).unwrap_or("download").to_string();
+                        let guid = ev
+                            .params
+                            .get("guid")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let url = ev
+                            .params
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let filename = ev
+                            .params
+                            .get("suggestedFilename")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("download")
+                            .to_string();
                         let path = dl_dir.join(&filename).display().to_string();
                         if let Ok(mut q) = dlq.lock() {
                             q.push(DownloadInfo {
-                                guid, url, filename: filename.clone(),
+                                guid,
+                                url,
+                                filename: filename.clone(),
                                 state: "inProgress".into(),
-                                received_bytes: 0, total_bytes: 0, path,
+                                received_bytes: 0,
+                                total_bytes: 0,
+                                path,
                             });
-                            if q.len() > 50 { let n = q.len() - 50; q.drain(0..n); }
+                            if q.len() > 50 {
+                                let n = q.len() - 50;
+                                q.drain(0..n);
+                            }
                         }
                         if let Ok(mut a) = dl_ambient.lock() {
                             a.push(format!("download started: {filename}"));
                         }
                     }
                     Ok(ev) if ev.method == "Page.downloadProgress" => {
-                        let guid = ev.params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let state = ev.params.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let received = ev.params.get("receivedBytes").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let total = ev.params.get("totalBytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let guid = ev
+                            .params
+                            .get("guid")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let state = ev
+                            .params
+                            .get("state")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let received = ev
+                            .params
+                            .get("receivedBytes")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let total = ev
+                            .params
+                            .get("totalBytes")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         if let Ok(mut q) = dlq.lock() {
                             if let Some(d) = q.iter_mut().find(|d| d.guid == guid) {
                                 d.state = state;
@@ -422,7 +551,8 @@ impl Page {
             // eventually every settle waits the full timeout.
             // Timestamps let us sweep stale entries (data URLs, long-poll,
             // server-sent events that never fire loadingFinished).
-            let mut open: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+            let mut open: std::collections::HashMap<String, std::time::Instant> =
+                std::collections::HashMap::new();
             // Pending request metadata for the V8 net log.
             let mut pending: HashMap<String, (String, String, i64)> = HashMap::new();
             let mut last_sweep = std::time::Instant::now();
@@ -441,18 +571,36 @@ impl Page {
                         // loadingFinished — counting them pinned the in-flight
                         // counter indefinitely on any page holding a socket.
                         let ty = ev.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+                        let id = ev
+                            .params
+                            .get("requestId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         if !id.is_empty() && ty != "WebSocket" && ty != "EventSource" {
                             open.insert(id.to_string(), std::time::Instant::now());
                             let req = ev.params.get("request");
-                            let method = req.and_then(|r| r.get("method")).and_then(|m| m.as_str()).unwrap_or("GET").to_string();
-                            let url = req.and_then(|r| r.get("url")).and_then(|u| u.as_str()).unwrap_or("").to_string();
-                            if (ty == "XHR" || ty == "Fetch") && !url.is_empty() && !is_media_url(&url) {
+                            let method = req
+                                .and_then(|r| r.get("method"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("GET")
+                                .to_string();
+                            let url = req
+                                .and_then(|r| r.get("url"))
+                                .and_then(|u| u.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if (ty == "XHR" || ty == "Fetch")
+                                && !url.is_empty()
+                                && !is_media_url(&url)
+                            {
                                 if url.contains("/i/api/graphql/") {
                                     tracing::debug!("xhr gql: {} {}", method, url);
                                 }
                                 let mut hdrs: Vec<(String, String)> = Vec::new();
-                                if let Some(h) = req.and_then(|r| r.get("headers")).and_then(|h| h.as_object()) {
+                                if let Some(h) = req
+                                    .and_then(|r| r.get("headers"))
+                                    .and_then(|h| h.as_object())
+                                {
                                     for (k, v) in h {
                                         let kl = k.to_ascii_lowercase();
                                         // Keep every header except transport noise the
@@ -476,7 +624,9 @@ impl Page {
                                 }
                                 if let Ok(mut log) = xhr_log_t.lock() {
                                     let key = xhr_key(&url);
-                                    if let Some(pos) = log.iter().position(|e| xhr_key(&e.url) == key) {
+                                    if let Some(pos) =
+                                        log.iter().position(|e| xhr_key(&e.url) == key)
+                                    {
                                         log.remove(pos);
                                     }
                                     log.push_back(XhrEntry {
@@ -497,8 +647,14 @@ impl Page {
                         }
                     }
                     Some(Ok(ev)) if ev.method == "Network.responseReceived" => {
-                        let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
-                        let status = ev.params.get("response")
+                        let id = ev
+                            .params
+                            .get("requestId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let status = ev
+                            .params
+                            .get("response")
                             .and_then(|r| r.get("status"))
                             .and_then(|s| s.as_i64())
                             .unwrap_or(0);
@@ -513,27 +669,40 @@ impl Page {
                             }
                         }
                     }
-                    Some(Ok(ev)) if ev.method == "Network.loadingFinished"
-                        || ev.method == "Network.loadingFailed" =>
+                    Some(Ok(ev))
+                        if ev.method == "Network.loadingFinished"
+                            || ev.method == "Network.loadingFailed" =>
                     {
-                        let id = ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+                        let id = ev
+                            .params
+                            .get("requestId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         if !id.is_empty() {
                             open.remove(id);
-                                if let Ok(mut log) = xhr_log_t.lock() {
+                            if let Ok(mut log) = xhr_log_t.lock() {
                                 if let Some(e) = log.iter_mut().rev().find(|e| e.id == id) {
                                     e.done = true;
                                     if ev.method == "Network.loadingFailed" {
-                                        e.error = Some(ev.params.get("errorText")
-                                            .and_then(|x| x.as_str())
-                                            .unwrap_or("failed")
-                                            .to_string());
+                                        e.error = Some(
+                                            ev.params
+                                                .get("errorText")
+                                                .and_then(|x| x.as_str())
+                                                .unwrap_or("failed")
+                                                .to_string(),
+                                        );
                                     }
                                     if e.url.contains("/i/api/graphql/") {
-                                        let st = e.error.clone().unwrap_or_else(|| e.status.to_string());
+                                        let st =
+                                            e.error.clone().unwrap_or_else(|| e.status.to_string());
                                         tracing::debug!(
                                             "xhr gql done: {} {} -> {}",
                                             e.method,
-                                            e.url.split('?').next().unwrap_or("").replace("https://x.com", ""),
+                                            e.url
+                                                .split('?')
+                                                .next()
+                                                .unwrap_or("")
+                                                .replace("https://x.com", ""),
                                             st
                                         );
                                     }
@@ -541,16 +710,26 @@ impl Page {
                             }
                             if let Some((method, url, status)) = pending.remove(id) {
                                 let error = if ev.method == "Network.loadingFailed" {
-                                    Some(ev.params.get("errorText")
-                                        .and_then(|e| e.as_str())
-                                        .unwrap_or("failed")
-                                        .to_string())
+                                    Some(
+                                        ev.params
+                                            .get("errorText")
+                                            .and_then(|e| e.as_str())
+                                            .unwrap_or("failed")
+                                            .to_string(),
+                                    )
                                 } else {
                                     None
                                 };
                                 if let Ok(mut log) = net_log_t.lock() {
-                                    log.push_back(NetEntry { method, url, status, error });
-                                    if log.len() > 50 { log.pop_front(); }
+                                    log.push_back(NetEntry {
+                                        method,
+                                        url,
+                                        status,
+                                        error,
+                                    });
+                                    if log.len() > 50 {
+                                        log.pop_front();
+                                    }
                                 }
                             }
                         }
@@ -585,7 +764,17 @@ impl Page {
         let blocked = detect_block(&cdp).await.unwrap_or(None);
         if let Some(ref fw) = consent {
             if let Ok(mut a) = ambient.lock() {
-                a.push(format!("consent: {} ({})", if std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".into()) != "accept" { "rejected" } else { "accepted" }, fw));
+                a.push(format!(
+                    "consent: {} ({})",
+                    if std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".into())
+                        != "accept"
+                    {
+                        "rejected"
+                    } else {
+                        "accepted"
+                    },
+                    fw
+                ));
             }
         }
         if let Some(ref bt) = blocked {
@@ -649,7 +838,7 @@ impl Page {
             isolated_ctx: Arc::new(std::sync::Mutex::new(None)),
             act_count: std::sync::atomic::AtomicU32::new(0),
             compress_enabled: std::sync::atomic::AtomicBool::new(
-                std::env::var("BLADE_NO_COMPRESS").as_deref() != Ok("1")
+                std::env::var("BLADE_NO_COMPRESS").as_deref() != Ok("1"),
             ),
         };
 

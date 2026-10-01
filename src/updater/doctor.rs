@@ -1,7 +1,7 @@
 //! System diagnostics — the "doctor" that checks everything.
 
-use crate::error::Result;
 use super::ui;
+use crate::error::Result;
 use std::fmt;
 
 /// A single diagnostic check result.
@@ -45,7 +45,11 @@ pub async fn run() -> Result<()> {
     checks.push(check_chrome());
 
     // 3. Chrome version (if found)
-    if checks.last().map(|c| c.status == Status::Pass).unwrap_or(false) {
+    if checks
+        .last()
+        .map(|c| c.status == Status::Pass)
+        .unwrap_or(false)
+    {
         checks.push(check_chrome_version().await);
     }
 
@@ -158,10 +162,20 @@ fn check_os() -> Check {
 fn check_data_dir() -> Check {
     let dir = crate::platform::blade_dir();
     let home = crate::platform::home_dir().join(".blade");
-    let reason = if std::env::var("BLADE_HOME").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+    let reason = if std::env::var("BLADE_HOME")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
         "BLADE_HOME"
-    } else if std::env::var("XDG_STATE_HOME").map(|v| !v.trim().is_empty()).unwrap_or(false) {
-        if dir == home { "existing install kept on legacy dir" } else { "XDG_STATE_HOME" }
+    } else if std::env::var("XDG_STATE_HOME")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        if dir == home {
+            "existing install kept on legacy dir"
+        } else {
+            "XDG_STATE_HOME"
+        }
     } else if dir == home {
         // Legacy dir selected: either nothing state-worthy exists yet or the
         // migration-free fallback kept an existing install put.
@@ -215,9 +229,7 @@ async fn check_chrome_version() -> Check {
         }
     };
 
-    let output = std::process::Command::new(&path)
-        .arg("--version")
-        .output();
+    let output = std::process::Command::new(&path).arg("--version").output();
 
     match output {
         Ok(o) => {
@@ -225,10 +237,13 @@ async fn check_chrome_version() -> Check {
             // Extract the first token that looks like a version (contains digits and dots).
             // "Chromium 150.0.7871.186 Arch Linux" → "150.0.7871.186"
             // "Google Chrome 150.0.7871.186" → "150.0.7871.186"
-            let version_token = version_str
-                .split_whitespace()
-                .find(|t| t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-                    && t.contains('.'));
+            let version_token = version_str.split_whitespace().find(|t| {
+                t.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                    && t.contains('.')
+            });
             let major = version_token
                 .and_then(|v| v.split('.').next())
                 .and_then(|v| v.parse::<u32>().ok())
@@ -294,7 +309,10 @@ fn check_xvfb() -> Check {
             name: "Xvfb (headful stealth)",
             status: Status::Warn,
             detail: "not found (headless fallback will be used)".into(),
-            fix: Some("Install: sudo pacman -S xorg-server-xvfb (Arch) / sudo apt install xvfb (Debian)".into()),
+            fix: Some(
+                "Install: sudo pacman -S xorg-server-xvfb (Arch) / sudo apt install xvfb (Debian)"
+                    .into(),
+            ),
         }
     }
 }
@@ -401,14 +419,18 @@ fn check_profile_hygiene() -> Check {
                 .or_else(|| name.strip_prefix("pid-"))
                 .and_then(|p| p.split('-').next())
                 .and_then(|p| p.parse::<u32>().ok());
-            let dead = pid.map(|p| !crate::platform::process_alive(p)).unwrap_or(true);
+            let dead = pid
+                .map(|p| !crate::platform::process_alive(p))
+                .unwrap_or(true);
             if dead {
                 // size (best effort, bounded)
                 let mut size: u64 = 0;
                 if let Ok(it) = fs_items(&path) {
                     for f in it {
                         size += f.len();
-                        if size > 200_000_000 { break; }
+                        if size > 200_000_000 {
+                            break;
+                        }
                     }
                 }
                 total_orphan_bytes += size;
@@ -428,7 +450,11 @@ fn check_profile_hygiene() -> Check {
     Check {
         name: "Profile hygiene",
         status: Status::Warn,
-        detail: format!("{} orphaned profile dir{} ({mb:.0}MB); auto-reaped on next launch", orphans.len(), if orphans.len() == 1 { "" } else { "s" }),
+        detail: format!(
+            "{} orphaned profile dir{} ({mb:.0}MB); auto-reaped on next launch",
+            orphans.len(),
+            if orphans.len() == 1 { "" } else { "s" }
+        ),
         fix: Some("Next launch cleans them automatically".into()),
     }
 }
@@ -476,7 +502,9 @@ fn check_stale_locks() -> Check {
                 Check {
                     name: "Profile locks",
                     status: Status::Warn,
-                    detail: format!("stale lock from dead PID {p} (will be auto-cleared on next launch)"),
+                    detail: format!(
+                        "stale lock from dead PID {p} (will be auto-cleared on next launch)"
+                    ),
                     fix: None,
                 }
             }
@@ -498,14 +526,12 @@ async fn check_network() -> Check {
             detail: format!("reachable (latest: {})", release.tag_name),
             fix: None,
         },
-        Err(e) => {
-            Check {
-                name: "GitHub connectivity",
-                status: Status::Fail,
-                detail: format!("cannot reach GitHub: {e}"),
-                fix: Some("Check your internet connection and firewall settings".into()),
-            }
-        }
+        Err(e) => Check {
+            name: "GitHub connectivity",
+            status: Status::Fail,
+            detail: format!("cannot reach GitHub: {e}"),
+            fix: Some("Check your internet connection and firewall settings".into()),
+        },
     }
 }
 
@@ -557,12 +583,14 @@ fn check_binary() -> Check {
 fn check_disk_space() -> Check {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
-        Err(_) => return Check {
-            name: "Disk space",
-            status: Status::Warn,
-            detail: "cannot check".into(),
-            fix: None,
-        },
+        Err(_) => {
+            return Check {
+                name: "Disk space",
+                status: Status::Warn,
+                detail: "cannot check".into(),
+                fix: None,
+            }
+        }
     };
     // Suppress unused warning on non-Unix (exe only used in cfg(unix) block).
     let _ = &exe;
@@ -662,7 +690,12 @@ fn find_chrome_path() -> Option<String> {
     } else if cfg!(target_os = "windows") {
         &["chrome", "chromium"]
     } else {
-        &["chromium", "google-chrome", "google-chrome-stable", "chromium-browser"]
+        &[
+            "chromium",
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium-browser",
+        ]
     };
 
     for name in names {

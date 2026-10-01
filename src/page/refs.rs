@@ -94,7 +94,6 @@ pub fn stabilize(
         }
     }
 
-
     let mut result = StabilizeResult::default();
     let mut used_prev: std::collections::HashSet<String> = std::collections::HashSet::new();
     // `fresh` tracks element indexes needing NEW refs (not rebound).
@@ -107,7 +106,9 @@ pub fn stabilize(
         if let Some(&ref_id) = prev_by_sig.get(el.sig.as_str()) {
             if used_prev.insert(ref_id.to_string()) {
                 result.live.insert(el.sig.clone(), ref_id.to_string());
-                if let Some(change) = diff_state_opt(prev.get(ref_id).and_then(|p| p.probe.as_ref()), el) {
+                if let Some(change) =
+                    diff_state_opt(prev.get(ref_id).and_then(|p| p.probe.as_ref()), el)
+                {
                     result.changed.push((ref_id.to_string(), change));
                 }
                 continue;
@@ -124,18 +125,20 @@ pub fn stabilize(
     // agent browser. Bladebro's fingerprint survives them.
     for &i in &fresh_vec {
         let el = &next[i];
-if el.fingerprint == 0 {
+        if el.fingerprint == 0 {
             continue; // Pre-D48 captures or 0-fp elements can't fingerprint-match
         }
         if let Some(candidates) = prev_by_fp.get(&el.fingerprint) {
-for &ref_id in candidates {
+            for &ref_id in candidates {
                 if used_prev.contains(ref_id) {
                     continue;
                 }
                 // Found the match: this new element IS the old ref, re-rendered.
-result.live.insert(el.sig.clone(), ref_id.to_string());
+                result.live.insert(el.sig.clone(), ref_id.to_string());
                 used_prev.insert(ref_id.to_string());
-                if let Some(change) = diff_state_opt(prev.get(ref_id).and_then(|p| p.probe.as_ref()), el) {
+                if let Some(change) =
+                    diff_state_opt(prev.get(ref_id).and_then(|p| p.probe.as_ref()), el)
+                {
                     result.changed.push((ref_id.to_string(), change));
                 }
                 result.rebound.push((ref_id.to_string(), el.sig.clone()));
@@ -183,7 +186,7 @@ result.live.insert(el.sig.clone(), ref_id.to_string());
 /// re-renders that preserve structure even when text or classes change
 /// (React/Vue/Angular re-renders, live region updates, counter changes).
 /// Different sigs but same structural fingerprint = same element.
-/// 
+///
 /// The live state of an element at capture time, stored on the LPM so the next
 /// capture can detect changes without a separate query.
 #[derive(Debug, Clone)]
@@ -218,8 +221,16 @@ fn diff_state(prev: &StateProbe, el: &RawElement) -> Option<StateChange> {
         return None;
     }
     Some(StateChange {
-        value: if value_changed { el.value.clone() } else { None },
-        disabled: if disabled_changed { Some(el.disabled) } else { None },
+        value: if value_changed {
+            el.value.clone()
+        } else {
+            None
+        },
+        disabled: if disabled_changed {
+            Some(el.disabled)
+        } else {
+            None
+        },
         checked: if checked_changed { el.checked } else { None },
     })
 }

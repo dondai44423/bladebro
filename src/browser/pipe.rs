@@ -1,17 +1,17 @@
 //! Pipe transport — `--remote-debugging-pipe` launches (no debug port).
 //! Opt-in lane; the WS transport is the default.
 
-use super::*;
-#[cfg(target_os = "linux")]
-use super::display::{apply_xvfb_env, VirtualDisplay};
 #[cfg(unix)]
 use super::discover::find_chrome;
+#[cfg(target_os = "linux")]
+use super::display::{apply_xvfb_env, VirtualDisplay};
 #[cfg(unix)]
 use super::flags::{classify_gl, gl_stages, launch_args, stage_label, LaunchCfg};
 #[cfg(unix)]
 use super::launch::font_audit;
 #[cfg(unix)]
 use super::probe::probe_gl_pipe;
+use super::*;
 
 impl Browser {
     /// Launch Chrome with CDP over `--remote-debugging-pipe` (S1: zero-port
@@ -165,8 +165,10 @@ impl Browser {
         // Pipe pairs: out = us→chrome (chrome reads fd 3), in = chrome→us
         // (chrome writes fd 4). We keep out_tx/in_rx; the child-side ends
         // become fds 3/4 in the child via pre_exec dup2.
-        let (out_tx, out_rx) = pipe::pipe().map_err(|e| BladeError::Other(format!("pipe create: {e}")))?;
-        let (in_tx, in_rx) = pipe::pipe().map_err(|e| BladeError::Other(format!("pipe create: {e}")))?;
+        let (out_tx, out_rx) =
+            pipe::pipe().map_err(|e| BladeError::Other(format!("pipe create: {e}")))?;
+        let (in_tx, in_rx) =
+            pipe::pipe().map_err(|e| BladeError::Other(format!("pipe create: {e}")))?;
 
         // Child-side ends: blocking fds (Chrome does blocking IO on 3/4).
         let child_read_fd = out_rx
@@ -182,7 +184,11 @@ impl Browser {
         }
 
         #[cfg(target_os = "linux")]
-        let mode_str = if headful { "headful (Xvfb)" } else { "headless" };
+        let mode_str = if headful {
+            "headful (Xvfb)"
+        } else {
+            "headless"
+        };
         #[cfg(not(target_os = "linux"))]
         let mode_str = "headful";
         eprintln!("[bladebro] launching Chrome from {chrome_path} on CDP pipe ({mode_str})");
@@ -223,7 +229,10 @@ impl Browser {
                 .await
             {
                 Ok(v) => {
-                    let product = v.get("product").and_then(|p| p.as_str()).unwrap_or("unknown");
+                    let product = v
+                        .get("product")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("unknown");
                     eprintln!("[bladebro] Chrome ready: {product} (pipe transport)");
                     let probe = probe_gl_pipe(&client).await;
                     return Ok((
@@ -241,16 +250,22 @@ impl Browser {
                 Err(_) => {
                     match child.try_wait() {
                         Ok(Some(status)) => {
-                            return Err(BladeError::Other(format!("Chrome exited during startup: {status}")));
+                            return Err(BladeError::Other(format!(
+                                "Chrome exited during startup: {status}"
+                            )));
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            return Err(BladeError::Other(format!("failed to poll Chrome status: {e}")));
+                            return Err(BladeError::Other(format!(
+                                "failed to poll Chrome status: {e}"
+                            )));
                         }
                     }
                     if Instant::now() >= deadline {
                         let _ = child.kill();
-                        return Err(BladeError::Other("Chrome pipe not responding after 20s".into()));
+                        return Err(BladeError::Other(
+                            "Chrome pipe not responding after 20s".into(),
+                        ));
                     }
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }

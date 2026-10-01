@@ -11,26 +11,26 @@
 //! - (later) `page`: the Live Page Model, perception, refs, diff, scene.
 //! - (later) `mcp`: the MCP server surface exposing a few tools to the agent.
 
-pub mod cdp;
-pub mod error;
-pub mod page;
 pub mod action;
+pub mod artifacts;
 pub mod audit;
-pub mod session_profile;
-pub mod logins;
-pub mod fingerprint;
-pub mod state;
-pub mod mcp;
-pub mod stealth;
 pub mod browser;
+pub mod cdp;
+pub mod cli;
+pub mod error;
+pub mod fingerprint;
+pub mod knowledge;
+pub mod logins;
+pub mod mcp;
+pub mod page;
 pub mod platform;
+pub mod realbrowser;
+pub mod reddit;
+pub mod session_profile;
+pub mod state;
+pub mod stealth;
 pub mod ui;
 pub mod updater;
-pub mod artifacts;
-pub mod knowledge;
-pub mod reddit;
 pub mod x;
-pub mod cli;
-pub mod realbrowser;
 
 pub use error::{BladeError, Result};

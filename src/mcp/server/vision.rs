@@ -30,7 +30,9 @@ pub async fn handle_vision(
         // visible elements — the refs match the structural
         // model exactly, so a vision-capable agent can say
         // "click e5" and the act tool just works.
-        let items: Vec<(String, String)> = page.model().elements()
+        let items: Vec<(String, String)> = page
+            .model()
+            .elements()
             .iter()
             .map(|e| (e.ref_id.clone(), e.raw.sig.clone()))
             .collect();
@@ -60,18 +62,32 @@ pub async fn handle_vision(
             + "b.style.cssText='position:fixed;left:'+Math.max(0,rect.x+rect.width/2-12)+'px;top:'+Math.max(0,rect.y+rect.height/2-8)+'px;background:rgba(220,0,110,0.92);color:#fff;font:bold 11px/14px monospace;padding:0 4px;border-radius:3px;border:1px solid #fff;';"
             + "ov.appendChild(b);marked++;}"
             + "d.body.appendChild(ov);return marked;})(" + &items_js + ")";
-        let res = page.cdp_ref().send("Runtime.evaluate", Some(json!({
-            "expression": overlay,
-            "returnByValue": true,
-        }))).await?;
+        let res = page
+            .cdp_ref()
+            .send(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": overlay,
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
         if let Some(exc) = res.get("exceptionDetails") {
-            let msg = exc.get("exception")
+            let msg = exc
+                .get("exception")
                 .and_then(|e| e.get("description"))
                 .and_then(|d| d.as_str())
                 .unwrap_or("overlay failed");
-            note = format!(" (marks overlay error: {})", crate::platform::truncate_utf8(msg, 120));
+            note = format!(
+                " (marks overlay error: {})",
+                crate::platform::truncate_utf8(msg, 120)
+            );
         } else {
-            let marked = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_i64()).unwrap_or(0);
+            let marked = res
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             note = format!(" ({marked} elements marked; badge refs match the structural model)");
         }
     }

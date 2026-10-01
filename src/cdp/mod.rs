@@ -19,6 +19,8 @@ pub mod protocol;
 pub mod session;
 
 pub use client::CdpClient;
-pub use discovery::{first_page_target, list_page_targets, list_targets, version, TargetInfo, VersionInfo};
+pub use discovery::{
+    first_page_target, list_page_targets, list_targets, version, TargetInfo, VersionInfo,
+};
 pub use protocol::{CdpEvent, CdpRequest};
 pub use session::{CdpSession, SessionSubscription};

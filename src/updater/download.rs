@@ -1,7 +1,7 @@
 //! Binary download and verification.
 
-use crate::error::{BladeError, Result};
 use super::version;
+use crate::error::{BladeError, Result};
 use std::path::PathBuf;
 
 /// A downloaded binary, ready to be installed.
@@ -27,8 +27,7 @@ const FIRST_CHECKSUMMED_TAG: &str = "3.3.0";
 
 /// Is checksum verification mandatory for this target tag?
 pub fn checksum_required(tag: &str) -> bool {
-    super::version::compare_versions(tag, FIRST_CHECKSUMMED_TAG)
-        != std::cmp::Ordering::Less
+    super::version::compare_versions(tag, FIRST_CHECKSUMMED_TAG) != std::cmp::Ordering::Less
 }
 
 /// Parse a checksum file body: `<hash>  <filename>` or just `<hash>`.
@@ -72,11 +71,13 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
 
     let resp = match client.get(&checksum_url).send().await {
         Ok(r) => r,
-        Err(e) if required => return Err(fetch_failed(&format!(
-            "checksum file unreachable ({e})"
-        ))),
+        Err(e) if required => {
+            return Err(fetch_failed(&format!("checksum file unreachable ({e})")))
+        }
         Err(_) => {
-            eprintln!("  warn: no checksum file found, skipping SHA256 verification (legacy release)");
+            eprintln!(
+                "  warn: no checksum file found, skipping SHA256 verification (legacy release)"
+            );
             return Ok(());
         }
     };
@@ -93,29 +94,33 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
         return Ok(());
     }
 
-    let checksum_text = resp
-        .text()
-        .await
-        .map_err(|e| if required {
+    let checksum_text = resp.text().await.map_err(|e| {
+        if required {
             fetch_failed(&format!("cannot read checksum: {e}"))
         } else {
             BladeError::Other(format!("cannot read checksum: {e}"))
-        })?;
+        }
+    })?;
 
     let expected_hash = match parse_checksum(&checksum_text) {
         Some(h) => h,
         None if required => return Err(fetch_failed("malformed checksum file")),
         None => {
-            eprintln!("  warn: invalid checksum file, skipping SHA256 verification (legacy release)");
+            eprintln!(
+                "  warn: invalid checksum file, skipping SHA256 verification (legacy release)"
+            );
             return Ok(());
         }
     };
 
     // Compute SHA256 of the downloaded binary.
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let data = std::fs::read(binary_path)
         .map_err(|e| BladeError::Other(format!("cannot read binary for hash: {e}")))?;
-    let actual_hash: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+    let actual_hash: String = Sha256::digest(&data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
 
     if actual_hash != expected_hash {
         return Err(BladeError::Other(format!(
@@ -193,7 +198,9 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
                 // SECURITY: Verify SHA256 before the binary is ever
                 // executed or installed. Fail-closed for releases >=
                 // FIRST_CHECKSUMMED_TAG; abort + clean up on failure.
-                if let Err(e) = verify_sha256(&tmp, &asset.browser_download_url, release.tag()).await {
+                if let Err(e) =
+                    verify_sha256(&tmp, &asset.browser_download_url, release.tag()).await
+                {
                     let _ = std::fs::remove_file(&tmp);
                     return Err(e);
                 }
@@ -235,15 +242,16 @@ pub fn create_secure_tmp(dir: &std::path::Path) -> Result<std::path::PathBuf> {
             std::process::id(),
             rand_suffix()
         ));
-        match std::fs::OpenOptions::new().create_new(true).write(true).open(&tmp) {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+        {
             Ok(_) => {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &tmp,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
                 }
                 return Ok(tmp);
             }
@@ -253,7 +261,9 @@ pub fn create_secure_tmp(dir: &std::path::Path) -> Result<std::path::PathBuf> {
             }
         }
     }
-    Err(BladeError::Other("cannot create temp file: name collisions".into()))
+    Err(BladeError::Other(
+        "cannot create temp file: name collisions".into(),
+    ))
 }
 
 /// Cheap per-process randomness for temp-name uniqueness (no extra deps):
@@ -266,8 +276,7 @@ fn rand_suffix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos() as u64;
-    (std::process::id() as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ t.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
         ^ n.wrapping_mul(0x1656_67B1_9E37_79F9)
 }
@@ -503,7 +512,8 @@ pub fn verify_binary_runs(dl: &DownloadedBinary) -> Result<()> {
                 if e.kind() == std::io::ErrorKind::PermissionDenied {
                     return Err(BladeError::Other(
                         "cannot execute downloaded binary (permission denied). \
-                         Run: chmod +x the binary path".into(),
+                         Run: chmod +x the binary path"
+                            .into(),
                     ));
                 }
             }
@@ -615,8 +625,12 @@ mod magic_tests {
     /// and rollback failed with "not a valid binary for this platform".
     #[test]
     fn macho_magic_accepts_the_real_artifact_headers() {
-        assert!(macho_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01]));
-        assert!(macho_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE, 0x07, 0x00, 0x00, 0x01]));
+        assert!(macho_magic_ok(&[
+            0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01
+        ]));
+        assert!(macho_magic_ok(&[
+            0xCF, 0xFA, 0xED, 0xFE, 0x07, 0x00, 0x00, 0x01
+        ]));
         // The other standard spellings stay accepted.
         assert!(macho_magic_ok(&[0xFE, 0xED, 0xFA, 0xCF]));
         assert!(macho_magic_ok(&[0xFE, 0xED, 0xFA, 0xCE]));
@@ -635,10 +649,14 @@ mod magic_tests {
     #[test]
     fn binary_magic_matches_the_platform() {
         if cfg!(target_os = "linux") {
-            assert!(binary_magic_ok(&[0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00]));
+            assert!(binary_magic_ok(&[
+                0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00
+            ]));
             assert!(!binary_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE]));
         } else if cfg!(target_os = "macos") {
-            assert!(binary_magic_ok(&[0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01]));
+            assert!(binary_magic_ok(&[
+                0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01
+            ]));
             assert!(!binary_magic_ok(&[0x7F, b'E', b'L', b'F']));
         } else if cfg!(windows) {
             assert!(binary_magic_ok(b"MZ\x90\x00"));

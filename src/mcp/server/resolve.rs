@@ -29,18 +29,72 @@ pub(super) async fn resolve_text_target(
     // When the query matches any name in a group, any element whose
     // name is also in that group is a candidate.
     const FIELD_ALIASES: &[&[&str]] = &[
-        &["username", "user", "login", "acct", "account", "userid", "user id",
-          "uid", "uname", "login name", "loginid", "login id", "signin",
-          "sign in", "user name", "member", "handle", "nick", "nickname"],
-        &["password", "pw", "passwd", "pwd", "pass", "secret",
-          "current password", "new password", "confirm password"],
-        &["email", "mail", "e mail", "e-mail", "emailaddress",
-          "email address", "eml", "emailaddr"],
+        &[
+            "username",
+            "user",
+            "login",
+            "acct",
+            "account",
+            "userid",
+            "user id",
+            "uid",
+            "uname",
+            "login name",
+            "loginid",
+            "login id",
+            "signin",
+            "sign in",
+            "user name",
+            "member",
+            "handle",
+            "nick",
+            "nickname",
+        ],
+        &[
+            "password",
+            "pw",
+            "passwd",
+            "pwd",
+            "pass",
+            "secret",
+            "current password",
+            "new password",
+            "confirm password",
+        ],
+        &[
+            "email",
+            "mail",
+            "e mail",
+            "e-mail",
+            "emailaddress",
+            "email address",
+            "eml",
+            "emailaddr",
+        ],
         &["search", "query", "find", "filter", "keyword", "q", "s"],
-        &["phone", "tel", "mobile", "phone number", "mobile number",
-          "telephone", "contact", "cell", "cellphone"],
-        &["name", "fullname", "full name", "first name", "firstname",
-          "given name", "family name", "last name", "lastname", "display name"],
+        &[
+            "phone",
+            "tel",
+            "mobile",
+            "phone number",
+            "mobile number",
+            "telephone",
+            "contact",
+            "cell",
+            "cellphone",
+        ],
+        &[
+            "name",
+            "fullname",
+            "full name",
+            "first name",
+            "firstname",
+            "given name",
+            "family name",
+            "last name",
+            "lastname",
+            "display name",
+        ],
     ];
 
     // Find which alias group the query belongs to (if any).
@@ -53,21 +107,31 @@ pub(super) async fn resolve_text_target(
     let mut lpm_matches: Vec<(String, String, String, Vec<usize>, i64)> = Vec::new();
     for el in page.model().elements() {
         let role = &el.raw.role;
-        if role == "hidden" { continue; }
+        if role == "hidden" {
+            continue;
+        }
         if let Some(rf) = role_filter {
-            if role != rf { continue; }
+            if role != rf {
+                continue;
+            }
         }
         let name = &el.raw.name;
         let name_lower = name.to_lowercase();
         let mut score = 0i64;
-        if name == query { score = 100; }
-        else if name_lower == q { score = 80; }
-        else if name.contains(query) { score = 70; }
-        else if name_lower.contains(&q) { score = 60; }
-        else {
+        if name == query {
+            score = 100;
+        } else if name_lower == q {
+            score = 80;
+        } else if name.contains(query) {
+            score = 70;
+        } else if name_lower.contains(&q) {
+            score = 60;
+        } else {
             // Check placeholder as fallback.
             let al = el.raw.placeholder.as_deref().unwrap_or("");
-            if !al.is_empty() && al.to_lowercase().contains(&q) { score = 30; }
+            if !al.is_empty() && al.to_lowercase().contains(&q) {
+                score = 30;
+            }
         }
         // Alias group matching: if both query and element name are in
         // the same alias group, it's a strong match (score 55).
@@ -87,7 +151,9 @@ pub(super) async fn resolve_text_target(
                     || (q == "search" && ty_lower == "search")
                     || (q == "phone" && ty_lower == "tel")
                     || (q == "url" && ty_lower == "url");
-                if type_match { score = 50; }
+                if type_match {
+                    score = 50;
+                }
             }
         }
         if score > 0 {
@@ -123,27 +189,32 @@ pub(super) async fn resolve_text_target(
     // positional guess is a "no matches, cope" heuristic, and answering
     // nth=3 with the first password box would be a silent wrong target.
     if let Some(group) = alias_group.filter(|_| nth.is_none()) {
-        let is_username_like = group.iter().any(|a| {
-            *a == "username" || *a == "user" || *a == "login" || *a == "acct"
-        });
+        let is_username_like = group
+            .iter()
+            .any(|a| *a == "username" || *a == "user" || *a == "login" || *a == "acct");
         let is_password_like = group.iter().any(|a| *a == "password" || *a == "pw");
         if is_username_like || is_password_like {
-            let textboxes: Vec<_> = page.model().elements().iter()
+            let textboxes: Vec<_> = page
+                .model()
+                .elements()
+                .iter()
                 .filter(|e| e.raw.role == "textbox" || e.raw.role == "combobox")
                 .collect();
             if is_password_like {
                 // Prefer password-typed inputs.
-                if let Some(pw) = textboxes.iter().find(|e| {
-                    e.raw.element_type.as_deref() == Some("password")
-                }) {
+                if let Some(pw) = textboxes
+                    .iter()
+                    .find(|e| e.raw.element_type.as_deref() == Some("password"))
+                {
                     return Ok(pw.ref_id.clone());
                 }
             }
             if is_username_like && !textboxes.is_empty() {
                 // First non-password textbox is the username field.
-                if let Some(tb) = textboxes.iter().find(|e| {
-                    e.raw.element_type.as_deref() != Some("password")
-                }) {
+                if let Some(tb) = textboxes
+                    .iter()
+                    .find(|e| e.raw.element_type.as_deref() != Some("password"))
+                {
                     return Ok(tb.ref_id.clone());
                 }
             }
@@ -157,7 +228,11 @@ pub(super) async fn resolve_text_target(
         // Same explainer as `see find`: a flat "not found" while a hidden or
         // shadow-root match exists is exactly the diagnostic gap that sent
         // an agent hunting through raw eval.
-        let note = miss_diag_note(crate::action::find_miss_diag(page.cdp_ref(), query).await.ok());
+        let note = miss_diag_note(
+            crate::action::find_miss_diag(page.cdp_ref(), query)
+                .await
+                .ok(),
+        );
         let view = page.view(2000);
         return Err(BladeError::Other(format!(
             "no element matching \"{}\" found{}\n\n--- current page ---\n{}",
@@ -179,7 +254,9 @@ pub(super) async fn resolve_text_target(
         return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
     }
     let top = &matches[0];
-    let id = page.model_mut().adopt(&top.sig, &top.role, &top.name, &top.frame);
+    let id = page
+        .model_mut()
+        .adopt(&top.sig, &top.role, &top.name, &top.frame);
     for m in &matches[1..] {
         let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
     }

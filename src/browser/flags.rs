@@ -134,7 +134,10 @@ pub fn launched_pipe() -> bool {
 /// healthcheck and the spoof decision can never disagree.
 pub fn is_software_renderer(renderer: &str) -> bool {
     let r = renderer.to_lowercase();
-    r.contains("swiftshader") || r.contains("llvmpipe") || r.contains("softpipe") || r.contains("software")
+    r.contains("swiftshader")
+        || r.contains("llvmpipe")
+        || r.contains("softpipe")
+        || r.contains("software")
 }
 
 /// Classify a live renderer string into the launch-time [`GpuState`].
@@ -206,7 +209,8 @@ pub(super) fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
         args.push("--ozone-platform=x11".into());
     }
     match cfg.stage {
-        GlStage::NativeGl => {
+        GlStage::NativeGl =>
+        {
             #[cfg(target_os = "linux")]
             if cfg.headful {
                 args.push("--use-angle=gl".into());

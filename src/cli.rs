@@ -28,21 +28,23 @@
 //! `help` (help text + typo suggestions). This file is the shared core:
 //! dispatch, the daemon client, and the daemon/one-shot run paths.
 
-
 use serde_json::{json, Value};
 
 use crate::error::{BladeError, Result};
-use crate::page::Page;
 use crate::mcp::server;
+use crate::page::Page;
 
 mod args;
 mod daemon;
 mod help;
 mod rb;
 
-pub use self::help::{command_help_text, help_json, help_text, suggest_command};
-use self::args::{extract_endpoint, parse_act_args, parse_nav_args, parse_run_args, parse_see_args, parse_state_args, parse_vision_args};
+use self::args::{
+    extract_endpoint, parse_act_args, parse_nav_args, parse_run_args, parse_see_args,
+    parse_state_args, parse_vision_args,
+};
 use self::daemon::{run_daemon, stop_daemon};
+pub use self::help::{command_help_text, help_json, help_text, suggest_command};
 use self::rb::run_rb;
 
 /// Unix socket path for the CLI daemon.
@@ -60,7 +62,11 @@ pub struct ToolResult {
 
 /// Dispatch a tool call to the same handlers the MCP server uses.
 /// This is the shared core — any handler update auto-propagates to CLI.
-pub async fn dispatch(tool: &str, args: &Value, page: &mut Page) -> std::result::Result<ToolResult, BladeError> {
+pub async fn dispatch(
+    tool: &str,
+    args: &Value,
+    page: &mut Page,
+) -> std::result::Result<ToolResult, BladeError> {
     // For see with URL: navigate first, then read. Any non-flag token is a
     // URL; the shared navigate adds the missing scheme.
     if tool == "see" {
@@ -97,7 +103,11 @@ pub async fn dispatch(tool: &str, args: &Value, page: &mut Page) -> std::result:
             .and_then(|i| i.get("data"))
             .and_then(|d| d.as_str())
             .map(String::from);
-        return Ok(ToolResult { text: text.to_string(), image, is_error });
+        return Ok(ToolResult {
+            text: text.to_string(),
+            image,
+            is_error,
+        });
     }
 
     let result = match tool {
@@ -116,14 +126,21 @@ pub async fn dispatch(tool: &str, args: &Value, page: &mut Page) -> std::result:
                 text.push_str("\n\u{26a0} dialogs auto-dismissed:\n");
                 for d in &dialogs {
                     let action = if d.accepted { "accepted" } else { "cancelled" };
-                    text.push_str(&format!("  {} \"{}\" \u{2014} {}\n", d.kind, d.message, action));
+                    text.push_str(&format!(
+                        "  {} \"{}\" \u{2014} {}\n",
+                        d.kind, d.message, action
+                    ));
                 }
             }
             let ambient = page.drain_ambient();
             for a in &ambient {
                 text.push_str(&format!("\u{26a0} {}\n", a));
             }
-            Ok(ToolResult { text, image: None, is_error: false })
+            Ok(ToolResult {
+                text,
+                image: None,
+                is_error: false,
+            })
         }
         Err(BladeError::Closed) => Err(BladeError::Closed),
         Err(e) => {
@@ -133,10 +150,17 @@ pub async fn dispatch(tool: &str, args: &Value, page: &mut Page) -> std::result:
                 text.push_str("\n\n\u{26a0} dialogs auto-dismissed:\n");
                 for d in &dialogs {
                     let action = if d.accepted { "accepted" } else { "cancelled" };
-                    text.push_str(&format!("  {} \"{}\" \u{2014} {}\n", d.kind, d.message, action));
+                    text.push_str(&format!(
+                        "  {} \"{}\" \u{2014} {}\n",
+                        d.kind, d.message, action
+                    ));
                 }
             }
-            Ok(ToolResult { text, image: None, is_error: true })
+            Ok(ToolResult {
+                text,
+                image: None,
+                is_error: true,
+            })
         }
     }
 }
@@ -172,7 +196,6 @@ fn auto_start_daemon() -> Result<()> {
         .map_err(|e| BladeError::Other(format!("failed to start daemon: {e}")))?;
     Ok(())
 }
-
 
 /// Ignore SIGHUP — the daemon must survive the parent CLI exiting.
 /// Called at daemon startup.
@@ -241,7 +264,9 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
             )));
         }
         Err(e) => {
-            return Err(BladeError::Other(format!("failed to read daemon response: {e}")));
+            return Err(BladeError::Other(format!(
+                "failed to read daemon response: {e}"
+            )));
         }
     }
 
@@ -250,14 +275,25 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
 
     let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
     if !ok {
-        let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("unknown error");
+        let err = v
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("unknown error");
         return Err(BladeError::Other(err.to_string()));
     }
 
-    let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let text = v
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
     let image = v.get("image").and_then(|i| i.as_str()).map(String::from);
     let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-    Ok(ToolResult { text, image, is_error })
+    Ok(ToolResult {
+        text,
+        image,
+        is_error,
+    })
 }
 
 /// Main CLI entry point. Called from main.rs.
@@ -504,11 +540,7 @@ async fn run_tool(
 async fn run_connected(tool: &str, args: &Value, base: &str, external: bool) -> Result<ToolResult> {
     let target = crate::cdp::first_page_target(base).await?;
     let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
-    let mut page = Page::attach(
-        crate::cdp::CdpSession::root(client),
-        base,
-        None,
-    ).await?;
+    let mut page = Page::attach(crate::cdp::CdpSession::root(client), base, None).await?;
 
     if !external {
         // Re-inject saved logins before anything navigates.
@@ -542,7 +574,8 @@ fn print_result(result: &ToolResult, json_mode: bool) -> i32 {
     // could blow an agent's context. The file is the CLI-native artifact;
     // MCP keeps the inline image because the protocol has image content.
     let image_path = result.image.as_deref().and_then(|img| {
-        base64_decode(img).and_then(|data| crate::artifacts::write_artifact_bytes(&data, "png").ok())
+        base64_decode(img)
+            .and_then(|data| crate::artifacts::write_artifact_bytes(&data, "png").ok())
     });
 
     if json_mode {
@@ -579,7 +612,6 @@ fn exit_with(code: i32) -> ! {
 /// Decode base64 to bytes. Public: shared with the MCP vision handler
 /// (large-screenshot offloading).
 pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    
     // Minimal base64 decoder — avoids adding a dependency.
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut lookup = [255u8; 256];
@@ -588,7 +620,10 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     }
     lookup[b'=' as usize] = 0;
 
-    let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'\n' && b != b'\r' && b != b' ').collect();
+    let bytes: Vec<u8> = s
+        .bytes()
+        .filter(|&b| b != b'\n' && b != b'\r' && b != b' ')
+        .collect();
     if bytes.len() % 4 != 0 {
         return None;
     }
@@ -619,10 +654,7 @@ async fn warm_profile(page: &mut Page) {
     ];
     let mut ok = 0;
     for url in &sites {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(4),
-            page.navigate(url),
-        ).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(4), page.navigate(url)).await {
             Ok(Ok(_)) => {
                 ok += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -631,7 +663,9 @@ async fn warm_profile(page: &mut Page) {
         }
     }
     if ok > 0 {
-        eprintln!("[bladebro] profile warmed ({ok}/{} sites visited)", sites.len());
+        eprintln!(
+            "[bladebro] profile warmed ({ok}/{} sites visited)",
+            sites.len()
+        );
     }
 }
-

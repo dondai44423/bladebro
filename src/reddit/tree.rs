@@ -18,10 +18,18 @@ pub(super) fn parse_discussion(raw: &Value) -> Result<(PostMeta, Tree)> {
 
     let post_id = post_data["id"].as_str().unwrap_or_default().to_string();
     if post_id.is_empty() {
-        return Err(BladeError::Other("reddit: post id missing from payload".into()));
+        return Err(BladeError::Other(
+            "reddit: post id missing from payload".into(),
+        ));
     }
-    let post_author = post_data["author"].as_str().unwrap_or("[deleted]").to_string();
-    let permalink = post_data["permalink"].as_str().unwrap_or_default().to_string();
+    let post_author = post_data["author"]
+        .as_str()
+        .unwrap_or("[deleted]")
+        .to_string();
+    let permalink = post_data["permalink"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let subreddit = post_data["subreddit"].as_str().unwrap_or_default();
     let body = post_data["selftext"]
         .as_str()
@@ -32,7 +40,11 @@ pub(super) fn parse_discussion(raw: &Value) -> Result<(PostMeta, Tree)> {
     let post = PostMeta {
         title: post_data["title"].as_str().unwrap_or_default().to_string(),
         author: u_prefix(&post_author),
-        subreddit: if subreddit.is_empty() { String::new() } else { format!("r/{subreddit}") },
+        subreddit: if subreddit.is_empty() {
+            String::new()
+        } else {
+            format!("r/{subreddit}")
+        },
         score: as_int(&post_data["score"]),
         comments: as_int(&post_data["num_comments"]),
         date: as_epoch(&post_data["created_utc"]).map(format_epoch),
@@ -72,7 +84,10 @@ fn walk(tree: &mut Tree, parent: &str, children: &[Value]) {
                     body: d["body"].as_str().unwrap_or_default().to_string(),
                     permalink: d["permalink"].as_str().unwrap_or_default().to_string(),
                 });
-                tree.children.entry(parent.to_string()).or_default().push(id.clone());
+                tree.children
+                    .entry(parent.to_string())
+                    .or_default()
+                    .push(id.clone());
                 if let Some(kids) = d
                     .get("replies")
                     .and_then(|r| r.get("data"))
@@ -87,7 +102,11 @@ fn walk(tree: &mut Tree, parent: &str, children: &[Value]) {
                 let parent_full = d["parent_id"].as_str().unwrap_or_default();
                 let ids: Vec<String> = d["children"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 tree.stubs.push(Stub {
                     parent: strip_prefix(parent_full).to_string(),
@@ -121,7 +140,9 @@ pub(super) fn parse_subtree(raw: &Value) -> Result<(String, Tree)> {
     }
     let root = first["data"]["id"].as_str().unwrap_or_default().to_string();
     if root.is_empty() {
-        return Err(BladeError::Other("reddit: comment subtree has no root id".into()));
+        return Err(BladeError::Other(
+            "reddit: comment subtree has no root id".into(),
+        ));
     }
     let mut sub = Tree::default();
     walk(&mut sub, "", std::slice::from_ref(first));
@@ -158,7 +179,11 @@ pub(super) fn merge_subtree(tree: &mut Tree, root: &str, sub: Tree) {
 
 /// Attach `/api/info` things under their real parent; returns how many were
 /// t1 comments.
-pub(super) fn attach_info_things(tree: &mut Tree, things: &[Value], fallback_parent: &str) -> usize {
+pub(super) fn attach_info_things(
+    tree: &mut Tree,
+    things: &[Value],
+    fallback_parent: &str,
+) -> usize {
     let mut got = 0usize;
     for t in things {
         if t["kind"].as_str() != Some("t1") {
@@ -177,7 +202,10 @@ pub(super) fn attach_info_things(tree: &mut Tree, things: &[Value], fallback_par
                 permalink: d["permalink"].as_str().unwrap_or_default().to_string(),
             },
         );
-        let parent = d["parent_id"].as_str().map(strip_prefix).unwrap_or(fallback_parent);
+        let parent = d["parent_id"]
+            .as_str()
+            .map(strip_prefix)
+            .unwrap_or(fallback_parent);
         let list = tree.children.entry(parent.to_string()).or_default();
         if !list.contains(&id) {
             list.push(id);
@@ -201,7 +229,9 @@ pub(super) fn render_items(tree: &Tree, cap: usize) -> (Vec<CommentItem>, bool) 
             capped = true;
             break;
         }
-        let Some(n) = tree.nodes.get(&id) else { continue };
+        let Some(n) = tree.nodes.get(&id) else {
+            continue;
+        };
         let url = if n.permalink.is_empty() {
             format!("https://www.reddit.com{}comment/{id}/", tree.post_permalink)
         } else {

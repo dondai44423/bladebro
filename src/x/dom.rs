@@ -1,8 +1,8 @@
 //! DOM fallback: bounded in-page scroll collection when rapid replay is
 //! rejected by the page's per-request transaction gate.
 
-use super::*;
 use super::parse::cut_chars;
+use super::*;
 
 /// DOM fallback: collect the rendered timeline in ONE in-page pass (a
 /// bounded scroll loop). Used when rapid replay is rejected — X gates some
@@ -92,8 +92,7 @@ return JSON.stringify({{count:items.size,exhausted:idle>=6,items:[...items.value
         total: None,
         complete,
         note: Some(if complete {
-            "x: collected from the rendered page (rapid replay unavailable for this page)"
-                .into()
+            "x: collected from the rendered page (rapid replay unavailable for this page)".into()
         } else {
             format!(
                 "x: collected from the rendered page — capped at {} items",
@@ -126,7 +125,10 @@ pub(super) async fn is_flaky_render(page: &Page) -> bool {
 
 /// Shape DOM-collected rows into payload items (aria-label counts, ISO dates).
 pub(super) fn dom_items_from_json(j: &Value) -> (Vec<XItem>, bool) {
-    let exhausted = j.get("exhausted").and_then(|e| e.as_bool()).unwrap_or(false);
+    let exhausted = j
+        .get("exhausted")
+        .and_then(|e| e.as_bool())
+        .unwrap_or(false);
     let mut items = Vec::new();
     for it in j
         .get("items")
@@ -134,7 +136,11 @@ pub(super) fn dom_items_from_json(j: &Value) -> (Vec<XItem>, bool) {
         .cloned()
         .unwrap_or_default()
     {
-        let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = it
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if id.is_empty() {
             continue;
         }
@@ -152,8 +158,16 @@ pub(super) fn dom_items_from_json(j: &Value) -> (Vec<XItem>, bool) {
             depth: None,
             reply_to: None,
             id,
-            author: it.get("author").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            name: it.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            author: it
+                .get("author")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            name: it
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             date: iso_to_utc(it.get("date").and_then(|v| v.as_str()).unwrap_or("")),
             text: cut_chars(
                 it.get("text").and_then(|v| v.as_str()).unwrap_or(""),
@@ -163,7 +177,11 @@ pub(super) fn dom_items_from_json(j: &Value) -> (Vec<XItem>, bool) {
             reposts: count_of("reposts"),
             likes: count_of("likes"),
             media: Vec::new(),
-            url: it.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            url: it
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         });
     }
     (items, exhausted)

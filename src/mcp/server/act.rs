@@ -19,7 +19,9 @@ use super::state::handle_state;
 /// steps: the step vocabulary and the act schema had drifted, which is why
 /// `fill` used to be "unknown action" inside run and schema-rejected in batch.
 pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
-    let fields = args.get("fields").and_then(|f| f.as_array())
+    let fields = args
+        .get("fields")
+        .and_then(|f| f.as_array())
         .ok_or_else(|| BladeError::Other("fill requires 'fields' array".into()))?;
     let submit = args.get("submit").and_then(|s| s.as_str()).unwrap_or("");
     let mut last_verdict = String::new();
@@ -28,7 +30,9 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
         let f_ref = field.get("ref").and_then(|r| r.as_str()).unwrap_or("");
         let f_label = field.get("label").and_then(|l| l.as_str()).unwrap_or("");
         let f_selector = field.get("selector").and_then(|s| s.as_str()).unwrap_or("");
-        let f_text = field.get("text").and_then(|t| t.as_str())
+        let f_text = field
+            .get("text")
+            .and_then(|t| t.as_str())
             .or_else(|| field.get("option").and_then(|o| o.as_str()))
             .unwrap_or("");
         let f_check = field.get("check").and_then(|c| c.as_bool());
@@ -47,7 +51,9 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
         };
 
         // Dispatch the right action based on element type.
-        let role = page.model().element(&resolved)
+        let role = page
+            .model()
+            .element(&resolved)
             .map(|e| e.raw.role.clone())
             .unwrap_or_default();
         let action = match role.as_str() {
@@ -57,7 +63,9 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
                 // state doesn't match desired state.
                 let should_click = match f_check {
                     Some(want_checked) => {
-                        let is_checked = page.model().element(&resolved)
+                        let is_checked = page
+                            .model()
+                            .element(&resolved)
                             .and_then(|e| e.raw.checked)
                             .unwrap_or(false);
                         is_checked != want_checked
@@ -71,12 +79,16 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
                     continue; // already in desired state
                 }
             }
-            "combobox" => {
-                Action::Select { ref_id: resolved, option: f_text.into() }
-            }
+            "combobox" => Action::Select {
+                ref_id: resolved,
+                option: f_text.into(),
+            },
             _ => {
                 // Default: type into text-like fields.
-                Action::Type { ref_id: resolved, text: f_text.into() }
+                Action::Type {
+                    ref_id: resolved,
+                    text: f_text.into(),
+                }
             }
         };
         let (_, verdict) = page.act(action).await?;
@@ -94,7 +106,11 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
         };
         // Wait briefly for field validation to settle before clicking submit.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let (delta, verdict) = page.act(Action::Click { ref_id: resolved.clone() }).await?;
+        let (delta, verdict) = page
+            .act(Action::Click {
+                ref_id: resolved.clone(),
+            })
+            .await?;
         last_verdict = verdict.clone();
         // If the mouse click had no effect (no navigation, no DOM change),
         // the submit button may be a div styled as a button or require
@@ -114,8 +130,10 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
     } else {
         page.recapture().await?
     };
-    Ok(format!("filled {count} fields\n{last_verdict}\n{}",
-        page.delta_view(&last_delta, 8000)))
+    Ok(format!(
+        "filled {count} fields\n{last_verdict}\n{}",
+        page.delta_view(&last_delta, 8000)
+    ))
 }
 
 pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
@@ -167,7 +185,11 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     if action_str == "navigate" {
         if let Some(block) = args.get("block").and_then(|b| b.as_str()) {
             let mask = page.set_block_classes(block).await?;
-            let target = if url.is_empty() { page.model().url().to_string() } else { url.to_string() };
+            let target = if url.is_empty() {
+                page.model().url().to_string()
+            } else {
+                url.to_string()
+            };
             page.remember_block_choice(&target, block, mask != 0);
         }
     }
@@ -182,15 +204,25 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 let resolved = if !ref_id.is_empty() {
                     ref_id.to_string()
                 } else if !text.is_empty() {
-                    let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                    let rf = if !role_str.is_empty() {
+                        Some(role_str)
+                    } else {
+                        None
+                    };
                     resolve_text_target(page, text, rf, nth).await?
                 } else if !label.is_empty() {
-                    let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                    let rf = if !role_str.is_empty() {
+                        Some(role_str)
+                    } else {
+                        None
+                    };
                     resolve_text_target(page, label, rf, nth).await?
                 } else if !selector.is_empty() {
                     resolve_selector_target(page, selector, nth).await?
                 } else {
-                    return Err(BladeError::Other("click requires 'ref', 'text', 'label', 'selector', or 'x'+'y'".into()));
+                    return Err(BladeError::Other(
+                        "click requires 'ref', 'text', 'label', 'selector', or 'x'+'y'".into(),
+                    ));
                 };
                 Action::Click { ref_id: resolved }
             }
@@ -199,14 +231,23 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, label, rf, nth).await?
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
             } else {
-                return Err(BladeError::Other("type requires 'ref', 'label', or 'selector' + 'text'".into()));
+                return Err(BladeError::Other(
+                    "type requires 'ref', 'label', or 'selector' + 'text'".into(),
+                ));
             };
-            Action::Type { ref_id: resolved, text: text.into() }
+            Action::Type {
+                ref_id: resolved,
+                text: text.into(),
+            }
         }
         "clear" => {
             let resolved = if !ref_id.is_empty() {
@@ -214,12 +255,16 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
             } else {
-                return Err(BladeError::Other("clear requires 'ref' or 'selector'".into()));
+                return Err(BladeError::Other(
+                    "clear requires 'ref' or 'selector'".into(),
+                ));
             };
             Action::Clear { ref_id: resolved }
         }
         "select" => {
-            let opt = args.get("option").and_then(|o| o.as_str())
+            let opt = args
+                .get("option")
+                .and_then(|o| o.as_str())
                 .or_else(|| args.get("text").and_then(|t| t.as_str()))
                 .unwrap_or("");
             // Label/role/nth addressing works here like click/type. The old
@@ -228,14 +273,23 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, label, rf, nth).await?
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
             } else {
-                return Err(BladeError::Other("select requires 'ref', 'label', or 'selector'".into()));
+                return Err(BladeError::Other(
+                    "select requires 'ref', 'label', or 'selector'".into(),
+                ));
             };
-            Action::Select { ref_id: resolved, option: opt.into() }
+            Action::Select {
+                ref_id: resolved,
+                option: opt.into(),
+            }
         }
         "press" => Action::Press { key: key.into() },
         "scroll" => Action::Scroll { dx, dy },
@@ -272,15 +326,25 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !text.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, text, rf, nth).await?
             } else if !label.is_empty() {
-                let rf = if !role_str.is_empty() { Some(role_str) } else { None };
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
                 resolve_text_target(page, label, rf, nth).await?
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
             } else {
-                return Err(BladeError::Other("hover requires 'ref', 'text', 'label', or 'selector'".into()));
+                return Err(BladeError::Other(
+                    "hover requires 'ref', 'text', 'label', or 'selector'".into(),
+                ));
             };
             Action::Hover { ref_id: resolved }
         }
@@ -290,9 +354,14 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
             } else {
-                return Err(BladeError::Other("upload requires 'ref' or 'selector'".into()));
+                return Err(BladeError::Other(
+                    "upload requires 'ref' or 'selector'".into(),
+                ));
             };
-            Action::Upload { ref_id: resolved, path: text.into() }
+            Action::Upload {
+                ref_id: resolved,
+                path: text.into(),
+            }
         }
         "read" => {
             let ref_id = if !ref_id.is_empty() {
@@ -306,7 +375,8 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             };
             // Self-heal: the ref may have died since the agent saw it.
             let heal = page.ensure_ref(&ref_id).await?;
-            let text_content = crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
+            let text_content =
+                crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
             let el = page.model().element(&ref_id);
             let role = el.map(|e| e.raw.role.clone()).unwrap_or_default();
             let name = el.map(|e| e.raw.name.clone()).unwrap_or_default();
@@ -316,7 +386,11 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 page.model().url(),
                 page.model().phase(),
                 page.model().actionables(),
-                ref_id, role, name, note, text_content
+                ref_id,
+                role,
+                name,
+                note,
+                text_content
             ));
         }
         "fill" => return handle_fill(args, page).await,
@@ -341,7 +415,9 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             // instead of 11 calls for a 5-field form. Each nested step
             // recaptures internally (no stale refs), ONE final recapture
             // renders the cumulative delta.
-            let steps = args.get("steps").and_then(|s| s.as_array())
+            let steps = args
+                .get("steps")
+                .and_then(|s| s.as_array())
                 .ok_or_else(|| BladeError::Other("batch requires 'steps' array".into()))?;
             if steps.is_empty() {
                 return Err(BladeError::Other("batch requires at least one step".into()));
@@ -355,7 +431,10 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             // ONE call. Their output collects under a --- read --- section.
             let mut reads: Vec<String> = Vec::new();
             for (i, step) in steps.iter().enumerate() {
-                let step_action = step.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
+                let step_action = step
+                    .get("action")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("unknown");
                 if step_action == "see" {
                     let mut see_args = step.clone();
                     if see_args.get("budget").is_none() {
@@ -396,20 +475,35 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                             )
                             .await;
                             let _ = page.recapture().await;
-                            verdicts.push(format!("step{}[{}]: {} (→ {})", i+1, step_action, vline, curr_url));
+                            verdicts.push(format!(
+                                "step{}[{}]: {} (→ {})",
+                                i + 1,
+                                step_action,
+                                vline,
+                                curr_url
+                            ));
                         } else {
-                            verdicts.push(format!("step{}[{}]: {}", i+1, step_action, vline));
+                            verdicts.push(format!("step{}[{}]: {}", i + 1, step_action, vline));
                         }
                         prev_url = curr_url;
                     }
                     Err(e) => {
-                        if step.get("optional").and_then(|o| o.as_bool()).unwrap_or(false) {
-                            verdicts.push(format!("step{}[{}]: failed (optional): {}", i+1, step_action, e));
+                        if step
+                            .get("optional")
+                            .and_then(|o| o.as_bool())
+                            .unwrap_or(false)
+                        {
+                            verdicts.push(format!(
+                                "step{}[{}]: failed (optional): {}",
+                                i + 1,
+                                step_action,
+                                e
+                            ));
                             prev_url = page.model().url().to_string();
                             continue;
                         }
-                        halted = Some(i+1);
-                        verdicts.push(format!("step{}[{}]: HALT: {}", i+1, step_action, e));
+                        halted = Some(i + 1);
+                        verdicts.push(format!("step{}[{}]: HALT: {}", i + 1, step_action, e));
                         break;
                     }
                 }
@@ -427,10 +521,16 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else {
                 format!("\nread ({}):\n{}\n", reads.len(), reads.join("\n"))
             };
-            return Ok(format!("{summary}\n{verdicts}{reads_block}\n{view}",
-                summary=summary,
-                verdicts=if verdicts.is_empty() { String::new() } else { format!("(steps: {})\n", verdicts.join(" | ")) },
-                view=view));
+            return Ok(format!(
+                "{summary}\n{verdicts}{reads_block}\n{view}",
+                summary = summary,
+                verdicts = if verdicts.is_empty() {
+                    String::new()
+                } else {
+                    format!("(steps: {})\n", verdicts.join(" | "))
+                },
+                view = view
+            ));
         }
         "navigate" => {
             if crate::realbrowser::input_paused() {
@@ -460,13 +560,17 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             }
             return Ok(format!("{verdict}\n{top}"));
         }
-        "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies" | "set-cookie" => {
+        "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies"
+        | "set-cookie" => {
             // Allow state ops as action shortcuts in batch/run steps.
             let mut state_args = args.clone();
             if action_str != "state" {
                 if let Some(obj) = state_args.as_object_mut() {
                     if !obj.contains_key("op") {
-                        obj.insert("op".to_string(), serde_json::Value::String(action_str.to_string()));
+                        obj.insert(
+                            "op".to_string(),
+                            serde_json::Value::String(action_str.to_string()),
+                        );
                     }
                 }
             }
@@ -497,15 +601,14 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                         // Merge: the press result is what matters (it triggers
                         // navigation / form submit). Include the type verdict
                         // as context.
-                        let merged_verdict = format!(
-                            "{type_verdict} then {press_verdict}"
-                        );
+                        let merged_verdict = format!("{type_verdict} then {press_verdict}");
                         Ok((press_delta, merged_verdict))
                     }
                     // Press failed — return the type result with a note.
-                    Err(e) => Ok((type_delta, format!(
-                        "{type_verdict} (press {press} failed: {e})"
-                    ))),
+                    Err(e) => Ok((
+                        type_delta,
+                        format!("{type_verdict} (press {press} failed: {e})"),
+                    )),
                 }
             }
             other => other,
@@ -524,13 +627,21 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             }
             // M14: Check expect param against observed outcome.
             let expect_note = if !expect.is_empty() {
-                let observed = if delta.navigated { "navigation" }
-                    else if !delta.is_empty() { "dom-change" }
-                    else { "none" };
+                let observed = if delta.navigated {
+                    "navigation"
+                } else if !delta.is_empty() {
+                    "dom-change"
+                } else {
+                    "none"
+                };
                 if expect != observed && expect != "any" {
                     format!("\n\u{26a0} expected {expect}, got {observed} \u{2014} may have hit wrong target")
-                } else { String::new() }
-            } else { String::new() };
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             // V13: slim mode — verdict only, no delta body. For
             // agents mid-`run` or confident in the outcome.
             let slim = args.get("slim").and_then(|s| s.as_bool()).unwrap_or(false);
@@ -565,7 +676,9 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     if delta.navigated {
                         let content = page.content(1500).await.unwrap_or_default();
                         if !content.is_empty() {
-                            Ok(format!("{verdict}{expect_note}\n{view}\n--- content ---\n{content}"))
+                            Ok(format!(
+                                "{verdict}{expect_note}\n{view}\n--- content ---\n{content}"
+                            ))
                         } else {
                             Ok(format!("{verdict}{expect_note}\n{view}"))
                         }

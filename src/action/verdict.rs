@@ -51,9 +51,18 @@ pub async fn hit_probe(cdp: &CdpSession, x: f64, y: f64) -> Result<Option<String
 /// sell them as a real effect. None = nothing observable changed.
 pub(super) fn dom_effect_summary(delta: &PageDelta) -> Option<String> {
     if !delta.added.is_empty() || !delta.removed.is_empty() {
-        Some(format!("+{} \u{2212}{}", delta.added.len(), delta.removed.len()))
+        Some(format!(
+            "+{} \u{2212}{}",
+            delta.added.len(),
+            delta.removed.len()
+        ))
     } else if !delta.changed.is_empty() {
-        let refs: Vec<&str> = delta.changed.iter().take(3).map(|(r, _)| r.as_str()).collect();
+        let refs: Vec<&str> = delta
+            .changed
+            .iter()
+            .take(3)
+            .map(|(r, _)| r.as_str())
+            .collect();
         let more = if delta.changed.len() > 3 { ", ..." } else { "" };
         Some(format!(
             "state-only: {} ref{} ({}{}) - no nodes added/removed",
@@ -264,7 +273,10 @@ pub(super) fn clip(s: &str, n: usize) -> String {
 }
 
 pub(super) fn shorten_url(u: &str) -> String {
-    let s = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or(u);
+    let s = u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))
+        .unwrap_or(u);
     if s.len() > 80 {
         // Char-safe: page URLs can contain raw multi-byte UTF-8 and byte
         // slicing panics mid-char (crash-by-URL).
@@ -354,8 +366,8 @@ pub async fn check_condition(
             }
         }
         "element" => {
-            let needle_js = serde_json::to_string(&text.to_lowercase())
-                .unwrap_or_else(|_| "\"\"".to_string());
+            let needle_js =
+                serde_json::to_string(&text.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
             let check = format!(
                 "(()=>{{const d=document;if(!d||!d.body)return false;const sel='{selector}';const all=[...d.querySelectorAll(sel)];const vis=n=>{{const r=n.getBoundingClientRect();if(r.width===0||r.height===0)return false;const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;return true;}};const nodes=all.filter(vis);const t={needle_js}.toLowerCase();return nodes.some(n=>{{const role=(n.getAttribute('role')||n.tagName.toLowerCase());const name=(n.getAttribute('aria-label')||n.textContent||n.placeholder||'').trim();return role.toLowerCase().includes(t)||name.toLowerCase().includes(t);}});}})()",
                 selector = crate::page::perception::JS_SELECTOR
@@ -375,7 +387,11 @@ pub async fn check_condition(
                 }
                 let found = res
                     .ok()
-                    .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_bool()))
+                    .and_then(|r| {
+                        r.get("result")
+                            .and_then(|r| r.get("value"))
+                            .and_then(|v| v.as_bool())
+                    })
                     .unwrap_or(false);
                 if found {
                     return true;
@@ -430,8 +446,8 @@ pub async fn check_condition(
             }
         }
         "text" => {
-            let needle_js = serde_json::to_string(&text.to_lowercase())
-                .unwrap_or_else(|_| "\"\"".to_string());
+            let needle_js =
+                serde_json::to_string(&text.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
             let expr = format!(
                 "(document.body&&document.body.innerText||'').toLowerCase().includes({needle_js})"
             );

@@ -14,19 +14,38 @@ use crate::page::{DownloadInfo, Page};
 /// Options: landscape (default false), printBackground (default true),
 /// scale (default 1.0, clamped 0.1-2.0).
 pub async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
-    let landscape = args.get("landscape").and_then(|v| v.as_bool()).unwrap_or(false);
-    let print_bg = args.get("printBackground").and_then(|v| v.as_bool()).unwrap_or(true);
-    let scale = args.get("scale").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.1, 2.0);
+    let landscape = args
+        .get("landscape")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let print_bg = args
+        .get("printBackground")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let scale = args
+        .get("scale")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0)
+        .clamp(0.1, 2.0);
 
-    let res = page.cdp_ref().send("Page.printToPDF", Some(json!({
-        "landscape": landscape,
-        "printBackground": print_bg,
-        "scale": scale,
-    }))).await?;
+    let res = page
+        .cdp_ref()
+        .send(
+            "Page.printToPDF",
+            Some(json!({
+                "landscape": landscape,
+                "printBackground": print_bg,
+                "scale": scale,
+            })),
+        )
+        .await?;
 
     if let Some(exc) = res.get("exceptionDetails") {
-        let msg = exc.get("exception").and_then(|e| e.get("description"))
-            .and_then(|d| d.as_str()).unwrap_or("printToPDF failed");
+        let msg = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("printToPDF failed");
         return Err(BladeError::Other(format!("pdf failed: {msg}")));
     }
     let data = res.get("data").and_then(|d| d.as_str()).unwrap_or("");
@@ -34,7 +53,8 @@ pub async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
         return Err(BladeError::Other("printToPDF returned no data".into()));
     }
     use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data)
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
         .map_err(|e| BladeError::Other(format!("pdf base64 decode: {e}")))?;
 
     let path = match args.get("path").and_then(|p| p.as_str()) {
@@ -99,7 +119,9 @@ fn download_name_matches(filename: &str, expected: &str) -> bool {
         match f_stem.rfind(" (") {
             Some(i)
                 if i + 2 < f_stem.len() - 1
-                    && f_stem[i + 2..f_stem.len() - 1].chars().all(|c| c.is_ascii_digit()) =>
+                    && f_stem[i + 2..f_stem.len() - 1]
+                        .chars()
+                        .all(|c| c.is_ascii_digit()) =>
             {
                 f_stem[..i].to_string()
             }
@@ -114,12 +136,20 @@ fn download_name_matches(filename: &str, expected: &str) -> bool {
 /// Pick the entry to wait on: among candidates (tracker entries outside the
 /// caller's guid baseline), a name match against the requested URL wins;
 /// otherwise the newest one.
-fn pick_candidate<'a>(cands: &[&'a DownloadInfo], expected: Option<&str>) -> Option<&'a DownloadInfo> {
+fn pick_candidate<'a>(
+    cands: &[&'a DownloadInfo],
+    expected: Option<&str>,
+) -> Option<&'a DownloadInfo> {
     if cands.is_empty() {
         return None;
     }
     if let Some(exp) = expected {
-        if let Some(m) = cands.iter().rev().copied().find(|d| download_name_matches(&d.filename, exp)) {
+        if let Some(m) = cands
+            .iter()
+            .rev()
+            .copied()
+            .find(|d| download_name_matches(&d.filename, exp))
+        {
             return Some(m);
         }
     }
@@ -129,8 +159,13 @@ fn pick_candidate<'a>(cands: &[&'a DownloadInfo], expected: Option<&str>) -> Opt
 /// Format a completed download: real on-disk size (trust the file, not the
 /// event counter) + final path + source URL.
 fn describe_download(d: &DownloadInfo) -> String {
-    let size = std::fs::metadata(&d.path).map(|m| m.len()).unwrap_or(d.received_bytes);
-    format!("download complete: {} ({} bytes)\nfrom: {}", d.path, size, d.url)
+    let size = std::fs::metadata(&d.path)
+        .map(|m| m.len())
+        .unwrap_or(d.received_bytes);
+    format!(
+        "download complete: {} ({} bytes)\nfrom: {}",
+        d.path, size, d.url
+    )
 }
 
 /// Wait for the correlated download to reach a terminal state (#22).
@@ -153,8 +188,7 @@ async fn wait_for_download(
     loop {
         let candidate: Option<DownloadInfo> = {
             let q = downloads.lock().unwrap_or_else(|e| e.into_inner());
-            let cands: Vec<&DownloadInfo> =
-                q.iter().filter(|d| !seen.contains(&d.guid)).collect();
+            let cands: Vec<&DownloadInfo> = q.iter().filter(|d| !seen.contains(&d.guid)).collect();
             pick_candidate(&cands, expected).cloned()
         };
         match candidate {
@@ -162,8 +196,7 @@ async fn wait_for_download(
                 if Some(d.guid.as_str()) == reuse_guid {
                     match reuse_deadline {
                         None => {
-                            reuse_deadline =
-                                Some(std::time::Instant::now() + DOWNLOAD_REUSE_GRACE);
+                            reuse_deadline = Some(std::time::Instant::now() + DOWNLOAD_REUSE_GRACE);
                         }
                         Some(g) if std::time::Instant::now() >= g => return Ok(d),
                         Some(_) => {}
@@ -256,30 +289,68 @@ pub async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
                 }}
             }})()"#,
         );
-        let res = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
-            "expression": js_expr,
-            "awaitPromise": true,
-            "returnByValue": true,
-        }))).await?;
-        let outcome = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+        let res = page
+            .cdp_ref()
+            .send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": js_expr,
+                    "awaitPromise": true,
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
+        let outcome = res
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if outcome.starts_with("fetch-failed") {
             let err = &outcome["fetch-failed:".len()..];
-            if err.contains("CORS") || err.contains("Failed to fetch") || err.contains("NetworkError") {
+            if err.contains("CORS")
+                || err.contains("Failed to fetch")
+                || err.contains("NetworkError")
+            {
                 // CORS-protected URL. Fall back to opening a new tab —
                 // Chrome may still download it if the server returns
                 // Content-Disposition: attachment. The correlated wait
                 // tells a real download from a viewer tab.
-                let create_res = page.cdp_ref().send("Target.createTarget", Some(serde_json::json!({
-                    "url": url,
-                }))).await?;
-                let new_id = create_res.get("targetId").and_then(|v| v.as_str())
-                    .ok_or_else(|| crate::error::BladeError::Other("no targetId for download tab".into()))?;
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-                let waited = wait_for_download(&downloads, &seen, expected.as_deref(), deadline, None, timeout_secs).await;
+                let create_res = page
+                    .cdp_ref()
+                    .send(
+                        "Target.createTarget",
+                        Some(serde_json::json!({
+                            "url": url,
+                        })),
+                    )
+                    .await?;
+                let new_id = create_res
+                    .get("targetId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        crate::error::BladeError::Other("no targetId for download tab".into())
+                    })?;
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                let waited = wait_for_download(
+                    &downloads,
+                    &seen,
+                    expected.as_deref(),
+                    deadline,
+                    None,
+                    timeout_secs,
+                )
+                .await;
                 // Close the download tab regardless of outcome.
-                let _ = page.cdp_ref().send("Target.closeTarget", Some(serde_json::json!({
-                    "targetId": new_id,
-                }))).await;
+                let _ = page
+                    .cdp_ref()
+                    .send(
+                        "Target.closeTarget",
+                        Some(serde_json::json!({
+                            "targetId": new_id,
+                        })),
+                    )
+                    .await;
                 return match waited {
                     Ok(d) => Ok(describe_download(&d)),
                     Err(e) if e.starts_with("download canceled") => {
@@ -293,12 +364,23 @@ pub async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
                     )),
                 };
             }
-            return Err(crate::error::BladeError::Other(format!("download failed: {err}")));
+            return Err(crate::error::BladeError::Other(format!(
+                "download failed: {err}"
+            )));
         }
     }
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    match wait_for_download(&downloads, &seen, expected.as_deref(), deadline, reuse_guid.as_deref(), timeout_secs).await {
+    match wait_for_download(
+        &downloads,
+        &seen,
+        expected.as_deref(),
+        deadline,
+        reuse_guid.as_deref(),
+        timeout_secs,
+    )
+    .await
+    {
         Ok(d) => Ok(describe_download(&d)),
         Err(e) => Err(crate::error::BladeError::Other(e)),
     }
@@ -362,7 +444,11 @@ mod download_correlation_tests {
     /// return B, never A's completion metadata.
     #[tokio::test]
     async fn wait_ignores_previous_completed_entry() {
-        let q = std::sync::Arc::new(std::sync::Mutex::new(vec![dl("g1", "one.pdf", "completed")]));
+        let q = std::sync::Arc::new(std::sync::Mutex::new(vec![dl(
+            "g1",
+            "one.pdf",
+            "completed",
+        )]));
         let q2 = q.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -384,7 +470,11 @@ mod download_correlation_tests {
     /// must win over the stale completed entry, inside the grace window.
     #[tokio::test]
     async fn no_url_reuse_waits_grace_for_straggler() {
-        let q = std::sync::Arc::new(std::sync::Mutex::new(vec![dl("g1", "one.pdf", "completed")]));
+        let q = std::sync::Arc::new(std::sync::Mutex::new(vec![dl(
+            "g1",
+            "one.pdf",
+            "completed",
+        )]));
         let q2 = q.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -404,7 +494,11 @@ mod download_correlation_tests {
     /// returned, but only after the grace window held it back.
     #[tokio::test]
     async fn no_url_reuse_returns_stale_after_grace() {
-        let q = std::sync::Arc::new(std::sync::Mutex::new(vec![dl("g1", "one.pdf", "completed")]));
+        let q = std::sync::Arc::new(std::sync::Mutex::new(vec![dl(
+            "g1",
+            "one.pdf",
+            "completed",
+        )]));
         let t0 = std::time::Instant::now();
         let deadline = t0 + std::time::Duration::from_secs(5);
         let got = wait_for_download(&q, &[], None, deadline, Some("g1"), 5)
@@ -420,7 +514,11 @@ mod download_correlation_tests {
     /// A canceled new download surfaces as an error, not as a wait timeout.
     #[tokio::test]
     async fn canceled_candidate_errors() {
-        let q = std::sync::Arc::new(std::sync::Mutex::new(vec![dl("g1", "one.pdf", "completed")]));
+        let q = std::sync::Arc::new(std::sync::Mutex::new(vec![dl(
+            "g1",
+            "one.pdf",
+            "completed",
+        )]));
         q.lock().unwrap().push(dl("g2", "two.pdf", "canceled"));
         let seen = vec!["g1".to_string()];
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

@@ -53,10 +53,17 @@ pub fn import_template(id: &str, src: &Path) -> Result<ImportStats> {
     crate::session_profile::copy_profile_ex(
         src,
         &tmp,
-        &["Current Session", "Current Tabs", "Last Session", "Last Tabs"],
+        &[
+            "Current Session",
+            "Current Tabs",
+            "Last Session",
+            "Last Tabs",
+        ],
     );
     if !tmp.is_dir() {
-        return Err(BladeError::Other("profile copy produced no directory".into()));
+        return Err(BladeError::Other(
+            "profile copy produced no directory".into(),
+        ));
     }
 
     // Atomic-ish swap (same discipline as the agent-lane template).

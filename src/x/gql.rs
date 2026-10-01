@@ -43,10 +43,8 @@ pub fn capture_templates(page: &Page) -> HashMap<String, GqlTemplate> {
         if let Some(o) = variables.as_object_mut() {
             o.remove("cursor");
         }
-        let params: Vec<(String, String)> = all
-            .into_iter()
-            .filter(|(k, _)| k != "variables")
-            .collect();
+        let params: Vec<(String, String)> =
+            all.into_iter().filter(|(k, _)| k != "variables").collect();
         out.insert(
             op.clone(),
             GqlTemplate {

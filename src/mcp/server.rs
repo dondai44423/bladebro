@@ -24,7 +24,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use serde_json::{json, Value};
 
-
 use crate::cdp::{self, CdpClient, CdpSession};
 use crate::error::{BladeError, Result};
 use crate::mcp::tools::tools_to_json;
@@ -217,7 +216,8 @@ async fn launch_browser(
                 let session = attach_pipe(&client).await?;
                 let page = Page::attach(session, "pipe", Some(client)).await?;
                 Ok(page)
-            }.await;
+            }
+            .await;
             match result {
                 Ok(page) => {
                     // Re-inject saved logins before anything navigates.
@@ -232,9 +232,7 @@ async fn launch_browser(
         }
         #[cfg(not(unix))]
         {
-            return Err(BladeError::Other(
-                "pipe transport is Unix-only".into(),
-            ));
+            return Err(BladeError::Other("pipe transport is Unix-only".into()));
         }
     }
 
@@ -248,7 +246,8 @@ async fn launch_browser(
             let client = CdpClient::connect(target.ws_url()?).await?;
             let page = Page::attach(CdpSession::root(client), &base, None).await?;
             Ok(page)
-        }.await;
+        }
+        .await;
         match result {
             Ok(page) => {
                 // Re-inject saved logins before anything navigates.
@@ -322,10 +321,7 @@ async fn warm_profile(page: &mut Page) {
     for url in &sites {
         // Navigate with a short timeout — if a site is unreachable,
         // skip it. Don't let warming block the agent's first action.
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(4),
-            page.navigate(url),
-        ).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(4), page.navigate(url)).await {
             Ok(Ok(_)) => {
                 ok += 1;
                 // Brief pause to let cookies/cache settle.
@@ -335,7 +331,10 @@ async fn warm_profile(page: &mut Page) {
         }
     }
     if ok > 0 {
-        eprintln!("[bladebro] profile warmed ({ok}/{} sites visited)", sites.len());
+        eprintln!(
+            "[bladebro] profile warmed ({ok}/{} sites visited)",
+            sites.len()
+        );
     } else {
         eprintln!("[bladebro] WARNING: profile warming failed (all sites unreachable)");
         crate::session_profile::SessionProfile::release_warming();
@@ -361,11 +360,7 @@ async fn warm_profile(page: &mut Page) {
 ///   the leaked Chrome/Xvfb and removes the session profile.
 /// - A second bladebro NEVER touches this session's Chrome:
 ///   profiles are per-process (`~/.blade/profiles/sess-<pid>`).
-async fn serve(
-    use_pipe: bool,
-    host: &str,
-    port: u16,
-) -> Result<()> {
+async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
     let stdin = tokio::io::stdin();
     let reader = BufReader::new(stdin);
     let mut lines = reader.lines();
@@ -1029,7 +1024,9 @@ pub async fn handle_tools_call(
         "see" => handle_see(&args, page).await,
         "state" => handle_state(&args, page).await,
         "run" => handle_run(&args, page).await,
-        _ => Err(crate::error::BladeError::Other(format!("unknown tool: {name}"))),
+        _ => Err(crate::error::BladeError::Other(format!(
+            "unknown tool: {name}"
+        ))),
     };
 
     match result {
@@ -1040,7 +1037,10 @@ pub async fn handle_tools_call(
                 text.push_str("\n\u{26a0} dialogs auto-dismissed:\n");
                 for d in &dialogs {
                     let action = if d.accepted { "accepted" } else { "cancelled" };
-                    text.push_str(&format!("  {} \"{}\" \u{2014} {}\n", d.kind, d.message, action));
+                    text.push_str(&format!(
+                        "  {} \"{}\" \u{2014} {}\n",
+                        d.kind, d.message, action
+                    ));
                     if let Some(p) = &d.default_prompt {
                         if !p.is_empty() {
                             text.push_str(&format!("    (prompt default: \"{}\")\n", p));
@@ -1093,7 +1093,10 @@ pub async fn handle_tools_call(
                 text.push_str("\n\n\u{26a0} dialogs auto-dismissed:\n");
                 for d in &dialogs {
                     let action = if d.accepted { "accepted" } else { "cancelled" };
-                    text.push_str(&format!("  {} \"{}\" \u{2014} {}\n", d.kind, d.message, action));
+                    text.push_str(&format!(
+                        "  {} \"{}\" \u{2014} {}\n",
+                        d.kind, d.message, action
+                    ));
                 }
             }
             let ambient = page.drain_ambient();

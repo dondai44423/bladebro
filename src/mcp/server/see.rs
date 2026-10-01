@@ -16,7 +16,10 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
 
     let budget = args.get("budget").and_then(|b| b.as_u64()).unwrap_or(8000) as usize;
     let filter = args.get("filter").and_then(|f| f.as_str()).unwrap_or("");
-    let want_content = args.get("content").and_then(|c| c.as_bool()).unwrap_or(false);
+    let want_content = args
+        .get("content")
+        .and_then(|c| c.as_bool())
+        .unwrap_or(false);
     let find = args.get("find").and_then(|f| f.as_str()).unwrap_or("");
     let extract = args.get("extract").and_then(|e| e.as_str()).unwrap_or("");
     let scope = args.get("scope").and_then(|s| s.as_str()).unwrap_or("");
@@ -50,7 +53,9 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
             let _ = page.ensure_ref(scope).await;
             match page.model().element(scope).cloned() {
                 Some(e) => {
-                    let md = page.markdown_scoped(budget, &e.raw.sig, &e.raw.frame).await?;
+                    let md = page
+                        .markdown_scoped(budget, &e.raw.sig, &e.raw.frame)
+                        .await?;
                     if md.is_empty() {
                         return Err(BladeError::Other(format!(
                             "scope {scope}: element found but has no readable text (or it went stale mid-read - recapture with see)"
@@ -109,7 +114,11 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
             // control is not there" and "it is there but not visible from
             // here" - one flat "not found" sent an agent hunting through
             // raw eval for a desktop-hidden trigger.
-            let diag_note = miss_diag_note(crate::action::find_miss_diag(page.cdp_ref(), find).await.ok());
+            let diag_note = miss_diag_note(
+                crate::action::find_miss_diag(page.cdp_ref(), find)
+                    .await
+                    .ok(),
+            );
             // M11 contract is full-page search: when no ACTIONABLE element
             // matches, locate the text itself - the deepest containing
             // element with its container chain plus the actionables inside
@@ -134,7 +143,12 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
             }
             return Ok(format!("no elements matching \"{find}\" found{diag_note}"));
         }
-        let mut out = format!("find \"{}\": {} match{}\n", find, matches.len(), if matches.len() > 1 { "es" } else { "" });
+        let mut out = format!(
+            "find \"{}\": {} match{}\n",
+            find,
+            matches.len(),
+            if matches.len() > 1 { "es" } else { "" }
+        );
         for m in &matches {
             let ref_id = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
             let ctx = if m.ctx.is_empty() {
@@ -153,8 +167,11 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // M12: extract — structured data extraction (links/forms).
     if !extract.is_empty() {
         let expr = match extract {
-            "links" => r#"(()=>{const links=[...document.querySelectorAll('a[href]')];return JSON.stringify(links.map(a=>({text:(a.textContent||'').trim().slice(0,80),href:a.href})).filter(l=>l.text||l.href));})()"#,
-            "forms" => r#"(()=>{
+            "links" => {
+                r#"(()=>{const links=[...document.querySelectorAll('a[href]')];return JSON.stringify(links.map(a=>({text:(a.textContent||'').trim().slice(0,80),href:a.href})).filter(l=>l.text||l.href));})()"#
+            }
+            "forms" => {
+                r#"(()=>{
 function extractForms(doc){
 const forms=[...doc.querySelectorAll('form')];
 return forms.map(f=>({action:f.action,method:(f.method||'get').toLowerCase(),fields:[...f.elements].filter(e=>e.tagName!=='FIELDSET'&&e.tagName!=='BUTTON').map(e=>{
@@ -173,14 +190,29 @@ var allForms=extractForms(document);
 try{for(const ifr of document.querySelectorAll('iframe')){try{if(ifr.contentDocument){allForms=allForms.concat(extractForms(ifr.contentDocument));}}catch(e){}}
 }catch(e){}
 return JSON.stringify(allForms);
-})()"#,
-            _ => return Err(BladeError::Other(format!("unknown extract type: {extract} (use 'links' or 'forms')"))),
+})()"#
+            }
+            _ => {
+                return Err(BladeError::Other(format!(
+                    "unknown extract type: {extract} (use 'links' or 'forms')"
+                )))
+            }
         };
-        let res = page.cdp_ref().send("Runtime.evaluate", Some(serde_json::json!({
-            "expression": expr,
-            "returnByValue": true,
-        }))).await?;
-        let json_str = res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("[]");
+        let res = page
+            .cdp_ref()
+            .send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": expr,
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
+        let json_str = res
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("[]");
         // V10: offload large extracts to a file.
         if json_str.len() > 6000 {
             let path = crate::artifacts::write_artifact(json_str, "json")?;
@@ -199,7 +231,9 @@ return JSON.stringify(allForms);
     if !scope.is_empty() {
         let text = crate::action::read_text(page.cdp_ref(), page.model(), scope).await?;
         let el = page.model().element(scope);
-        let (role, name) = el.map(|e| (e.raw.role.clone(), e.raw.name.clone())).unwrap_or_default();
+        let (role, name) = el
+            .map(|e| (e.raw.role.clone(), e.raw.name.clone()))
+            .unwrap_or_default();
         return Ok(format!("scope {scope} {role} \"{}\":\n{}", name, text));
     }
 
@@ -214,7 +248,11 @@ return JSON.stringify(allForms);
     // the agent almost certainly needs the text, not just the empty element list.
     let auto_content = !want_content && page.model().actionables() <= 3 && filter.is_empty();
     if want_content || auto_content {
-        let content_budget = if auto_content { budget } else { budget.min(4000) };
+        let content_budget = if auto_content {
+            budget
+        } else {
+            budget.min(4000)
+        };
         let content = page.content(content_budget).await?;
         if !content.is_empty() {
             out.push_str("\n--- page content ---\n");
@@ -251,7 +289,12 @@ pub async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
                 }
             }
             let mut out = format!("console ({} entries):\n", arr.len());
-            for l in errors.iter().chain(warnings.iter()).chain(rest.iter()).take(30) {
+            for l in errors
+                .iter()
+                .chain(warnings.iter())
+                .chain(rest.iter())
+                .take(30)
+            {
                 out.push_str(l);
                 out.push('\n');
             }

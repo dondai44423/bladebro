@@ -45,7 +45,10 @@ fn blade_home_override_wins() {
         data_line.contains("/tmp/bladebro-blade-home"),
         "BLADE_HOME must be honored: {data_line}"
     );
-    assert!(data_line.contains("BLADE_HOME"), "reason label: {data_line}");
+    assert!(
+        data_line.contains("BLADE_HOME"),
+        "reason label: {data_line}"
+    );
 }
 
 #[cfg(unix)]

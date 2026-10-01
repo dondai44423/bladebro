@@ -31,10 +31,13 @@ mod launch;
 mod pipe;
 mod probe;
 
-pub use self::flags::{GlStage, GpuState, Transport, gpu_state, is_software_renderer, launched_headless, launched_pipe, set_gpu_state, set_launched_headless, set_launched_pipe};
-pub use self::launch::launch_lane;
 #[cfg(target_os = "linux")]
 pub use self::display::VirtualDisplay;
+pub use self::flags::{
+    gpu_state, is_software_renderer, launched_headless, launched_pipe, set_gpu_state,
+    set_launched_headless, set_launched_pipe, GlStage, GpuState, Transport,
+};
+pub use self::launch::launch_lane;
 /// A launched Chrome process + virtual display + session
 /// profile. Chrome killed on Drop; the session profile is
 /// synced back to the template and removed on explicit
@@ -48,7 +51,6 @@ pub struct Browser {
     port: u16,
     profile: crate::session_profile::SessionProfile,
 }
-
 
 impl Browser {
     /// The port Chrome's debug endpoint is listening on.
@@ -87,7 +89,7 @@ impl Browser {
     pub fn shutdown(self) {
         let profile_dir = self.profile.dir().to_path_buf();
         drop(self); // kills Chrome + Xvfb
-        // Chrome is dead — the profile is flushed and safe to sync.
+                    // Chrome is dead — the profile is flushed and safe to sync.
         crate::session_profile::SessionProfile::cleanup_dir(&profile_dir);
     }
 }

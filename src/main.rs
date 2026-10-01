@@ -34,7 +34,11 @@ fn main() {
         Ok(()) => 0,
         Err(e) => {
             print_error(&e);
-            if matches!(e, bladebro::BladeError::Usage(_)) { 2 } else { 1 }
+            if matches!(e, bladebro::BladeError::Usage(_)) {
+                2
+            } else {
+                1
+            }
         }
     };
     // See exit_immediately: a parked stdin read hangs
@@ -166,13 +170,30 @@ fn run() -> Result<()> {
     // Update hub commands don't need Chrome. Handle them before launch.
     let is_update_cmd = matches!(
         cmd.as_str(),
-        "update" | "-u" | "doctor" | "-doc" | "rollback" | "--rollback" | "-v" | "--version" | "version"
+        "update"
+            | "-u"
+            | "doctor"
+            | "-doc"
+            | "rollback"
+            | "--rollback"
+            | "-v"
+            | "--version"
+            | "version"
     );
 
     // CLI commands go through the new CLI module (own Chrome management).
     let is_cli_cmd = matches!(
         cmd.as_str(),
-        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help" | "rb"
+        "nav"
+            | "see"
+            | "act"
+            | "state"
+            | "run"
+            | "vision"
+            | "daemon"
+            | "stop"
+            | "help"
+            | "rb"
             | "realbrowser"
     );
 
@@ -210,7 +231,9 @@ fn run() -> Result<()> {
     // discovery. Windows uses WS (pipe fds 3/4 don't exist on Windows).
     let use_pipe = port == 0
         && cmd == "mcp"
-        && std::env::var("BLADE_TRANSPORT").map(|v| v == "pipe").unwrap_or(false)
+        && std::env::var("BLADE_TRANSPORT")
+            .map(|v| v == "pipe")
+            .unwrap_or(false)
         && cfg!(unix);
 
     // Auto-launch Chrome if port is 0 (default). When --port is explicitly
@@ -243,8 +266,8 @@ fn run() -> Result<()> {
             Ok(())
         }
         // CLI commands go through the new CLI module.
-        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help"
-        | "rb" | "realbrowser" => {
+        "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help" | "rb"
+        | "realbrowser" => {
             let mut cli_args: Vec<String> = std::iter::once(cmd.clone())
                 .chain(positional.iter().cloned())
                 .collect();
@@ -269,11 +292,15 @@ fn run() -> Result<()> {
         "-v" | "--version" => rt.block_on(bladebro::updater::run("version", &positional)),
         "mcp" if use_pipe => rt.block_on(cmd_mcp_pipe()),
         "mcp" => rt.block_on(cmd_mcp(&host, port)),
-        "audit" => rt.block_on(with_browser_guard(&mut browser, || bladebro::audit::run_audit(&base))),
+        "audit" => rt.block_on(with_browser_guard(&mut browser, || {
+            bladebro::audit::run_audit(&base)
+        })),
         _ => {
             // Unknown command: NEVER launch a browser (it used to!), and
             // exit 2 as a usage error (see the exit-code contract in cli.rs).
-            Err(bladebro::BladeError::Usage(format!("unknown command: {cmd}")))
+            Err(bladebro::BladeError::Usage(format!(
+                "unknown command: {cmd}"
+            )))
         }
     };
     // Exit HERE, before `rt` drops: the MCP server reads
@@ -285,7 +312,11 @@ fn run() -> Result<()> {
         Ok(()) => exit_immediately(0),
         Err(e) => {
             print_error(&e);
-            exit_immediately(if matches!(e, bladebro::BladeError::Usage(_)) { 2 } else { 1 });
+            exit_immediately(if matches!(e, bladebro::BladeError::Usage(_)) {
+                2
+            } else {
+                1
+            });
         }
     }
 }
@@ -335,7 +366,11 @@ async fn cmd_probe(base: &str) -> Result<()> {
 
     let targets = cdp::list_targets(base).await?;
     let pages: Vec<_> = targets.iter().filter(|t| t.is_page()).collect();
-    println!("  targets: {} total, {} page(s)", targets.len(), pages.len());
+    println!(
+        "  targets: {} total, {} page(s)",
+        targets.len(),
+        pages.len()
+    );
 
     let Some(page) = pages.iter().find(|t| t.web_socket_debugger_url.is_some()) else {
         println!("  no page target with a WebSocket URL — nothing to drive");
@@ -384,5 +419,7 @@ async fn cmd_mcp_pipe() -> Result<()> {
 /// symbol to resolve.
 #[cfg(not(unix))]
 async fn cmd_mcp_pipe() -> Result<()> {
-    Err(bladebro::error::BladeError::Other("pipe transport is Unix-only".into()))
+    Err(bladebro::error::BladeError::Other(
+        "pipe transport is Unix-only".into(),
+    ))
 }

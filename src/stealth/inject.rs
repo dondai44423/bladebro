@@ -47,8 +47,8 @@
 use crate::cdp::CdpSession;
 use crate::error::Result;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 /// Whether GL spoofing was applied to the main page. Set by `apply()`, read
 /// by `worker_gl_spoof()` to decide if worker injection is needed.
@@ -63,7 +63,11 @@ static FULL_SCRIPT: std::sync::RwLock<String> = std::sync::RwLock::new(String::n
 /// The assembled full stealth script, if one has been registered.
 pub fn full_script() -> Option<String> {
     let guard = FULL_SCRIPT.read().ok()?;
-    if guard.is_empty() { None } else { Some(guard.clone()) }
+    if guard.is_empty() {
+        None
+    } else {
+        Some(guard.clone())
+    }
 }
 
 /// True once a full stealth script has been registered (drives whether the
@@ -184,8 +188,8 @@ const INTEL_EXT2_NOMINAL: &[&str] = &[
 struct GpuProfile {
     gl_vendor: String,
     gl_renderer: String,
-    max_texture_size: i32,      // 3379 (MAX_TEXTURE_SIZE)
-    max_renderbuffer_size: i32, // 34024
+    max_texture_size: i32,       // 3379 (MAX_TEXTURE_SIZE)
+    max_renderbuffer_size: i32,  // 34024
     max_cube_map_size: i32,      // 34076
     max_combined_tex_units: i32, // 35661 (MAX_COMBINED_TEXTURE_IMAGE_UNITS)
     max_samples: i32,            // 36183 (MAX_SAMPLES, WebGL2)
@@ -213,16 +217,34 @@ fn get_gpu_profile() -> GpuProfile {
 fn detect_gpu() -> GpuProfile {
     if let Ok(gpu) = std::env::var("BLADE_GPU") {
         match gpu.as_str() {
-            "amd" => { eprintln!("[stealth] BLADE_GPU=amd — using AMD Radeon profile"); return amd_profile(); }
-            "nvidia" => { eprintln!("[stealth] BLADE_GPU=nvidia — using NVIDIA GeForce profile"); return nvidia_profile(); }
-            "mali" => { eprintln!("[stealth] BLADE_GPU=mali — using Mali-G78 profile"); return mali_profile(); }
-            "adreno" => { eprintln!("[stealth] BLADE_GPU=adreno — using Adreno 730 profile"); return adreno_profile(); }
+            "amd" => {
+                eprintln!("[stealth] BLADE_GPU=amd — using AMD Radeon profile");
+                return amd_profile();
+            }
+            "nvidia" => {
+                eprintln!("[stealth] BLADE_GPU=nvidia — using NVIDIA GeForce profile");
+                return nvidia_profile();
+            }
+            "mali" => {
+                eprintln!("[stealth] BLADE_GPU=mali — using Mali-G78 profile");
+                return mali_profile();
+            }
+            "adreno" => {
+                eprintln!("[stealth] BLADE_GPU=adreno — using Adreno 730 profile");
+                return adreno_profile();
+            }
             _ => {
                 // Default override: match the native arch
                 #[cfg(target_arch = "aarch64")]
-                { eprintln!("[stealth] BLADE_GPU={gpu} — using Mali-G78 profile"); return mali_profile(); }
+                {
+                    eprintln!("[stealth] BLADE_GPU={gpu} — using Mali-G78 profile");
+                    return mali_profile();
+                }
                 #[cfg(not(target_arch = "aarch64"))]
-                { eprintln!("[stealth] BLADE_GPU={gpu} — using Intel UHD 630 profile"); return intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)"); }
+                {
+                    eprintln!("[stealth] BLADE_GPU={gpu} — using Intel UHD 630 profile");
+                    return intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)");
+                }
             }
         }
     }
@@ -240,14 +262,21 @@ fn detect_gpu() -> GpuProfile {
     eprintln!("[stealth] GPU detection failed — using Intel UHD 630 fallback");
 
     #[cfg(target_arch = "aarch64")]
-    { mali_profile() }
+    {
+        mali_profile()
+    }
     #[cfg(not(target_arch = "aarch64"))]
-    { intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)") }
+    {
+        intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)")
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn detect_gpu_lspci() -> Option<GpuProfile> {
-    let output = std::process::Command::new("lspci").arg("-nn").output().ok()?;
+    let output = std::process::Command::new("lspci")
+        .arg("-nn")
+        .output()
+        .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         let lower = line.to_lowercase();
@@ -259,7 +288,10 @@ fn detect_gpu_lspci() -> Option<GpuProfile> {
             if lower.contains("alder lake-p") || lower.contains("adl-p") {
                 return Some(intel_profile("Mesa Intel(R) Graphics (ADL GT2)"));
             }
-            if lower.contains("alder lake-s") || lower.contains("adl-s") || lower.contains("uhd 770") {
+            if lower.contains("alder lake-s")
+                || lower.contains("adl-s")
+                || lower.contains("uhd 770")
+            {
                 return Some(intel_profile("Mesa Intel(R) Graphics (ADL-S GT1)"));
             }
             if lower.contains("tiger lake") || lower.contains("tgl") {
@@ -318,7 +350,8 @@ fn intel_profile(mesa_name: &str) -> GpuProfile {
 fn amd_profile() -> GpuProfile {
     GpuProfile {
         gl_vendor: "Google Inc. (AMD)".into(),
-        gl_renderer: "ANGLE (AMD, Mesa AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7), OpenGL ES 3.2)".into(),
+        gl_renderer: "ANGLE (AMD, Mesa AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7), OpenGL ES 3.2)"
+            .into(),
         max_texture_size: 16384,
         max_renderbuffer_size: 16384,
         max_cube_map_size: 16384,
@@ -472,7 +505,7 @@ function _mkPrec(proto){
 _mkPrec(WebGLRenderingContext.prototype);
 if(typeof WebGL2RenderingContext!=='undefined'){_mkPrec(WebGL2RenderingContext.prototype);}
 "#
-        .to_string()
+    .to_string()
 }
 
 /// Extension-list mask: filter the software backend's lists down to the
@@ -537,7 +570,8 @@ if(_ex2&&typeof WebGL2RenderingContext!=='undefined')_mkExts(WebGL2RenderingCont
 fn build_worker_gl_spoof(p: &GpuProfile, locale: Option<&str>) -> String {
     let locale_patch = if let Some(l) = locale {
         let base = l.split('-').next().unwrap_or(l);
-        format!(r#"
+        format!(
+            r#"
 try{{
   if(typeof WorkerNavigator!=='undefined'){{
     var _wl='{l}';var _wls=['{l}','{base}'];
@@ -545,7 +579,10 @@ try{{
     _defGet(WorkerNavigator.prototype,'languages',_ogs(WorkerNavigator.prototype,'languages'),function(th,a,og){{og.apply(th,a);return _wls;}});
   }}
 }}catch(e){{}}
-"#, l=l, base=base)
+"#,
+            l = l,
+            base = base
+        )
     } else {
         String::new()
     };
@@ -681,13 +718,23 @@ async fn probe_environment(cdp: &CdpSession) -> EnvProbe {
         .await;
     match res {
         Ok(v) => {
-            let val = v.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
+            let val = v
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .cloned()
+                .unwrap_or(Value::Null);
             EnvProbe {
-                gl_renderer: val.get("gl").and_then(|g| g.as_str()).map(|s| s.to_string()),
+                gl_renderer: val
+                    .get("gl")
+                    .and_then(|g| g.as_str())
+                    .map(|s| s.to_string()),
                 media_devices: val.get("media").and_then(|m| m.as_i64()).unwrap_or(-1),
             }
         }
-        Err(_) => EnvProbe { gl_renderer: None, media_devices: -1 },
+        Err(_) => EnvProbe {
+            gl_renderer: None,
+            media_devices: -1,
+        },
     }
 }
 
@@ -734,30 +781,34 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     let spoof_gl = match gl_mode.as_str() {
         "spoof" => true,
         "real" => false,
-        _ => match crate::browser::gpu_state() {
-            Some(crate::browser::GpuState::Hardware(renderer)) => {
-                eprintln!("[stealth] GL healthcheck says hardware ({renderer}) — no WebGL spoof");
-                false
-            }
-            Some(crate::browser::GpuState::Software(renderer)) => {
-                eprintln!("[stealth] GL healthcheck says software ({renderer}) — registering WebGL spoof");
-                true
-            }
-            // No context existed at launch — the spoof is inert either way;
-            // keep the fail-safe default.
-            Some(crate::browser::GpuState::Missing) => true,
-            None => match &env.gl_renderer {
-                Some(renderer) => {
-                    let software = is_software_gl(renderer);
-                    if software {
-                        eprintln!("[stealth] real GL is software ({renderer}) — registering WebGL spoof");
-                    }
-                    software
+        _ => {
+            match crate::browser::gpu_state() {
+                Some(crate::browser::GpuState::Hardware(renderer)) => {
+                    eprintln!(
+                        "[stealth] GL healthcheck says hardware ({renderer}) — no WebGL spoof"
+                    );
+                    false
                 }
-                // Probe failed — safest default is to spoof (hides SwiftShader).
-                None => true,
-            },
-        },
+                Some(crate::browser::GpuState::Software(renderer)) => {
+                    eprintln!("[stealth] GL healthcheck says software ({renderer}) — registering WebGL spoof");
+                    true
+                }
+                // No context existed at launch — the spoof is inert either way;
+                // keep the fail-safe default.
+                Some(crate::browser::GpuState::Missing) => true,
+                None => match &env.gl_renderer {
+                    Some(renderer) => {
+                        let software = is_software_gl(renderer);
+                        if software {
+                            eprintln!("[stealth] real GL is software ({renderer}) — registering WebGL spoof");
+                        }
+                        software
+                    }
+                    // Probe failed — safest default is to spoof (hides SwiftShader).
+                    None => true,
+                },
+            }
+        }
     };
     // S15: mediaDevices patch only when the machine reports zero devices.
     let patch_media = match std::env::var("BLADE_MEDIA").as_deref() {
@@ -768,16 +819,20 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     if patch_media {
         eprintln!("[stealth] registering mediaDevices patch");
     }
-    let noise = std::env::var("BLADE_NOISE").map(|v| v == "1").unwrap_or(false);
+    let noise = std::env::var("BLADE_NOISE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     // BCP-47 validate: the locale is interpolated into a JS string literal —
     // a quote or backslash would break out and silently kill the whole
     // stealth injection. Letters, digits, '-', '_' only.
     // Explicit override (per-domain profile, S11) beats the env var.
-    let raw_locale = locale_override.map(String::from)
+    let raw_locale = locale_override
+        .map(String::from)
         .or_else(|| std::env::var("BLADE_LOCALE").ok());
-    let locale = raw_locale
-        .filter(|s| !s.is_empty())
-        .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    let locale = raw_locale.filter(|s| !s.is_empty()).filter(|s| {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    });
     if std::env::var("BLADE_LOCALE").is_ok() && locale.is_none() {
         eprintln!("[stealth] WARNING: BLADE_LOCALE rejected (invalid characters) — locale override skipped");
     }
@@ -785,16 +840,31 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         eprintln!("[stealth] registering locale override: {l}");
     }
 
-    let mut script = String::with_capacity(STEALTH_CORE.len() + 2048 + MEDIA_PATCH.len() + PERMISSIONS_PATCH.len() + LOCALE_OVERRIDE.len() + NOISE.len() + RTC_PATCH.len() + STEALTH_TAIL.len());
+    let mut script = String::with_capacity(
+        STEALTH_CORE.len()
+            + 2048
+            + MEDIA_PATCH.len()
+            + PERMISSIONS_PATCH.len()
+            + LOCALE_OVERRIDE.len()
+            + NOISE.len()
+            + RTC_PATCH.len()
+            + STEALTH_TAIL.len(),
+    );
     script.push_str(STEALTH_CORE);
     // WebRTC candidate filtering only under a proxy (see RTC_PATCH docs).
-    if std::env::var("BLADE_PROXY").map(|v| !v.is_empty()).unwrap_or(false) {
+    if std::env::var("BLADE_PROXY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
         script.push_str(RTC_PATCH);
     }
     GL_SPOOFED.store(spoof_gl, Ordering::Relaxed);
     if spoof_gl {
         let profile = get_gpu_profile();
-        eprintln!("[stealth] registering WebGL spoof: {} (page + worker)", profile.gl_renderer);
+        eprintln!(
+            "[stealth] registering WebGL spoof: {} (page + worker)",
+            profile.gl_renderer
+        );
         script.push_str(&build_gl_spoof(&profile));
         // SharedWorker constructor wrapper (issue #8): CDP doesn't emit
         // attachedToTarget for shared_worker targets, so we intercept the
@@ -837,7 +907,9 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     let script = script.replace("__PROXY_HELPERS__", PROXY_HELPERS);
     let script = if let Some(ref l) = locale {
         let base = l.split('-').next().unwrap_or(l).to_string();
-        script.replace("__LOCALE__", l).replace("__LOCALE_BASE__", &base)
+        script
+            .replace("__LOCALE__", l)
+            .replace("__LOCALE_BASE__", &base)
     } else {
         script
     };

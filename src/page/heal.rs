@@ -25,7 +25,11 @@ impl Page {
         // with the V25c global per-frame rank sig scheme, the sig uniquely
         // identifies the ORIGINAL element even among duplicate-named ones.
         let (role, name, want_sig) = if let Some(el) = self.lpm.element(ref_id) {
-            (el.raw.role.clone(), el.raw.name.clone(), Some(el.raw.sig.clone()))
+            (
+                el.raw.role.clone(),
+                el.raw.name.clone(),
+                Some(el.raw.sig.clone()),
+            )
         } else if let Some((sig, role, name)) = self.lpm.graveyard_lookup(ref_id) {
             (role, name, Some(sig))
         } else {
@@ -41,7 +45,8 @@ impl Page {
         // invisible when its rich editor mounts, and the input path adopts
         // the live editor from the hidden wrapper (see find_sig "prepare").
         let include_hidden = matches!(role.as_str(), "textbox" | "combobox");
-        let matches = crate::action::find_by_text(&self.cdp, &name, Some(&role), include_hidden).await?;
+        let matches =
+            crate::action::find_by_text(&self.cdp, &name, Some(&role), include_hidden).await?;
         // Precise heal: if exactly one candidate has the SAME sig as the
         // original element, that IS the original (not a same-named sibling).
         // Heals duplicate-named refs (header vs footer nav links) to the
@@ -52,7 +57,8 @@ impl Page {
             let exact: Vec<_> = matches.iter().filter(|m| m.sig == ws).collect();
             if exact.len() == 1 {
                 let m = exact[0];
-                self.lpm.adopt_as(ref_id, &m.sig, &m.role, &m.name, &m.frame);
+                self.lpm
+                    .adopt_as(ref_id, &m.sig, &m.role, &m.name, &m.frame);
                 return Ok(Some(format!(
                     "ref {ref_id} healed → {role} \"{}\"",
                     crate::page::model::truncate_pub(&name, 40)
@@ -65,7 +71,8 @@ impl Page {
             ))),
             1 => {
                 let m = &matches[0];
-                self.lpm.adopt_as(ref_id, &m.sig, &m.role, &m.name, &m.frame);
+                self.lpm
+                    .adopt_as(ref_id, &m.sig, &m.role, &m.name, &m.frame);
                 Ok(Some(format!(
                     "ref {ref_id} healed → {role} \"{}\"",
                     crate::page::model::truncate_pub(&name, 40)

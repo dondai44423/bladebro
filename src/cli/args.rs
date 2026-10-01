@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 
 use crate::error::{BladeError, Result};
 
-
 // ── Arg Parsers ────────────────────────────────────────────────────────
 
 /// Extract `--host`/`--port` into an external endpoint (`host:port`),
@@ -40,11 +39,13 @@ pub(super) fn extract_endpoint(args: &[String]) -> Result<(Vec<String>, Option<S
                 let v = args.get(i + 1).ok_or_else(|| {
                     BladeError::Usage("--port needs a value (e.g. --port 9222)".into())
                 })?;
-                let p: u16 = v.parse().map_err(|_| {
-                    BladeError::Usage(format!("--port needs a number, got '{v}'"))
-                })?;
+                let p: u16 = v
+                    .parse()
+                    .map_err(|_| BladeError::Usage(format!("--port needs a number, got '{v}'")))?;
                 if p == 0 {
-                    return Err(BladeError::Usage("--port 0 is not a usable debug port".into()));
+                    return Err(BladeError::Usage(
+                        "--port 0 is not a usable debug port".into(),
+                    ));
                 }
                 port = Some(p);
                 i += 2;
@@ -101,7 +102,8 @@ fn resolve_payload(arg: &str) -> Result<String> {
             .map_err(|e| BladeError::Usage(format!("cannot read stdin: {e}")))?;
         if buf.trim().is_empty() {
             return Err(BladeError::Usage(
-                "stdin was empty — pipe the payload in, e.g. `cat steps.json | bladebro run -`".into(),
+                "stdin was empty — pipe the payload in, e.g. `cat steps.json | bladebro run -`"
+                    .into(),
             ));
         }
         return Ok(buf);
@@ -176,7 +178,8 @@ pub(super) fn parse_nav_args(args: &[String]) -> Result<Value> {
         }
         i += 1;
     }
-    let url = url.ok_or_else(|| BladeError::Usage("nav needs a URL — bladebro nav <url>".into()))?;
+    let url =
+        url.ok_or_else(|| BladeError::Usage("nav needs a URL — bladebro nav <url>".into()))?;
     let mut j = json!({ "action": "navigate", "url": url });
     if let Some(b) = block {
         j["block"] = json!(b);
@@ -299,9 +302,31 @@ pub(super) fn parse_act_args(args: &[String]) -> Result<Value> {
     }
 
     const ACTIONS: &[&str] = &[
-        "click", "type", "fill", "select", "clear", "press", "scroll", "hover", "navigate",
-        "upload", "download", "wait", "eval", "collect", "read", "batch", "pdf", "back",
-        "forward", "reload", "save", "load", "open-tab", "close-tab", "switch-tab",
+        "click",
+        "type",
+        "fill",
+        "select",
+        "clear",
+        "press",
+        "scroll",
+        "hover",
+        "navigate",
+        "upload",
+        "download",
+        "wait",
+        "eval",
+        "collect",
+        "read",
+        "batch",
+        "pdf",
+        "back",
+        "forward",
+        "reload",
+        "save",
+        "load",
+        "open-tab",
+        "close-tab",
+        "switch-tab",
     ];
     let action = args[0].as_str();
     if !ACTIONS.contains(&action) {
@@ -358,7 +383,11 @@ pub(super) fn parse_act_args(args: &[String]) -> Result<Value> {
 
     match action {
         "click" | "hover" => {
-            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() && !pos.is_empty() {
+            if j.get("ref").is_none()
+                && j.get("label").is_none()
+                && j.get("selector").is_none()
+                && !pos.is_empty()
+            {
                 if is_ref(&pos[0]) {
                     j["ref"] = json!(pos[0].clone());
                     if pos.len() > 1 {
@@ -467,7 +496,8 @@ pub(super) fn parse_act_args(args: &[String]) -> Result<Value> {
             }
             if j.get("key").is_none() {
                 return Err(BladeError::Usage(
-                    "press needs a key — `act press Enter` (Enter, Tab, Escape, ArrowDown, …)".into(),
+                    "press needs a key — `act press Enter` (Enter, Tab, Escape, ArrowDown, …)"
+                        .into(),
                 ));
             }
         }
@@ -526,9 +556,17 @@ pub(super) fn parse_act_args(args: &[String]) -> Result<Value> {
                 .and_then(|p| p.as_str())
                 .map(String::from)
                 .or_else(|| j.get("text").and_then(|t| t.as_str()).map(String::from))
-                .or_else(|| if pos.len() > pi { Some(pos[pi..].join(" ")) } else { None })
+                .or_else(|| {
+                    if pos.len() > pi {
+                        Some(pos[pi..].join(" "))
+                    } else {
+                        None
+                    }
+                })
                 .ok_or_else(|| {
-                    BladeError::Usage("upload needs a file path — `act upload e5 /path/file.pdf`".into())
+                    BladeError::Usage(
+                        "upload needs a file path — `act upload e5 /path/file.pdf`".into(),
+                    )
                 })?;
             if let Some(obj) = j.as_object_mut() {
                 obj.remove("path");
@@ -546,7 +584,8 @@ pub(super) fn parse_act_args(args: &[String]) -> Result<Value> {
             }
             if j.get("url").is_none() {
                 return Err(BladeError::Usage(
-                    "download needs a URL — `act download https://x/file.pdf [--path <dir>]`".into(),
+                    "download needs a URL — `act download https://x/file.pdf [--path <dir>]`"
+                        .into(),
                 ));
             }
         }
@@ -562,7 +601,10 @@ pub(super) fn parse_act_args(args: &[String]) -> Result<Value> {
                 ));
             }
             let cond = j["condition"].as_str().unwrap_or("").to_string();
-            if !matches!(cond.as_str(), "element" | "title" | "url" | "text" | "settle" | "js") {
+            if !matches!(
+                cond.as_str(),
+                "element" | "title" | "url" | "text" | "settle" | "js"
+            ) {
                 return Err(BladeError::Usage(format!(
                     "unknown wait condition '{cond}' — element, title, url, text, settle, js"
                 )));
@@ -585,7 +627,8 @@ pub(super) fn parse_act_args(args: &[String]) -> Result<Value> {
             }
             if j.get("js").is_none() {
                 return Err(BladeError::Usage(
-                    "eval needs JS — `act eval \"document.title\"` (or @script.js / - for stdin)".into(),
+                    "eval needs JS — `act eval \"document.title\"` (or @script.js / - for stdin)"
+                        .into(),
                 ));
             }
         }
@@ -688,9 +731,25 @@ pub(super) fn parse_state_args(args: &[String]) -> Result<Value> {
     }
 
     const OPS: &[&str] = &[
-        "cookies", "set-cookie", "del-cookie", "ls", "ss", "set-ls", "set-ss", "rm-ls",
-        "rm-ss", "clear-ls", "clear-ss", "tabs", "open-tab", "close-tab", "switch-tab",
-        "save", "load", "compress", "block",
+        "cookies",
+        "set-cookie",
+        "del-cookie",
+        "ls",
+        "ss",
+        "set-ls",
+        "set-ss",
+        "rm-ls",
+        "rm-ss",
+        "clear-ls",
+        "clear-ss",
+        "tabs",
+        "open-tab",
+        "close-tab",
+        "switch-tab",
+        "save",
+        "load",
+        "compress",
+        "block",
     ];
     // Aliases: MCP-style names.
     let op = match args[0].as_str() {
@@ -765,7 +824,9 @@ pub(super) fn parse_state_args(args: &[String]) -> Result<Value> {
                 )
             })?;
             let value = value.ok_or_else(|| {
-                BladeError::Usage("set-cookie needs a value — `state set-cookie <name> <value>`".into())
+                BladeError::Usage(
+                    "set-cookie needs a value — `state set-cookie <name> <value>`".into(),
+                )
             })?;
             j["name"] = json!(name);
             j["value"] = json!(value);
@@ -819,7 +880,9 @@ pub(super) fn parse_state_args(args: &[String]) -> Result<Value> {
                 .map(String::from)
                 .or_else(|| j.get("key").and_then(|x| x.as_str()).map(String::from))
                 .or_else(|| pos.first().cloned())
-                .ok_or_else(|| BladeError::Usage(format!("{op} needs a key — `state {op} <key>`")))?;
+                .ok_or_else(|| {
+                    BladeError::Usage(format!("{op} needs a key — `state {op} <key>`"))
+                })?;
             if let Some(obj) = j.as_object_mut() {
                 obj.remove("key");
             }
@@ -992,7 +1055,10 @@ mod tests {
     #[test]
     fn port_maps_to_default_host_endpoint() {
         let (cleaned, external) = extract_endpoint(&[
-            "state".into(), "tabs".into(), "--port".into(), "9223".into(),
+            "state".into(),
+            "tabs".into(),
+            "--port".into(),
+            "9223".into(),
         ])
         .expect("valid endpoint");
         assert_eq!(cleaned, vec!["state".to_string(), "tabs".to_string()]);
@@ -1002,8 +1068,12 @@ mod tests {
     #[test]
     fn explicit_host_combines_with_port() {
         let (cleaned, external) = extract_endpoint(&[
-            "--host".into(), "192.168.1.50".into(),
-            "see".into(), "content".into(), "--port".into(), "9222".into(),
+            "--host".into(),
+            "192.168.1.50".into(),
+            "see".into(),
+            "content".into(),
+            "--port".into(),
+            "9222".into(),
         ])
         .expect("valid endpoint");
         assert_eq!(cleaned, vec!["see".to_string(), "content".to_string()]);
@@ -1013,7 +1083,10 @@ mod tests {
     #[test]
     fn no_port_means_no_external_endpoint() {
         let (cleaned, external) = extract_endpoint(&[
-            "state".into(), "cookies".into(), "--host".into(), "127.0.0.1".into(),
+            "state".into(),
+            "cookies".into(),
+            "--host".into(),
+            "127.0.0.1".into(),
         ])
         .expect("host without port is still fine");
         assert_eq!(cleaned, vec!["state".to_string(), "cookies".to_string()]);
@@ -1023,7 +1096,10 @@ mod tests {
     #[test]
     fn flags_before_command_still_parse() {
         let (cleaned, external) = extract_endpoint(&[
-            "--port".into(), "9333".into(), "vision".into(), "--marks".into(),
+            "--port".into(),
+            "9333".into(),
+            "vision".into(),
+            "--marks".into(),
         ])
         .expect("valid endpoint");
         assert_eq!(cleaned, vec!["vision".to_string(), "--marks".to_string()]);
@@ -1052,7 +1128,14 @@ mod tests {
         assert_eq!(v["selector"], "#menu li");
         let v = parse_act_args(&a(&["hover", "--selector", "button[aria-label=\"x\"]"])).unwrap();
         assert_eq!(v["selector"], "button[aria-label=\"x\"]");
-        let v = parse_act_args(&a(&["type", "--selector", "[role=textbox]", "--text", "hi"])).unwrap();
+        let v = parse_act_args(&a(&[
+            "type",
+            "--selector",
+            "[role=textbox]",
+            "--text",
+            "hi",
+        ]))
+        .unwrap();
         assert_eq!(v["selector"], "[role=textbox]");
         assert_eq!(v["text"], "hi");
         let v = parse_act_args(&a(&["select", "--selector", "#pet", "cat"])).unwrap();
@@ -1062,7 +1145,14 @@ mod tests {
         assert_eq!(v["selector"], "#note");
         let v = parse_act_args(&a(&["clear", "--selector", "#note"])).unwrap();
         assert_eq!(v["selector"], "#note");
-        let v = parse_act_args(&a(&["upload", "--selector", "input[type=file]", "--path", "/tmp/f.pdf"])).unwrap();
+        let v = parse_act_args(&a(&[
+            "upload",
+            "--selector",
+            "input[type=file]",
+            "--path",
+            "/tmp/f.pdf",
+        ]))
+        .unwrap();
         assert_eq!(v["selector"], "input[type=file]");
         assert_eq!(v["text"], "/tmp/f.pdf");
     }
@@ -1096,7 +1186,9 @@ mod tests {
         let v = parse_act_args(&a(&["fill", "{\"e3\":\"John\",\"e5\":\"Doe\"}"])).unwrap();
         let fields = v["fields"].as_array().unwrap();
         assert_eq!(fields.len(), 2);
-        assert!(fields.iter().any(|f| f["ref"] == "e3" && f["text"] == "John"));
+        assert!(fields
+            .iter()
+            .any(|f| f["ref"] == "e3" && f["text"] == "John"));
     }
 
     #[test]
@@ -1254,7 +1346,12 @@ mod tests {
     #[test]
     fn see_artifact_readback_flags_parse() {
         let v = parse_see_args(&a(&[
-            "--artifact", "/x/y.json", "--offset", "100", "--limit", "500",
+            "--artifact",
+            "/x/y.json",
+            "--offset",
+            "100",
+            "--limit",
+            "500",
         ]))
         .unwrap();
         assert_eq!(v["artifact"], "/x/y.json");
@@ -1310,8 +1407,15 @@ mod tests {
     #[test]
     fn state_set_cookie_full_form() {
         let v = parse_state_args(&a(&[
-            "set-cookie", "tok", "abc", "--domain", "example.com", "--secure",
-            "--http-only", "--same-site", "Strict",
+            "set-cookie",
+            "tok",
+            "abc",
+            "--domain",
+            "example.com",
+            "--secure",
+            "--http-only",
+            "--same-site",
+            "Strict",
         ]))
         .unwrap();
         assert_eq!(v["name"], "tok");
@@ -1409,11 +1513,13 @@ mod endpoint_args_tests {
 
     #[test]
     fn endpoint_flags_parse_and_strip() {
-        let (cleaned, ext) = extract_endpoint(&args(&["see", "--port", "9222"])).expect("valid port");
+        let (cleaned, ext) =
+            extract_endpoint(&args(&["see", "--port", "9222"])).expect("valid port");
         assert_eq!(cleaned, vec!["see"]);
         assert_eq!(ext.as_deref(), Some("127.0.0.1:9222"));
         let (cleaned, ext) =
-            extract_endpoint(&args(&["--host", "10.0.0.5", "state", "--port", "7"])).expect("valid");
+            extract_endpoint(&args(&["--host", "10.0.0.5", "state", "--port", "7"]))
+                .expect("valid");
         assert_eq!(cleaned, vec!["state"]);
         assert_eq!(ext.as_deref(), Some("10.0.0.5:7"));
         // No --port: no external endpoint, daemon flow untouched.

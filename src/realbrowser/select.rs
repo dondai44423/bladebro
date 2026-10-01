@@ -145,7 +145,12 @@ pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
     // `rb use --binary`: an explicit override always wins over discovery.
     // Re-validated here so a binary deleted since it was set fails with the
     // path named, not with a spawn error inside a launch.
-    if let Some(ov) = cfg.binary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(ov) = cfg
+        .binary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         spec.binary = validate_binary_override(ov)?;
     }
 
@@ -163,7 +168,11 @@ pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
                 BladeError::Other(format!(
                     "profile `{key}` not found in {}. Available: {}",
                     spec.profile_root.display(),
-                    if avail.is_empty() { "(none)".to_string() } else { avail.join(", ") }
+                    if avail.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        avail.join(", ")
+                    }
                 ))
             })?,
         None => profiles.first().cloned().ok_or_else(|| {

@@ -1,8 +1,8 @@
 //! Xvfb virtual display + window manager — the headful-on-a-virtual-display
 //! foundation (Linux only; macOS/Windows use the native window server).
 
-use super::*;
 use super::discover::{find_in_path, find_xvfb};
+use super::*;
 
 /// A virtual X display managed by Xvfb. Killed + cleaned up on Drop.
 /// Linux-only: macOS and Windows have native window servers.
@@ -31,9 +31,7 @@ impl VirtualDisplay {
     /// and dies (observed live: SIGTERM on session A killed
     /// session B's Chrome via a shared Xvfb).
     pub(super) fn start() -> Result<Self> {
-        let xvfb_path = find_xvfb().ok_or_else(|| {
-            BladeError::Other("Xvfb not found".into())
-        })?;
+        let xvfb_path = find_xvfb().ok_or_else(|| BladeError::Other("Xvfb not found".into()))?;
         let mut last_err = String::new();
         for _attempt in 0..3 {
             let Some(display_num) = claim_display_num() else {
@@ -43,9 +41,12 @@ impl VirtualDisplay {
             let child = Command::new(&xvfb_path)
                 .args([
                     &format!(":{display_num}"),
-                    "-screen", "0", &format!("{XVFB_SCREEN_WIDTH}x{XVFB_SCREEN_HEIGHT}x24"),
-                    "-ac",           // disable access control (headless server)
-                    "-nolisten", "tcp",
+                    "-screen",
+                    "0",
+                    &format!("{XVFB_SCREEN_WIDTH}x{XVFB_SCREEN_HEIGHT}x24"),
+                    "-ac", // disable access control (headless server)
+                    "-nolisten",
+                    "tcp",
                 ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -80,7 +81,11 @@ impl VirtualDisplay {
                         {
                             let wm = spawn_session_chrome(display_num);
                             eprintln!("[bladebro] Xvfb virtual display on :{display_num}");
-                            return Ok(Self { child, wm, display_num });
+                            return Ok(Self {
+                                child,
+                                wm,
+                                display_num,
+                            });
                         }
                         std::thread::sleep(Duration::from_millis(25));
                     }
@@ -92,7 +97,9 @@ impl VirtualDisplay {
                 }
             }
         }
-        Err(BladeError::Other(format!("Xvfb failed after 3 attempts: {last_err}")))
+        Err(BladeError::Other(format!(
+            "Xvfb failed after 3 attempts: {last_err}"
+        )))
     }
 
     fn display_env(&self) -> String {

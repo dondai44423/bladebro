@@ -1,9 +1,9 @@
 //! The fetch loops: TweetDetail thread walk and timeline walk. Both are
 //! cursor-paginated and respect the request/time budget.
 
-use super::*;
 use super::gql::{build_url, fetch_api, Budget};
 use super::parse::{cut_chars, parse_thread_page, parse_timeline_page, T};
+use super::*;
 
 fn focal_id_from_url(url: &str) -> Option<String> {
     let id = url
@@ -35,9 +35,9 @@ pub(super) async fn fetch_thread(
         .ok_or_else(|| BladeError::Other("x: URL has no /status/<id>".into()))?;
     let mut base = tpl.variables.clone();
     {
-        let obj = base.as_object_mut().ok_or_else(|| {
-            BladeError::Other("x: template variables not an object".into())
-        })?;
+        let obj = base
+            .as_object_mut()
+            .ok_or_else(|| BladeError::Other("x: template variables not an object".into()))?;
         obj.insert("focalTweetId".into(), json!(focal_id));
         obj.insert("count".into(), json!(PAGE_COUNT));
         obj.remove("cursor");
@@ -72,7 +72,9 @@ pub(super) async fn fetch_thread(
             if pages == 0 {
                 // First page rejected: this op's replays are not viable on
                 // this page state — let the caller pick a fallback.
-                return Err(BladeError::Other(format!("x: replay rejected (HTTP {status})")));
+                return Err(BladeError::Other(format!(
+                    "x: replay rejected (HTTP {status})"
+                )));
             }
             note = Some(format!(
                 "x: HTTP {status} after {pages} page(s) — partial results"
@@ -181,7 +183,11 @@ pub(super) async fn fetch_timeline(
     let ops: &[&str] = match kind {
         // X has renamed the profile timeline op over time; take whichever
         // the page actually used.
-        "profile" => &["UserOriginalsTimeline", "UserTweets", "UserTweetsAndReplies"],
+        "profile" => &[
+            "UserOriginalsTimeline",
+            "UserTweets",
+            "UserTweetsAndReplies",
+        ],
         "search" => &["SearchTimeline"],
         "home" => &["HomeTimeline"],
         _ => unreachable!("kind checked by caller"),
@@ -198,9 +204,9 @@ pub(super) async fn fetch_timeline(
     let _ = op;
     let mut base = tpl.variables.clone();
     {
-        let obj = base.as_object_mut().ok_or_else(|| {
-            BladeError::Other("x: template variables not an object".into())
-        })?;
+        let obj = base
+            .as_object_mut()
+            .ok_or_else(|| BladeError::Other("x: template variables not an object".into()))?;
         // Page size stays as the app chose it — op schemas validate their
         // variables strictly, and the cursor does the walking anyway.
         obj.remove("cursor");
@@ -234,7 +240,9 @@ pub(super) async fn fetch_timeline(
             if pages == 0 {
                 // First page rejected: this op's replays are not viable on
                 // this page state — let the caller pick a fallback.
-                return Err(BladeError::Other(format!("x: replay rejected (HTTP {status})")));
+                return Err(BladeError::Other(format!(
+                    "x: replay rejected (HTTP {status})"
+                )));
             }
             note = Some(format!(
                 "x: HTTP {status} after {pages} page(s) — partial results"

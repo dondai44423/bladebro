@@ -31,11 +31,21 @@ pub(super) fn find_chrome() -> Result<String> {
     }
 
     let names = if cfg!(target_os = "macos") {
-        &["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"][..]
+        &[
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ][..]
     } else if cfg!(target_os = "windows") {
         &["chrome", "chromium"][..]
     } else {
-        &["chromium", "google-chrome", "google-chrome-stable", "chromium-browser"][..]
+        &[
+            "chromium",
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium-browser",
+        ][..]
     };
     for name in names {
         if let Some(path) = find_in_path(name) {
@@ -141,7 +151,15 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 fn find_in_nix_store() -> Option<String> {
     if let Ok(output) = Command::new("fd")
-        .args(["-t", "x", "-1", "chromium$", "/nix/store", "--max-depth", "3"])
+        .args([
+            "-t",
+            "x",
+            "-1",
+            "chromium$",
+            "/nix/store",
+            "--max-depth",
+            "3",
+        ])
         .output()
     {
         if output.status.success() {
@@ -154,7 +172,15 @@ fn find_in_nix_store() -> Option<String> {
         }
     }
     if let Ok(output) = Command::new("find")
-        .args(["/nix/store", "-maxdepth", "3", "-name", "chromium", "-type", "f"])
+        .args([
+            "/nix/store",
+            "-maxdepth",
+            "3",
+            "-name",
+            "chromium",
+            "-type",
+            "f",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()

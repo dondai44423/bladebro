@@ -38,7 +38,9 @@ async fn roundtrip_command_and_event() {
             "method": "Page.frameNavigated",
             "params": { "frame": { "url": "https://example.test/" } }
         });
-        sink.send(Message::Text(ev.to_string().into())).await.unwrap();
+        sink.send(Message::Text(ev.to_string().into()))
+            .await
+            .unwrap();
 
         // Respond to each request by echoing its id with a canned result.
         while let Some(Ok(msg)) = stream.next().await {
@@ -62,7 +64,9 @@ async fn roundtrip_command_and_event() {
                 }),
                 _ => json!({ "id": id, "result": {} }),
             };
-            sink.send(Message::Text(resp.to_string().into())).await.unwrap();
+            sink.send(Message::Text(resp.to_string().into()))
+                .await
+                .unwrap();
         }
     });
 
@@ -159,7 +163,9 @@ async fn protocol_error_is_typed() {
                 "id": id,
                 "error": { "code": -32000, "message": "Cannot find context" }
             });
-            sink.send(Message::Text(resp.to_string().into())).await.unwrap();
+            sink.send(Message::Text(resp.to_string().into()))
+                .await
+                .unwrap();
         }
     });
 

@@ -95,7 +95,12 @@ pub fn list_profiles(root: &Path) -> Vec<ProfileInfo> {
 /// ws path. Chrome writes this into the profile dir whenever a debug
 /// endpoint is live (launch flag or the chrome://inspect approval flow).
 pub fn parse_devtools_active_port(body: &str) -> Option<u16> {
-    body.lines().next()?.trim().parse::<u16>().ok().filter(|p| *p > 0)
+    body.lines()
+        .next()?
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|p| *p > 0)
 }
 
 /// The live debug port of a user-data root, if one is exposed right now

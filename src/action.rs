@@ -15,17 +15,16 @@
 //!   mouse-based option selection is fragile across select implementations.
 //! - **Press** dispatches keyDown + keyUp via `Input.dispatchKeyEvent`.
 //! - **Scroll** uses `window.scrollBy` via evaluate.
-use std::time::Duration;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::json;
 
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
 use crate::page::perception::JS_PREAMBLE;
-use crate::page::{capture, wait_for_settle_with_network, PageDelta, LivePageModel};
-
+use crate::page::{capture, wait_for_settle_with_network, LivePageModel, PageDelta};
 
 use self::edit::*;
 use self::find::*;
@@ -37,7 +36,10 @@ mod find;
 mod input;
 mod verdict;
 
-pub use self::find::{find_by_selector, find_by_text, find_miss_diag, locate_text, read_text, MissDiag, MissExample, SelectorDiag, SelectorLookup, TextLocation, TextMatch};
+pub use self::find::{
+    find_by_selector, find_by_text, find_miss_diag, locate_text, read_text, MissDiag, MissExample,
+    SelectorDiag, SelectorLookup, TextLocation, TextMatch,
+};
 pub use self::verdict::check_condition;
 /// What the agent can do. Few verbs, full control.
 #[derive(Debug, Clone)]
@@ -61,7 +63,11 @@ pub enum Action {
     Read { ref_id: String },
     /// Wait for a condition: "element" (element with matching role/name appears),
     /// "title" (title contains text), "settle" (DOM stabilizes).
-    Wait { condition: String, text: String, timeout: Duration },
+    Wait {
+        condition: String,
+        text: String,
+        timeout: Duration,
+    },
     /// Go back in browser history.
     Back,
     /// Go forward in browser history.
@@ -87,7 +93,12 @@ impl Action {
             | Action::Read { ref_id }
             | Action::Hover { ref_id }
             | Action::Upload { ref_id, .. } => Some(ref_id),
-            Action::Press { .. } | Action::Scroll { .. } | Action::Wait { .. } | Action::Back | Action::Forward | Action::Reload => None,
+            Action::Press { .. }
+            | Action::Scroll { .. }
+            | Action::Wait { .. }
+            | Action::Back
+            | Action::Forward
+            | Action::Reload => None,
         }
     }
 
@@ -192,9 +203,14 @@ pub async fn perform_with_network(
         Action::ClickCoord { x, y } => {
             // S10: coordinate-based click — works on cross-origin iframes,
             // canvas, shadow DOM (anything Input-domain can reach).
-            let _ = cdp.send("Runtime.evaluate", Some(json!({
-                "expression": MUT_WATCH,
-            }))).await;
+            let _ = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(json!({
+                        "expression": MUT_WATCH,
+                    })),
+                )
+                .await;
             dispatch_mouse_click(cdp, *x, *y, last_mouse).await?;
         }
         Action::Click { ref_id } => {
@@ -204,17 +220,20 @@ pub async fn perform_with_network(
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
             }
             if found.disabled == Some(true) {
-                return Err(BladeError::NotInteractable(format!(
-                    "{ref_id} is disabled"
-                )));
+                return Err(BladeError::NotInteractable(format!("{ref_id} is disabled")));
             }
 
             // M2: Click auto-escalation. Try mouse -> JS -> Enter until effect.
             // Install the mutation watcher first: it sees DOM effects on
             // non-actionable content that the element delta cannot.
-            let _ = cdp.send("Runtime.evaluate", Some(json!({
-                "expression": MUT_WATCH,
-            }))).await;
+            let _ = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(json!({
+                        "expression": MUT_WATCH,
+                    })),
+                )
+                .await;
             // Strategy order is role-aware (W5). Menu items get the KEYBOARD
             // activation lane first: reddit's rpl-dropdown items ignore
             // synthetic clicks (a trusted mouse click only closes the menu)
@@ -266,17 +285,15 @@ pub async fn perform_with_network(
                             continue;
                         }
                     }
-                    "js" => {
-                        match find_by_sig(cdp, sig, frame, "click", None).await {
-                            Ok(f) if f.ok => {}
-                            Ok(_) => continue,
-                            Err(e) => {
-                                dispatch_errors += 1;
-                                last_dispatch_err = Some(e);
-                                continue;
-                            }
+                    "js" => match find_by_sig(cdp, sig, frame, "click", None).await {
+                        Ok(f) if f.ok => {}
+                        Ok(_) => continue,
+                        Err(e) => {
+                            dispatch_errors += 1;
+                            last_dispatch_err = Some(e);
+                            continue;
                         }
-                    }
+                    },
                     "enter" => {
                         let fr = find_by_sig(cdp, sig, frame, "focus", None).await;
                         let focused = fr.map(|f| f.focused.unwrap_or(false)).unwrap_or(false);
@@ -355,7 +372,9 @@ pub async fn perform_with_network(
             if !tgt_meta.is_empty() {
                 if found.is_topmost == Some(false) {
                     match found.top_desc.as_deref() {
-                        Some(top) => tgt_meta.push_str(&format!(" (topmost=false - clicks land on {top})")),
+                        Some(top) => {
+                            tgt_meta.push_str(&format!(" (topmost=false - clicks land on {top})"))
+                        }
                         None => tgt_meta.push_str(" (topmost=false)"),
                     }
                 } else {
@@ -366,11 +385,18 @@ pub async fn perform_with_network(
                     ));
                 }
             }
-            let mut verdict = compute_verdict(action, &delta, lpm, Some((via, &tried, &tgt_meta)), None, None, None);
+            let mut verdict = compute_verdict(
+                action,
+                &delta,
+                lpm,
+                Some((via, &tried, &tgt_meta)),
+                None,
+                None,
+                None,
+            );
             if dialog_fired && !delta.navigated && delta.is_empty() && !delta.content_changed {
-                verdict = format!(
-                    "outcome: dialog opened via {via} (auto-dismissed — see ambient)"
-                );
+                verdict =
+                    format!("outcome: dialog opened via {via} (auto-dismissed — see ambient)");
             }
             return Ok((delta, verdict));
         }
@@ -378,7 +404,8 @@ pub async fn perform_with_network(
             let (sig, frame) = sig_frame.as_ref().unwrap();
             // Validate the element is typeable — prevent silently typing
             // into non-text elements (links, buttons, etc.).
-            let el = lpm.element(ref_id)
+            let el = lpm
+                .element(ref_id)
                 .ok_or_else(|| BladeError::StaleRef(ref_id.clone()))?;
             if el.raw.role != "textbox" && el.raw.role != "combobox" {
                 return Err(BladeError::NotInteractable(format!(
@@ -457,11 +484,20 @@ pub async fn perform_with_network(
             // would, and every readback below resolves the effective host.
             let focus = find_by_sig(cdp, sig, frame, "prepare", None).await?;
             let pre = check_editor(cdp, sig, frame).await;
-            if !focus.ok && pre.as_ref().and_then(|p| p.host_kind.clone()).unwrap_or_default().is_empty() {
+            if !focus.ok
+                && pre
+                    .as_ref()
+                    .and_then(|p| p.host_kind.clone())
+                    .unwrap_or_default()
+                    .is_empty()
+            {
                 // The addressed element is gone and no live editor took over.
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
             }
-            let pre_read = pre.as_ref().and_then(|p| p.text.clone()).unwrap_or_default();
+            let pre_read = pre
+                .as_ref()
+                .and_then(|p| p.text.clone())
+                .unwrap_or_default();
             // Replace semantics: clear existing content first, VERIFIED. A
             // clear that cannot empty a framework editor is not claimed -
             // it flows into the report and the verdict says so.
@@ -478,12 +514,18 @@ pub async fn perform_with_network(
             // drafts) can surface their content after the keystrokes return.
             let want = norm_text(text);
             let mut last = check_editor(cdp, sig, frame).await;
-            let mut branch_text = last.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+            let mut branch_text = last
+                .as_ref()
+                .and_then(|c| c.text.clone())
+                .unwrap_or_default();
             if norm_text(&branch_text) != want {
                 for _ in 0..6u8 {
                     tokio::time::sleep(Duration::from_millis(120)).await;
                     last = check_editor(cdp, sig, frame).await;
-                    branch_text = last.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+                    branch_text = last
+                        .as_ref()
+                        .and_then(|c| c.text.clone())
+                        .unwrap_or_default();
                     if norm_text(&branch_text) == want {
                         break;
                     }
@@ -494,7 +536,10 @@ pub async fn perform_with_network(
             // write desyncs a framework editor's internal state.
             let mut set_via_js = false;
             if norm_text(&branch_text) != want {
-                let kind = last.as_ref().and_then(|c| c.host_kind.clone()).unwrap_or_default();
+                let kind = last
+                    .as_ref()
+                    .and_then(|c| c.host_kind.clone())
+                    .unwrap_or_default();
                 if (kind == "input" || kind == "textarea")
                     && norm_text(&branch_text) == norm_text(&pre_read)
                 {
@@ -502,7 +547,10 @@ pub async fn perform_with_network(
                     if js.ok {
                         tokio::time::sleep(Duration::from_millis(40)).await;
                         last = check_editor(cdp, sig, frame).await;
-                        branch_text = last.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+                        branch_text = last
+                            .as_ref()
+                            .and_then(|c| c.text.clone())
+                            .unwrap_or_default();
                         set_via_js = norm_text(&branch_text) == want;
                     }
                 }
@@ -555,7 +603,8 @@ pub async fn perform_with_network(
             let (sig, frame) = sig_frame.as_ref().unwrap();
             // Validate the element is a combobox — prevent silently setting
             // value on non-select elements (textareas, inputs).
-            let el = lpm.element(ref_id)
+            let el = lpm
+                .element(ref_id)
                 .ok_or_else(|| BladeError::StaleRef(ref_id.clone()))?;
             if el.raw.role != "combobox" {
                 return Err(BladeError::NotInteractable(format!(
@@ -610,8 +659,7 @@ pub async fn perform_with_network(
             // Produces trusted wheel events (window.scrollBy is untrusted).
             let total_x = *dx as f64;
             let total_y = *dy as f64;
-            let steps = (((total_x.abs() + total_y.abs()) / 150.0).round() as usize)
-                .clamp(4, 12);
+            let steps = (((total_x.abs() + total_y.abs()) / 150.0).round() as usize).clamp(4, 12);
 
             // Viewport center for the wheel event position.
             let (cx, cy) = cdp
@@ -705,7 +753,11 @@ pub async fn perform_with_network(
             // Read is handled by handle_act directly (returns text, not delta).
             // This arm exists for exhaustiveness.
         }
-        Action::Wait { condition, text, timeout } => {
+        Action::Wait {
+            condition,
+            text,
+            timeout,
+        } => {
             // check_condition polls until the condition is met or timeout.
             // On timeout, error so the agent gets the current page state to
             // recover (a silent "waited" would be a lie — the condition failed).
@@ -718,33 +770,50 @@ pub async fn perform_with_network(
             }
         }
         Action::Back => {
-            cdp.send("Runtime.evaluate", Some(json!({
-                "expression": "window.history.back()",
-                "returnByValue": true,
-            }))).await?;
+            cdp.send(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": "window.history.back()",
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
         }
         Action::Forward => {
-            cdp.send("Runtime.evaluate", Some(json!({
-                "expression": "window.history.forward()",
-                "returnByValue": true,
-            }))).await?;
+            cdp.send(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": "window.history.forward()",
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
         }
         Action::Reload => {
             // Page.reload (CDP) is a real reload: bypasses bfcache,
             // re-fetches resources. ignoreCache=false keeps it a
             // normal F5, not a hard reload.
-            cdp.send("Page.reload", Some(json!({
-                "ignoreCache": false,
-            }))).await?;
+            cdp.send(
+                "Page.reload",
+                Some(json!({
+                    "ignoreCache": false,
+                })),
+            )
+            .await?;
         }
         Action::Hover { ref_id } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
             // Install the mutation watcher FIRST — hover menus
             // and tooltips mutate the DOM, and we want the delta
             // to reflect what the hover actually revealed.
-            let _ = cdp.send("Runtime.evaluate", Some(json!({
-                "expression": MUT_WATCH,
-            }))).await;
+            let _ = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(json!({
+                        "expression": MUT_WATCH,
+                    })),
+                )
+                .await;
             // "hover" mode scrolls the element into view
             // (block:center) and returns its post-scroll box.
             let found = find_by_sig(cdp, sig, frame, "hover", None).await?;
@@ -760,11 +829,19 @@ pub async fn perform_with_network(
             // The human-like path triggers CSS :hover and JS
             // mouseover/mouseenter. On dispatch failure (page
             // navigating mid-hover), re-resolve and retry once.
-            if dispatch_mouse_move(cdp, (cx, cy), last_mouse).await.is_err() {
+            if dispatch_mouse_move(cdp, (cx, cy), last_mouse)
+                .await
+                .is_err()
+            {
                 let retry = find_by_sig(cdp, sig, frame, "hover", None).await?;
                 if retry.ok {
                     if let Some(b2) = retry.box_ {
-                        dispatch_mouse_move(cdp, (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0), last_mouse).await?;
+                        dispatch_mouse_move(
+                            cdp,
+                            (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0),
+                            last_mouse,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -775,7 +852,8 @@ pub async fn perform_with_network(
         Action::Upload { ref_id, path } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
             // Validate the element is a file input.
-            let el = lpm.element(ref_id)
+            let el = lpm
+                .element(ref_id)
                 .ok_or_else(|| BladeError::StaleRef(ref_id.clone()))?;
             if el.raw.role != "file" {
                 return Err(BladeError::NotInteractable(format!(
@@ -814,22 +892,38 @@ pub async fn perform_with_network(
                 + ","
                 + &frame_js
                 + ")";
-            let res = cdp.send("Runtime.evaluate", Some(serde_json::json!({
-                "expression": expr,
-                "returnByValue": false,
-            }))).await?;
-            let object_id = res.get("result").and_then(|r| r.get("objectId")).and_then(|o| o.as_str());
+            let res = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(serde_json::json!({
+                        "expression": expr,
+                        "returnByValue": false,
+                    })),
+                )
+                .await?;
+            let object_id = res
+                .get("result")
+                .and_then(|r| r.get("objectId"))
+                .and_then(|o| o.as_str());
             let object_id = match object_id {
                 Some(id) => id.to_string(),
-                None => return Err(BladeError::Other(format!("could not get objectId for file input {ref_id}"))),
+                None => {
+                    return Err(BladeError::Other(format!(
+                        "could not get objectId for file input {ref_id}"
+                    )))
+                }
             };
             // Set the file on the input. DOM.setFileInputFiles accepts
             // objectId directly — no need to convert to nodeId (which can
             // go stale if the DOM tree hasn't been explicitly requested).
-            cdp.send("DOM.setFileInputFiles", Some(serde_json::json!({
-                "objectId": object_id,
-                "files": [path],
-            }))).await?;
+            cdp.send(
+                "DOM.setFileInputFiles",
+                Some(serde_json::json!({
+                    "objectId": object_id,
+                    "files": [path],
+                })),
+            )
+            .await?;
         }
     }
 
@@ -841,7 +935,11 @@ pub async fn perform_with_network(
     let (nav_check_ms, settle_ms) = match action {
         Action::Type { .. } | Action::Clear { .. } | Action::Scroll { .. } => (120, 900),
         Action::Press { .. } | Action::Select { .. } | Action::Hover { .. } => (150, 900),
-        Action::Wait { condition, .. } if condition.as_str() == "settle" || condition.as_str() == "network" => (0, 0),
+        Action::Wait { condition, .. }
+            if condition.as_str() == "settle" || condition.as_str() == "network" =>
+        {
+            (0, 0)
+        }
         Action::Wait { .. } => (0, 500),
         _ => (150, 2000),
     };
@@ -850,7 +948,8 @@ pub async fn perform_with_network(
     let nav_result = tokio::time::timeout(
         Duration::from_millis(nav_check_ms),
         sub_fires(&mut nav_sub, "Page.frameNavigated"),
-    ).await;
+    )
+    .await;
     if let Ok(true) = nav_result {
         crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
     }
@@ -876,7 +975,15 @@ pub async fn perform_with_network(
             coord_hit = hit_probe(cdp, *x, *y).await.unwrap_or(None);
         }
     }
-    let verdict = compute_verdict(action, &delta, lpm, None, edit_report.as_ref(), coord_hit.as_deref(), scroll_report.as_ref());
+    let verdict = compute_verdict(
+        action,
+        &delta,
+        lpm,
+        None,
+        edit_report.as_ref(),
+        coord_hit.as_deref(),
+        scroll_report.as_ref(),
+    );
     Ok((delta, verdict))
 }
 #[cfg(test)]
@@ -912,10 +1019,20 @@ mod action_tests {
         // State-only change (value/checked/disabled flip) → explicitly weak:
         // this is the class that used to print a self-contradictory "(+0 -0)".
         let mut d = PageDelta::default();
-        d.changed.push(("e2".into(), StateChange { value: None, disabled: None, checked: Some(true) }));
+        d.changed.push((
+            "e2".into(),
+            StateChange {
+                value: None,
+                disabled: None,
+                checked: Some(true),
+            },
+        ));
         let s = dom_effect_summary(&d).unwrap();
         assert!(s.starts_with("state-only:"), "{s}");
-        assert!(s.contains("e2") && s.contains("no nodes added/removed"), "{s}");
+        assert!(
+            s.contains("e2") && s.contains("no nodes added/removed"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -934,9 +1051,18 @@ mod action_tests {
     #[test]
     fn leaf_target_fragment_is_present_and_em_dash_free() {
         let js = super::LEAF_TARGET_JS;
-        assert!(js.contains("elementFromPoint"), "leaf-target uses hit-testing");
-        assert!(js.contains("querySelectorAll('button,a[href]"), "leaf-target finds native controls");
-        assert!(js.contains("_lbest"), "leaf-target selects nearest candidate");
+        assert!(
+            js.contains("elementFromPoint"),
+            "leaf-target uses hit-testing"
+        );
+        assert!(
+            js.contains("querySelectorAll('button,a[href]"),
+            "leaf-target finds native controls"
+        );
+        assert!(
+            js.contains("_lbest"),
+            "leaf-target selects nearest candidate"
+        );
         assert!(js.contains("_lClick"), "leaf-target rewrites the click box");
         assert!(js.contains("_lhr"), "leaf-target rewrites the target label");
         assert!(!js.contains('\u{2014}'), "no em-dash in injected JS");
@@ -953,9 +1079,15 @@ mod action_tests {
         assert!(since.is_none(), "no probe must not start the absence clock");
         let counter = AtomicUsize::new(1);
         since = Some(std::time::Instant::now() - std::time::Duration::from_millis(900));
-        assert!(!super::absence_confirmed(&mut since, Some(&counter)), "busy page never confirms");
+        assert!(
+            !super::absence_confirmed(&mut since, Some(&counter)),
+            "busy page never confirms"
+        );
         counter.store(0, Ordering::Relaxed);
-        assert!(super::absence_confirmed(&mut since, Some(&counter)), "quiet + past window confirms");
+        assert!(
+            super::absence_confirmed(&mut since, Some(&counter)),
+            "quiet + past window confirms"
+        );
     }
 
     // The find-by-sig script is built at runtime; a syntax error in it
@@ -1043,11 +1175,23 @@ mod action_tests {
             return;
         }
         let cases: Vec<(&str, String)> = vec![
-            ("bd-select", super::find_selector_expr("#overflow-trigger").expect("selector expr")),
-            ("bd-select2", super::find_selector_expr("[role=menuitem]").expect("selector expr")),
-            ("bd-missdiag", super::find_miss_expr("Open user actions \"quoted\"").expect("miss expr")),
+            (
+                "bd-select",
+                super::find_selector_expr("#overflow-trigger").expect("selector expr"),
+            ),
+            (
+                "bd-select2",
+                super::find_selector_expr("[role=menuitem]").expect("selector expr"),
+            ),
+            (
+                "bd-missdiag",
+                super::find_miss_expr("Open user actions \"quoted\"").expect("miss expr"),
+            ),
             ("bd-hitprobe", super::hit_probe_expr(216.0, 616.5)),
-            ("bd-textloc", super::text_locate_expr("are you sure? yes").expect("text-locate expr")),
+            (
+                "bd-textloc",
+                super::text_locate_expr("are you sure? yes").expect("text-locate expr"),
+            ),
             ("bd-scrollprobe", super::scroll_probe_expr(480.0, 270.0)),
         ];
         for (name, js) in cases {
@@ -1071,7 +1215,16 @@ mod action_tests {
     fn key_combos_parse_and_reject_junk() {
         use super::{parse_key_combo, KeyCombo};
         let c = parse_key_combo("Control+a").unwrap().expect("combo");
-        assert_eq!(c, KeyCombo { ctrl: true, alt: false, shift: false, meta: false, key: "a".into() });
+        assert_eq!(
+            c,
+            KeyCombo {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                meta: false,
+                key: "a".into()
+            }
+        );
         let c = parse_key_combo("Meta+Enter").unwrap().expect("combo");
         assert!(c.meta && !c.ctrl && c.key == "Enter");
         let c = parse_key_combo("ctrl+shift+z").unwrap().expect("combo");
@@ -1142,12 +1295,20 @@ mod action_tests {
         assert!(v.contains("replaced 4 chars"), "{v}");
         assert!(v.contains("landed in the focused editor"), "{v}");
         // Unverified: says so, never claims a value.
-        let rep = EditReport { final_text: String::new(), verified: false, ..base.clone() };
+        let rep = EditReport {
+            final_text: String::new(),
+            verified: false,
+            ..base.clone()
+        };
         let v = type_verdict_text("e4", "hi", &rep, &lpm);
         assert!(v.contains("unverified"), "{v}");
         assert!(!v.contains("value=\"hi\""), "{v}");
         // Late restore caught by the final readback.
-        let rep = EditReport { final_text: "DRAFT hi".into(), verified: false, ..base.clone() };
+        let rep = EditReport {
+            final_text: "DRAFT hi".into(),
+            verified: false,
+            ..base.clone()
+        };
         let v = type_verdict_text("e4", "hi", &rep, &lpm);
         assert!(v.contains("DRAFT hi"), "{v}");
         assert!(v.contains("late restore"), "{v}");
@@ -1185,17 +1346,31 @@ mod pause_gate_tests {
     #[test]
     fn pause_refuses_input_and_page_moves_but_not_reads() {
         // Input dispatch.
-        assert!(Action::Click { ref_id: "e1".into() }.disrupts_page());
+        assert!(Action::Click {
+            ref_id: "e1".into()
+        }
+        .disrupts_page());
         assert!(Action::ClickCoord { x: 1.0, y: 2.0 }.disrupts_page());
-        assert!(Action::Type { ref_id: "e1".into(), text: "x".into() }.disrupts_page());
-        assert!(Action::Upload { ref_id: "e1".into(), path: "/tmp/x".into() }.disrupts_page());
+        assert!(Action::Type {
+            ref_id: "e1".into(),
+            text: "x".into()
+        }
+        .disrupts_page());
+        assert!(Action::Upload {
+            ref_id: "e1".into(),
+            path: "/tmp/x".into()
+        }
+        .disrupts_page());
         // Page-level moves (history/reload) — they replace what the person
         // using the browser is looking at.
         assert!(Action::Back.disrupts_page());
         assert!(Action::Forward.disrupts_page());
         assert!(Action::Reload.disrupts_page());
         // Reads and waits stay available while paused.
-        assert!(!Action::Read { ref_id: "e1".into() }.disrupts_page());
+        assert!(!Action::Read {
+            ref_id: "e1".into()
+        }
+        .disrupts_page());
         assert!(!Action::Wait {
             condition: "settle".into(),
             text: String::new(),

@@ -75,8 +75,15 @@ pub(super) fn norm_text(s: &str) -> String {
 /// Readback of the effective editing host via the "check" mode. `None`
 /// when the eval itself fails - callers treat that as "unverified", never
 /// as "empty".
-pub(super) async fn check_editor(cdp: &CdpSession, sig: &str, frame: &[usize]) -> Option<FoundElement> {
-    find_by_sig(cdp, sig, frame, "check", None).await.ok().filter(|f| f.ok)
+pub(super) async fn check_editor(
+    cdp: &CdpSession,
+    sig: &str,
+    frame: &[usize],
+) -> Option<FoundElement> {
+    find_by_sig(cdp, sig, frame, "check", None)
+        .await
+        .ok()
+        .filter(|f| f.ok)
 }
 
 /// Clear the addressed element's effective editing host, verified at every
@@ -84,17 +91,31 @@ pub(super) async fn check_editor(cdp: &CdpSession, sig: &str, frame: &[usize]) -
 /// Ctrl+A carrying the selectAll editing command -> JS range-select +
 /// trusted Backspace -> execCommand. The result carries the final readback
 /// so no caller can claim a clear that did not happen.
-pub(super) async fn clear_editable(cdp: &CdpSession, sig: &str, frame: &[usize]) -> Result<ClearResult> {
+pub(super) async fn clear_editable(
+    cdp: &CdpSession,
+    sig: &str,
+    frame: &[usize],
+) -> Result<ClearResult> {
     // Focus first: framework editors mount and take focus here, and the
     // trusted-key rungs act on whatever is focused.
     let _ = find_by_sig(cdp, sig, frame, "focus", None).await;
     let mut cur = check_editor(cdp, sig, frame).await;
     let Some(first) = cur.as_ref() else {
-        return Ok(ClearResult { ok: false, text: String::new(), was_empty: false, missing: true });
+        return Ok(ClearResult {
+            ok: false,
+            text: String::new(),
+            was_empty: false,
+            missing: true,
+        });
     };
     let mut text = first.text.clone().unwrap_or_default();
     if text.is_empty() {
-        return Ok(ClearResult { ok: true, text, was_empty: true, missing: false });
+        return Ok(ClearResult {
+            ok: true,
+            text,
+            was_empty: true,
+            missing: false,
+        });
     }
     let kind = first.host_kind.clone().unwrap_or_default();
     if kind == "input" || kind == "textarea" || kind == "select" {
@@ -103,9 +124,17 @@ pub(super) async fn clear_editable(cdp: &CdpSession, sig: &str, frame: &[usize])
         let _ = find_by_sig(cdp, sig, frame, "clear", None).await;
         tokio::time::sleep(Duration::from_millis(25)).await;
         cur = check_editor(cdp, sig, frame).await;
-        text = cur.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+        text = cur
+            .as_ref()
+            .and_then(|c| c.text.clone())
+            .unwrap_or_default();
         if text.is_empty() {
-            return Ok(ClearResult { ok: true, text, was_empty: false, missing: false });
+            return Ok(ClearResult {
+                ok: true,
+                text,
+                was_empty: false,
+                missing: false,
+            });
         }
     }
     // Trusted select-all + Backspace; then the command variant; then a
@@ -119,7 +148,12 @@ pub(super) async fn clear_editable(cdp: &CdpSession, sig: &str, frame: &[usize])
         if let Some(t) = after {
             text = t;
             if text.is_empty() {
-                return Ok(ClearResult { ok: true, text, was_empty: false, missing: false });
+                return Ok(ClearResult {
+                    ok: true,
+                    text,
+                    was_empty: false,
+                    missing: false,
+                });
             }
         }
     }
@@ -127,8 +161,16 @@ pub(super) async fn clear_editable(cdp: &CdpSession, sig: &str, frame: &[usize])
     let _ = find_by_sig(cdp, sig, frame, "clear", None).await;
     tokio::time::sleep(Duration::from_millis(25)).await;
     cur = check_editor(cdp, sig, frame).await;
-    text = cur.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
-    Ok(ClearResult { ok: text.is_empty(), text, was_empty: false, missing: false })
+    text = cur
+        .as_ref()
+        .and_then(|c| c.text.clone())
+        .unwrap_or_default();
+    Ok(ClearResult {
+        ok: text.is_empty(),
+        text,
+        was_empty: false,
+        missing: false,
+    })
 }
 
 /// Rung helper: trusted Ctrl+A (optionally carrying the selectAll editing
@@ -140,8 +182,18 @@ pub(super) async fn trusted_select_all(
     frame: &[usize],
     with_cmd: bool,
 ) -> Result<Option<String>> {
-    let combo = KeyCombo { ctrl: true, alt: false, shift: false, meta: false, key: "a".to_string() };
-    let cmds = if with_cmd { Some(vec!["selectAll".to_string()]) } else { None };
+    let combo = KeyCombo {
+        ctrl: true,
+        alt: false,
+        shift: false,
+        meta: false,
+        key: "a".to_string(),
+    };
+    let cmds = if with_cmd {
+        Some(vec!["selectAll".to_string()])
+    } else {
+        None
+    };
     dispatch_combo(cdp, &combo, cmds).await?;
     tokio::time::sleep(Duration::from_millis(25)).await;
     let cur = check_editor(cdp, sig, frame).await;
@@ -152,11 +204,20 @@ pub(super) async fn trusted_select_all(
     dispatch_key(cdp, "Backspace").await?;
     tokio::time::sleep(Duration::from_millis(35)).await;
     let after = check_editor(cdp, sig, frame).await;
-    Ok(Some(after.as_ref().and_then(|c| c.text.clone()).unwrap_or_default()))
+    Ok(Some(
+        after
+            .as_ref()
+            .and_then(|c| c.text.clone())
+            .unwrap_or_default(),
+    ))
 }
 
 /// Rung helper: JS range-select (selhost) + the same trusted Backspace.
-pub(super) async fn js_select_all(cdp: &CdpSession, sig: &str, frame: &[usize]) -> Result<Option<String>> {
+pub(super) async fn js_select_all(
+    cdp: &CdpSession,
+    sig: &str,
+    frame: &[usize],
+) -> Result<Option<String>> {
     let sh = find_by_sig(cdp, sig, frame, "selhost", None).await?;
     if !sh.ok || sh.sel.unwrap_or(0) == 0 {
         return Ok(None);
@@ -164,7 +225,12 @@ pub(super) async fn js_select_all(cdp: &CdpSession, sig: &str, frame: &[usize]) 
     dispatch_key(cdp, "Backspace").await?;
     tokio::time::sleep(Duration::from_millis(35)).await;
     let after = check_editor(cdp, sig, frame).await;
-    Ok(Some(after.as_ref().and_then(|c| c.text.clone()).unwrap_or_default()))
+    Ok(Some(
+        after
+            .as_ref()
+            .and_then(|c| c.text.clone())
+            .unwrap_or_default(),
+    ))
 }
 
 /// Dispatch the typing itself: humanized per-char key events for short text
@@ -179,7 +245,10 @@ pub(super) async fn type_text(cdp: &CdpSession, text: &str) -> bool {
         typed = type_per_char(cdp, text).await;
     }
     if !typed {
-        typed = cdp.send("Input.insertText", Some(json!({ "text": text }))).await.is_ok();
+        typed = cdp
+            .send("Input.insertText", Some(json!({ "text": text })))
+            .await
+            .is_ok();
     }
     if !typed {
         let _ = type_per_char(cdp, text).await;
@@ -193,9 +262,17 @@ pub(super) async fn type_text(cdp: &CdpSession, text: &str) -> bool {
 /// restored after a verified clear. Corrections need a readable state; a
 /// readback we cannot see is reported, never fought (a blind retry could
 /// double-type).
-pub(super) async fn finalize_edit(rep: &mut EditReport, cdp: &CdpSession, sig: &str, frame: &[usize]) -> Result<()> {
+pub(super) async fn finalize_edit(
+    rep: &mut EditReport,
+    cdp: &CdpSession,
+    sig: &str,
+    frame: &[usize],
+) -> Result<()> {
     let read = check_editor(cdp, sig, frame).await;
-    let mut final_text = read.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+    let mut final_text = read
+        .as_ref()
+        .and_then(|c| c.text.clone())
+        .unwrap_or_default();
     if let Some(c) = &read {
         rep.host_kind = c.host_kind.clone().unwrap_or_default();
         rep.host_is_tgt = c.host_is_tgt.unwrap_or(false);
@@ -218,7 +295,10 @@ pub(super) async fn finalize_edit(rep: &mut EditReport, cdp: &CdpSession, sig: &
                         for _ in 0..3u8 {
                             tokio::time::sleep(Duration::from_millis(120)).await;
                             let after = check_editor(cdp, sig, frame).await;
-                            final_text = after.as_ref().and_then(|c| c.text.clone()).unwrap_or_default();
+                            final_text = after
+                                .as_ref()
+                                .and_then(|c| c.text.clone())
+                                .unwrap_or_default();
                             if norm_text(&final_text) == want {
                                 break;
                             }
@@ -249,7 +329,11 @@ pub(super) async fn finalize_edit(rep: &mut EditReport, cdp: &CdpSession, sig: &
 /// Find a ref (different from `target`) whose captured value equals
 /// `final_text` - the "where did the text actually land" lookup for
 /// framework editors whose wrapper and editor are separate elements.
-pub(super) fn landed_ref_excluding(lpm: &LivePageModel, target: &str, final_text: &str) -> Option<String> {
+pub(super) fn landed_ref_excluding(
+    lpm: &LivePageModel,
+    target: &str,
+    final_text: &str,
+) -> Option<String> {
     let want = norm_text(final_text);
     if want.is_empty() {
         return None;
@@ -266,11 +350,20 @@ pub(super) fn landed_ref_excluding(lpm: &LivePageModel, target: &str, final_text
 
 /// Type verdict from the verified report. `edit: None` callers keep the
 /// capture-based fallback in `compute_verdict`.
-pub(super) fn type_verdict_text(ref_id: &str, text: &str, rep: &EditReport, lpm: &LivePageModel) -> String {
+pub(super) fn type_verdict_text(
+    ref_id: &str,
+    text: &str,
+    rep: &EditReport,
+    lpm: &LivePageModel,
+) -> String {
     let want = norm_text(text);
     let got = norm_text(&rep.final_text);
     if rep.verified && got == want {
-        let mut s = format!("outcome: typed \"{}\" → value=\"{}\"", clip(text, 40), clip(&rep.final_text, 40));
+        let mut s = format!(
+            "outcome: typed \"{}\" → value=\"{}\"",
+            clip(text, 40),
+            clip(&rep.final_text, 40)
+        );
         if rep.pre_text_len > 0 {
             s.push_str(&format!(" (replaced {} chars)", rep.pre_text_len));
         }

@@ -148,7 +148,10 @@ pub async fn extract(page: &Page, kind: &str, cap: usize) -> Result<XPayload> {
         templates.len(),
         templates
             .values()
-            .map(|t| (t.op.clone(), t.headers.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()))
+            .map(|t| (
+                t.op.clone(),
+                t.headers.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+            ))
             .collect::<Vec<_>>()
     );
     let mut budget = Budget::new();
@@ -205,7 +208,11 @@ mod tests {
         assert_eq!(focal.replies, Some(23));
         assert_eq!(focal.views, Some(12100));
         assert!(!focal.media.is_empty(), "focal has media");
-        assert_eq!(page.tweets.len(), 30, "30 replies (the promoted tweet is not one)");
+        assert_eq!(
+            page.tweets.len(),
+            30,
+            "30 replies (the promoted tweet is not one)"
+        );
         assert!(
             page.tweets.iter().all(|t| t.id != "2096286950328304004"),
             "promoted tweets are filtered out of the conversation"
@@ -225,7 +232,10 @@ mod tests {
                 {"type": "TimelineTerminateTimeline", "direction": "Top"}
             ]}}
         });
-        assert!(!collect_page(&j2).terminated, "Top terminate is not bottom exhaustion");
+        assert!(
+            !collect_page(&j2).terminated,
+            "Top terminate is not bottom exhaustion"
+        );
     }
 
     #[test]
@@ -343,8 +353,13 @@ mod tests {
             headers: Vec::new(),
         };
         let rebuilt = build_url(&tpl, &json!({"focalTweetId": "999", "count": 40}));
-        assert!(rebuilt.starts_with("https://x.com/i/api/graphql/zoF7_t363wZyzylk-BLfZQ/TweetDetail?"));
-        assert!(rebuilt.contains("features=%7B%22a%22%3Atrue%7D"), "features preserved");
+        assert!(
+            rebuilt.starts_with("https://x.com/i/api/graphql/zoF7_t363wZyzylk-BLfZQ/TweetDetail?")
+        );
+        assert!(
+            rebuilt.contains("features=%7B%22a%22%3Atrue%7D"),
+            "features preserved"
+        );
         let vars: Value = {
             let q = rebuilt.split('?').nth(1).expect("query");
             let pairs: HashMap<String, String> = url::form_urlencoded::parse(q.as_bytes())

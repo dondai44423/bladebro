@@ -34,9 +34,10 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
     } else {
         page.ensure_ref(ref_id).await?;
         let (sig, frame) = {
-            let el = page.model().element(ref_id).ok_or_else(|| {
-                BladeError::StaleRef(ref_id.to_string())
-            })?;
+            let el = page
+                .model()
+                .element(ref_id)
+                .ok_or_else(|| BladeError::StaleRef(ref_id.to_string()))?;
             (el.raw.sig.clone(), el.raw.frame.clone())
         };
         let sig_js = serde_json::to_string(&sig)?;
@@ -67,7 +68,8 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
 
     // Baseline of open page targets, captured once before evaluation, so the
     // popup report after the eval only lists NEW tabs (never pre-existing).
-    let wants_popups = js.contains("window.open") || js.contains("open('") || js.contains("open(\"");
+    let wants_popups =
+        js.contains("window.open") || js.contains("open('") || js.contains("open(\"");
     let before_tabs: Vec<String> = if wants_popups {
         page.cdp_ref()
             .send("Target.getTargets", None)
@@ -78,7 +80,11 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
                     .map(|arr| {
                         arr.iter()
                             .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
-                            .filter_map(|t| t.get("targetId").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                            .filter_map(|t| {
+                                t.get("targetId")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
                             .collect()
                     })
                     .unwrap_or_default()
@@ -89,11 +95,18 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
     };
 
     for (i, expression) in expressions.iter().enumerate() {
-        let res = match page.cdp_ref().send("Runtime.evaluate", Some(json!({
-            "expression": expression,
-            "returnByValue": true,
-            "awaitPromise": true,
-        }))).await {
+        let res = match page
+            .cdp_ref()
+            .send(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+            )
+            .await
+        {
             Ok(res) => res,
             // window.open (and any Window/DOM return) blows up returnByValue
             // with -32000 "Object reference chain is too long". The eval
@@ -110,7 +123,8 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
         };
 
         if let Some(exc) = res.get("exceptionDetails") {
-            let msg = exc.get("exception")
+            let msg = exc
+                .get("exception")
                 .and_then(|e| e.get("description"))
                 .and_then(|d| d.as_str())
                 .or_else(|| exc.get("text").and_then(|t| t.as_str()))
@@ -126,13 +140,18 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
                     "eval failed: page CSP blocks eval(). Use a plain expression instead of statements on this page.".into(),
                 ));
             }
-            return Err(BladeError::Other(format!("eval failed: {}", crate::platform::truncate_utf8(&msg, 200))));
+            return Err(BladeError::Other(format!(
+                "eval failed: {}",
+                crate::platform::truncate_utf8(&msg, 200)
+            )));
         }
 
         let value = res.get("result").and_then(|r| r.get("value")).cloned();
         if let Some(ref v) = value {
             if v.get("__blade_not_found").and_then(|b| b.as_bool()) == Some(true) {
-                return Err(BladeError::ElementNotFound(format!("{ref_id} not found in live DOM")));
+                return Err(BladeError::ElementNotFound(format!(
+                    "{ref_id} not found in live DOM"
+                )));
             }
             if !ref_id.is_empty() {
                 if let Some(inner) = v.get("__blade_result") {
@@ -154,7 +173,8 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
         if wants_popups {
             if let Ok(targets) = page.cdp_ref().send("Target.getTargets", None).await {
                 if let Some(infos) = targets.get("targetInfos").and_then(|t| t.as_array()) {
-                    let new_tabs: Vec<String> = infos.iter()
+                    let new_tabs: Vec<String> = infos
+                        .iter()
                         .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
                         .filter_map(|t| {
                             let id = t.get("targetId").and_then(|v| v.as_str())?.to_string();
@@ -163,7 +183,11 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
                             }
                             let url = t.get("url").and_then(|v| v.as_str()).unwrap_or("");
                             if !url.is_empty() && url != "about:blank" {
-                                Some(format!("{} → {}", id, crate::platform::truncate_utf8(url, 60)))
+                                Some(format!(
+                                    "{} → {}",
+                                    id,
+                                    crate::platform::truncate_utf8(url, 60)
+                                ))
                             } else {
                                 Some(id)
                             }
@@ -184,7 +208,6 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
 
     unreachable!("at least one expression candidate is always provided");
 }
-
 
 async fn format_eval_result(json_str: &str) -> Result<String> {
     const INLINE_CAP: usize = 8000;

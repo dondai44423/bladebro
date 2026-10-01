@@ -10,14 +10,17 @@ impl Page {
     /// navigate steps, and the CLI `nav` command.
     pub async fn navigate(&mut self, url: &str) -> Result<PageDelta> {
         // S4+S5: track action timing for pacing + idle hum.
-        self.is_busy.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.is_busy
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let result = self.navigate_inner(url).await;
-        self.is_busy.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.is_busy
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        self.last_action_epoch.store(now, std::sync::atomic::Ordering::Relaxed);
+        self.last_action_epoch
+            .store(now, std::sync::atomic::Ordering::Relaxed);
         result
     }
 
@@ -40,12 +43,16 @@ impl Page {
         // Applied only when nothing is active — an explicit session choice
         // always wins; `state block clear` erases the stored config.
         let domain = crate::knowledge::domain_from_url(url);
-        let (stored_block, learned_settle) = self.knowledge.as_ref()
+        let (stored_block, learned_settle) = self
+            .knowledge
+            .as_ref()
             .and_then(|kb| kb.lock().ok())
-            .map(|kb| (
-                kb.get_block_config(&domain).map(|s| s.to_string()),
-                kb.get_settle_ms(&domain),
-            ))
+            .map(|kb| {
+                (
+                    kb.get_block_config(&domain).map(|s| s.to_string()),
+                    kb.get_settle_ms(&domain),
+                )
+            })
             .unwrap_or((None, None));
         if let Some(spec) = stored_block.filter(|s| !s.is_empty()) {
             if self.block_rules() == 0 {
@@ -74,7 +81,12 @@ impl Page {
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
         _t("load");
         let _settle_t = std::time::Instant::now();
-        wait_for_settle_with_network(&self.cdp, Duration::from_millis(settle_cap), Some(&self.in_flight)).await?;
+        wait_for_settle_with_network(
+            &self.cdp,
+            Duration::from_millis(settle_cap),
+            Some(&self.in_flight),
+        )
+        .await?;
         // Bounded post-drain re-quiet: a late fetch resolving after the
         // network plateau mounts its content a moment later; this catches
         // that mount without taxing interactions (nav-only).
@@ -95,10 +107,14 @@ impl Page {
         // M4+M6: Check for consent banners and block pages after navigation.
         // Knowledge-base integration: try stored consent selector first,
         // learn from successful dismissals, record the visit.
-        let stored_consent = self.knowledge.as_ref()
+        let stored_consent = self
+            .knowledge
+            .as_ref()
             .and_then(|kb| kb.lock().ok())
             .and_then(|kb| kb.get_consent(&domain).map(|c| c.selector.clone()));
-        let consent = dismiss_consent_with_stored(&self.cdp, stored_consent.as_deref()).await.unwrap_or(None);
+        let consent = dismiss_consent_with_stored(&self.cdp, stored_consent.as_deref())
+            .await
+            .unwrap_or(None);
         let blocked = detect_block(&self.cdp).await.unwrap_or(None);
         // JS challenge handling: many anti-bot systems (Reddit, Cloudflare)
         // serve a JS challenge page that a real browser solves automatically.
@@ -111,11 +127,17 @@ impl Page {
         // walls never do (waiting there only added 5s latency to a final verdict).
         // Knowledge: heavier vendors get a longer self-solve window (learned
         // per domain, raised by every real block we hit there).
-        let domain_risk = self.knowledge.as_ref()
+        let domain_risk = self
+            .knowledge
+            .as_ref()
             .and_then(|kb| kb.lock().ok())
             .map(|kb| kb.get_bot_risk(&domain))
             .unwrap_or_default();
-        let challenge_polls: u32 = if domain_risk >= crate::knowledge::BotRiskLevel::Heavy { 16 } else { 10 };
+        let challenge_polls: u32 = if domain_risk >= crate::knowledge::BotRiskLevel::Heavy {
+            16
+        } else {
+            10
+        };
         let mut challenge_seen = false;
         let blocked = match blocked.as_deref() {
             Some("cloudflare") | Some("datadome") | Some("perimeterx") => {
@@ -138,8 +160,11 @@ impl Page {
                 }
                 if solved {
                     wait_for_settle_with_network(
-                        &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
-                    ).await?;
+                        &self.cdp,
+                        Duration::from_millis(2500),
+                        Some(&self.in_flight),
+                    )
+                    .await?;
                     let _ = re_settle(&self.cdp).await;
                     None // clear block — was a JS challenge, not a real block
                 } else {
@@ -169,8 +194,11 @@ impl Page {
                 }
                 if solved {
                     wait_for_settle_with_network(
-                        &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
-                    ).await?;
+                        &self.cdp,
+                        Duration::from_millis(2500),
+                        Some(&self.in_flight),
+                    )
+                    .await?;
                     let _ = re_settle(&self.cdp).await;
                     None // clear block — the challenge solved itself
                 } else {
@@ -187,8 +215,11 @@ impl Page {
                 match solve_reddit_humanity(&self.cdp).await {
                     HumanityOutcome::Solved => {
                         wait_for_settle_with_network(
-                            &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
-                        ).await?;
+                            &self.cdp,
+                            Duration::from_millis(2500),
+                            Some(&self.in_flight),
+                        )
+                        .await?;
                         let _ = re_settle(&self.cdp).await;
                         if let Ok(mut a) = self.ambient.lock() {
                             a.push(
@@ -232,12 +263,18 @@ impl Page {
                     tokio::time::sleep(Duration::from_millis(jitter)).await;
                     let _ = self
                         .cdp
-                        .send("Page.reload", Some(serde_json::json!({ "ignoreCache": false })))
+                        .send(
+                            "Page.reload",
+                            Some(serde_json::json!({ "ignoreCache": false })),
+                        )
                         .await;
                     let _ = wait_for_load(&self.cdp, Duration::from_secs(10)).await;
                     let _ = wait_for_settle_with_network(
-                        &self.cdp, Duration::from_millis(2500), Some(&self.in_flight),
-                    ).await;
+                        &self.cdp,
+                        Duration::from_millis(2500),
+                        Some(&self.in_flight),
+                    )
+                    .await;
                     let _ = re_settle(&self.cdp).await;
                     let now = detect_block(&self.cdp).await.unwrap_or(None);
                     if !matches!(now.as_deref(), Some("reddit")) {
@@ -248,7 +285,8 @@ impl Page {
                 if cleared {
                     if let Ok(mut a) = self.ambient.lock() {
                         a.push(
-                            "reddit: transient network-security wall — auto-cleared on reload".into(),
+                            "reddit: transient network-security wall — auto-cleared on reload"
+                                .into(),
                         );
                     }
                     None
@@ -284,8 +322,17 @@ impl Page {
                 }
             }
             if let Ok(mut a) = self.ambient.lock() {
-                a.push(format!("consent: {} ({})",
-                    if std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".into()) != "accept" { "rejected" } else { "accepted" }, result));
+                a.push(format!(
+                    "consent: {} ({})",
+                    if std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".into())
+                        != "accept"
+                    {
+                        "rejected"
+                    } else {
+                        "accepted"
+                    },
+                    result
+                ));
             }
         }
         if let Some(ref bt) = blocked {
@@ -345,16 +392,24 @@ impl Page {
             if let Some(ref locale) = profile.locale {
                 let _ = self
                     .cdp
-                    .send("Emulation.setLocaleOverride", Some(serde_json::json!({ "locale": locale })))
+                    .send(
+                        "Emulation.setLocaleOverride",
+                        Some(serde_json::json!({ "locale": locale })),
+                    )
                     .await;
                 // Keep Accept-Language in sync — it was set once at attach;
                 // a swapped locale with a stale header is a cross-layer
                 // mismatch fingerprint.
                 let base = locale.split('-').next().unwrap_or(locale);
-                let _ = self.cdp.send("Network.setExtraHTTPHeaders",
-                    Some(serde_json::json!({
-                        "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
-                    }))).await;
+                let _ = self
+                    .cdp
+                    .send(
+                        "Network.setExtraHTTPHeaders",
+                        Some(serde_json::json!({
+                            "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
+                        })),
+                    )
+                    .await;
                 eprintln!("[bladebro] domain profile {domain}: locale={locale}");
             }
 
@@ -363,14 +418,19 @@ impl Page {
             // different locale, navigator.language and Intl disagree — a
             // fingerprint-visible mismatch. Swap the registration (remove
             // + re-add, never stack) so both layers speak the same locale.
-            let want_locale = profile.locale.clone()
+            let want_locale = profile
+                .locale
+                .clone()
                 .or_else(|| std::env::var("BLADE_LOCALE").ok().filter(|s| !s.is_empty()));
             if want_locale != self.active_locale {
                 if let Some(id) = self.stealth_script_id.take() {
-                    let _ = self.cdp.send(
-                        "Page.removeScriptToEvaluateOnNewDocument",
-                        Some(serde_json::json!({ "identifier": id })),
-                    ).await;
+                    let _ = self
+                        .cdp
+                        .send(
+                            "Page.removeScriptToEvaluateOnNewDocument",
+                            Some(serde_json::json!({ "identifier": id })),
+                        )
+                        .await;
                 }
                 match crate::stealth::apply_stealth(&self.cdp, profile.locale.as_deref()).await {
                     Ok(id) => {
@@ -508,19 +568,34 @@ async fn probe_click_point(cdp: &CdpSession) -> Option<(f64, f64)> {
 /// Get the current page URL via CDP. Used by JS challenge detection
 /// to detect redirects after a challenge page is served.
 async fn eval_location_href(cdp: &CdpSession) -> String {
-    cdp.send("Runtime.evaluate", Some(json!({
-        "expression": "location.href",
-        "returnByValue": true,
-    }))).await
-        .ok()
-        .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_default()
+    cdp.send(
+        "Runtime.evaluate",
+        Some(json!({
+            "expression": "location.href",
+            "returnByValue": true,
+        })),
+    )
+    .await
+    .ok()
+    .and_then(|r| {
+        r.get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    })
+    .unwrap_or_default()
 }
 
 fn extract_domain(url: &str) -> String {
-    url.split("://").nth(1).unwrap_or(url)
-        .split('/').next().unwrap_or("")
-        .split(':').next().unwrap_or("")
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
         .trim_start_matches("www.")
         .to_string()
 }

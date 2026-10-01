@@ -41,9 +41,12 @@ use crate::error::{BladeError, Result};
 mod net;
 mod tree;
 
-use self::net::{ensure_loid, fetch_json, fetch_json_many, is_rate_limit};
 pub use self::net::is_security_block;
-use self::tree::{attach_info_things, cut_chars, merge_subtree, parse_discussion, parse_subtree, render_items, stub_hides_comments};
+use self::net::{ensure_loid, fetch_json, fetch_json_many, is_rate_limit};
+use self::tree::{
+    attach_info_things, cut_chars, merge_subtree, parse_discussion, parse_subtree, render_items,
+    stub_hides_comments,
+};
 
 /// Budget for the whole comment sweep (initial fetch + stub resolution).
 const TOTAL_BUDGET: Duration = Duration::from_secs(25);
@@ -158,7 +161,10 @@ struct Budget {
 
 impl Budget {
     fn new() -> Self {
-        Self { requests: 0, deadline: Instant::now() + TOTAL_BUDGET }
+        Self {
+            requests: 0,
+            deadline: Instant::now() + TOTAL_BUDGET,
+        }
     }
 
     /// Consume `n` request slots; false when the sweep must stop.
@@ -186,9 +192,14 @@ pub async fn fetch_comments(
     cap: usize,
 ) -> Result<CommentsPayload> {
     if !post_base.starts_with('/') || !post_base.contains("/comments/") {
-        return Err(BladeError::Other(format!("reddit: bad post path {post_base:?}")));
+        return Err(BladeError::Other(format!(
+            "reddit: bad post path {post_base:?}"
+        )));
     }
-    let sort = if !sort.is_empty() && sort.len() <= 16 && sort.chars().all(|c| c.is_ascii_alphanumeric()) {
+    let sort = if !sort.is_empty()
+        && sort.len() <= 16
+        && sort.chars().all(|c| c.is_ascii_alphanumeric())
+    {
         sort
     } else {
         "confidence"
@@ -209,7 +220,11 @@ pub async fn fetch_comments(
     if !budget.take(1) {
         return Err(BladeError::Other("reddit: fetch budget exhausted".into()));
     }
-    let raw = fetch_json(cdp, &format!("{post_base}.json?limit=500&raw_json=1&sort={sort}")).await?;
+    let raw = fetch_json(
+        cdp,
+        &format!("{post_base}.json?limit=500&raw_json=1&sort={sort}"),
+    )
+    .await?;
     let (post, mut tree) = parse_discussion(&raw)?;
     tracing::debug!(
         nodes = tree.nodes.len(),
@@ -442,7 +457,13 @@ pub async fn fetch_comments(
         "reddit sweep done"
     );
     Ok(assemble(
-        post, items, capped || dfs_capped, budget_hit, rate_limited, security_blocked, gaps,
+        post,
+        items,
+        capped || dfs_capped,
+        budget_hit,
+        rate_limited,
+        security_blocked,
+        gaps,
     ))
 }
 
@@ -462,7 +483,9 @@ fn assemble(
     let total_s = total.map(|t| t.to_string()).unwrap_or_else(|| "?".into());
     let mut status: Option<String> = None;
     if capped {
-        status = Some(format!("capped: {count} of {total_s} comments shown (raise limit to fetch more)"));
+        status = Some(format!(
+            "capped: {count} of {total_s} comments shown (raise limit to fetch more)"
+        ));
     } else if security_blocked {
         status = Some(format!(
             "reddit's network-security wall interrupted the sweep: {count} of {total_s} comments loaded (it's transient — retry in a few seconds for the rest)"
@@ -472,7 +495,9 @@ fn assemble(
             "reddit rate limit reached: {count} of {total_s} comments loaded (retry in ~a minute for more)"
         ));
     } else if budget_hit {
-        status = Some(format!("fetch budget exhausted: {count} of {total_s} comments loaded"));
+        status = Some(format!(
+            "fetch budget exhausted: {count} of {total_s} comments loaded"
+        ));
     } else if total.is_some_and(|t| (count as i64) < t) {
         // Every sweep-side cause is excluded above, and every region the API
         // exposed was resolved (Phase A + B) — the leftover is comments
@@ -487,7 +512,11 @@ fn assemble(
     notes.append(&mut gaps);
     let mut seen = HashSet::new();
     notes.retain(|n| seen.insert(n.clone()));
-    let note = if notes.is_empty() { None } else { Some(cut_chars(&notes.join("; "), 600)) };
+    let note = if notes.is_empty() {
+        None
+    } else {
+        Some(cut_chars(&notes.join("; "), 600))
+    };
     CommentsPayload {
         container: "reddit-comments",
         post,
@@ -560,14 +589,20 @@ mod tests {
         assert_eq!(items[2].depth, 1);
 
         // The previously DOM-collapsed depth-3 reply is present.
-        let deep = items.iter().find(|i| i.id == "pbehi7l").expect("depth-3 comment");
+        let deep = items
+            .iter()
+            .find(|i| i.id == "pbehi7l")
+            .expect("depth-3 comment");
         assert_eq!(deep.depth, 3);
 
         // Full bodies, no mid-word 500-char cut.
         let straight = items.iter().find(|i| i.id == "pbd2e82").expect("comment");
         assert!(straight.text.chars().count() > 500, "long body kept whole");
         let reply = items.iter().find(|i| i.id == "pbd57io").expect("reply");
-        assert!(reply.text.chars().count() > 500, "1194-char reply kept whole");
+        assert!(
+            reply.text.chars().count() > 500,
+            "1194-char reply kept whole"
+        );
 
         // Dates formatted from created_utc.
         assert_eq!(straight.date.as_deref(), Some("2026-09-22 13:30 UTC"));
@@ -664,7 +699,11 @@ mod tests {
 
         let (items, _) = render_items(&tree, 100);
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "b", "c", "d"], "resolved top-level comments appended in order");
+        assert_eq!(
+            ids,
+            vec!["a", "b", "c", "d"],
+            "resolved top-level comments appended in order"
+        );
         let payload = assemble(post, items, false, false, false, false, vec![]);
         assert!(payload.complete);
     }
@@ -698,7 +737,10 @@ mod tests {
         let payload = assemble(post, items, capped, false, false, false, vec![]);
         assert!(!payload.complete);
         let note = payload.note.unwrap();
-        assert!(note.contains("capped: 3 of 26"), "note names the cap: {note}");
+        assert!(
+            note.contains("capped: 3 of 26"),
+            "note names the cap: {note}"
+        );
 
         // Clean full render → complete, no note.
         let (post2, tree2) = parse_discussion(&fixture()).unwrap();
@@ -713,7 +755,10 @@ mod tests {
         assert!(!payload3.complete);
         let note3 = payload3.note.unwrap();
         assert!(note3.contains("fetch budget exhausted: 3 of 26"), "{note3}");
-        assert!(!note3.contains("deleted"), "budget shortfall must not read as deletions: {note3}");
+        assert!(
+            !note3.contains("deleted"),
+            "budget shortfall must not read as deletions: {note3}"
+        );
 
         // Rate limiting reads as its own status, with a retry hint.
         let (post4, tree4) = parse_discussion(&fixture()).unwrap();
@@ -730,7 +775,10 @@ mod tests {
         let payload5 = assemble(post5, items5, false, false, false, true, vec![]);
         assert!(!payload5.complete);
         let note5 = payload5.note.unwrap();
-        assert!(note5.contains("network-security wall interrupted"), "{note5}");
+        assert!(
+            note5.contains("network-security wall interrupted"),
+            "{note5}"
+        );
         assert!(note5.contains("transient"), "{note5}");
     }
 
@@ -745,7 +793,8 @@ mod tests {
         assert!(e.to_string().contains("transient"), "{e}");
 
         // The classic variant some reddit edges still serve.
-        let whoa = "<h1>Whoa there, pardner!</h1>Your request has been blocked due to a network policy.";
+        let whoa =
+            "<h1>Whoa there, pardner!</h1>Your request has been blocked due to a network policy.";
         assert!(is_security_block(
             &classify_gate_body("/api/info.json", whoa).expect("whoa variant classified")
         ));
@@ -762,12 +811,17 @@ mod tests {
 
         // Ordinary failures keep the generic path — no false classification.
         assert!(classify_gate_body("/x.json", "{\"kind\":\"Listing\"}").is_none());
-        assert!(classify_gate_body("/x.json", "<html><body>Service Unavailable</body></html>").is_none());
+        assert!(
+            classify_gate_body("/x.json", "<html><body>Service Unavailable</body></html>")
+                .is_none()
+        );
     }
 
     #[test]
     fn gate_classification_is_case_insensitive() {
-        assert!(classify_gate_body("/x.json", "YOU'VE BEEN BLOCKED BY Network Security.").is_some());
+        assert!(
+            classify_gate_body("/x.json", "YOU'VE BEEN BLOCKED BY Network Security.").is_some()
+        );
     }
 
     #[test]
@@ -788,12 +842,20 @@ mod tests {
         let (items, _) = render_items(&tree, 100);
         let payload = assemble(post, items, false, false, false, false, vec![]);
         let s = serde_json::to_string(&payload).unwrap();
-        assert!(s.starts_with("{\"container\":\"reddit-comments\","), "container first: {s:.80}");
+        assert!(
+            s.starts_with("{\"container\":\"reddit-comments\","),
+            "container first: {s:.80}"
+        );
         assert!(s.contains("\"complete\":true"));
         assert!(!s.contains("\"note\""), "clean payload carries no note");
         // Non-op comments do not serialize the op key.
         let first_item = s.find("\"items\":[").unwrap();
-        let head: String = s.get(first_item..).unwrap_or("").chars().take(400).collect();
+        let head: String = s
+            .get(first_item..)
+            .unwrap_or("")
+            .chars()
+            .take(400)
+            .collect();
         assert!(!head.contains("\"op\":false"), "op is omitted unless true");
     }
 }

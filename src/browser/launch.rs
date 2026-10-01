@@ -1,12 +1,14 @@
 //! Launch paths — the agent-lane launch ladder (WS), the real-lane launch,
 //! the lane dispatcher and the font audit.
 
-use super::*;
+use super::discover::{find_chrome, free_port};
 #[cfg(target_os = "linux")]
 use super::display::{apply_xvfb_env, VirtualDisplay};
-use super::discover::{find_chrome, free_port};
-use super::flags::{classify_gl, gl_stages, launch_args, launch_args_real, stage_label, LaunchCfg, RealLaunchCfg};
+use super::flags::{
+    classify_gl, gl_stages, launch_args, launch_args_real, stage_label, LaunchCfg, RealLaunchCfg,
+};
 use super::probe::probe_gl_ws;
+use super::*;
 
 impl Browser {
     /// Find Chrome, launch it with stealth flags on `port` (0 = auto-pick a
@@ -114,7 +116,11 @@ impl Browser {
     }
 
     /// One launch attempt with a pinned GL stage (driven by `launch_inner`).
-    async fn launch_inner_stage(port: u16, no_sandbox: bool, stage: GlStage) -> Result<(Self, Option<String>)> {
+    async fn launch_inner_stage(
+        port: u16,
+        no_sandbox: bool,
+        stage: GlStage,
+    ) -> Result<(Self, Option<String>)> {
         let timing = std::env::var("NAV_TIMING").is_ok();
         let t0 = std::time::Instant::now();
         let chrome_path = find_chrome()?;
@@ -171,17 +177,17 @@ impl Browser {
         });
 
         #[cfg(target_os = "linux")]
-        let mode_str = if headful { "headful (Xvfb)" } else { "headless" };
+        let mode_str = if headful {
+            "headful (Xvfb)"
+        } else {
+            "headless"
+        };
         #[cfg(not(target_os = "linux"))]
         let mode_str = "headful";
-        eprintln!(
-            "[bladebro] launching Chrome from {chrome_path} on port {port} ({mode_str})"
-        );
+        eprintln!("[bladebro] launching Chrome from {chrome_path} on port {port} ({mode_str})");
 
         let mut cmd = Command::new(&chrome_path);
-        cmd.args(&args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
 
         // Set DISPLAY env var for headful mode (Linux only).
         // CRITICAL on Wayland sessions: Chrome 110+ defaults to the
@@ -349,7 +355,10 @@ impl Browser {
             // BLADE_RB_DEBUG=1 surfaces the browser's own stderr — the only
             // way to see WHY a real-lane launch died (X11/Wayland/GL errors
             // are otherwise discarded into /dev/null).
-            let child_stderr = if std::env::var("BLADE_RB_DEBUG").map(|v| v == "1").unwrap_or(false) {
+            let child_stderr = if std::env::var("BLADE_RB_DEBUG")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
                 Stdio::inherit()
             } else {
                 Stdio::null()
@@ -385,8 +394,7 @@ impl Browser {
                     Err(_) => {
                         match child.try_wait() {
                             Ok(Some(status)) => {
-                                if spawned_at.elapsed() < Duration::from_secs(5)
-                                    && status.success()
+                                if spawned_at.elapsed() < Duration::from_secs(5) && status.success()
                                 {
                                     last_err = Some(BladeError::Other(
                                         "the browser exited immediately (status 0) — another \
@@ -432,7 +440,8 @@ impl Browser {
                 );
             }
         }
-        let failure = last_err.unwrap_or_else(|| BladeError::Other("real-browser launch failed".into()));
+        let failure =
+            last_err.unwrap_or_else(|| BladeError::Other("real-browser launch failed".into()));
         if headless {
             Err(failure)
         } else {
@@ -497,8 +506,9 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
             }
             let root = crate::realbrowser::root_for(&spec.id);
             let sp = crate::session_profile::SessionProfile::create_real(&root)?;
-            let browser = Browser::launch_real(&spec.binary, sp, cfg.visible, Some(profile.key.as_str()))
-                .await?;
+            let browser =
+                Browser::launch_real(&spec.binary, sp, cfg.visible, Some(profile.key.as_str()))
+                    .await?;
             let base = browser.base();
             Ok((Some(browser), base))
         }
@@ -532,8 +542,9 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
                 )));
             }
             let sp = crate::session_profile::SessionProfile::adopt(&profile.root)?;
-            let browser = Browser::launch_real(&spec.binary, sp, cfg.visible, Some(profile.key.as_str()))
-                .await?;
+            let browser =
+                Browser::launch_real(&spec.binary, sp, cfg.visible, Some(profile.key.as_str()))
+                    .await?;
             let base = browser.base();
             Ok((Some(browser), base))
         }

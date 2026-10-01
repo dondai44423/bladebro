@@ -26,11 +26,15 @@ pub(crate) use self::navigate::with_scheme;
 use std::time::Duration;
 
 pub use model::{LivePageModel, PageDelta, PageElement};
-pub use perception::{capture, capture_content, dismiss_consent, dismiss_consent_with_stored, detect_block, re_settle, wait_for_load, wait_for_settle, wait_for_settle_with_network, PageCapture, RawElement};
+pub use perception::{
+    capture, capture_content, detect_block, dismiss_consent, dismiss_consent_with_stored,
+    re_settle, wait_for_load, wait_for_settle, wait_for_settle_with_network, PageCapture,
+    RawElement,
+};
 pub use refs::{RefEntry, StateChange, StateProbe};
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+use std::sync::{Arc, Mutex};
 
 use crate::cdp::{CdpClient, CdpSession};
 use crate::error::{BladeError, Result};
@@ -178,22 +182,26 @@ impl Page {
 
     /// Increment the act turn counter (called after each non-navigate act).
     pub fn incr_act_turn(&self) {
-        self.act_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.act_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Reset the act turn counter to 0 (called on navigation, see, or error).
     pub fn reset_act_turn(&self) {
-        self.act_count.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.act_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Is context pruning enabled?
     pub fn compress_enabled(&self) -> bool {
-        self.compress_enabled.load(std::sync::atomic::Ordering::Relaxed)
+        self.compress_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Toggle context pruning on/off at runtime.
     pub fn set_compress_enabled(&self, enabled: bool) {
-        self.compress_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.compress_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Shared last-mouse-position tracker for movementX/movementY calculation.
@@ -217,7 +225,9 @@ impl Page {
     /// Empty / "none" clears blocking. Toggles the CDP Fetch domain so
     /// interception adds zero overhead while blocking is off.
     pub async fn set_block_classes(&mut self, spec: &str) -> Result<u32> {
-        let mask = if spec.trim().eq_ignore_ascii_case("none") || spec.trim().eq_ignore_ascii_case("clear") {
+        let mask = if spec.trim().eq_ignore_ascii_case("none")
+            || spec.trim().eq_ignore_ascii_case("clear")
+        {
             0
         } else {
             intercept::InterceptState::parse_classes(spec)
@@ -252,7 +262,10 @@ impl Page {
         }
         let stored = if active {
             spec.to_string()
-        } else if spec.is_empty() || spec.eq_ignore_ascii_case("none") || spec.eq_ignore_ascii_case("clear") {
+        } else if spec.is_empty()
+            || spec.eq_ignore_ascii_case("none")
+            || spec.eq_ignore_ascii_case("clear")
+        {
             String::new()
         } else {
             return;
@@ -271,11 +284,18 @@ impl Page {
 
     /// A full agent-facing view of the current model (the `see` output).
     pub fn view(&self, budget: usize) -> String {
-        self.lpm.compress(budget, self.in_flight.load(std::sync::atomic::Ordering::Relaxed))
+        self.lpm.compress(
+            budget,
+            self.in_flight.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     pub fn view_filtered(&self, budget: usize, filter: &str) -> String {
-        self.lpm.compress_filtered(budget, filter, self.in_flight.load(std::sync::atomic::Ordering::Relaxed))
+        self.lpm.compress_filtered(
+            budget,
+            filter,
+            self.in_flight.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Extract visible text content from the page body.
@@ -292,7 +312,12 @@ impl Page {
 
     /// Scoped markdown: ONE element's subtree (`see mode=content scope=eN`).
     /// Bypasses site branches; budget is honored inside the subtree.
-    pub async fn markdown_scoped(&self, budget: usize, sig: &str, frame: &[usize]) -> Result<String> {
+    pub async fn markdown_scoped(
+        &self,
+        budget: usize,
+        sig: &str,
+        frame: &[usize],
+    ) -> Result<String> {
         crate::page::perception::capture_markdown_scoped(&self.cdp, budget, sig, frame).await
     }
 
@@ -303,7 +328,11 @@ impl Page {
 
     /// The delta since the last capture, rendered (the observation).
     pub fn delta_view(&self, d: &PageDelta, budget: usize) -> String {
-        self.lpm.compress_delta(d, budget, self.in_flight.load(std::sync::atomic::Ordering::Relaxed))
+        self.lpm.compress_delta(
+            d,
+            budget,
+            self.in_flight.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// S5: pacing governor — sleep so the inter-action gap follows a
@@ -313,7 +342,9 @@ impl Page {
         if std::env::var("BLADE_PACE").as_deref() == Ok("off") {
             return;
         }
-        let last = self.last_action_epoch.load(std::sync::atomic::Ordering::Relaxed);
+        let last = self
+            .last_action_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
         if last == 0 {
             return; // first action
         }
@@ -368,9 +399,13 @@ impl Page {
         };
         // S5: pacing governor — realistic inter-action gaps.
         self.pace(&action).await;
-        self.is_busy.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.is_busy
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         // M5: For clicks, detect new tabs (target=_blank opens a new page).
-        let is_click = matches!(action, crate::action::Action::Click { .. } | crate::action::Action::ClickCoord { .. });
+        let is_click = matches!(
+            action,
+            crate::action::Action::Click { .. } | crate::action::Action::ClickCoord { .. }
+        );
         let before = if is_click {
             let r = self.list_page_targets().await;
             r
@@ -378,8 +413,13 @@ impl Page {
             Vec::new()
         };
         let result = crate::action::perform_with_network(
-            &self.cdp, &mut self.lpm, &action, Some(&self.in_flight), &self.last_mouse
-        ).await;
+            &self.cdp,
+            &mut self.lpm,
+            &action,
+            Some(&self.in_flight),
+            &self.last_mouse,
+        )
+        .await;
         // V1b: DOM-drift heal. The model had the ref, but the live
         // DOM moved (SPA re-render between captures). Re-resolve the
         // element's identity and retry ONCE before giving up.
@@ -391,11 +431,17 @@ impl Page {
                     Some(note) => {
                         heal_note = Some(note);
                         crate::action::perform_with_network(
-                            &self.cdp, &mut self.lpm, &action, Some(&self.in_flight), &self.last_mouse
-                        ).await?
+                            &self.cdp,
+                            &mut self.lpm,
+                            &action,
+                            Some(&self.in_flight),
+                            &self.last_mouse,
+                        )
+                        .await?
                     }
                     None => {
-                        self.is_busy.store(false, std::sync::atomic::Ordering::Relaxed);
+                        self.is_busy
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
                         return Err(BladeError::ElementNotFound(format!(
                             "{ref_id} not in the live DOM and cannot be re-resolved"
                         )));
@@ -403,7 +449,8 @@ impl Page {
                 }
             }
             Err(e) => {
-                self.is_busy.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.is_busy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 return Err(e);
             }
         };
@@ -413,20 +460,25 @@ impl Page {
         };
         if is_click {
             let after = self.list_page_targets().await;
-            let new_tabs: Vec<_> = after.iter()
+            let new_tabs: Vec<_> = after
+                .iter()
                 .filter(|t| !before.iter().any(|b| b.id == t.id))
                 .collect();
             if !new_tabs.is_empty() {
                 // Override verdict: a new tab opened even if the current page
                 // didn't change. This is the correct outcome for target=_blank
                 // links and window.open() calls.
-                let tab_info: Vec<String> = new_tabs.iter().map(|t| {
-                    if t.title.is_empty() { t.url.clone() } else { t.title.clone() }
-                }).collect();
-                let new_verdict = format!(
-                    "outcome: new tab opened — {}",
-                    tab_info.join(", ")
-                );
+                let tab_info: Vec<String> = new_tabs
+                    .iter()
+                    .map(|t| {
+                        if t.title.is_empty() {
+                            t.url.clone()
+                        } else {
+                            t.title.clone()
+                        }
+                    })
+                    .collect();
+                let new_verdict = format!("outcome: new tab opened — {}", tab_info.join(", "));
                 if let Ok(mut a) = self.ambient.lock() {
                     a.push(new_verdict.clone());
                 }
@@ -434,12 +486,14 @@ impl Page {
             }
         }
         // S4+S5: mark action complete — hum resumes, next action paces.
-        self.is_busy.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.is_busy
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        self.last_action_epoch.store(now, std::sync::atomic::Ordering::Relaxed);
+        self.last_action_epoch
+            .store(now, std::sync::atomic::Ordering::Relaxed);
         Ok((delta, verdict))
     }
 }
@@ -513,14 +567,20 @@ mod tests {
     fn with_scheme_handles_all_forms() {
         // Bare public hosts get https.
         assert_eq!(with_scheme("example.com"), "https://example.com");
-        assert_eq!(with_scheme("example.com/path?q=1"), "https://example.com/path?q=1");
+        assert_eq!(
+            with_scheme("example.com/path?q=1"),
+            "https://example.com/path?q=1"
+        );
         // Local/private targets get http (dev servers rarely have certs).
         assert_eq!(with_scheme("localhost:3000"), "http://localhost:3000");
         assert_eq!(with_scheme("localhost"), "http://localhost");
         assert_eq!(with_scheme("127.0.0.1:8080"), "http://127.0.0.1:8080");
         assert_eq!(with_scheme("192.168.1.5"), "http://192.168.1.5");
         // Explicit ports imply a dev server: http.
-        assert_eq!(with_scheme("myserver.test:8443"), "http://myserver.test:8443");
+        assert_eq!(
+            with_scheme("myserver.test:8443"),
+            "http://myserver.test:8443"
+        );
         // Existing schemes untouched.
         assert_eq!(with_scheme("https://x.com"), "https://x.com");
         assert_eq!(with_scheme("http://x.com"), "http://x.com");

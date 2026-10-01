@@ -9,11 +9,11 @@
 use crate::error::{BladeError, Result};
 
 #[cfg(unix)]
-use serde_json::{json, Value};
+use super::{daemon_running, dispatch, ignore_sighup, socket_path, warm_profile};
 #[cfg(unix)]
 use crate::page::Page;
 #[cfg(unix)]
-use super::{daemon_running, dispatch, ignore_sighup, socket_path, warm_profile};
+use serde_json::{json, Value};
 
 /// Wait for a termination signal (SIGTERM/SIGINT/SIGHUP on Unix, Ctrl+C on Windows).
 /// Same as the MCP server's signal handler.
@@ -53,8 +53,8 @@ pub(super) async fn restart_daemon_for_lane() {
 /// Same lifecycle as MCP (lazy launch, self-healing, idle timeout, reaper).
 #[cfg(unix)]
 pub async fn run_daemon() -> Result<()> {
-    use tokio::net::UnixListener;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
 
     // Ignore SIGHUP — the daemon must survive the parent CLI exiting.
     #[cfg(unix)]
@@ -66,7 +66,10 @@ pub async fn run_daemon() -> Result<()> {
     // orphans it — a ghost that keeps its Chrome but that `stop` can no
     // longer reach (and whose death later unlinks the new daemon's socket).
     if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-        eprintln!("[bladebro] daemon already running on {} — exiting", path.display());
+        eprintln!(
+            "[bladebro] daemon already running on {} — exiting",
+            path.display()
+        );
         return Ok(());
     }
     // Remove stale socket (connect failed — nobody is listening).
@@ -403,7 +406,9 @@ pub async fn run_daemon() -> Result<()> {
 
 #[cfg(not(unix))]
 pub async fn run_daemon() -> Result<()> {
-    Err(BladeError::Other("daemon mode is Unix-only (requires Unix sockets)".into()))
+    Err(BladeError::Other(
+        "daemon mode is Unix-only (requires Unix sockets)".into(),
+    ))
 }
 
 /// Launch the lane's browser and create a Page for the daemon.
@@ -419,13 +424,10 @@ async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
     let result = async {
         let target = crate::cdp::first_page_target(&base).await?;
         let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
-        let page = Page::attach(
-            crate::cdp::CdpSession::root(client),
-            &base,
-            None,
-        ).await?;
+        let page = Page::attach(crate::cdp::CdpSession::root(client), &base, None).await?;
         Ok(page)
-    }.await;
+    }
+    .await;
 
     match result {
         Ok(page) => {
@@ -457,7 +459,11 @@ fn pid_path() -> std::path::PathBuf {
 
 #[cfg(unix)]
 fn read_pid_file() -> Option<i32> {
-    std::fs::read_to_string(pid_path()).ok()?.trim().parse().ok()
+    std::fs::read_to_string(pid_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 #[cfg(unix)]

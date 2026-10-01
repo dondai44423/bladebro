@@ -76,20 +76,35 @@ pub struct BrowserSpec {
 /// it with Chrome flags just fails. Flatpak profile roots are listed so a
 /// flatpak system can still work via `rb use --binary <wrapper>`.
 #[allow(clippy::type_complexity)]
-fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<PathBuf>)> {
+fn candidates() -> Vec<(
+    &'static str,
+    &'static str,
+    Brand,
+    Vec<PathBuf>,
+    Vec<PathBuf>,
+)> {
     // Used by the Linux + macOS candidate tables; Windows builds its paths
     // from LOCALAPPDATA/APPDATA/PROGRAMFILES instead.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let home = crate::platform::home_dir();
-    let mut out: Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<PathBuf>)> = Vec::new();
+    let mut out: Vec<(
+        &'static str,
+        &'static str,
+        Brand,
+        Vec<PathBuf>,
+        Vec<PathBuf>,
+    )> = Vec::new();
 
     #[cfg(target_os = "linux")]
     {
         let xdg = std::env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join(".config"));
-        let mut push = |id: &'static str, name: &'static str, brand: Brand,
-                        bins: Vec<PathBuf>, roots: Vec<PathBuf>| {
+        let mut push = |id: &'static str,
+                        name: &'static str,
+                        brand: Brand,
+                        bins: Vec<PathBuf>,
+                        roots: Vec<PathBuf>| {
             out.push((id, name, brand, bins, roots));
         };
         push(
@@ -167,9 +182,7 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
             "opera",
             "Opera",
             Brand::Opera,
-            vec![
-                PathBuf::from("/usr/bin/opera"),
-            ],
+            vec![PathBuf::from("/usr/bin/opera")],
             vec![xdg.join("opera")],
         );
     }
@@ -179,8 +192,11 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
         let apps = PathBuf::from("/Applications");
         let user_apps = home.join("Applications");
         let sup = home.join("Library/Application Support");
-        let mut push = |id: &'static str, name: &'static str, brand: Brand,
-                        bins: Vec<PathBuf>, roots: Vec<PathBuf>| {
+        let mut push = |id: &'static str,
+                        name: &'static str,
+                        brand: Brand,
+                        bins: Vec<PathBuf>,
+                        roots: Vec<PathBuf>| {
             out.push((id, name, brand, bins, roots));
         };
         push(
@@ -261,8 +277,11 @@ fn candidates() -> Vec<(&'static str, &'static str, Brand, Vec<PathBuf>, Vec<Pat
         let pf = ev("PROGRAMFILES");
         let pf86 = ev("PROGRAMFILES(X86)");
         let j = |b: &Option<PathBuf>, rel: &str| b.as_ref().map(|b| b.join(rel));
-        let mut push = |id: &'static str, name: &'static str, brand: Brand,
-                        bins: Vec<Option<PathBuf>>, roots: Vec<Option<PathBuf>>| {
+        let mut push = |id: &'static str,
+                        name: &'static str,
+                        brand: Brand,
+                        bins: Vec<Option<PathBuf>>,
+                        roots: Vec<Option<PathBuf>>| {
             out.push((
                 id,
                 name,

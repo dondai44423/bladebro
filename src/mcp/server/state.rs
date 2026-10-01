@@ -21,7 +21,9 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
     match op_str {
         // Context pruning toggle.
         "compress" => {
-            let mode = args.get("mode").and_then(|m| m.as_str())
+            let mode = args
+                .get("mode")
+                .and_then(|m| m.as_str())
                 .or_else(|| args.get("value").and_then(|v| v.as_str()))
                 .unwrap_or("");
             return match mode {
@@ -39,8 +41,8 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
                     Ok(format!("context pruning: {status} (current turn: {turn})"))
                 }
                 _ => Err(crate::error::BladeError::Other(
-                    "compress mode must be 'on', 'off', or 'status'".into()
-                ))
+                    "compress mode must be 'on', 'off', or 'status'".into(),
+                )),
             };
         }
         "open-tab" => {
@@ -56,7 +58,9 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
             let new_id = page.open_tab_target(url).await?;
             page.switch_tab(&new_id).await?;
             let view = page.view(1500);
-            return Ok(format!("\u{2713} opened + switched to tab {new_id}\n{view}"));
+            return Ok(format!(
+                "\u{2713} opened + switched to tab {new_id}\n{view}"
+            ));
         }
         "switch-tab" => {
             // Manual-control pause: switching focuses a different tab —
@@ -101,7 +105,10 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
                 let mask = page.set_block_classes(classes).await?;
                 let here = page.model().url().to_string();
                 page.remember_block_choice(&here, classes, mask != 0);
-                return Ok(format!("blocking: {}", crate::page::intercept::InterceptState::describe(mask)));
+                return Ok(format!(
+                    "blocking: {}",
+                    crate::page::intercept::InterceptState::describe(mask)
+                ));
             }
             if args.get("clear").and_then(|c| c.as_bool()).unwrap_or(false) {
                 page.set_block_classes("none").await?;
@@ -109,7 +116,10 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
                 page.remember_block_choice(&here, "", false);
                 return Ok("blocking: none".to_string());
             }
-            return Ok(format!("blocking: {}", crate::page::intercept::InterceptState::describe(page.block_rules())));
+            return Ok(format!(
+                "blocking: {}",
+                crate::page::intercept::InterceptState::describe(page.block_rules())
+            ));
         }
         _ => {}
     }
@@ -123,40 +133,74 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
                 Some(url.to_string())
             } else {
                 let current = page.model().url().to_string();
-                if current.is_empty() || current == "about:blank" { None } else { Some(current) }
+                if current.is_empty() || current == "about:blank" {
+                    None
+                } else {
+                    Some(current)
+                }
             };
-            StateOp::GetCookies { urls: filter_url.map(|u| vec![u]).unwrap_or_default() }
-        },
+            StateOp::GetCookies {
+                urls: filter_url.map(|u| vec![u]).unwrap_or_default(),
+            }
+        }
         "set-cookie" => StateOp::SetCookie {
-            name: name.into(), value: value.into(),
+            name: name.into(),
+            value: value.into(),
             // CDP Network.setCookie requires either url or domain.
             // Prefer url when the agent provides it; fall back to the
             // current page's url so the call never fails for missing scope.
-            url: if !url.is_empty() { Some(url.into()) } else {
+            url: if !url.is_empty() {
+                Some(url.into())
+            } else {
                 let current = page.model().url().to_string();
-                if current.is_empty() || current == "about:blank" { None } else { Some(current) }
+                if current.is_empty() || current == "about:blank" {
+                    None
+                } else {
+                    Some(current)
+                }
             },
-            domain: args.get("domain").and_then(|d| d.as_str()).map(String::from),
+            domain: args
+                .get("domain")
+                .and_then(|d| d.as_str())
+                .map(String::from),
             path: args.get("path").and_then(|p| p.as_str()).map(String::from),
             secure: args.get("secure").and_then(|s| s.as_bool()),
             http_only: args.get("httpOnly").and_then(|h| h.as_bool()),
-            same_site: args.get("sameSite").and_then(|s| s.as_str()).map(String::from),
+            same_site: args
+                .get("sameSite")
+                .and_then(|s| s.as_str())
+                .map(String::from),
         },
         "del-cookie" => StateOp::DeleteCookies {
             name: name.into(),
-            domain: args.get("domain").and_then(|d| d.as_str()).map(String::from),
+            domain: args
+                .get("domain")
+                .and_then(|d| d.as_str())
+                .map(String::from),
             // CDP Network.deleteCookies requires either url or domain.
             // Prefer url when the agent provides it; fall back to the
             // current page's url so the call never fails for missing scope.
-            url: if !url.is_empty() { Some(url.into()) } else {
+            url: if !url.is_empty() {
+                Some(url.into())
+            } else {
                 let current = page.model().url().to_string();
-                if current.is_empty() || current == "about:blank" { None } else { Some(current) }
+                if current.is_empty() || current == "about:blank" {
+                    None
+                } else {
+                    Some(current)
+                }
             },
         },
         "ls" => StateOp::GetLocalStorage,
         "ss" => StateOp::GetSessionStorage,
-        "set-ls" => StateOp::SetLocalStorage { key: name.into(), value: value.into() },
-        "set-ss" => StateOp::SetSessionStorage { key: name.into(), value: value.into() },
+        "set-ls" => StateOp::SetLocalStorage {
+            key: name.into(),
+            value: value.into(),
+        },
+        "set-ss" => StateOp::SetSessionStorage {
+            key: name.into(),
+            value: value.into(),
+        },
         "rm-ls" => StateOp::RemoveLocalStorage { key: name.into() },
         "rm-ss" => StateOp::RemoveSessionStorage { key: name.into() },
         "clear-ls" => StateOp::ClearLocalStorage,
@@ -164,7 +208,11 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
         "tabs" => StateOp::ListTabs,
         "save" => StateOp::SaveSession { name: name.into() },
         "load" => StateOp::LoadSession { name: name.into() },
-        _ => return Err(crate::error::BladeError::Other(format!("unknown state op: {op_str}"))),
+        _ => {
+            return Err(crate::error::BladeError::Other(format!(
+                "unknown state op: {op_str}"
+            )))
+        }
     };
 
     page.state(op).await
