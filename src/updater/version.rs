@@ -306,11 +306,7 @@ pub fn find_asset(release: &Release) -> Option<&Asset> {
 
 /// List asset names in a release (for error messages).
 pub fn asset_names(release: &Release) -> Vec<String> {
-    release
-        .assets
-        .iter()
-        .map(|a| a.name.clone())
-        .collect()
+    release.assets.iter().map(|a| a.name.clone()).collect()
 }
 
 // ── install method detection ─────────────────────────────────────

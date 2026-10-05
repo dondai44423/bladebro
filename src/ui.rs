@@ -21,7 +21,9 @@ use std::io::IsTerminal;
 use std::sync::OnceLock;
 
 fn env_set(name: &str) -> bool {
-    std::env::var_os(name).map(|v| !v.is_empty()).unwrap_or(false)
+    std::env::var_os(name)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
 }
 
 fn env_on(name: &str) -> bool {
@@ -208,11 +210,26 @@ mod tests {
 
     #[test]
     fn decide_respects_the_switches_in_order() {
-        assert!(!decide(true, true, true, false, false), "BLADE_PLAIN is absolute");
-        assert!(decide(false, false, true, false, false), "CLICOLOR_FORCE wins off-TTY");
-        assert!(decide(false, false, true, true, false), "force beats NO_COLOR");
-        assert!(!decide(true, false, false, true, false), "NO_COLOR disables");
-        assert!(!decide(true, false, false, false, true), "TERM=dumb disables");
+        assert!(
+            !decide(true, true, true, false, false),
+            "BLADE_PLAIN is absolute"
+        );
+        assert!(
+            decide(false, false, true, false, false),
+            "CLICOLOR_FORCE wins off-TTY"
+        );
+        assert!(
+            decide(false, false, true, true, false),
+            "force beats NO_COLOR"
+        );
+        assert!(
+            !decide(true, false, false, true, false),
+            "NO_COLOR disables"
+        );
+        assert!(
+            !decide(true, false, false, false, true),
+            "TERM=dumb disables"
+        );
         assert!(decide(true, false, false, false, false), "plain TTY is on");
         assert!(!decide(false, false, false, false, false), "a pipe is off");
     }
@@ -220,12 +237,28 @@ mod tests {
     #[test]
     fn report_styling_only_touches_errors_and_dividers() {
         let text = "outcome: navigated → x\n✗ error: boom\n--- content ---\nhello\n";
-        assert_eq!(style_report_impl(text, false), text, "plain mode is byte-identical");
+        assert_eq!(
+            style_report_impl(text, false),
+            text,
+            "plain mode is byte-identical"
+        );
         let styled = style_report_impl(text, true);
-        assert!(styled.contains("\x1b[31m✗ error: boom\x1b[0m"), "error line red");
-        assert!(styled.contains("\x1b[2m--- content ---\x1b[0m"), "divider dim");
-        assert!(styled.contains("outcome: navigated → x\n"), "other lines untouched");
-        assert!(styled.ends_with("hello\n"), "trailing text + newline preserved");
+        assert!(
+            styled.contains("\x1b[31m✗ error: boom\x1b[0m"),
+            "error line red"
+        );
+        assert!(
+            styled.contains("\x1b[2m--- content ---\x1b[0m"),
+            "divider dim"
+        );
+        assert!(
+            styled.contains("outcome: navigated → x\n"),
+            "other lines untouched"
+        );
+        assert!(
+            styled.ends_with("hello\n"),
+            "trailing text + newline preserved"
+        );
         assert_eq!(styled.matches('\n').count(), text.matches('\n').count());
     }
 
@@ -235,9 +268,19 @@ mod tests {
         let styled = style_help_impl(text, true);
         assert!(styled.contains("\x1b[1;36mUSAGE\x1b[0m"));
         assert!(styled.contains("\x1b[1;36mEXIT CODES\x1b[0m"));
-        assert!(!styled.contains("\x1b[1;36mbladebro"), "title line stays plain");
-        assert!(!styled.contains("\x1b[1;36m  0  ok"), "body lines stay plain");
-        assert_eq!(style_help_impl(text, false), text, "plain mode is byte-identical");
+        assert!(
+            !styled.contains("\x1b[1;36mbladebro"),
+            "title line stays plain"
+        );
+        assert!(
+            !styled.contains("\x1b[1;36m  0  ok"),
+            "body lines stay plain"
+        );
+        assert_eq!(
+            style_help_impl(text, false),
+            text,
+            "plain mode is byte-identical"
+        );
     }
 
     #[test]

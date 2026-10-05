@@ -1,5 +1,5 @@
-//! Reddit comment-tree extraction — the `extract auto` fast path on
-//! reddit.com post pages.
+//! Reddit extraction — the `extract auto` fast path: the comment tree on
+//! reddit.com post pages, and the result listing on reddit search pages.
 //!
 //! Comments come from Reddit's own JSON endpoints, fetched from inside the
 //! page (same origin, same cookies, same session — exactly the traffic the
@@ -23,6 +23,12 @@
 //! `ensure_loid` guards the sweep against sending those requests tokenless,
 //! and wall/challenge bodies that do slip through are classified as
 //! stop-signals (partial results + honest note), never hammered.
+//!
+//! Module map: this file is the sweep orchestrator ([`fetch_comments`]) and
+//! the search sweep's entry points ([`fetch_search`] / [`search_target`]);
+//! `net` is the in-page HTTP layer (loid gate, JSON fetches, gate
+//! classification); `tree` is the listing parser + thread renderer; `search`
+//! is the search-listing path (query sanitizing + parse).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -32,6 +38,20 @@ use serde_json::Value;
 
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
+
+mod net;
+mod search;
+mod tree;
+
+pub use self::net::is_security_block;
+use self::net::{ensure_loid, fetch_json, fetch_json_many, is_rate_limit};
+pub use self::search::{
+    fetch_search, search_target, SearchItem, SearchPayload, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_PAGE,
+};
+use self::tree::{
+    attach_info_things, cut_chars, merge_subtree, parse_discussion, parse_subtree, render_items,
+    stub_hides_comments,
+};
 
 /// Budget for the whole comment sweep (initial fetch + stub resolution).
 const TOTAL_BUDGET: Duration = Duration::from_secs(25);
@@ -146,7 +166,10 @@ struct Budget {
 
 impl Budget {
     fn new() -> Self {
-        Self { requests: 0, deadline: Instant::now() + TOTAL_BUDGET }
+        Self {
+            requests: 0,
+            deadline: Instant::now() + TOTAL_BUDGET,
+        }
     }
 
     /// Consume `n` request slots; false when the sweep must stop.
@@ -174,9 +197,14 @@ pub async fn fetch_comments(
     cap: usize,
 ) -> Result<CommentsPayload> {
     if !post_base.starts_with('/') || !post_base.contains("/comments/") {
-        return Err(BladeError::Other(format!("reddit: bad post path {post_base:?}")));
+        return Err(BladeError::Other(format!(
+            "reddit: bad post path {post_base:?}"
+        )));
     }
-    let sort = if !sort.is_empty() && sort.len() <= 16 && sort.chars().all(|c| c.is_ascii_alphanumeric()) {
+    let sort = if !sort.is_empty()
+        && sort.len() <= 16
+        && sort.chars().all(|c| c.is_ascii_alphanumeric())
+    {
         sort
     } else {
         "confidence"
@@ -197,7 +225,11 @@ pub async fn fetch_comments(
     if !budget.take(1) {
         return Err(BladeError::Other("reddit: fetch budget exhausted".into()));
     }
-    let raw = fetch_json(cdp, &format!("{post_base}.json?limit=500&raw_json=1&sort={sort}")).await?;
+    let raw = fetch_json(
+        cdp,
+        &format!("{post_base}.json?limit=500&raw_json=1&sort={sort}"),
+    )
+    .await?;
     let (post, mut tree) = parse_discussion(&raw)?;
     tracing::debug!(
         nodes = tree.nodes.len(),
@@ -430,17 +462,14 @@ pub async fn fetch_comments(
         "reddit sweep done"
     );
     Ok(assemble(
-        post, items, capped || dfs_capped, budget_hit, rate_limited, security_blocked, gaps,
+        post,
+        items,
+        capped || dfs_capped,
+        budget_hit,
+        rate_limited,
+        security_blocked,
+        gaps,
     ))
-}
-
-/// Does this stub hide comments worth a dedicated parent-subtree fetch?
-/// Two shapes: an EMPTY stub (count 0, no ids — reddit's collapsed-region
-/// marker; the parent's own permalink listing still serves the subtree) and
-/// a partial region (count exceeds the id list) with a real shortfall.
-fn stub_hides_comments(s: &Stub) -> bool {
-    let empty = s.count == 0 && s.ids.is_empty();
-    !s.top_level && (empty || s.count - s.ids.len() as i64 >= RECOVERY_MIN_SHORTFALL)
 }
 
 /// Assemble the payload: honest counts, deduplicated notes, completion flag.
@@ -459,7 +488,9 @@ fn assemble(
     let total_s = total.map(|t| t.to_string()).unwrap_or_else(|| "?".into());
     let mut status: Option<String> = None;
     if capped {
-        status = Some(format!("capped: {count} of {total_s} comments shown (raise limit to fetch more)"));
+        status = Some(format!(
+            "capped: {count} of {total_s} comments shown (raise limit to fetch more)"
+        ));
     } else if security_blocked {
         status = Some(format!(
             "reddit's network-security wall interrupted the sweep: {count} of {total_s} comments loaded (it's transient — retry in a few seconds for the rest)"
@@ -469,7 +500,9 @@ fn assemble(
             "reddit rate limit reached: {count} of {total_s} comments loaded (retry in ~a minute for more)"
         ));
     } else if budget_hit {
-        status = Some(format!("fetch budget exhausted: {count} of {total_s} comments loaded"));
+        status = Some(format!(
+            "fetch budget exhausted: {count} of {total_s} comments loaded"
+        ));
     } else if total.is_some_and(|t| (count as i64) < t) {
         // Every sweep-side cause is excluded above, and every region the API
         // exposed was resolved (Phase A + B) — the leftover is comments
@@ -484,7 +517,11 @@ fn assemble(
     notes.append(&mut gaps);
     let mut seen = HashSet::new();
     notes.retain(|n| seen.insert(n.clone()));
-    let note = if notes.is_empty() { None } else { Some(cut_chars(&notes.join("; "), 600)) };
+    let note = if notes.is_empty() {
+        None
+    } else {
+        Some(cut_chars(&notes.join("; "), 600))
+    };
     CommentsPayload {
         container: "reddit-comments",
         post,
@@ -496,488 +533,13 @@ fn assemble(
     }
 }
 
-/// Parse `[postListing, commentListing]` into post meta + a fresh tree.
-fn parse_discussion(raw: &Value) -> Result<(PostMeta, Tree)> {
-    let arr = raw
-        .as_array()
-        .ok_or_else(|| BladeError::Other("reddit: discussion payload is not a listing".into()))?;
-    let post_data = arr
-        .first()
-        .and_then(|l| l.get("data"))
-        .and_then(|d| d.get("children"))
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("data"))
-        .ok_or_else(|| BladeError::Other("reddit: post object missing from payload".into()))?;
-
-    let post_id = post_data["id"].as_str().unwrap_or_default().to_string();
-    if post_id.is_empty() {
-        return Err(BladeError::Other("reddit: post id missing from payload".into()));
-    }
-    let post_author = post_data["author"].as_str().unwrap_or("[deleted]").to_string();
-    let permalink = post_data["permalink"].as_str().unwrap_or_default().to_string();
-    let subreddit = post_data["subreddit"].as_str().unwrap_or_default();
-    let body = post_data["selftext"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| normalize_text(s, POST_BODY_CAP));
-
-    let post = PostMeta {
-        title: post_data["title"].as_str().unwrap_or_default().to_string(),
-        author: u_prefix(&post_author),
-        subreddit: if subreddit.is_empty() { String::new() } else { format!("r/{subreddit}") },
-        score: as_int(&post_data["score"]),
-        comments: as_int(&post_data["num_comments"]),
-        date: as_epoch(&post_data["created_utc"]).map(format_epoch),
-        url: format!("https://www.reddit.com{permalink}"),
-        body,
-    };
-
-    let mut tree = Tree {
-        post_id: post_id.clone(),
-        post_author,
-        post_permalink: permalink,
-        ..Default::default()
-    };
-    if let Some(kids) = arr
-        .get(1)
-        .and_then(|l| l.get("data"))
-        .and_then(|d| d.get("children"))
-        .and_then(|c| c.as_array())
-    {
-        walk(&mut tree, &post_id, kids);
-    }
-    Ok((post, tree))
-}
-
-/// Walk a comment listing (recursively through `replies`) into the tree.
-fn walk(tree: &mut Tree, parent: &str, children: &[Value]) {
-    for c in children {
-        match c["kind"].as_str().unwrap_or_default() {
-            "t1" => {
-                let d = &c["data"];
-                let Some(id) = d["id"].as_str() else { continue };
-                let id = id.to_string();
-                tree.nodes.entry(id.clone()).or_insert_with(|| Node {
-                    author: d["author"].as_str().unwrap_or("[deleted]").to_string(),
-                    score: as_int(&d["score"]),
-                    created: as_epoch(&d["created_utc"]),
-                    body: d["body"].as_str().unwrap_or_default().to_string(),
-                    permalink: d["permalink"].as_str().unwrap_or_default().to_string(),
-                });
-                tree.children.entry(parent.to_string()).or_default().push(id.clone());
-                if let Some(kids) = d
-                    .get("replies")
-                    .and_then(|r| r.get("data"))
-                    .and_then(|dd| dd.get("children"))
-                    .and_then(|k| k.as_array())
-                {
-                    walk(tree, &id, kids);
-                }
-            }
-            "more" => {
-                let d = &c["data"];
-                let parent_full = d["parent_id"].as_str().unwrap_or_default();
-                let ids: Vec<String> = d["children"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                    .unwrap_or_default();
-                tree.stubs.push(Stub {
-                    parent: strip_prefix(parent_full).to_string(),
-                    top_level: parent_full.starts_with("t3_"),
-                    count: as_int(&d["count"]).unwrap_or(0),
-                    ids,
-                });
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Parse a comment-permalink payload
-/// (`[postListing, listingOfTheComment]`) into the comment's subtree.
-fn parse_subtree(raw: &Value) -> Result<(String, Tree)> {
-    let arr = raw
-        .as_array()
-        .ok_or_else(|| BladeError::Other("reddit: subtree payload is not a listing".into()))?;
-    let first = arr
-        .get(1)
-        .and_then(|l| l.get("data"))
-        .and_then(|d| d.get("children"))
-        .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .ok_or_else(|| BladeError::Other("reddit: comment subtree is empty".into()))?;
-    if first["kind"].as_str() != Some("t1") {
-        return Err(BladeError::Other(
-            "reddit: comment subtree unavailable (deleted or removed)".into(),
-        ));
-    }
-    let root = first["data"]["id"].as_str().unwrap_or_default().to_string();
-    if root.is_empty() {
-        return Err(BladeError::Other("reddit: comment subtree has no root id".into()));
-    }
-    let mut sub = Tree::default();
-    walk(&mut sub, "", std::slice::from_ref(first));
-    sub.children.remove("");
-    Ok((root, sub))
-}
-
-/// Merge a fetched subtree into the tree. The fetched children of the root
-/// are authoritative and complete; anything previously known that the fetch
-/// omitted is kept after them.
-fn merge_subtree(tree: &mut Tree, root: &str, sub: Tree) {
-    for (id, node) in sub.nodes {
-        tree.nodes.insert(id, node);
-    }
-    for (pid, kids) in sub.children {
-        if pid == root {
-            let mut merged = kids;
-            if let Some(old) = tree.children.get(&pid) {
-                for k in old {
-                    if !merged.contains(k) {
-                        merged.push(k.clone());
-                    }
-                }
-            }
-            tree.children.insert(pid, merged);
-        } else {
-            tree.children.insert(pid, kids);
-        }
-    }
-    tree.children.entry(root.to_string()).or_default();
-    // Stubs discovered inside the subtree resolve after the current ones.
-    tree.stubs.extend(sub.stubs);
-}
-
-/// Attach `/api/info` things under their real parent; returns how many were
-/// t1 comments.
-fn attach_info_things(tree: &mut Tree, things: &[Value], fallback_parent: &str) -> usize {
-    let mut got = 0usize;
-    for t in things {
-        if t["kind"].as_str() != Some("t1") {
-            continue;
-        }
-        let d = &t["data"];
-        let Some(id) = d["id"].as_str() else { continue };
-        let id = id.to_string();
-        tree.nodes.insert(
-            id.clone(),
-            Node {
-                author: d["author"].as_str().unwrap_or("[deleted]").to_string(),
-                score: as_int(&d["score"]),
-                created: as_epoch(&d["created_utc"]),
-                body: d["body"].as_str().unwrap_or_default().to_string(),
-                permalink: d["permalink"].as_str().unwrap_or_default().to_string(),
-            },
-        );
-        let parent = d["parent_id"].as_str().map(strip_prefix).unwrap_or(fallback_parent);
-        let list = tree.children.entry(parent.to_string()).or_default();
-        if !list.contains(&id) {
-            list.push(id);
-        }
-        got += 1;
-    }
-    got
-}
-
-/// Thread-ordered (DFS) render, trimmed at `cap`; returns whether trimming
-/// happened.
-fn render_items(tree: &Tree, cap: usize) -> (Vec<CommentItem>, bool) {
-    let mut items = Vec::new();
-    let mut capped = false;
-    let Some(roots) = tree.children.get(&tree.post_id) else {
-        return (items, false);
-    };
-    let mut stack: Vec<(String, usize)> = roots.iter().rev().map(|id| (id.clone(), 0)).collect();
-    while let Some((id, depth)) = stack.pop() {
-        if items.len() >= cap {
-            capped = true;
-            break;
-        }
-        let Some(n) = tree.nodes.get(&id) else { continue };
-        let url = if n.permalink.is_empty() {
-            format!("https://www.reddit.com{}comment/{id}/", tree.post_permalink)
-        } else {
-            format!("https://www.reddit.com{}", n.permalink)
-        };
-        items.push(CommentItem {
-            id: id.clone(),
-            author: u_prefix(&n.author),
-            score: n.score,
-            date: n.created.map(format_epoch),
-            depth,
-            op: if n.author == tree.post_author && !n.author.starts_with('[') {
-                Some(true)
-            } else {
-                None
-            },
-            text: normalize_text(&n.body, COMMENT_TEXT_CAP),
-            url,
-        });
-        if let Some(kids) = tree.children.get(&id) {
-            for k in kids.iter().rev() {
-                stack.push((k.clone(), depth + 1));
-            }
-        }
-    }
-    (items, capped)
-}
-
-/// Reddit gates its JSON paths (`.json`, `/api/info`, subtree listings) on
-/// the `loid` client token: without it they answer with the network-security
-/// wall (HTTP 403) rather than the JS challenge that HTML navigations get.
-/// The token is set by the page-load challenge and persists in the profile,
-/// so it is missing only on a cold profile or mid-challenge. Wait briefly
-/// (the challenge auto-submits in ~1s), then re-serve the page once; give up
-/// honestly rather than burn the sweep on guaranteed 403s.
-async fn ensure_loid(cdp: &CdpSession) -> bool {
-    async fn has_loid(cdp: &CdpSession) -> bool {
-        cdp.send(
-            "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": "document.cookie.includes('loid=')",
-                "returnByValue": true,
-            })),
-        )
-        .await
-        .ok()
-        .and_then(|r| {
-            r.get("result")
-                .and_then(|x| x.get("value"))
-                .and_then(|v| v.as_bool())
-        })
-        .unwrap_or(false)
-    }
-
-    if has_loid(cdp).await {
-        return true;
-    }
-    for _ in 0..6 {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        if has_loid(cdp).await {
-            return true;
-        }
-    }
-    // Still tokenless — re-serve the page; the challenge resolves in ~1s
-    // and its solved response sets `loid`.
-    let _ = cdp
-        .send("Page.reload", Some(serde_json::json!({ "ignoreCache": false })))
-        .await;
-    let _ = crate::page::wait_for_load(cdp, Duration::from_secs(10)).await;
-    for _ in 0..8 {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        if has_loid(cdp).await {
-            return true;
-        }
-    }
-    false
-}
-
-/// Marker classification for HTML bodies served to reddit API paths: the
-/// network-security wall and the unsolved JS challenge both mean "stop the
-/// sweep — this is a gate, not a gap". Anything else keeps the generic
-/// HTTP / parse error.
-fn classify_gate_body(path: &str, text: &str) -> Option<BladeError> {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("blocked by network security") || lower.contains("whoa there, pardner") {
-        return Some(BladeError::Other(format!(
-            "reddit: network-security block (soft, transient — retry shortly) on {path}"
-        )));
-    }
-    if lower.contains("js_challenge") || lower.contains("requestsubmit") {
-        return Some(BladeError::Other(format!(
-            "reddit: JS challenge served to an API path on {path}"
-        )));
-    }
-    None
-}
-
-/// Fetch one same-origin reddit JSON path from inside the page.
-async fn fetch_json(cdp: &CdpSession, path: &str) -> Result<Value> {
-    let url_js = serde_json::to_string(path)?;
-    let expr = format!(
-        "(async()=>{{try{{const c=new AbortController();const t=setTimeout(()=>c.abort(),{PAGE_FETCH_TIMEOUT_MS});\
-const r=await fetch({url_js},{{credentials:'include',signal:c.signal}});clearTimeout(t);const x=await r.text();\
-return {{s:r.status,t:x}};}}catch(e){{return {{s:0,t:String(e)}}}}}})()"
-    );
-    let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-        )
-        .await?;
-    if let Some(exc) = res.get("exceptionDetails") {
-        let msg = exc
-            .get("exception")
-            .and_then(|e| e.get("description"))
-            .and_then(|d| d.as_str())
-            .unwrap_or("fetch failed");
-        return Err(BladeError::Other(format!("reddit: {}", crate::platform::truncate_utf8(msg, 200))));
-    }
-    let val = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
-    let status = val["s"].as_i64().unwrap_or(0);
-    let text = val["t"].as_str().unwrap_or_default();
-    if status == 429 {
-        return Err(BladeError::Other("reddit: rate limited (HTTP 429)".into()));
-    }
-    if status != 200 {
-        return Err(classify_gate_body(path, text)
-            .unwrap_or_else(|| BladeError::Other(format!("reddit: GET {path} → HTTP {status}"))));
-    }
-    if text.trim().is_empty() {
-        return Err(BladeError::Other("reddit: empty response (throttled?)".into()));
-    }
-    serde_json::from_str(text).map_err(|e| {
-        classify_gate_body(path, text)
-            .unwrap_or_else(|| BladeError::Other(format!("reddit: non-JSON response from {path} ({e})")))
-    })
-}
-
-/// Fetch several reddit JSON paths concurrently in one CDP round-trip.
-/// Each URL resolves to `Ok(value)` / `Err(reason)` independently.
-async fn fetch_json_many(cdp: &CdpSession, urls: &[String]) -> Result<Vec<Result<Value>>> {
-    let urls_js = serde_json::to_string(urls)?;
-    let expr = format!(
-        "(async()=>{{const us={urls_js};return await Promise.all(us.map(u=>{{const c=new AbortController();\
-const tm=setTimeout(()=>c.abort(),{PAGE_FETCH_TIMEOUT_MS});\
-return fetch(u,{{credentials:'include',signal:c.signal}}).then(r=>r.text().then(t=>({{s:r.status,t}})))\
-.catch(e=>({{s:0,t:String(e)}})).finally(()=>clearTimeout(tm));}}));}})()"
-    );
-    let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-        )
-        .await?;
-    if let Some(exc) = res.get("exceptionDetails") {
-        let msg = exc
-            .get("exception")
-            .and_then(|e| e.get("description"))
-            .and_then(|d| d.as_str())
-            .unwrap_or("batch fetch failed");
-        return Err(BladeError::Other(format!("reddit: {}", crate::platform::truncate_utf8(msg, 200))));
-    }
-    let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
-    let arr = value.as_array().cloned().unwrap_or_default();
-    let mut out = Vec::with_capacity(arr.len());
-    for (item, url) in arr.iter().zip(urls) {
-        let status = item["s"].as_i64().unwrap_or(0);
-        let text = item["t"].as_str().unwrap_or_default();
-        if status == 429 {
-            out.push(Err(BladeError::Other("rate limited (HTTP 429)".into())));
-        } else if status != 200 {
-            out.push(Err(classify_gate_body(url, text)
-                .unwrap_or_else(|| BladeError::Other(format!("HTTP {status}")))));
-        } else if text.trim().is_empty() {
-            out.push(Err(BladeError::Other("empty response (throttled?)".into())));
-        } else {
-            out.push(serde_json::from_str(text).map_err(|e| {
-                classify_gate_body(url, text)
-                    .unwrap_or_else(|| BladeError::Other(format!("non-JSON response ({e})")))
-            }));
-        }
-    }
-    Ok(out)
-}
-
-/// Rate-limit signal: Reddit throttles with 429s (and empty bodies).
-fn is_rate_limit(e: &BladeError) -> bool {
-    let s = e.to_string();
-    s.contains("429") || s.contains("throttled")
-}
-
-/// Security-wall signal: the sweep hit reddit's network-security block page
-/// and must stop — it is transient, and hammering extends it.
-pub fn is_security_block(e: &BladeError) -> bool {
-    e.to_string().contains("network-security block")
-}
-
-fn strip_prefix(fullname: &str) -> &str {
-    fullname
-        .strip_prefix("t1_")
-        .or_else(|| fullname.strip_prefix("t3_"))
-        .unwrap_or(fullname)
-}
-
-fn u_prefix(author: &str) -> String {
-    if author.starts_with('[') {
-        author.to_string()
-    } else {
-        format!("u/{author}")
-    }
-}
-
-fn as_int(v: &Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_f64().map(|f| f.round() as i64))
-}
-
-fn as_epoch(v: &Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
-}
-
-/// Epoch seconds → `YYYY-MM-DD HH:MM UTC` (civil-from-days; no chrono).
-fn format_epoch(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (hh, mm) = (rem / 3_600, (rem % 3_600) / 60);
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02} UTC")
-}
-
-/// Normalize a comment body for reading: CRLF → LF, trailing whitespace
-/// stripped per line, 2+ blank lines collapsed to one, then capped.
-fn normalize_text(s: &str, cap: usize) -> String {
-    let t = s.replace("\r\n", "\n").replace('\r', "\n");
-    let mut out = String::with_capacity(t.len().min(cap + 8));
-    let mut blank = 0usize;
-    for line in t.lines() {
-        let line = line.trim_end();
-        if line.trim().is_empty() {
-            blank += 1;
-            if blank > 1 {
-                continue;
-            }
-        } else {
-            blank = 0;
-        }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(line);
-    }
-    cut_chars(out.trim(), cap)
-}
-
-fn cut_chars(s: &str, cap: usize) -> String {
-    if s.chars().count() <= cap {
-        return s.to_string();
-    }
-    let mut o: String = s.chars().take(cap).collect();
-    o.push('…');
-    o
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    use super::net::classify_gate_body;
+    use super::tree::{format_epoch, normalize_text};
 
     fn fixture() -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1032,14 +594,20 @@ mod tests {
         assert_eq!(items[2].depth, 1);
 
         // The previously DOM-collapsed depth-3 reply is present.
-        let deep = items.iter().find(|i| i.id == "pbehi7l").expect("depth-3 comment");
+        let deep = items
+            .iter()
+            .find(|i| i.id == "pbehi7l")
+            .expect("depth-3 comment");
         assert_eq!(deep.depth, 3);
 
         // Full bodies, no mid-word 500-char cut.
         let straight = items.iter().find(|i| i.id == "pbd2e82").expect("comment");
         assert!(straight.text.chars().count() > 500, "long body kept whole");
         let reply = items.iter().find(|i| i.id == "pbd57io").expect("reply");
-        assert!(reply.text.chars().count() > 500, "1194-char reply kept whole");
+        assert!(
+            reply.text.chars().count() > 500,
+            "1194-char reply kept whole"
+        );
 
         // Dates formatted from created_utc.
         assert_eq!(straight.date.as_deref(), Some("2026-09-22 13:30 UTC"));
@@ -1136,7 +704,11 @@ mod tests {
 
         let (items, _) = render_items(&tree, 100);
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "b", "c", "d"], "resolved top-level comments appended in order");
+        assert_eq!(
+            ids,
+            vec!["a", "b", "c", "d"],
+            "resolved top-level comments appended in order"
+        );
         let payload = assemble(post, items, false, false, false, false, vec![]);
         assert!(payload.complete);
     }
@@ -1170,7 +742,10 @@ mod tests {
         let payload = assemble(post, items, capped, false, false, false, vec![]);
         assert!(!payload.complete);
         let note = payload.note.unwrap();
-        assert!(note.contains("capped: 3 of 26"), "note names the cap: {note}");
+        assert!(
+            note.contains("capped: 3 of 26"),
+            "note names the cap: {note}"
+        );
 
         // Clean full render → complete, no note.
         let (post2, tree2) = parse_discussion(&fixture()).unwrap();
@@ -1185,7 +760,10 @@ mod tests {
         assert!(!payload3.complete);
         let note3 = payload3.note.unwrap();
         assert!(note3.contains("fetch budget exhausted: 3 of 26"), "{note3}");
-        assert!(!note3.contains("deleted"), "budget shortfall must not read as deletions: {note3}");
+        assert!(
+            !note3.contains("deleted"),
+            "budget shortfall must not read as deletions: {note3}"
+        );
 
         // Rate limiting reads as its own status, with a retry hint.
         let (post4, tree4) = parse_discussion(&fixture()).unwrap();
@@ -1202,7 +780,10 @@ mod tests {
         let payload5 = assemble(post5, items5, false, false, false, true, vec![]);
         assert!(!payload5.complete);
         let note5 = payload5.note.unwrap();
-        assert!(note5.contains("network-security wall interrupted"), "{note5}");
+        assert!(
+            note5.contains("network-security wall interrupted"),
+            "{note5}"
+        );
         assert!(note5.contains("transient"), "{note5}");
     }
 
@@ -1217,7 +798,8 @@ mod tests {
         assert!(e.to_string().contains("transient"), "{e}");
 
         // The classic variant some reddit edges still serve.
-        let whoa = "<h1>Whoa there, pardner!</h1>Your request has been blocked due to a network policy.";
+        let whoa =
+            "<h1>Whoa there, pardner!</h1>Your request has been blocked due to a network policy.";
         assert!(is_security_block(
             &classify_gate_body("/api/info.json", whoa).expect("whoa variant classified")
         ));
@@ -1234,12 +816,17 @@ mod tests {
 
         // Ordinary failures keep the generic path — no false classification.
         assert!(classify_gate_body("/x.json", "{\"kind\":\"Listing\"}").is_none());
-        assert!(classify_gate_body("/x.json", "<html><body>Service Unavailable</body></html>").is_none());
+        assert!(
+            classify_gate_body("/x.json", "<html><body>Service Unavailable</body></html>")
+                .is_none()
+        );
     }
 
     #[test]
     fn gate_classification_is_case_insensitive() {
-        assert!(classify_gate_body("/x.json", "YOU'VE BEEN BLOCKED BY Network Security.").is_some());
+        assert!(
+            classify_gate_body("/x.json", "YOU'VE BEEN BLOCKED BY Network Security.").is_some()
+        );
     }
 
     #[test]
@@ -1260,12 +847,20 @@ mod tests {
         let (items, _) = render_items(&tree, 100);
         let payload = assemble(post, items, false, false, false, false, vec![]);
         let s = serde_json::to_string(&payload).unwrap();
-        assert!(s.starts_with("{\"container\":\"reddit-comments\","), "container first: {s:.80}");
+        assert!(
+            s.starts_with("{\"container\":\"reddit-comments\","),
+            "container first: {s:.80}"
+        );
         assert!(s.contains("\"complete\":true"));
         assert!(!s.contains("\"note\""), "clean payload carries no note");
         // Non-op comments do not serialize the op key.
         let first_item = s.find("\"items\":[").unwrap();
-        let head: String = s.get(first_item..).unwrap_or("").chars().take(400).collect();
+        let head: String = s
+            .get(first_item..)
+            .unwrap_or("")
+            .chars()
+            .take(400)
+            .collect();
         assert!(!head.contains("\"op\":false"), "op is omitted unless true");
     }
 }

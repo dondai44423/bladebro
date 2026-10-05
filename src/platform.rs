@@ -13,9 +13,38 @@ use std::time::Duration;
 pub fn home_dir() -> PathBuf {
     #[cfg(unix)]
     {
-        std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        if let Ok(h) = std::env::var("HOME") {
+            if !h.trim().is_empty() {
+                return PathBuf::from(h);
+            }
+        }
+        // HOME unset or empty (cron, services, sanitized envs): ask the
+        // password database for the account's real home. Falling straight
+        // to /tmp put the cookie-bearing data dir in a shared directory.
+        // getpwuid_r (not getpwuid): home_dir may run on any tokio worker.
+        unsafe {
+            let mut buf = [0 as libc::c_char; 1024];
+            let mut pwd: libc::passwd = std::mem::zeroed();
+            let mut result: *mut libc::passwd = std::ptr::null_mut();
+            if libc::getpwuid_r(
+                libc::getuid(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            ) == 0
+                && !result.is_null()
+                && !pwd.pw_dir.is_null()
+            {
+                let dir = std::ffi::CStr::from_ptr(pwd.pw_dir)
+                    .to_string_lossy()
+                    .to_string();
+                if !dir.trim().is_empty() {
+                    return PathBuf::from(dir);
+                }
+            }
+        }
+        PathBuf::from("/tmp")
     }
     #[cfg(windows)]
     {
@@ -41,7 +70,12 @@ pub fn blade_dir() -> PathBuf {
     let home = home_dir();
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let legacy = home.join(".blade");
-    resolve_blade_dir(&home, &env, dir_has_state(&legacy), local_state_creatable(&home))
+    resolve_blade_dir(
+        &home,
+        &env,
+        dir_has_state(&legacy),
+        local_state_creatable(&home),
+    )
 }
 
 /// Can `$HOME/.local/state/blade` be created? True when the parent exists
@@ -94,8 +128,15 @@ fn dir_has_state(legacy: &std::path::Path) -> bool {
         return false;
     }
     const MARKS: &[&str] = &[
-        ".fingerprint.json", "logins.json", "knowledge", ".warmed",
-        "profile", "profiles", "sessions", "artifacts", "downloads",
+        ".fingerprint.json",
+        "logins.json",
+        "knowledge",
+        ".warmed",
+        "profile",
+        "profiles",
+        "sessions",
+        "artifacts",
+        "downloads",
         "cli.sock",
     ];
     MARKS.iter().any(|m| legacy.join(m).exists())
@@ -149,6 +190,24 @@ pub fn secure_write_file(path: &std::path::Path, data: &[u8]) -> std::io::Result
     Ok(())
 }
 
+/// Spell a path the way the write-path checks compare it: strip Windows
+/// verbatim prefixes (`\\?\C:\…`, `\\?\UNC\server\share`) and normalize
+/// separators to `/`. Windows `canonicalize` returns verbatim paths, so a
+/// lexical prefix check (`c:/windows`) would otherwise silently never match.
+fn plain_spelling(path: &std::path::Path) -> String {
+    const VERBATIM: &str = r"\\?\";
+    const VERBATIM_UNC: &str = r"\\?\UNC\";
+    let s = path.to_string_lossy().into_owned();
+    let s = if let Some(rest) = s.strip_prefix(VERBATIM_UNC) {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(VERBATIM) {
+        rest.to_string()
+    } else {
+        s
+    };
+    s.replace('\\', "/")
+}
+
 /// Validate a file write path to prevent writing to system directories.
 /// SECURITY: Blocks path traversal attacks that could overwrite critical
 /// system files (e.g., /etc/cron.d, /usr/bin, /boot) via prompt injection,
@@ -167,23 +226,77 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
     let mut normalized = std::path::PathBuf::new();
     for component in canonical.components() {
         match component {
-            std::path::Component::ParentDir => { normalized.pop(); }
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
             std::path::Component::CurDir => {}
             other => normalized.push(other.as_os_str()),
         }
     }
-    let path_str = normalized.to_string_lossy().replace('\\', "/");
+    // Symlink resolution: canonicalize the deepest EXISTING ancestor and
+    // re-append the untouched tail. A path spelled through a symlink
+    // (~/drop → /etc) must not pass on its harmless-looking spelling — the
+    // pre-fix check never resolved symlinks. An existing FINAL symlink
+    // resolves too, so the write target itself is what gets checked.
+    let mut probe = normalized.clone();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !probe.exists() {
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) if parent != probe => {
+                tail.push(name.to_os_string());
+                probe = parent.to_path_buf();
+            }
+            _ => break,
+        }
+    }
+    // The caller's spelling, kept for checks that must match both what was
+    // written and what it resolves to (see the blocked-prefix loop below).
+    let lexical = plain_spelling(&normalized);
+    let normalized = match std::fs::canonicalize(&probe) {
+        Ok(base) => {
+            let mut p = base;
+            for c in tail.iter().rev() {
+                p.push(c);
+            }
+            p
+        }
+        Err(_) => normalized,
+    };
+    let path_str = plain_spelling(&normalized);
     let lower = path_str.to_lowercase();
 
     #[cfg(unix)]
     {
         let blocked_prefixes: &[&str] = &[
-            "/etc", "/usr", "/bin", "/sbin", "/boot", "/dev",
-            "/proc", "/sys", "/var/log", "/root", "/lib", "/lib64",
-            "/run", "/snap",
+            "/etc",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/boot",
+            "/dev",
+            "/proc",
+            "/sys",
+            "/var/log",
+            "/var/spool",
+            "/root",
+            "/lib",
+            "/lib64",
+            "/run",
+            "/snap",
         ];
         for prefix in blocked_prefixes {
-            if path_str.starts_with(prefix) || path_str.starts_with(&format!("{prefix}/")) {
+            // Three spellings must all match: what the caller wrote
+            // (`lexical`), what it resolves to (`path_str`), and the
+            // platform's own real spelling of the blocked directory — on
+            // macOS /etc is a symlink to /private/etc, so a canonicalized
+            // path would otherwise slip past a lexical-only compare.
+            let resolved = std::fs::canonicalize(prefix)
+                .ok()
+                .map(|p| plain_spelling(&p));
+            let hit = path_str.starts_with(prefix)
+                || lexical.starts_with(prefix)
+                || resolved.as_deref().is_some_and(|r| path_str.starts_with(r));
+            if hit {
                 return Err(format!(
                     "blocked: writing to system directory ({prefix}) is not allowed"
                 ));
@@ -194,7 +307,9 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         let blocked_win: &[&str] = &[
-            "c:/windows", "c:/program files", "c:/program files (x86)",
+            "c:/windows",
+            "c:/program files",
+            "c:/program files (x86)",
             "c:/programdata/microsoft/windows/start menu",
         ];
         for prefix in blocked_win {
@@ -206,9 +321,7 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
         }
         // Autostart persistence: the per-user Startup folder.
         if lower.contains("/microsoft/windows/start menu/programs/startup") {
-            return Err(
-                "blocked: writing to the Windows Startup folder is not allowed".into(),
-            );
+            return Err("blocked: writing to the Windows Startup folder is not allowed".into());
         }
     }
 
@@ -216,10 +329,12 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
     // A prompt-injected page convincing the agent to write here gains
     // persistence (rc files) or steals credentials (.ssh/.aws/.gnupg).
     const BLOCKED_COMPONENTS: &[&str] = &[
-        ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config",
-        ".gnome",
+        ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config", ".gnome",
     ];
-    for comp in normalized.components().filter_map(|c| c.as_os_str().to_str()) {
+    for comp in normalized
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+    {
         let cl = comp.to_lowercase();
         if BLOCKED_COMPONENTS.contains(&cl.as_str())
             || cl == "authorized_keys"
@@ -236,9 +351,7 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
     }
     // systemd user-unit persistence spans multiple components.
     if lower.contains("/.local/share/systemd/") {
-        return Err(
-            "blocked: writing to systemd user units is not allowed".into(),
-        );
+        return Err("blocked: writing to systemd user units is not allowed".into());
     }
 
     // Shell startup files directly in the home directory (~/.bashrc etc.).
@@ -247,24 +360,42 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
         .map(|n| n.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     const RC_FILES: &[&str] = &[
-        ".bashrc", ".bash_profile", ".bash_logout", ".bash_aliases",
-        ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin",
-        ".kshrc", ".cshrc", ".gitconfig", ".tmux.conf", ".xinitrc",
-        ".xsession", ".xprofile", ".crontab", ".vimrc", ".exrc",
-        ".curlrc", ".wgetrc", ".netrc", ".env",
+        ".bashrc",
+        ".bash_profile",
+        ".bash_logout",
+        ".bash_aliases",
+        ".profile",
+        ".zshrc",
+        ".zprofile",
+        ".zshenv",
+        ".zlogin",
+        ".kshrc",
+        ".cshrc",
+        ".gitconfig",
+        ".tmux.conf",
+        ".xinitrc",
+        ".xsession",
+        ".xprofile",
+        ".crontab",
+        ".vimrc",
+        ".exrc",
+        ".curlrc",
+        ".wgetrc",
+        ".netrc",
+        ".env",
     ];
-    let in_home = std::env::var("HOME")
-        .map(|h| {
-            let h = h.replace('\\', "/");
-            path_str == h || path_str.starts_with(&format!("{h}/"))
-        })
-        .unwrap_or(false)
-        || std::env::var("USERPROFILE")
-            .map(|h| {
-                let h = h.replace('\\', "/");
-                path_str == h || path_str.starts_with(&format!("{h}/"))
-            })
-            .unwrap_or(false);
+    // Check both the caller's and the resolved spelling: canonicalizing a
+    // path under a symlinked HOME root (e.g. /home → /var/home) rewrites it
+    // past the user's own $HOME spelling, which must not unlock rc files.
+    let under = |h: String| {
+        let h = h.replace('\\', "/");
+        let prefix = format!("{h}/");
+        [&path_str, &lexical]
+            .iter()
+            .any(|p| p.as_str() == h.as_str() || p.as_str().starts_with(prefix.as_str()))
+    };
+    let in_home = std::env::var("HOME").map(under).unwrap_or(false)
+        || std::env::var("USERPROFILE").map(under).unwrap_or(false);
     if in_home && RC_FILES.contains(&file_name.as_str()) {
         return Err(format!(
             "blocked: writing to shell/config startup file ({file_name}) is not allowed"
@@ -324,7 +455,11 @@ pub fn process_is_chrome(pid: u32) -> bool {
         std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "comm="])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("chrom"))
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .to_lowercase()
+                    .contains("chrom")
+            })
             .unwrap_or(false)
     }
     #[cfg(windows)]
@@ -332,7 +467,11 @@ pub fn process_is_chrome(pid: u32) -> bool {
         std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("chrome"))
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .to_lowercase()
+                    .contains("chrome")
+            })
             .unwrap_or(false)
     }
 }
@@ -453,7 +592,10 @@ mod tests {
         // not fire (a false positive would nag every user after any unrelated
         // file shuffle). The true cases are live-verified: a rename-swap or
         // unlink under a running MCP produces the advisory exactly once.
-        assert!(!stale_binary(), "false positive in the ordinary launch case");
+        assert!(
+            !stale_binary(),
+            "false positive in the ordinary launch case"
+        );
     }
 
     fn env_of<'a>(map: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
@@ -544,5 +686,52 @@ mod tests {
             resolve_blade_dir(home, &env_of(&over), false, true),
             std::path::PathBuf::from("D:\\blade")
         );
+    }
+}
+
+#[cfg(test)]
+mod write_path_tests {
+    use super::*;
+
+    /// Windows `canonicalize` returns `\\?\`-prefixed verbatim paths; the
+    /// spelling normalizer must strip the prefix (and re-form UNC paths) or
+    /// every string check downstream would miss. Pure string logic — runs on
+    /// every platform.
+    #[test]
+    fn plain_spelling_strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            plain_spelling(std::path::Path::new(r"\\?\C:\Windows\System32")),
+            "C:/Windows/System32"
+        );
+        assert_eq!(
+            plain_spelling(std::path::Path::new(r"\\?\UNC\srv\share\x")),
+            "//srv/share/x"
+        );
+        assert_eq!(
+            plain_spelling(std::path::Path::new("/etc/passwd")),
+            "/etc/passwd"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_path_resolves_symlinked_ancestors() {
+        let dir = std::env::temp_dir().join(format!("blade-vwp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("drop");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        // Spelled through the symlink, this resolves into /etc — blocked.
+        // The pre-fix check only saw the harmless-looking spelling.
+        assert!(validate_write_path(&link.join("bladebro-test")).is_err());
+        // A plain path under the same dir still passes.
+        assert!(validate_write_path(&dir.join("ok.txt")).is_ok());
+        // The platform's REAL spelling of a blocked directory is blocked
+        // too: on macOS /etc is a symlink to /private/etc, so a check that
+        // only knew the literal spelling let this through (CI red,
+        // 2026-09-29).
+        let real_etc = std::fs::canonicalize("/etc").expect("canonicalize /etc");
+        assert!(validate_write_path(&real_etc.join("bladebro-test")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

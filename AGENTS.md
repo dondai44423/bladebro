@@ -13,8 +13,9 @@ Two properties shape every change:
 
 ```bash
 cargo build --release                     # → ./target/release/bladebro
+cargo fmt --check                         # formatting (CI-enforced)
 cargo clippy --release -- -D warnings     # zero warnings, always
-cargo test --release                      # all must pass (217 tests at v4.0.0)
+cargo test --release                      # all must pass (229 tests)
 
 ./target/release/bladebro doctor          # environment check
 ./target/release/bladebro nav example.com # auto-starts its daemon + browser
@@ -28,18 +29,19 @@ Rust: edition 2021, MSRV 1.86. Requirements: Chrome/Chromium installed. On headl
 
 | To touch… | Start in |
 |---|---|
-| click/type/fill/select/press, find-by-sig, action conditions | `src/action.rs` |
-| capture, markdown, settle, block detection | `src/page/perception.rs`, `src/page/mod.rs` |
+| click/type/fill/select/press, find-by-sig, action conditions | `src/action.rs` + `src/action/` (perform, find, input, verdict, edit) |
+| capture, markdown, settle, block detection | `src/page/perception.rs` + `src/page/perception/` (wait, consent, block, content), `src/page/mod.rs` (JS in `src/page/js/`) |
 | refs, Live Page Model, deltas | `src/page/refs.rs`, `src/page/model.rs` |
-| stealth injection (every page-side override) | `src/stealth/inject.rs` |
+| navigation, tabs, attach, heal, page logs, client-side route guard | `src/page/` (navigate, tabs, attach, heal, logs, route) |
+| stealth injection (every page-side override) | `src/stealth/inject.rs` + `src/stealth/inject/` (gpu), `src/stealth/js/` |
 | mouse/typing biometrics, idle hum | `src/stealth/biometrics.rs`, `src/stealth/hum.rs` |
-| Chrome discovery, launch flags, CDP transports, Xvfb | `src/browser.rs`, `src/platform.rs` |
-| MCP tool schemas and dispatch | `src/mcp/tools.rs`, `src/mcp/server.rs` |
-| CLI commands, daemon, help text | `src/cli.rs` |
-| sessions/profiles, seasoning, orphan reaper | `src/session_profile.rs` |
+| Chrome discovery, launch flags, CDP transports, Xvfb | `src/browser.rs` + `src/browser/`, `src/platform.rs` |
+| MCP tool schemas and dispatch | `src/mcp/tools.rs`, `src/mcp/server.rs` + `src/mcp/server/` (boot, serve, proto + tool handlers) |
+| CLI commands, daemon, help text | `src/cli.rs` + `src/cli/` (args/ per-command parsers, daemon, help, rb) |
+| sessions/profiles, seasoning, orphan reaper | `src/session_profile.rs` + `src/session_profile/` (reap, copy) |
 | cookies/storage/tabs, session save-load | `src/state.rs` |
-| site adapters (`extract=auto` fast paths) | `src/reddit.rs`, `src/x.rs` |
-| real-browser lane (`rb`) | `src/realbrowser.rs` |
+| site adapters (`extract=auto` fast paths) | `src/reddit.rs` + `src/reddit/`, `src/x.rs` + `src/x/` |
+| real-browser lane (`rb`) | `src/realbrowser.rs` + `src/realbrowser/` |
 | self-update, rollback, doctor | `src/updater/` |
 | human CLI output/styling | `src/ui.rs` |
 
@@ -63,7 +65,7 @@ House rules: **reproduce before you fix** (don't "fix" what you haven't seen fai
 
 - `./target/release/bladebro audit` — 61 stealth vectors + cross-restart stability stamps. Must stay 61/61 after any stealth-adjacent change.
 - `python3 tools/diff_oracle/oracle.py` — stock Chrome vs bladebro, same display, identical probe battery; every difference classified EXPECTED (a documented mask, with its reason) or DIVERGENT. **`divergent: 0` is required — a DIVERGENT line is a STOP, not a note.** `--lane real` checks the real-browser lane (bar: 0 expected, 0 divergent).
-- `python3 tools/qol_probe/run.py` — the input/action behavior suite against local fixtures (`editor.html`, `shadow.html`, `extract.html`); 61 checks. The fastest way to validate click/type/fill/select changes, and the right place to add a repro when you fix an input bug.
+- `python3 tools/qol_probe/run.py` — the input/action behavior suite against local fixtures (`editor.html`, `shadow.html`, `extract.html`, `universal.html`, `router.html`); 79 checks. Runs on a local HTTP fixture server with its own `BLADE_HOME`. The fastest way to validate click/type/fill/select changes, and the right place to add a repro when you fix an input bug.
 - `python3 tools/lane_matrix.py all 5` — cold-start matrix across all five lanes (daemon / one-shot / MCP / MCP-pipe / real), 5 rounds each.
 - `python3 tools/rb_live/attach_drift.py` — real-lane attach drift check; run after touching `src/realbrowser.rs`.
 
@@ -77,15 +79,16 @@ Match the surrounding code. Specific to this repo:
 - **Error strings are product surface.** Agents read them: be specific, actionable, name the recovery path. Include page state in action errors.
 - **No `unwrap`/`expect` in non-test code** outside provably-guarded cases; failures bubble with context (`anyhow`/`thiserror`).
 - **Injected JS must stay dependency-free and syntactically valid.** The test suite runs `node --check` on assembled scripts because one parse error silently disables *every* patch. Debug with `BLADE_DUMP_INJECT=/tmp/inj.js` + `node --check /tmp/inj.js`.
-- **`src/cli.rs` help blocks are raw strings** (`r#"…"#`). A `"#` sequence inside one (a CSS `"#id"` example, say) terminates the string early and the compiler error appears dozens of lines away. Don't put it there.
+- **`src/cli/help.rs` help blocks are raw strings** (`r#"…"#`). A `"#` sequence inside one (a CSS `"#id"` example, say) terminates the string early and the compiler error appears dozens of lines away. Don't put it there.
 - **stdout is a machine contract.** `--json` prints a single JSON object; MCP stdout is pure JSON-RPC. Logs go to stderr. Human styling (`src/ui.rs`) is TTY-gated — piped output must stay plain.
 - **Keep outputs lean.** Delta-first responses, big payloads offloaded to artifact files. Don't add a field an agent doesn't need.
+- **Thin cores + focused children.** Big modules split as `foo.rs` (public surface + a `Module map:` header, re-exports) plus a `foo/` folder — `cli/`, `cli/args/`, `mcp/server/`, `action/`, `page/`, `page/perception/`, `session_profile/`, `stealth/inject/`, `browser/`, `realbrowser/`, `reddit/`, `x/`. When moving code, keep public paths stable via re-exports. Embedded JS lives in `src/**/js/*.js` (`include_str!`) — edit the `.js`, never paste a payload back into a Rust string.
 
 ## Git / PR workflow
 
 - Conventional Commits: `feat:`, `fix:`, `stealth:`, `perf:`, `docs:`, `chore:` — e.g. `fix: handle redirect drift in network tracker`.
 - Branch, commit, open a PR, fill in `.github/PULL_REQUEST_TEMPLATE.md`. Keep PRs scoped — a stealth fix and a refactor are two PRs.
-- CI (clippy + test + build on ubuntu, macos, windows) runs on PRs — all three must pass. Docs-only changes skip CI by design.
+- CI (fmt + clippy + test + build on ubuntu, macos, windows) runs on PRs — all three must pass. Docs-only changes skip CI by design.
 - AI-generated PRs are welcome, but **review your own diff first** — you are responsible for what you submit.
 - Version bumps, publishing, tags and `CHANGELOG.md` curation are maintainer territory. Describe your change in the PR description; don't touch release machinery.
 

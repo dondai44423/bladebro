@@ -162,15 +162,33 @@ pub struct BehavioralProfile {
     pub version: u32,
 }
 
-fn default_click_precision() -> f64 { 2.5 }
-fn default_curve_factor() -> f64 { 0.15 }
-fn default_typing_mean() -> f64 { 50.0 }
-fn default_typing_sigma() -> f64 { 0.3 }
-fn default_gap_mean() -> f64 { 400.0 }
-fn default_gap_sigma() -> f64 { 0.35 }
-fn default_overshoot_min() -> i64 { 5 }
-fn default_overshoot_max() -> i64 { 15 }
-fn default_hum_mean() -> f64 { 2000.0 }
+fn default_click_precision() -> f64 {
+    2.5
+}
+fn default_curve_factor() -> f64 {
+    0.15
+}
+fn default_typing_mean() -> f64 {
+    50.0
+}
+fn default_typing_sigma() -> f64 {
+    0.3
+}
+fn default_gap_mean() -> f64 {
+    400.0
+}
+fn default_gap_sigma() -> f64 {
+    0.35
+}
+fn default_overshoot_min() -> i64 {
+    5
+}
+fn default_overshoot_max() -> i64 {
+    15
+}
+fn default_hum_mean() -> f64 {
+    2000.0
+}
 
 /// Current timing baseline version. Bump when generated speed parameters
 /// change; older behavior.json files are rescaled on load (see `migrate`).
@@ -196,7 +214,9 @@ impl BehavioralProfile {
                     // Persist the one-time rescale so it doesn't re-run.
                     let _ = crate::platform::secure_write_file(
                         &p,
-                        serde_json::to_string_pretty(&bp).unwrap_or_default().as_bytes(),
+                        serde_json::to_string_pretty(&bp)
+                            .unwrap_or_default()
+                            .as_bytes(),
                     );
                 }
                 return bp;
@@ -206,7 +226,12 @@ impl BehavioralProfile {
         }
         let bp = Self::generate();
         let _ = crate::platform::secure_create_dir_all(&knowledge_dir());
-        let _ = crate::platform::secure_write_file(&p, serde_json::to_string_pretty(&bp).unwrap_or_default().as_bytes());
+        let _ = crate::platform::secure_write_file(
+            &p,
+            serde_json::to_string_pretty(&bp)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
         eprintln!("[knowledge] generated behavioral profile");
         bp
     }
@@ -216,14 +241,14 @@ impl BehavioralProfile {
     fn generate() -> BehavioralProfile {
         let t = nanos();
         BehavioralProfile {
-            click_precision: vary_f64(t, 2.5, 0.5),         // 2.0-3.0
+            click_precision: vary_f64(t, 2.5, 0.5), // 2.0-3.0
             curve_factor: vary_f64(t.wrapping_mul(3), 0.15, 0.03), // 0.12-0.18
             typing_mean_ms: vary_f64(t.wrapping_mul(5), 50.0, 8.0), // 42-58 (fast typist)
-            typing_sigma: vary_f64(t.wrapping_mul(7), 0.3, 0.05),  // 0.25-0.35
+            typing_sigma: vary_f64(t.wrapping_mul(7), 0.3, 0.05), // 0.25-0.35
             action_gap_mean_ms: vary_f64(t.wrapping_mul(11), 400.0, 60.0), // 340-460
             action_gap_sigma: vary_f64(t.wrapping_mul(13), 0.35, 0.05), // 0.30-0.40
             overshoot_min: 5,
-            overshoot_max: vary_i64(t.wrapping_mul(17), 15, 3),  // 12-18
+            overshoot_max: vary_i64(t.wrapping_mul(17), 15, 3), // 12-18
             hum_interval_ms: vary_f64(t.wrapping_mul(19), 2000.0, 300.0), // 1700-2300
             version: BEHAVIOR_VERSION,
         }
@@ -313,7 +338,10 @@ impl KnowledgeBase {
                         }
                     }
                     Err(_) => {
-                        eprintln!("[knowledge] corrupted domain file {} — deleting", path.display());
+                        eprintln!(
+                            "[knowledge] corrupted domain file {} — deleting",
+                            path.display()
+                        );
                         let _ = std::fs::remove_file(&path);
                     }
                 },
@@ -339,7 +367,15 @@ impl KnowledgeBase {
     fn pre_seed(&mut self) {
         let now = now_secs();
         // Amazon EU cookie consent (same selector across all Amazon EU TLDs).
-        for domain in &["amazon.com", "amazon.co.uk", "amazon.de", "amazon.fr", "amazon.it", "amazon.es", "amazon.nl"] {
+        for domain in &[
+            "amazon.com",
+            "amazon.co.uk",
+            "amazon.de",
+            "amazon.fr",
+            "amazon.it",
+            "amazon.es",
+            "amazon.nl",
+        ] {
             let need = match self.domains.get(*domain) {
                 None => true,
                 Some(dk) => dk.consent.is_none(),
@@ -396,7 +432,9 @@ impl KnowledgeBase {
         let now = now_secs();
         let evict_age = EVICT_AGE_DAYS * 86400;
         self.domains.retain(|_, dk| {
-            let consent_ok = dk.consent.as_ref()
+            let consent_ok = dk
+                .consent
+                .as_ref()
                 .map(|c| c.confidence >= EVICT_THRESHOLD || (now - c.last_validated) < evict_age)
                 .unwrap_or(true);
             let domain_fresh = dk.visit_count > 0 && (now - dk.last_visit) < evict_age;
@@ -404,7 +442,9 @@ impl KnowledgeBase {
         });
         // Hard cap: if still too many, evict lowest-value.
         if self.domains.len() > MAX_DOMAINS {
-            let mut entries: Vec<_> = self.domains.iter()
+            let mut entries: Vec<_> = self
+                .domains
+                .iter()
                 .map(|(k, v)| (k.clone(), v.visit_count, v.last_visit))
                 .collect();
             entries.sort_by_key(|&(_, visits, last)| (visits, last));
@@ -421,7 +461,8 @@ impl KnowledgeBase {
     /// Get trusted consent knowledge for a domain. Returns None if no
     /// consent knowledge or confidence below TRUST_THRESHOLD.
     pub fn get_consent(&self, domain: &str) -> Option<&ConsentKnowledge> {
-        self.domains.get(domain)
+        self.domains
+            .get(domain)
             .and_then(|d| d.consent.as_ref())
             .filter(|c| c.confidence >= TRUST_THRESHOLD && !c.selector.is_empty())
     }
@@ -479,7 +520,8 @@ impl KnowledgeBase {
 
     /// Get stored block config for a domain.
     pub fn get_block_config(&self, domain: &str) -> Option<&str> {
-        self.domains.get(domain)
+        self.domains
+            .get(domain)
             .and_then(|d| d.block_config.as_deref())
             .filter(|s| !s.trim().is_empty())
     }
@@ -497,7 +539,8 @@ impl KnowledgeBase {
 
     /// Get stored settle time for a domain.
     pub fn get_settle_ms(&self, domain: &str) -> Option<u64> {
-        self.domains.get(domain)
+        self.domains
+            .get(domain)
             .and_then(|d| d.timing.as_ref())
             .map(|t| t.settle_ms)
     }
@@ -515,7 +558,10 @@ impl KnowledgeBase {
                     sample_count: t.sample_count + 1,
                 }
             }
-            None => TimingKnowledge { settle_ms, sample_count: 1 },
+            None => TimingKnowledge {
+                settle_ms,
+                sample_count: 1,
+            },
         });
         dk.last_visit = now;
         self.dirty = true;
@@ -533,7 +579,10 @@ impl KnowledgeBase {
 
     /// Last observed bot-detection risk for a domain.
     pub fn get_bot_risk(&self, domain: &str) -> BotRiskLevel {
-        self.domains.get(domain).map(|d| d.bot_risk).unwrap_or_default()
+        self.domains
+            .get(domain)
+            .map(|d| d.bot_risk)
+            .unwrap_or_default()
     }
 
     /// Raise (never lower) the recorded bot-detection risk for a domain.
@@ -585,19 +634,28 @@ pub fn vendor_risk(vendor: &str) -> BotRiskLevel {
 /// keep the 2.5s default; known domains get headroom proportional to
 /// their observed settle (bounded 2.5-6s) so slow SPAs finish quieting.
 pub fn nav_settle_cap_ms(learned: Option<u64>) -> u64 {
-    learned.map(|ms| ms.saturating_mul(2).clamp(2500, 6000)).unwrap_or(2500)
+    learned
+        .map(|ms| ms.saturating_mul(2).clamp(2500, 6000))
+        .unwrap_or(2500)
 }
 
 /// Infer the consent framework from a CSS selector.
 /// Used by `learn_consent_result` — the caller doesn't need to know the framework.
 fn infer_consent_framework(selector: &str) -> &'static str {
     let s = selector.to_ascii_lowercase();
-    if s.contains("onetrust") { "onetrust" }
-    else if s.contains("cookiebot") { "cookiebot" }
-    else if s.contains("didomi") { "didomi" }
-    else if s.contains("qc-cmp") { "quantcast" }
-    else if s.contains("truste") { "truste" }
-    else { "generic" }
+    if s.contains("onetrust") {
+        "onetrust"
+    } else if s.contains("cookiebot") {
+        "cookiebot"
+    } else if s.contains("didomi") {
+        "didomi"
+    } else if s.contains("qc-cmp") {
+        "quantcast"
+    } else if s.contains("truste") {
+        "truste"
+    } else {
+        "generic"
+    }
 }
 
 impl KnowledgeBase {
@@ -659,13 +717,22 @@ mod tests {
         let mut kb = KnowledgeBase::default();
         kb.learn_consent("example.com", "#onetrust-reject-all-handler", "onetrust");
         let c = kb.get_consent("example.com");
-        assert!(c.is_none(), "initial confidence 0.6 is below trust threshold 0.7");
+        assert!(
+            c.is_none(),
+            "initial confidence 0.6 is below trust threshold 0.7"
+        );
         // Simulate 3 more successes to reach trust threshold.
         for _ in 0..3 {
             kb.learn_consent("example.com", "#onetrust-reject-all-handler", "onetrust");
         }
-        let c = kb.get_consent("example.com").expect("should be trusted after 4 successes");
-        assert!((c.confidence - 0.75).abs() < 0.01, "confidence should be 0.75, got {}", c.confidence);
+        let c = kb
+            .get_consent("example.com")
+            .expect("should be trusted after 4 successes");
+        assert!(
+            (c.confidence - 0.75).abs() < 0.01,
+            "confidence should be 0.75, got {}",
+            c.confidence
+        );
         assert_eq!(c.success_count, 4);
     }
 
@@ -673,10 +740,27 @@ mod tests {
     fn consent_confidence_decreases_on_failure() {
         let mut kb = KnowledgeBase::default();
         kb.learn_consent("example.com", "#btn", "generic");
-        let initial = kb.domains.get("example.com").unwrap().consent.as_ref().unwrap().confidence;
+        let initial = kb
+            .domains
+            .get("example.com")
+            .unwrap()
+            .consent
+            .as_ref()
+            .unwrap()
+            .confidence;
         kb.downgrade_consent("example.com");
-        let after = kb.domains.get("example.com").unwrap().consent.as_ref().unwrap().confidence;
-        assert!(after < initial, "confidence should decrease: {initial} → {after}");
+        let after = kb
+            .domains
+            .get("example.com")
+            .unwrap()
+            .consent
+            .as_ref()
+            .unwrap()
+            .confidence;
+        assert!(
+            after < initial,
+            "confidence should decrease: {initial} → {after}"
+        );
         assert_eq!(after, initial - FAIL_DECREMENT);
     }
 
@@ -688,8 +772,10 @@ mod tests {
         for _ in 0..5 {
             kb.downgrade_consent("example.com");
         }
-        assert!(kb.domains.get("example.com").unwrap().consent.is_none(),
-            "consent should be evicted after repeated failures");
+        assert!(
+            kb.domains.get("example.com").unwrap().consent.is_none(),
+            "consent should be evicted after repeated failures"
+        );
     }
 
     #[test]
@@ -697,18 +783,32 @@ mod tests {
         let mut kb = KnowledgeBase::default();
         kb.learn_consent("example.com", "#old-btn", "onetrust");
         kb.learn_consent("example.com", "#new-btn", "onetrust");
-        let c = kb.domains.get("example.com").unwrap().consent.as_ref().unwrap();
+        let c = kb
+            .domains
+            .get("example.com")
+            .unwrap()
+            .consent
+            .as_ref()
+            .unwrap();
         assert_eq!(c.selector, "#new-btn");
-        assert_eq!(c.success_count, 1, "new selector should reset success count");
-        assert!((c.confidence - INITIAL_CONFIDENCE).abs() < 0.01, "new selector starts at initial confidence");
+        assert_eq!(
+            c.success_count, 1,
+            "new selector should reset success count"
+        );
+        assert!(
+            (c.confidence - INITIAL_CONFIDENCE).abs() < 0.01,
+            "new selector starts at initial confidence"
+        );
     }
 
     #[test]
     fn empty_selector_not_learned() {
         let mut kb = KnowledgeBase::default();
         kb.learn_consent("example.com", "", "generic");
-        assert!(!kb.domains.contains_key("example.com") || kb.domains["example.com"].consent.is_none(),
-            "empty selector should not be stored");
+        assert!(
+            !kb.domains.contains_key("example.com") || kb.domains["example.com"].consent.is_none(),
+            "empty selector should not be stored"
+        );
     }
 
     #[test]
@@ -719,7 +819,10 @@ mod tests {
             kb.update_timing("example.com", 1000);
         }
         let t = kb.get_settle_ms("example.com").unwrap();
-        assert!((t as i64 - 1000).abs() < 50, "EWMA should converge to ~1000ms, got {t}");
+        assert!(
+            (t as i64 - 1000).abs() < 50,
+            "EWMA should converge to ~1000ms, got {t}"
+        );
     }
 
     #[test]
@@ -729,14 +832,20 @@ mod tests {
         kb.update_timing("example.com", 1000);
         let t = kb.get_settle_ms("example.com").unwrap();
         // Alpha=0.3: 0.3*1000 + 0.7*2000 = 1700
-        assert_eq!(t, 1700, "EWMA should weight recent sample: expected 1700, got {t}");
+        assert_eq!(
+            t, 1700,
+            "EWMA should weight recent sample: expected 1700, got {t}"
+        );
     }
 
     #[test]
     fn block_config_learned_and_retrieved() {
         let mut kb = KnowledgeBase::default();
         kb.learn_block_config("example.com", "images,fonts,trackers");
-        assert_eq!(kb.get_block_config("example.com"), Some("images,fonts,trackers"));
+        assert_eq!(
+            kb.get_block_config("example.com"),
+            Some("images,fonts,trackers")
+        );
     }
 
     #[test]
@@ -750,8 +859,14 @@ mod tests {
 
     #[test]
     fn domain_from_url_extracts_registrable_domain() {
-        assert_eq!(domain_from_url("https://www.example.com/path"), "example.com");
-        assert_eq!(domain_from_url("https://example.co.uk/page?q=1"), "example.co.uk");
+        assert_eq!(
+            domain_from_url("https://www.example.com/path"),
+            "example.com"
+        );
+        assert_eq!(
+            domain_from_url("https://example.co.uk/page?q=1"),
+            "example.co.uk"
+        );
         assert_eq!(domain_from_url("https://sub.example.com/"), "example.com");
         assert_eq!(domain_from_url("http://localhost:3000"), "localhost");
         assert_eq!(domain_from_url("about:blank"), "");
@@ -794,17 +909,37 @@ mod tests {
     #[test]
     fn behavioral_profile_migrates_legacy_timing() {
         // Old range maps linearly: 75 -> 42, 90 -> 50, 105 -> 58.
-        let fast = BehavioralProfile { typing_mean_ms: 75.0, version: 0, ..BehavioralProfile::generate() };
+        let fast = BehavioralProfile {
+            typing_mean_ms: 75.0,
+            version: 0,
+            ..BehavioralProfile::generate()
+        };
         let m = fast.migrate();
         assert_eq!(m.version, 2);
-        assert!((m.typing_mean_ms - 42.0).abs() < 0.001, "got {}", m.typing_mean_ms);
-        let slow = BehavioralProfile { typing_mean_ms: 105.0, version: 0, ..BehavioralProfile::generate() };
+        assert!(
+            (m.typing_mean_ms - 42.0).abs() < 0.001,
+            "got {}",
+            m.typing_mean_ms
+        );
+        let slow = BehavioralProfile {
+            typing_mean_ms: 105.0,
+            version: 0,
+            ..BehavioralProfile::generate()
+        };
         assert!((slow.migrate().typing_mean_ms - 58.0).abs() < 0.001);
         // Already-current profiles are untouched.
-        let v2 = BehavioralProfile { typing_mean_ms: 47.3, version: 2, ..BehavioralProfile::generate() };
+        let v2 = BehavioralProfile {
+            typing_mean_ms: 47.3,
+            version: 2,
+            ..BehavioralProfile::generate()
+        };
         assert!((v2.migrate().typing_mean_ms - 47.3).abs() < 0.001);
         // Migration runs BEFORE clamping: a corrupted 999 comes out clamped, not scaled.
-        let corrupt = BehavioralProfile { typing_mean_ms: 999.0, version: 0, ..BehavioralProfile::generate() };
+        let corrupt = BehavioralProfile {
+            typing_mean_ms: 999.0,
+            version: 0,
+            ..BehavioralProfile::generate()
+        };
         assert_eq!(corrupt.migrate().clamped().typing_mean_ms, 80.0);
     }
 
@@ -812,36 +947,48 @@ mod tests {
     fn prune_evicts_old_low_confidence() {
         let mut kb = KnowledgeBase::default();
         // Domain with low-confidence consent and old last_visit.
-        kb.domains.insert("old.com".to_string(), DomainKnowledge {
-            consent: Some(ConsentKnowledge {
-                selector: "#btn".into(),
-                framework: "test".into(),
-                confidence: 0.1, // below EVICT_THRESHOLD
-                last_validated: now_secs() - 60 * 86400, // 60 days ago
-                success_count: 1,
-                fail_count: 5,
-            }),
-            visit_count: 0,
-            last_visit: now_secs() - 60 * 86400,
-            ..Default::default()
-        });
+        kb.domains.insert(
+            "old.com".to_string(),
+            DomainKnowledge {
+                consent: Some(ConsentKnowledge {
+                    selector: "#btn".into(),
+                    framework: "test".into(),
+                    confidence: 0.1,                         // below EVICT_THRESHOLD
+                    last_validated: now_secs() - 60 * 86400, // 60 days ago
+                    success_count: 1,
+                    fail_count: 5,
+                }),
+                visit_count: 0,
+                last_visit: now_secs() - 60 * 86400,
+                ..Default::default()
+            },
+        );
         // Domain with high-confidence consent — should survive.
-        kb.domains.insert("good.com".to_string(), DomainKnowledge {
-            consent: Some(ConsentKnowledge {
-                selector: "#btn".into(),
-                framework: "test".into(),
-                confidence: 0.9,
-                last_validated: now_secs(),
-                success_count: 10,
-                fail_count: 0,
-            }),
-            visit_count: 5,
-            last_visit: now_secs(),
-            ..Default::default()
-        });
+        kb.domains.insert(
+            "good.com".to_string(),
+            DomainKnowledge {
+                consent: Some(ConsentKnowledge {
+                    selector: "#btn".into(),
+                    framework: "test".into(),
+                    confidence: 0.9,
+                    last_validated: now_secs(),
+                    success_count: 10,
+                    fail_count: 0,
+                }),
+                visit_count: 5,
+                last_visit: now_secs(),
+                ..Default::default()
+            },
+        );
         kb.prune();
-        assert!(!kb.domains.contains_key("old.com"), "old low-confidence should be evicted");
-        assert!(kb.domains.contains_key("good.com"), "good high-confidence should survive");
+        assert!(
+            !kb.domains.contains_key("old.com"),
+            "old low-confidence should be evicted"
+        );
+        assert!(
+            kb.domains.contains_key("good.com"),
+            "good high-confidence should survive"
+        );
     }
 
     #[test]
@@ -869,10 +1016,15 @@ mod tests {
         let mut kb = KnowledgeBase::default();
         kb.pre_seed();
         // Amazon.com should have consent at trust threshold.
-        let c = kb.get_consent("amazon.com").expect("amazon.com should be pre-seeded");
+        let c = kb
+            .get_consent("amazon.com")
+            .expect("amazon.com should be pre-seeded");
         assert_eq!(c.selector, "#sp-cc-rejectall-link");
         assert_eq!(c.framework, "amazon");
-        assert!((c.confidence - 0.7).abs() < 0.01, "should start at trust threshold");
+        assert!(
+            (c.confidence - 0.7).abs() < 0.01,
+            "should start at trust threshold"
+        );
         // Other Amazon TLDs should also be seeded.
         assert!(kb.get_consent("amazon.co.uk").is_some());
         assert!(kb.get_consent("amazon.de").is_some());
@@ -888,7 +1040,10 @@ mod tests {
         // Pre-seed should NOT overwrite the user-learned selector.
         let dk = kb.domains.get("amazon.com").unwrap();
         let c = dk.consent.as_ref().unwrap();
-        assert_eq!(c.selector, "#user-learned-btn", "pre-seed should not overwrite existing");
+        assert_eq!(
+            c.selector, "#user-learned-btn",
+            "pre-seed should not overwrite existing"
+        );
     }
 
     #[test]
@@ -928,6 +1083,10 @@ mod tests {
         kb.learn_block_config("example.com", "images,fonts");
         assert_eq!(kb.get_block_config("example.com"), Some("images,fonts"));
         kb.learn_block_config("example.com", "");
-        assert_eq!(kb.get_block_config("example.com"), None, "explicit clear must not read as a config");
+        assert_eq!(
+            kb.get_block_config("example.com"),
+            None,
+            "explicit clear must not read as a config"
+        );
     }
 }

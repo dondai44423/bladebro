@@ -2,6 +2,11 @@
 //!
 //! These spawn the real binary with controlled env in a SUBPROCESS so the
 //! process-global env vars can never race with parallel in-process tests.
+//!
+//! Unix-only: the tests drive XDG semantics and `~/.local` paths; gating the
+//! whole file keeps the helpers from being dead code on other targets.
+
+#![cfg(unix)]
 
 use std::process::Command;
 
@@ -45,7 +50,10 @@ fn blade_home_override_wins() {
         data_line.contains("/tmp/bladebro-blade-home"),
         "BLADE_HOME must be honored: {data_line}"
     );
-    assert!(data_line.contains("BLADE_HOME"), "reason label: {data_line}");
+    assert!(
+        data_line.contains("BLADE_HOME"),
+        "reason label: {data_line}"
+    );
 }
 
 #[cfg(unix)]

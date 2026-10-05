@@ -108,7 +108,11 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
     };
     let mut out: Vec<SavedCookie> = Vec::with_capacity(arr.len());
     for c in arr {
-        let domain = c.get("domain").and_then(|d| d.as_str()).unwrap_or("").to_string();
+        let domain = c
+            .get("domain")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
         // Partitioned (third-party Contextual/CHIPS) cookies and internal
         // origins cannot be faithfully restored via setCookies — skip them.
         if c.get("partitionKey").map(|p| !p.is_null()).unwrap_or(false) {
@@ -118,13 +122,28 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
             continue;
         }
         out.push(SavedCookie {
-            name: c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            value: c.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            name: c
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            value: c
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             domain,
-            path: c.get("path").and_then(|v| v.as_str()).unwrap_or("/").to_string(),
+            path: c
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("/")
+                .to_string(),
             secure: c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false),
             http_only: c.get("httpOnly").and_then(|v| v.as_bool()).unwrap_or(false),
-            same_site: c.get("sameSite").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            same_site: c
+                .get("sameSite")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             expires: c.get("expires").and_then(|v| v.as_f64()),
         });
     }
@@ -169,43 +188,49 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
     let mut rejected = 0usize;
     let total = list.len();
     for chunk in list.chunks(150) {
-        let cookies: Vec<Value> = chunk.iter().map(|c| {
-            // Apply url or domain per-cookie (IP/localhost and __Host-/__Secure-
-            // prefixed cookies need url).
-            let target = cookie_target(c);
-            let mut spec = json!({
-                "name": c.name.clone(),
-                "value": c.value,
-                "path": c.path,
-                "secure": c.secure,
-                "httpOnly": c.http_only,
-                // Default to Lax when absent — some Chrome builds reject
-                // cookies with a null sameSite in the CDP call (same rule
-                // state.rs uses for single set-cookie).
-                "sameSite": c.same_site.clone().unwrap_or_else(|| "Lax".to_string()),
-            });
-            // Session cookies are reported back with expires = -1. Sending
-            // that literal value makes Chrome create an ALREADY-EXPIRED
-            // cookie (base::Time::FromDoubleT(-1) is 1969) that is dropped on
-            // the spot — so a session login never survives a restore, and a
-            // later snapshot then overwrites the good sidecar with nothing.
-            // The CDP rule: omit `expires` for a session cookie.
-            if let Some(exp) = c.expires {
-                if exp >= 0.0 {
-                    spec["expires"] = json!(exp);
+        let cookies: Vec<Value> = chunk
+            .iter()
+            .map(|c| {
+                // Apply url or domain per-cookie (IP/localhost and __Host-/__Secure-
+                // prefixed cookies need url).
+                let target = cookie_target(c);
+                let mut spec = json!({
+                    "name": c.name.clone(),
+                    "value": c.value,
+                    "path": c.path,
+                    "secure": c.secure,
+                    "httpOnly": c.http_only,
+                    // Default to Lax when absent — some Chrome builds reject
+                    // cookies with a null sameSite in the CDP call (same rule
+                    // state.rs uses for single set-cookie).
+                    "sameSite": c.same_site.clone().unwrap_or_else(|| "Lax".to_string()),
+                });
+                // Session cookies are reported back with expires = -1. Sending
+                // that literal value makes Chrome create an ALREADY-EXPIRED
+                // cookie (base::Time::FromDoubleT(-1) is 1969) that is dropped on
+                // the spot — so a session login never survives a restore, and a
+                // later snapshot then overwrites the good sidecar with nothing.
+                // The CDP rule: omit `expires` for a session cookie.
+                if let Some(exp) = c.expires {
+                    if exp >= 0.0 {
+                        spec["expires"] = json!(exp);
+                    }
                 }
-            }
-            if let Some(map) = target.as_object() {
-                if let Some(u) = map.get("url") {
-                    spec["url"] = u.clone();
+                if let Some(map) = target.as_object() {
+                    if let Some(u) = map.get("url") {
+                        spec["url"] = u.clone();
+                    }
+                    if let Some(d) = map.get("domain") {
+                        spec["domain"] = d.clone();
+                    }
                 }
-                if let Some(d) = map.get("domain") {
-                    spec["domain"] = d.clone();
-                }
-            }
-            spec
-        }).collect();
-        match cdp.send("Network.setCookies", Some(json!({ "cookies": cookies }))).await {
+                spec
+            })
+            .collect();
+        match cdp
+            .send("Network.setCookies", Some(json!({ "cookies": cookies })))
+            .await
+        {
             Ok(res) => {
                 // Chrome 150+ returns success in `data` per cookie; count the
                 // rejected ones so a partial restore is visible. (Some builds
@@ -213,7 +238,11 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
                 // here, rather than silently losing the login.)
                 if let Some(data) = res.get("data").and_then(|d| d.as_array()) {
                     for item in data {
-                        if !item.get("success").and_then(|s| s.as_bool()).unwrap_or(true) {
+                        if !item
+                            .get("success")
+                            .and_then(|s| s.as_bool())
+                            .unwrap_or(true)
+                        {
                             rejected += 1;
                         }
                     }
@@ -221,7 +250,10 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
             }
             Err(e) => {
                 rejected += chunk.len();
-                eprintln!("[bladebro] logins restore call failed ({} cookies): {e}", chunk.len());
+                eprintln!(
+                    "[bladebro] logins restore call failed ({} cookies): {e}",
+                    chunk.len()
+                );
             }
         }
     }
@@ -238,7 +270,10 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
 /// Atomic, fsync'd, 0600 write of the sidecar. Never a torn file: write to a
 /// sibling temp, sync to disk, then rename over the target.
 fn atomic_write(path: &PathBuf, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(".logins.json.tmp");
     let mut opts = std::fs::OpenOptions::new();
@@ -293,28 +328,51 @@ mod tests {
         // they must be reconstructed from a matching url (fix for silently
         // lost logins on security-hardened sites).
         let host = SavedCookie {
-            name: "__Host-sid".into(), value: "x".into(),
-            domain: "example.com".into(), path: "/".into(),
-            secure: true, http_only: true, same_site: None, expires: None,
+            name: "__Host-sid".into(),
+            value: "x".into(),
+            domain: "example.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            same_site: None,
+            expires: None,
         };
         let t = cookie_target(&host);
-        assert_eq!(t["url"].as_str(), Some("https://example.com/"), "__Host- needs url");
+        assert_eq!(
+            t["url"].as_str(),
+            Some("https://example.com/"),
+            "__Host- needs url"
+        );
         assert!(t.get("domain").is_none(), "__Host- must not carry a domain");
 
         // __Secure- also url-targets (scheme follows the secure flag).
         let sec = SavedCookie {
-            name: "__Secure-tok".into(), value: "x".into(),
-            domain: ".example.com".into(), path: "/".into(),
-            secure: false, http_only: false, same_site: None, expires: None,
+            name: "__Secure-tok".into(),
+            value: "x".into(),
+            domain: ".example.com".into(),
+            path: "/".into(),
+            secure: false,
+            http_only: false,
+            same_site: None,
+            expires: None,
         };
         let t2 = cookie_target(&sec);
-        assert_eq!(t2["url"].as_str(), Some("http://example.com/"), "__Secure- goes via url");
+        assert_eq!(
+            t2["url"].as_str(),
+            Some("http://example.com/"),
+            "__Secure- goes via url"
+        );
 
         // Plain cookies keep domain semantics (host-only vs domain preserved).
         let norm = SavedCookie {
-            name: "sid".into(), value: "x".into(),
-            domain: ".example.com".into(), path: "/".into(),
-            secure: false, http_only: false, same_site: None, expires: None,
+            name: "sid".into(),
+            value: "x".into(),
+            domain: ".example.com".into(),
+            path: "/".into(),
+            secure: false,
+            http_only: false,
+            same_site: None,
+            expires: None,
         };
         let t3 = cookie_target(&norm);
         assert_eq!(t3["domain"].as_str(), Some(".example.com"));
@@ -322,20 +380,37 @@ mod tests {
 
         // IP hosts keep url targeting too.
         let ip = SavedCookie {
-            name: "ipc".into(), value: "x".into(),
-            domain: "127.0.0.1".into(), path: "/".into(),
-            secure: false, http_only: false, same_site: None, expires: None,
+            name: "ipc".into(),
+            value: "x".into(),
+            domain: "127.0.0.1".into(),
+            path: "/".into(),
+            secure: false,
+            http_only: false,
+            same_site: None,
+            expires: None,
         };
-        assert_eq!(cookie_target(&ip)["url"].as_str(), Some("http://127.0.0.1/"));
+        assert_eq!(
+            cookie_target(&ip)["url"].as_str(),
+            Some("http://127.0.0.1/")
+        );
     }
 
     #[test]
     fn empty_snapshot_keeps_last_good_logins() {
         // A session that ended before any origin formed (fresh restore at
         // about:blank) must not erase the saved logins with an empty write.
-        assert!(keep_last_good_snapshot(b"[{\"name\":\"sid\"}]"), "cookies present -> keep");
-        assert!(keep_last_good_snapshot(b"[]"), "saved empty is still a known state, never lose it");
+        assert!(
+            keep_last_good_snapshot(b"[{\"name\":\"sid\"}]"),
+            "cookies present -> keep"
+        );
+        assert!(
+            keep_last_good_snapshot(b"[]"),
+            "saved empty is still a known state, never lose it"
+        );
         // Nothing saved yet: an empty write is fine (nothing to protect).
-        assert!(!keep_last_good_snapshot(b""), "no prior state -> allow write");
+        assert!(
+            !keep_last_good_snapshot(b""),
+            "no prior state -> allow write"
+        );
     }
 }

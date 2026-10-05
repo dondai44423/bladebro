@@ -32,12 +32,18 @@ impl CdpSession {
     /// The root session of a connection (browser-level on pipe, or the whole
     /// connection on a direct page WebSocket).
     pub fn root(client: CdpClient) -> Self {
-        Self { client, session_id: None }
+        Self {
+            client,
+            session_id: None,
+        }
     }
 
     /// A child session (flat-mode `Target.attachToTarget` result).
     pub fn child(client: CdpClient, session_id: impl Into<String>) -> Self {
-        Self { client, session_id: Some(session_id.into()) }
+        Self {
+            client,
+            session_id: Some(session_id.into()),
+        }
     }
 
     /// The underlying connection (for browser-level commands from a child).
@@ -58,7 +64,12 @@ impl CdpSession {
     /// Send a command with the default timeout.
     pub async fn send(&self, method: &str, params: Option<Value>) -> Result<Value> {
         self.client
-            .send_session_with_timeout(self.session_id.as_deref(), method, params, crate::cdp::client::DEFAULT_TIMEOUT)
+            .send_session_with_timeout(
+                self.session_id.as_deref(),
+                method,
+                params,
+                crate::cdp::client::DEFAULT_TIMEOUT,
+            )
             .await
     }
 

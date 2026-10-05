@@ -32,7 +32,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust-version }}
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Install Chromium (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -54,6 +54,9 @@ jobs:
           path: target
           key: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-build-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-build-
+
+      - name: Format check
+        run: cargo fmt --check
 
       - name: Clippy
         run: cargo clippy --release -- -D warnings

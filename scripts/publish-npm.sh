@@ -121,6 +121,30 @@ done
 echo "Publishing main package: bladebro@$VERSION..."
 (cd npm/bladebro && npm publish --access public)
 
+# ── verify the main package is actually live ────────────────────────
+# Registry publishes can land asynchronously ("being processed"), and the
+# platform-package check above says nothing about the meta package — a
+# silent miss would leave `npm i -g bladebro` on the PREVIOUS version while
+# this script prints "Done!". `--prefer-online` matters: a plain `npm view`
+# serves a stale cache entry for minutes and reads as "missing".
+echo "Waiting for bladebro@$VERSION to go live..."
+META_OK=false
+for i in $(seq 1 18); do
+  if npm view "bladebro@$VERSION" version --prefer-online 2>/dev/null | grep -q "$VERSION"; then
+    echo "  bladebro@$VERSION is live after $((i*10))s"
+    META_OK=true
+    break
+  fi
+  sleep 10
+  echo "  waiting... ($((i*10))s)"
+done
+if [ "$META_OK" != true ]; then
+  echo "ERROR: bladebro@$VERSION never appeared on the registry — the publish was" >&2
+  echo "       staged or failed. Approve it with: npm stage list / npm stage approve <id>" >&2
+  echo "       (an interactive 2FA challenge is required for approval)." >&2
+  exit 1
+fi
+
 echo ""
 echo "Done! Published bladebro@$VERSION to npm (all platforms)."
 echo "  Install:  npm install -g bladebro"

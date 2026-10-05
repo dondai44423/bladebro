@@ -43,7 +43,11 @@ pub enum StateOp {
         same_site: Option<String>,
     },
     /// Delete cookies by name (optionally filtered by domain or url).
-    DeleteCookies { name: String, domain: Option<String>, url: Option<String> },
+    DeleteCookies {
+        name: String,
+        domain: Option<String>,
+        url: Option<String>,
+    },
     /// Read all localStorage keys/values.
     GetLocalStorage,
     /// Read all sessionStorage keys/values.
@@ -117,7 +121,6 @@ pub struct Tab {
 pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
     match op {
         // ---- cookies ----
-
         StateOp::GetCookies { urls } => {
             cdp.enable("Network").await?;
             let params = if urls.is_empty() {
@@ -218,7 +221,10 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 cookie_parts.push("secure".to_string());
             }
             // httpOnly can't be set via document.cookie — skip it.
-            cookie_parts.push(format!("samesite={}", same_site.as_deref().unwrap_or("Lax")));
+            cookie_parts.push(format!(
+                "samesite={}",
+                same_site.as_deref().unwrap_or("Lax")
+            ));
             let cookie_str = cookie_parts.join("; ");
             // JSON-escape into a JS string literal. Rust's `{:?}` Debug
             // escaping is NOT JS escaping — edge-case characters produced
@@ -226,12 +232,23 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             let cookie_js = serde_json::to_string(&cookie_str)
                 .map_err(|e| BladeError::Other(format!("cookie encode: {e}")))?;
             let js = format!("document.cookie={cookie_js}");
-            match cdp.send("Runtime.evaluate", Some(json!({
-                "expression": js,
-                "returnByValue": true,
-            }))).await {
-                Ok(_) => Ok(format!("✓ cookie set (via JS): {name}={}", truncate(value, 40))),
-                Err(e) => Ok(format!("✗ cookie set failed: {name} (CDP: {cdp_err}, JS: {e})")),
+            match cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(json!({
+                        "expression": js,
+                        "returnByValue": true,
+                    })),
+                )
+                .await
+            {
+                Ok(_) => Ok(format!(
+                    "✓ cookie set (via JS): {name}={}",
+                    truncate(value, 40)
+                )),
+                Err(e) => Ok(format!(
+                    "✗ cookie set failed: {name} (CDP: {cdp_err}, JS: {e})"
+                )),
             }
         }
 
@@ -250,7 +267,6 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
         }
 
         // ---- storage ----
-
         StateOp::GetLocalStorage => get_storage(cdp, "localStorage").await,
         StateOp::GetSessionStorage => get_storage(cdp, "sessionStorage").await,
         StateOp::SetLocalStorage { key, value } => {
@@ -259,17 +275,12 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
         StateOp::SetSessionStorage { key, value } => {
             set_storage(cdp, "sessionStorage", key, value).await
         }
-        StateOp::RemoveLocalStorage { key } => {
-            remove_storage(cdp, "localStorage", key).await
-        }
-        StateOp::RemoveSessionStorage { key } => {
-            remove_storage(cdp, "sessionStorage", key).await
-        }
+        StateOp::RemoveLocalStorage { key } => remove_storage(cdp, "localStorage", key).await,
+        StateOp::RemoveSessionStorage { key } => remove_storage(cdp, "sessionStorage", key).await,
         StateOp::ClearLocalStorage => clear_storage(cdp, "localStorage").await,
         StateOp::ClearSessionStorage => clear_storage(cdp, "sessionStorage").await,
 
         // ---- tabs ----
-
         StateOp::ListTabs => {
             let res = cdp.send("Target.getTargets", None).await?;
             let targets = res
@@ -279,9 +290,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             let all: Vec<Value> = serde_json::from_value(targets)?;
             let tabs: Vec<Tab> = all
                 .into_iter()
-                .filter(|t| {
-                    t.get("type").and_then(|v| v.as_str()) == Some("page")
-                })
+                .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
                 .filter_map(|t| serde_json::from_value(t).ok())
                 .collect();
             if tabs.is_empty() {
@@ -311,10 +320,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             // "localhost:" as the scheme).
             let url = crate::page::with_scheme(url);
             let res = cdp
-                .send(
-                    "Target.createTarget",
-                    Some(json!({ "url": url.as_str() })),
-                )
+                .send("Target.createTarget", Some(json!({ "url": url.as_str() })))
                 .await?;
             let target_id = res
                 .get("targetId")
@@ -324,27 +330,32 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
         }
 
         StateOp::CloseTab { target_id } => {
-            cdp.send(
-                "Target.closeTarget",
-                Some(json!({ "targetId": target_id })),
-            )
-            .await?;
+            cdp.send("Target.closeTarget", Some(json!({ "targetId": target_id })))
+                .await?;
             Ok(format!("✓ closed tab {target_id}"))
         }
 
         // ---- sessions (M10) ----
-
         StateOp::SaveSession { name } => {
-                if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\\') {
-                    return Err(BladeError::Other(format!("invalid session name: {name:?}")));
-                }
-            
+            if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\\') {
+                return Err(BladeError::Other(format!("invalid session name: {name:?}")));
+            }
+
             cdp.enable("Network").await?;
-            let origin_res = cdp.send("Runtime.evaluate", Some(json!({
-                "expression": "location.origin",
-                "returnByValue": true,
-            }))).await?;
-            let origin = origin_res.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+            let origin_res = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(json!({
+                        "expression": "location.origin",
+                        "returnByValue": true,
+                    })),
+                )
+                .await?;
+            let origin = origin_res
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             // Error pages (chrome-error://) and untouched about:blank report
             // a literal "null" origin.
             if origin.is_empty() || origin == "null" {
@@ -364,43 +375,74 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 .and_then(|r| extract_eval_value(&r).ok())
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
-            let session = json!({ "cookies": cookies, "localStorage": ls_entries, "origin": origin });
+            let session =
+                json!({ "cookies": cookies, "localStorage": ls_entries, "origin": origin });
             let dir = crate::platform::blade_dir().join("sessions");
-            crate::platform::secure_create_dir_all(&dir).map_err(|e| BladeError::Other(format!("cannot create sessions dir: {e}")))?;
+            crate::platform::secure_create_dir_all(&dir)
+                .map_err(|e| BladeError::Other(format!("cannot create sessions dir: {e}")))?;
             let path = dir.join(format!("{name}.json"));
-            crate::platform::secure_write_file(&path, serde_json::to_string_pretty(&session)?.as_bytes())
-                .map_err(|e| BladeError::Other(format!("cannot write session: {e}")))?;
+            crate::platform::secure_write_file(
+                &path,
+                serde_json::to_string_pretty(&session)?.as_bytes(),
+            )
+            .map_err(|e| BladeError::Other(format!("cannot write session: {e}")))?;
             let cookie_count = cookies.as_array().map(|a| a.len()).unwrap_or(0);
-            Ok(format!("✓ saved session '{}': {} cookies, {} localStorage entries\n  → {}", name, cookie_count, ls_entries.len(), path.display()))
+            Ok(format!(
+                "✓ saved session '{}': {} cookies, {} localStorage entries\n  → {}",
+                name,
+                cookie_count,
+                ls_entries.len(),
+                path.display()
+            ))
         }
 
         StateOp::LoadSession { name } => {
-                if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\\') {
-                    return Err(BladeError::Other(format!("invalid session name: {name:?}")));
-                }
-            
+            if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\\') {
+                return Err(BladeError::Other(format!("invalid session name: {name:?}")));
+            }
+
             cdp.enable("Network").await?;
-            let path = crate::platform::blade_dir().join("sessions").join(format!("{name}.json"));
+            let path = crate::platform::blade_dir()
+                .join("sessions")
+                .join(format!("{name}.json"));
             let content = std::fs::read_to_string(&path)
                 .map_err(|e| BladeError::Other(format!("cannot read session '{name}': {e}")))?;
             let session: Value = serde_json::from_str(&content)?;
-            let cookies = session.get("cookies").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            let cookies = session
+                .get("cookies")
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default();
             let mut cookie_count = 0usize;
             for cookie in &cookies {
                 let mut params = json!({
                     "name": cookie.get("name").unwrap_or(&json!("")),
                     "value": cookie.get("value").unwrap_or(&json!("")),
                 });
-                if let Some(d) = cookie.get("domain") { params["domain"] = d.clone(); }
-                if let Some(p) = cookie.get("path") { params["path"] = p.clone(); }
-                if let Some(s) = cookie.get("secure") { params["secure"] = s.clone(); }
-                if let Some(h) = cookie.get("httpOnly") { params["httpOnly"] = h.clone(); }
-                if let Some(e) = cookie.get("expires") { params["expires"] = e.clone(); }
+                if let Some(d) = cookie.get("domain") {
+                    params["domain"] = d.clone();
+                }
+                if let Some(p) = cookie.get("path") {
+                    params["path"] = p.clone();
+                }
+                if let Some(s) = cookie.get("secure") {
+                    params["secure"] = s.clone();
+                }
+                if let Some(h) = cookie.get("httpOnly") {
+                    params["httpOnly"] = h.clone();
+                }
+                if let Some(e) = cookie.get("expires") {
+                    params["expires"] = e.clone();
+                }
                 if cdp.send("Network.setCookie", Some(params)).await.is_ok() {
                     cookie_count += 1;
                 }
             }
-            let ls_entries = session.get("localStorage").and_then(|l| l.as_array()).cloned().unwrap_or_default();
+            let ls_entries = session
+                .get("localStorage")
+                .and_then(|l| l.as_array())
+                .cloned()
+                .unwrap_or_default();
             for entry in &ls_entries {
                 let key = entry.get("key").and_then(|k| k.as_str()).unwrap_or("");
                 let value = entry.get("value").and_then(|v| v.as_str()).unwrap_or("");
@@ -408,15 +450,18 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                     let _ = set_storage(cdp, "localStorage", key, value).await;
                 }
             }
-            Ok(format!("✓ loaded session '{}': {} cookies, {} localStorage entries — navigate to apply", name, cookie_count, ls_entries.len()))
+            Ok(format!(
+                "✓ loaded session '{}': {} cookies, {} localStorage entries — navigate to apply",
+                name,
+                cookie_count,
+                ls_entries.len()
+            ))
         }
     }
 }
 
 async fn get_storage(cdp: &CdpSession, storage: &str) -> Result<String> {
-    let expr = format!(
-        r#"Object.keys({storage}).map(k=>({{key:k,value:{storage}.getItem(k)}}))"#
-    );
+    let expr = format!(r#"Object.keys({storage}).map(k=>({{key:k,value:{storage}.getItem(k)}}))"#);
     let res = cdp
         .send(
             "Runtime.evaluate",

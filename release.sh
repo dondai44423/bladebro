@@ -118,15 +118,18 @@ else
 fi
 
 # macOS x86_64 (via cargo-zigbuild)
+# Darwin targets build `ring`'s C through cargo-zigbuild's cc wrapper, which
+# sccache (0.17.0) rejects — run the apple builds with the wrapper disabled
+# (the toolchain note in status.md; the battery has always done this).
 if command -v cargo-zigbuild &>/dev/null; then
-    cargo zigbuild --release --target x86_64-apple-darwin 2>&1 | tail -1
+    RUSTC_WRAPPER= cargo zigbuild --release --target x86_64-apple-darwin 2>&1 | tail -1
 else
     echo "  WARNING: cargo-zigbuild not found, skipping macOS x64 build"
 fi
 
 # macOS arm64 (via cargo-zigbuild)
 if command -v cargo-zigbuild &>/dev/null; then
-    cargo zigbuild --release --target aarch64-apple-darwin 2>&1 | tail -1
+    RUSTC_WRAPPER= cargo zigbuild --release --target aarch64-apple-darwin 2>&1 | tail -1
 else
     echo "  WARNING: cargo-zigbuild not found, skipping macOS arm64 build"
 fi
@@ -138,24 +141,52 @@ else
     echo "  WARNING: cargo-zigbuild not found, skipping Linux arm64 build"
 fi
 
+# 5b. Gate: ALL five platform binaries must exist before anything is
+# committed, tagged or published. This script used to warn-and-skip a
+# failing cross target, then create a GitHub release missing that platform
+# and hard-fail inside npm publish AFTER the tag existed — the partial
+# release state the workflow forbids.
+MISSING_ARTIFACTS=0
+for f in \
+    target/release/bladebro \
+    target/x86_64-pc-windows-gnu/release/bladebro.exe \
+    target/x86_64-apple-darwin/release/bladebro \
+    target/aarch64-apple-darwin/release/bladebro \
+    target/aarch64-unknown-linux-gnu/release/bladebro ; do
+    if [[ ! -f "$f" ]]; then
+        echo "ERROR: missing build artifact: $f" >&2
+        MISSING_ARTIFACTS=1
+    fi
+done
+if (( MISSING_ARTIFACTS )); then
+    echo "ERROR: refusing to publish a partial release — fix the build(s) above first." >&2
+    echo "       (The version bump + CHANGELOG edits are uncommitted; restore with" >&2
+    echo "        'git checkout Cargo.toml CHANGELOG.md' before re-running.)" >&2
+    exit 1
+fi
+echo "      gate: all five platform binaries present"
+
 # 6. Commit + tag.
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "release: v$VERSION"
 git tag -a "v$VERSION" -m "v$VERSION"
 echo "[7/9] committed + tagged v$VERSION"
 
-# 7. Push.
+# 7. Push. A token (when present) rides a ONE-SHOT authenticated URL on the
+# push command itself — never `git remote set-url` with the token embedded.
+# The old dance left the token in .git/config whenever the script died
+# before its EXIT trap ran (SIGKILL, power loss).
 REMOTE_URL=$(git remote get-url origin)
 if [[ "$REMOTE_URL" != *"@github.com"* ]]; then
     TOKEN=$(gh auth token 2>/dev/null || true)
     if [[ -n "$TOKEN" ]]; then
-        git remote set-url origin "https://dondai44423:${TOKEN}@github.com/dondai44423/bladebro.git"
-        trap 'git remote set-url origin "https://github.com/dondai44423/bladebro.git"' EXIT
+        git push "https://dondai44423:${TOKEN}@github.com/dondai44423/bladebro.git" main --tags
+    else
+        git push origin main --tags
     fi
+else
+    git push origin main --tags
 fi
-git push origin main --tags
-git remote set-url origin "https://github.com/dondai44423/bladebro.git" 2>/dev/null || true
-trap - EXIT
 echo "[8/9] pushed"
 
 # 8. GitHub release with ALL 4 platform binaries.

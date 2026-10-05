@@ -49,7 +49,9 @@ impl TargetInfo {
     pub fn ws_url(&self) -> Result<&str> {
         self.web_socket_debugger_url
             .as_deref()
-            .ok_or_else(|| BladeError::NoWebSocketUrl { id: self.id.clone() })
+            .ok_or_else(|| BladeError::NoWebSocketUrl {
+                id: self.id.clone(),
+            })
     }
 }
 

@@ -27,7 +27,12 @@ pub struct CdpRequest {
 impl CdpRequest {
     /// Build a request with the next id; the caller owns id assignment.
     pub fn new(id: u64, method: impl Into<String>, params: Option<Value>) -> Self {
-        Self { id, method: method.into(), params, session_id: None }
+        Self {
+            id,
+            method: method.into(),
+            params,
+            session_id: None,
+        }
     }
 }
 
@@ -74,7 +79,11 @@ pub(crate) struct CdpMessage {
 #[derive(Debug)]
 pub(crate) enum CdpIncoming {
     /// A response to one of our commands.
-    Response { id: u64, result: Value, error: Option<CdpErrorPayload> },
+    Response {
+        id: u64,
+        result: Value,
+        error: Option<CdpErrorPayload>,
+    },
     /// An unsolicited event from the browser.
     Event(CdpEvent),
 }

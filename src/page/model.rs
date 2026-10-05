@@ -13,8 +13,8 @@
 use std::collections::HashMap;
 
 use crate::page::perception::{PageCapture, RawElement};
-use crate::page::refs::{stabilize, StateChange, StateProbe};
 use crate::page::refs::PrevState;
+use crate::page::refs::{stabilize, StateChange, StateProbe};
 
 /// One actionable element with its stable ref attached.
 #[derive(Debug, Clone)]
@@ -162,7 +162,14 @@ impl LivePageModel {
     /// ref is reborn pointing at its re-resolved live element). If the
     /// id is already live, the entry is REPLACED in place (force-heal:
     /// the live DOM moved under a stale model entry).
-    pub fn adopt_as(&mut self, id: &str, sig: &str, role: &str, name: &str, frame: &[usize]) -> String {
+    pub fn adopt_as(
+        &mut self,
+        id: &str,
+        sig: &str,
+        role: &str,
+        name: &str,
+        frame: &[usize],
+    ) -> String {
         let raw = crate::page::perception::RawElement {
             tag: String::new(),
             role: role.to_string(),
@@ -186,9 +193,15 @@ impl LivePageModel {
             ctx: String::new(),
         };
         if let Some(&i) = self.by_ref.get(id) {
-            self.elements[i] = PageElement { ref_id: id.to_string(), raw };
+            self.elements[i] = PageElement {
+                ref_id: id.to_string(),
+                raw,
+            };
         } else {
-            self.elements.push(PageElement { ref_id: id.to_string(), raw });
+            self.elements.push(PageElement {
+                ref_id: id.to_string(),
+                raw,
+            });
             self.by_ref.insert(id.to_string(), self.elements.len() - 1);
         }
         self.prev_state.insert(
@@ -276,12 +289,8 @@ impl LivePageModel {
         for r in &stab.removed {
             // Skip if the same ref id is somehow already recorded.
             if !self.graveyard.iter().any(|(id, _, _, _)| id == &r.id) {
-                self.graveyard.push((
-                    r.id.clone(),
-                    r.sig.clone(),
-                    r.role.clone(),
-                    r.name.clone(),
-                ));
+                self.graveyard
+                    .push((r.id.clone(), r.sig.clone(), r.role.clone(), r.name.clone()));
             }
         }
         if self.graveyard.len() > GRAVEYARD_CAP {
@@ -327,7 +336,10 @@ impl LivePageModel {
     pub fn compress(&self, budget: usize, in_flight: usize) -> String {
         const FOLD_LANDMARKS: [&str; 4] = ["nav", "banner", "footer", "aside"];
         let has_content_landmark = self.elements.iter().any(|e| {
-            matches!(e.raw.landmark.as_deref(), Some("main") | Some("dialog") | Some("search"))
+            matches!(
+                e.raw.landmark.as_deref(),
+                Some("main") | Some("dialog") | Some("search")
+            )
         });
 
         let mut out = String::new();
@@ -336,7 +348,11 @@ impl LivePageModel {
             short_url(&self.url),
             self.phase,
             self.elements.len(),
-            if in_flight > 0 { format!(" | {} requests in flight", in_flight) } else { String::new() }
+            if in_flight > 0 {
+                format!(" | {} requests in flight", in_flight)
+            } else {
+                String::new()
+            }
         ));
         if !self.title.is_empty() {
             out.push_str(&format!("title: {}\n", truncate(&self.title, 80)));
@@ -350,7 +366,9 @@ impl LivePageModel {
                         if folded_done.contains(lm) {
                             continue; // already folded into a one-liner
                         }
-                        let count = self.elements.iter()
+                        let count = self
+                            .elements
+                            .iter()
                             .filter(|e| e.raw.landmark.as_deref() == Some(lm))
                             .count();
                         if count >= 3 {
@@ -390,20 +408,26 @@ impl LivePageModel {
     /// Hacker News) to just the elements the agent cares about right now.
     pub fn compress_filtered(&self, budget: usize, filter: &str, in_flight: usize) -> String {
         // Support comma-separated filters: "button,link" matches either.
-        let filters: Vec<String> = filter.split(',').map(|f| f.trim().to_lowercase()).filter(|f| !f.is_empty()).collect();
+        let filters: Vec<String> = filter
+            .split(',')
+            .map(|f| f.trim().to_lowercase())
+            .filter(|f| !f.is_empty())
+            .collect();
         let matches = |el: &PageElement| {
             filters.iter().any(|fl| {
                 el.raw.role.to_lowercase().contains(fl)
                     || el.raw.name.to_lowercase().contains(fl)
-                    || el.raw.landmark.as_deref().unwrap_or("").to_lowercase().contains(fl)
+                    || el
+                        .raw
+                        .landmark
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(fl)
             })
         };
         let mut out = String::new();
-        let matching: Vec<&PageElement> = self
-            .elements
-            .iter()
-            .filter(|el| matches(el))
-            .collect();
+        let matching: Vec<&PageElement> = self.elements.iter().filter(|el| matches(el)).collect();
         out.push_str(&format!(
             "Page: {} | phase: {} | filter: \"{}\" | {} of {} matching{}\n",
             short_url(&self.url),
@@ -411,7 +435,11 @@ impl LivePageModel {
             filter,
             matching.len(),
             self.elements.len(),
-            if in_flight > 0 { format!(" | {} in flight", in_flight) } else { String::new() }
+            if in_flight > 0 {
+                format!(" | {} in flight", in_flight)
+            } else {
+                String::new()
+            }
         ));
         if !self.title.is_empty() {
             out.push_str(&format!("title: {}\n", truncate(&self.title, 80)));
@@ -452,7 +480,11 @@ impl LivePageModel {
             short_url(&d.url),
             d.phase,
             self.elements.len(),
-            if in_flight > 0 { format!(" | {} requests in flight", in_flight) } else { String::new() }
+            if in_flight > 0 {
+                format!(" | {} requests in flight", in_flight)
+            } else {
+                String::new()
+            }
         ));
         if d.title_changed && !d.navigated {
             out.push_str(&format!("title → \"{}\"\n", truncate(&d.title, 60)));
@@ -528,7 +560,10 @@ impl LivePageModel {
         for el in &d.added {
             let line = format!("+ {}\n", format_element(el));
             if out.len() + line.len() > budget {
-                out.push_str(&format!("…({} more)\n", d.added.len() + d.removed.len() - out.lines().count() + 1));
+                out.push_str(&format!(
+                    "…({} more)\n",
+                    d.added.len() + d.removed.len() - out.lines().count() + 1
+                ));
                 break;
             }
             out.push_str(&line);
@@ -538,7 +573,10 @@ impl LivePageModel {
         // large pages (e.g. 230 removed elements on HN back-navigation).
         if d.navigated {
             if !d.removed.is_empty() {
-                out.push_str(&format!("({} elements from previous page)\n", d.removed.len()));
+                out.push_str(&format!(
+                    "({} elements from previous page)\n",
+                    d.removed.len()
+                ));
             }
         } else {
             for r in &d.removed {
@@ -691,7 +729,10 @@ fn role_summary<'a>(roles: impl Iterator<Item = &'a str>) -> String {
     }
     let mut v: Vec<(&str, usize)> = counts.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    v.iter().map(|(r, c)| format!("{} {}", c, r)).collect::<Vec<_>>().join(", ")
+    v.iter()
+        .map(|(r, c)| format!("{} {}", c, r))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -702,10 +743,16 @@ mod tests {
     fn role_summary_is_deterministic_and_sorted() {
         // Count descending, then alphabetical for ties.
         let roles = ["link", "button", "link", "link", "textbox", "button"];
-        assert_eq!(role_summary(roles.iter().copied()), "3 link, 2 button, 1 textbox");
+        assert_eq!(
+            role_summary(roles.iter().copied()),
+            "3 link, 2 button, 1 textbox"
+        );
         // Same multiset, different input order — identical output.
         let roles2 = ["button", "link", "textbox", "button", "link", "link"];
-        assert_eq!(role_summary(roles2.iter().copied()), "3 link, 2 button, 1 textbox");
+        assert_eq!(
+            role_summary(roles2.iter().copied()),
+            "3 link, 2 button, 1 textbox"
+        );
     }
 
     #[test]
@@ -772,11 +819,20 @@ mod tests {
         let items: Vec<(String, String)> = (1..=20)
             .map(|i| (format!("opt{i}"), format!("v{i}")))
             .collect();
-        let el = select_el("s", SelectOptions { sel: -1, total: 20, items });
+        let el = select_el(
+            "s",
+            SelectOptions {
+                sel: -1,
+                total: 20,
+                items,
+            },
+        );
         let line = format_element(&el);
         // 12 shown inline, the remaining 8 collapsed into the marker.
-        assert!(line.starts_with("e1 combobox \"s\" [20 options: opt1=v1 | "), "{line}");
+        assert!(
+            line.starts_with("e1 combobox \"s\" [20 options: opt1=v1 | "),
+            "{line}"
+        );
         assert!(line.ends_with(" | +8 more]"), "{line}");
     }
 }
-

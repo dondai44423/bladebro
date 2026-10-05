@@ -67,8 +67,12 @@ async fn discovery_selects_the_requested_endpoint() {
 
     // The exact call chain run_connected uses for state/see/act when --port is
     // given: first_page_target(<base>) must resolve against THAT base.
-    let a = cdp::first_page_target(&base_a).await.expect("endpoint A reachable");
-    let b = cdp::first_page_target(&base_b).await.expect("endpoint B reachable");
+    let a = cdp::first_page_target(&base_a)
+        .await
+        .expect("endpoint A reachable");
+    let b = cdp::first_page_target(&base_b)
+        .await
+        .expect("endpoint B reachable");
 
     // Each resolves to its own distinct target.
     assert_eq!(a.id, "page-alpha");
@@ -80,6 +84,12 @@ async fn discovery_selects_the_requested_endpoint() {
     let wa = a.ws_url().unwrap();
     let wb = b.ws_url().unwrap();
     assert_ne!(wa, wb, "two endpoints must not share a target");
-    assert!(wa.contains(&format!("{base_a}/devtools/page/alpha")), "A ws on {wa}");
-    assert!(wb.contains(&format!("{base_b}/devtools/page/beta")), "B ws on {wb}");
+    assert!(
+        wa.contains(&format!("{base_a}/devtools/page/alpha")),
+        "A ws on {wa}"
+    );
+    assert!(
+        wb.contains(&format!("{base_b}/devtools/page/beta")),
+        "B ws on {wb}"
+    );
 }

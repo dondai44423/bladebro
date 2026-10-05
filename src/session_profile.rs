@@ -33,35 +33,24 @@
 //!
 //! Seasoning (S7: returning-visitor trust) is preserved via the
 //! template copy in both directions.
+//!
+//! Module map: this file is the `SessionProfile` lifecycle — create/adopt,
+//! teardown and the sole-survivor sync-back, template locks, and the path
+//! helpers; children: `reap` (orphan reaper + Xvfb cleanup), `copy`
+//! (profile-tree copy + its skip list).
 
-use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::error::{BladeError, Result};
 use crate::platform;
 
-/// Files/dirs Chrome locks while running — never copy these
-/// between a live profile and the template.
-const SKIP_ON_COPY: &[&str] = &[
-    "SingletonLock",
-    "SingletonSocket",
-    "SingletonCookie",
-    "lockfile",
-    ".blade-owner",
-    "Crashpad",
-    "RunningChromeVersion",
-    // Performance caches: large, regenerated on demand, and not needed
-    // for seasoning (trust signals). Skipping these cuts the profile copy
-    // from ~hundreds of MB to ~tens of MB — much faster launch.
-    "Cache",
-    "Code Cache",
-    "GPUCache",
-    "DawnGraphiteCache",
-    "DawnWebGPUCache",
-    "GrShaderCache",
-    "ShaderCache",
-    "blob_storage",
-];
+mod copy;
+mod reap;
+
+use self::copy::copy_profile;
+pub(crate) use self::copy::copy_profile_ex;
+pub use self::reap::reap_orphans;
 
 /// A per-process session profile. Cleaned up by [`cleanup`]
 /// after Chrome has exited (never while Chrome holds it).
@@ -83,7 +72,9 @@ impl SessionProfile {
     pub fn create() -> Result<Self> {
         reap_orphans();
 
-        let seasoned = !std::env::var("BLADE_FRESH").map(|v| v == "1").unwrap_or(false);
+        let seasoned = !std::env::var("BLADE_FRESH")
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
         let dir = if let Ok(custom) = std::env::var("BLADE_PROFILE_DIR") {
             // Explicit override: use it as-is (the caller owns
@@ -92,7 +83,11 @@ impl SessionProfile {
                 let d = PathBuf::from(custom);
                 std::fs::create_dir_all(&d)
                     .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
-                return Ok(Self { dir: d, seasoned: false, real_root: None });
+                return Ok(Self {
+                    dir: d,
+                    seasoned: false,
+                    real_root: None,
+                });
             }
             session_dir()
         } else if seasoned {
@@ -118,13 +113,14 @@ impl SessionProfile {
                 copy_profile(&template, &dir);
             }
             // Mark ownership for the orphan reaper.
-            let _ = std::fs::write(
-                dir.join(".blade-owner"),
-                std::process::id().to_string(),
-            );
+            let _ = std::fs::write(dir.join(".blade-owner"), std::process::id().to_string());
         }
 
-        Ok(Self { dir, seasoned, real_root: None })
+        Ok(Self {
+            dir,
+            seasoned,
+            real_root: None,
+        })
     }
 
     /// Create a real-lane session profile (clone mechanism): copy the
@@ -135,7 +131,9 @@ impl SessionProfile {
     /// still ages through the sole-survivor sync-back.
     pub fn create_real(root: &Path) -> Result<Self> {
         reap_orphans();
-        let dir = root.join("profiles").join(format!("sess-{}", std::process::id()));
+        let dir = root
+            .join("profiles")
+            .join(format!("sess-{}", std::process::id()));
         if dir.exists() {
             // PID reuse after a crash: never copy on top of a stale dir.
             let _ = std::fs::remove_dir_all(&dir);
@@ -184,7 +182,13 @@ impl SessionProfile {
         if let Some(root) = &self.real_root {
             // Real-lane (clone) session: sync back into this browser's own
             // template under the realbrowser root.
-            Self::sync_back_impl(root, "template", "template.sync", ".template.old", &self.dir);
+            Self::sync_back_impl(
+                root,
+                "template",
+                "template.sync",
+                ".template.old",
+                &self.dir,
+            );
             return;
         }
         if !self.seasoned {
@@ -207,7 +211,11 @@ impl SessionProfile {
     /// silently lose all logins) can be detected and broken.
     fn acquire_lock_at(root: &Path) -> bool {
         let lock = root.join(".template.lock");
-        match std::fs::OpenOptions::new().create_new(true).write(true).open(&lock) {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock)
+        {
             Ok(mut f) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -238,17 +246,21 @@ impl SessionProfile {
         }
     }
 
-    /// Copy a session profile into the template without removing the session
-    /// dir. Used by the orphan reaper to rescue a dead session's state on the
-    /// next launch (graceful-kill the orphan, flush, then copy). The template
-    /// is only replaced after Chrome is dead, so the copy is never taken from
-    /// a live, un-flushed profile.
-    pub fn sync_back_only(dir: &Path) {
-        let root = platform::blade_dir();
+    /// Copy a session profile into the template at `root` without removing
+    /// the session dir. Used by the orphan reaper to rescue a dead session's
+    /// state on the next launch (graceful-kill the orphan, flush, then copy).
+    /// The template is only replaced after Chrome is dead, so the copy is
+    /// never taken from a live, un-flushed profile.
+    ///
+    /// `root` is passed in rather than re-resolved: `blade_dir()` reads the
+    /// process-global env, and a second resolution could land in a different
+    /// directory than the reap that called us (the test suite flips
+    /// BLADE_HOME on other threads).
+    fn sync_back_only_at(root: &Path, dir: &Path) {
         if other_live_sessions_at(&root.join("profiles")) {
             return;
         }
-        if !Self::acquire_lock_at(&root) {
+        if !Self::acquire_lock_at(root) {
             return;
         }
         let tmp = root.join(".profile.sync");
@@ -267,7 +279,10 @@ impl SessionProfile {
     /// BLADE_NO_WARMING=1 disables warming entirely (privacy: no default
     /// visits to google.com/github.com/wikipedia.org).
     pub fn claim_warming() -> bool {
-        if std::env::var("BLADE_NO_WARMING").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("BLADE_NO_WARMING")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             return false;
         }
         let marker = platform::blade_dir().join(".warmed");
@@ -275,7 +290,10 @@ impl SessionProfile {
         // regardless of the marker (the profile was deleted/reset).
         let template = platform::blade_dir().join("profile");
         let template_empty = !template.is_dir()
-            || template.read_dir().map(|mut d| d.next().is_none()).unwrap_or(true);
+            || template
+                .read_dir()
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true);
         if template_empty {
             let _ = std::fs::remove_file(&marker);
         }
@@ -304,7 +322,8 @@ impl SessionProfile {
         }
         let profiles = platform::blade_dir().join("profiles");
         let is_session = dir.starts_with(&profiles)
-            && dir.file_name()
+            && dir
+                .file_name()
                 .map(|n| n.to_string_lossy().starts_with("sess-"))
                 .unwrap_or(false);
         if is_session {
@@ -315,7 +334,13 @@ impl SessionProfile {
     }
 
     fn sync_back_and_remove(dir: &Path) {
-        Self::sync_back_impl(&platform::blade_dir(), "profile", ".profile.sync", ".profile.old", dir);
+        Self::sync_back_impl(
+            &platform::blade_dir(),
+            "profile",
+            ".profile.sync",
+            ".profile.old",
+            dir,
+        );
     }
 
     /// Real-lane static teardown: sync a clone session back to its
@@ -327,7 +352,13 @@ impl SessionProfile {
     /// Sole-survivor copy-back: if another live session exists, skip — its
     /// state wins when IT exits. Shared by the agent lane (`profile`) and
     /// the real lane (`template` under the realbrowser root).
-    fn sync_back_impl(root: &Path, template_name: &str, tmp_name: &str, old_name: &str, dir: &Path) {
+    fn sync_back_impl(
+        root: &Path,
+        template_name: &str,
+        tmp_name: &str,
+        old_name: &str,
+        dir: &Path,
+    ) {
         if !other_live_sessions_at(&root.join("profiles")) && Self::acquire_lock_at(root) {
             let tmp = root.join(tmp_name);
             let _ = std::fs::remove_dir_all(&tmp);
@@ -385,7 +416,11 @@ fn session_dir() -> PathBuf {
 /// `<root>`), or None when `dir` is not a real-lane session.
 pub fn real_root_of_session(dir: &Path) -> Option<PathBuf> {
     let profiles = dir.parent()?;
-    if profiles.file_name().map(|n| n != "profiles").unwrap_or(true) {
+    if profiles
+        .file_name()
+        .map(|n| n != "profiles")
+        .unwrap_or(true)
+    {
         return None;
     }
     let root = profiles.parent()?;
@@ -430,363 +465,12 @@ fn other_live_sessions_at(profiles: &Path) -> bool {
     false
 }
 
-/// Reap the corpses of dead bladebro processes:
-/// 1. Session profile dirs whose owner pid is dead → kill
-///    their orphaned Chrome (via SingletonLock pid), rm dir.
-/// 2. Xvfb lock files (/tmp/.X<n>-lock) whose pid is dead →
-///    remove lock, kill the orphaned Xvfb if still running.
-///
-/// Runs on every Chrome launch. Self-healing: no matter how
-/// bladebro died (SIGKILL, OOM, panic), the next launch
-/// cleans up after it.
-/// Restore a template that a crashed sync-swap left displaced, and clean any
-/// swap staging leftovers. Called by [`reap_orphans`] on every launch.
-///
-/// `swap_into_template` moves the live `profile` aside to `.profile.old`
-/// BEFORE renaming the new copy in. If that swap is SIGKILLed between the two
-/// renames, `profile` is missing and `.profile.old` is the ONLY surviving copy
-/// of the whole profile. Deleting it (as reap_orphans used to) loses all
-/// seasoning on exactly the power-loss path the sidecar protects against.
-/// Returns true when a displaced template was resurrected.
-fn restore_interrupted_swap(blade_dir: &Path) -> bool {
-    let old = blade_dir.join(".profile.old");
-    let template = blade_dir.join("profile");
-    if old.is_dir() && !template.exists() {
-        let _ = std::fs::rename(&old, &template);
-        eprintln!("[bladebro] restored template from .profile.old (sync swap was interrupted)");
-        return true;
-    }
-    // Normal (template present) or leftover staging: drop it.
-    let _ = std::fs::remove_dir_all(&old);
-    false
-}
-
-pub fn reap_orphans() {
-    let blade_dir = platform::blade_dir();
-    // `.profile.sync` is just the staging copy, safe to drop.
-    let _ = std::fs::remove_dir_all(blade_dir.join(".profile.sync"));
-    restore_interrupted_swap(&blade_dir);
-
-    // 1. Dead session profiles + their Chromes (agent lane).
-    reap_session_root(&blade_dir.join("profiles"), None);
-
-    // 1b. Real-lane (clone) roots: swap leftovers + dead sessions. A dead
-    // MCP/daemon process must not leak its Chrome or lose the clone's state.
-    let rb = blade_dir.join("realbrowser");
-    if let Ok(entries) = std::fs::read_dir(&rb) {
-        for entry in entries.flatten() {
-            let root = entry.path();
-            if !root.is_dir() {
-                continue;
-            }
-            restore_interrupted_real_swap(&root);
-            let _ = std::fs::remove_dir_all(root.join("template.sync"));
-            reap_session_root(&root.join("profiles"), Some(&root));
-        }
-    }
-
-    // 2. Stale Xvfb locks + orphan Xvfb processes (Linux).
-    #[cfg(target_os = "linux")]
-    {
-        reap_xvfb();
-    }
-}
-
-/// Reap dead session dirs under `profiles`; `real_root` selects the
-/// sync-back destination (`None` = the agent-lane template).
-fn reap_session_root(profiles: &Path, real_root: Option<&Path>) {
-    let my_pid = std::process::id();
-    let entries = match std::fs::read_dir(profiles) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("sess-") {
-            continue;
-        }
-        let dir = entry.path();
-        let owner = std::fs::read_to_string(dir.join(".blade-owner"))
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok());
-        let owner_dead = match owner {
-            Some(pid) => pid != my_pid && !platform::process_alive(pid),
-            // No owner file = pre-session-profile artifact or interrupted
-            // creation. Treat sess-<pid> name as owner.
-            None => name
-                .strip_prefix("sess-")
-                .and_then(|p| p.parse::<u32>().ok())
-                .map(|pid| pid != my_pid && !platform::process_alive(pid))
-                .unwrap_or(false),
-        };
-        if !owner_dead {
-            continue;
-        }
-        kill_orphan_chrome(&dir);
-        // Sync the dead session's state (cookies, localStorage) back to the
-        // template BEFORE removing it. Without this, sessions killed without
-        // graceful shutdown lose all their state — the reaper just deleted
-        // the dir.
-        match real_root {
-            Some(root) => SessionProfile::sync_back_real(root, &dir),
-            None => SessionProfile::sync_back_only(&dir),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        eprintln!("[bladebro] reaped dead session profile {name}");
-    }
-}
-
-/// Kill the orphaned Chrome holding a dead session's profile. The pid is
-/// verified to be Chrome AND to mention THIS profile dir — a recycled pid
-/// must never be killed.
-fn kill_orphan_chrome(dir: &Path) {
-    if let Some(chrome_pid) = read_singleton_pid(dir) {
-        if platform::process_alive(chrome_pid)
-            && platform::process_is_chrome(chrome_pid)
-            && process_uses_dir(chrome_pid, dir)
-        {
-            platform::kill_process_graceful(chrome_pid);
-            for _ in 0..20 {
-                if !platform::process_alive(chrome_pid) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            if platform::process_alive(chrome_pid) {
-                platform::kill_process_force(chrome_pid);
-            }
-        }
-    }
-}
-
-/// Restore/clean a realbrowser template after a crashed import or sync
-/// swap. Mirrors [`restore_interrupted_swap`] for the per-browser root.
-fn restore_interrupted_real_swap(root: &Path) {
-    let template = root.join("template");
-    for (name, what) in [("template.old", "sync swap"), ("template.tmp", "import")] {
-        let dir = root.join(name);
-        if dir.is_dir() {
-            if !template.exists() {
-                let _ = std::fs::rename(&dir, &template);
-                eprintln!(
-                    "[bladebro] restored real-browser template from {name} (interrupted {what})"
-                );
-            } else {
-                let _ = std::fs::remove_dir_all(&dir);
-            }
-        }
-    }
-}
-
-/// Read the pid from a profile dir's SingletonLock (a `hostname-pid`
-/// symlink on Linux/macOS). Windows has no such file — its singleton is a
-/// `lockfile` handle with no pid in it — so this returns None there and the
-/// orphan kill is Unix-only (documented residual).
-fn read_singleton_pid(dir: &Path) -> Option<u32> {
-    let lock = dir.join("SingletonLock");
-    #[cfg(unix)]
-    {
-        let target = std::fs::read_link(&lock).ok()?;
-        target
-            .to_string_lossy()
-            .rsplit('-')
-            .next()
-            .and_then(|p| p.parse::<u32>().ok())
-    }
-    #[cfg(windows)]
-    {
-        std::fs::read_to_string(&lock)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-    }
-}
-
-/// Does process `pid` have `dir` in its command line?
-/// Guards against killing a recycled pid.
-fn process_uses_dir(pid: u32, dir: &Path) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-            .map(|c| c.contains(&dir.display().to_string()))
-            .unwrap_or(false)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // No /proc on macOS — ask ps for the full command line.
-        std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "command="])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&dir.display().to_string()))
-            .unwrap_or(false)
-    }
-    #[cfg(windows)]
-    {
-        // No cheap command-line read on Windows (wmic is gone on recent
-        // builds). Trust process_is_chrome — the pid comes from OUR session
-        // dir's lock, so a recycled-pid kill window is narrow.
-        let _ = (pid, dir);
-        true
-    }
-}
-
-/// Reap stale Xvfb locks and orphaned Xvfb processes.
-///
-/// The X lock file /tmp/.X<n>-lock contains the server
-/// pid, 10 chars, space-padded. Two reap cases:
-/// - pid dead: stale lock, remove + kill any orphan on
-///   that display.
-/// - pid alive but ORPHANED (ppid 1): its bladebro died
-///   without cleanup; kill it and remove the lock.
-///
-/// Never touches :0/:1 (the user's real displays) or any
-/// Xvfb with a live parent (an active session owns it).
-#[cfg(target_os = "linux")]
-fn reap_xvfb() {
-    for n in 2..200 {
-        let lock = format!("/tmp/.X{n}-lock");
-        let content = match std::fs::read_to_string(&lock) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let pid: u32 = match content.trim().parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if platform::process_alive(pid) {
-            // Alive — but orphaned? ppid 1 means the owning
-            // bladebro died and init adopted it.
-            if proc_ppid(pid) <= 1 && proc_is_xvfb(pid) {
-                platform::kill_process_force(pid);
-                let _ = std::fs::remove_file(&lock);
-                eprintln!("[bladebro] reaped orphaned Xvfb :{n} (pid {pid})");
-            }
-            continue;
-        }
-        // Dead pid: the lock is stale. Remove it, then kill
-        // any orphaned Xvfb still bound to this display.
-        let _ = std::fs::remove_file(&lock);
-        kill_xvfb_on_display(n);
-        eprintln!("[bladebro] reaped stale Xvfb display :{n}");
-    }
-    // Stale display CLAIMS: /tmp/.blade-x<n>-claim holds the claiming
-    // bladebro's pid. A SIGKILLed bladebro never releases its claim, so
-    // that display number would be lost forever (until /tmp is wiped).
-    // Free every claim whose owner is dead.
-    for n in 99..200 {
-        let claim = format!("/tmp/.blade-x{n}-claim");
-        let pid: u32 = match std::fs::read_to_string(&claim) {
-            Ok(c) => match c.trim().parse() {
-                Ok(p) => p,
-                Err(_) => continue,
-            },
-            Err(_) => continue,
-        };
-        if !platform::process_alive(pid) {
-            let _ = std::fs::remove_file(&claim);
-        }
-    }
-}
-
-/// Parent pid of a process (0/1 = orphaned or init).
-#[cfg(target_os = "linux")]
-fn proc_ppid(pid: u32) -> u32 {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .unwrap_or_default();
-    // Format: pid (comm) state ppid ... — comm can contain
-    // spaces/parens, so parse after the last ')'.
-    stat.rsplit(')')
-        .next()
-        .and_then(|rest| rest.split_whitespace().nth(1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0)
-}
-
-/// Is this pid an Xvfb process?
-#[cfg(target_os = "linux")]
-fn proc_is_xvfb(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-        .map(|c| c.contains("Xvfb"))
-        .unwrap_or(false)
-}
-
-/// Kill any Xvfb process serving display `:<n>` whose parent
-/// is dead (orphaned). Identified via /proc cmdline scan.
-#[cfg(target_os = "linux")]
-fn kill_xvfb_on_display(display: u16) {
-    let want = format!(":{display}");
-    let procs = match std::fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    for entry in procs.flatten() {
-        let pid: u32 = match entry.file_name().to_string_lossy().parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let cmdline = match std::fs::read_to_string(entry.path().join("cmdline")) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if !cmdline.contains("Xvfb") || !cmdline.contains(&want) {
-            continue;
-        }
-        if proc_ppid(pid) <= 1 {
-            platform::kill_process_force(pid);
-        }
-    }
-}
-
-/// Copy a Chrome profile tree, skipping locked/runtime files.
-/// Shallow-but-recursive: Chrome's profile nests (Default/,
-/// Local Storage/, etc.) — a full recursive copy with per-file
-/// error tolerance. Dirs are created 0700 (cookie-bearing data).
-fn copy_profile(src: &Path, dst: &Path) {
-    copy_profile_ex(src, dst, &[]);
-}
-
-/// Copy with an extra skip list — the real-lane import excludes session
-/// restore files so the clone opens a fresh window, not the user's tab set.
-pub(crate) fn copy_profile_ex(src: &Path, dst: &Path, extra_skip: &[&str]) {
-    let _ = crate::platform::secure_create_dir_all(dst);
-    copy_dir_filtered(src, dst, 0, extra_skip);
-}
-
-fn copy_dir_filtered(src: &Path, dst: &Path, depth: usize, extra_skip: &[&str]) {
-    // Bound recursion — Chrome profiles nest cache dirs deeply.
-    // 6 levels covers the deepest seasoning-relevant structure
-    // (Default/WebStorage/<id>/CacheStorage/<origin>/files).
-    if depth > 6 {
-        return;
-    }
-    let entries = match std::fs::read_dir(src) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if SKIP_ON_COPY.contains(&name.as_str()) || extra_skip.contains(&name.as_str()) {
-            continue;
-        }
-        let s = entry.path();
-        let d = dst.join(&name);
-        let ft = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if ft.is_dir() {
-            let _ = crate::platform::secure_create_dir_all(&d);
-            copy_dir_filtered(&s, &d, depth + 1, extra_skip);
-        } else if ft.is_file() {
-            // Skip sockets/fifos implicitly (not files). Copy
-            // errors (locked SQLite, etc.) are tolerated.
-            let _ = std::fs::copy(&s, &d);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use super::copy::copy_profile;
+    use super::reap::{reap_orphans_at, restore_interrupted_swap};
 
     #[test]
     fn copy_skips_singleton_files() {
@@ -824,65 +508,69 @@ mod tests {
 
     #[test]
     fn stale_lock_with_dead_owner_is_broken_and_acquired() {
-        let _ = std::fs::create_dir_all(platform::blade_dir());
-        let lock = platform::blade_dir().join(".template.lock.test-dead");
+        // Hermetic: locks live in a temp dir, never the shared real one.
+        let dir = std::env::temp_dir().join(format!("bladebro-lock-dead-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let lock = dir.join(".template.lock.test-dead");
         let _ = std::fs::remove_file(&lock);
-        // A dead pid must never wedge sync: acquiring should break the lock.
+        // A dead pid must never wedge sync: the lock must read as stale.
         std::fs::write(&lock, "999999999 0\n").unwrap();
-        // Redirect acquire to the test path by temporarily using a helper
-        // that reads this exact file name.
-        let stale = template_lock_stale(&lock);
-        assert!(stale, "lock owned by a dead pid must be stale");
+        assert!(
+            template_lock_stale(&lock),
+            "lock owned by a dead pid must be stale"
+        );
         let _ = std::fs::remove_file(&lock);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn stale_lock_with_live_owner_is_not_stale() {
-        let _ = std::fs::create_dir_all(platform::blade_dir());
-        let lock = platform::blade_dir().join(".template.lock.test-live");
+        // Hermetic: locks live in a temp dir, never the shared real one.
+        let dir = std::env::temp_dir().join(format!("bladebro-lock-live-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let lock = dir.join(".template.lock.test-live");
         let _ = std::fs::remove_file(&lock);
         let me = std::process::id();
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         std::fs::write(&lock, format!("{me} {now}\n")).unwrap();
-        assert!(!template_lock_stale(&lock), "live owner lock must not be stale");
+        assert!(
+            !template_lock_stale(&lock),
+            "live owner lock must not be stale"
+        );
         let _ = std::fs::remove_file(&lock);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn reaper_syncs_back_before_delete() {
-        let blade_dir = platform::blade_dir();        let profiles_dir = blade_dir.join("profiles");
-        let template_dir = blade_dir.join("profile");
+        // Hermetic: a temp root, never the shared real data dir. The env is
+        // process-global and parallel tests flip BLADE_HOME; the pre-fix
+        // version resolved the root twice (reap entry + sync) and could be
+        // split across two directories by a flip — and it mutated the real
+        // install (deleted its session dirs, swapped its template).
+        let root =
+            std::env::temp_dir().join(format!("bladebro-test-reaper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let profiles_dir = root.join("profiles");
+        let template_dir = root.join("profile");
 
-        // Clean ALL stale session dirs + locks so they don't interfere.
-        // (Live testing leaves orphaned session dirs with dead owners.)
-        if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
-        }
-        let _ = std::fs::remove_file(blade_dir.join(".template.lock"));
-        let _ = std::fs::remove_dir_all(blade_dir.join(".profile.sync"));
-
-        // Snapshot the entire template so we can restore it after.
-        let template_backup = std::env::temp_dir().join("bladebro-test-template-backup");
-        let _ = std::fs::remove_dir_all(&template_backup);
-        if template_dir.is_dir() {
-            copy_profile(&template_dir, &template_backup);
-        }
+        // Template with a marker file the sync must REPLACE, not merge into.
+        std::fs::create_dir_all(template_dir.join("Default")).unwrap();
+        std::fs::write(template_dir.join("Default/Cookies"), b"template-cookie-db").unwrap();
+        std::fs::write(template_dir.join("stale-marker"), b"old-template").unwrap();
 
         // Create a fake dead session with a marker file.
         let test_pid = 999_999_999u32; // guaranteed dead pid
         let sess_dir = profiles_dir.join(format!("sess-{test_pid}"));
         std::fs::create_dir_all(sess_dir.join("Default")).unwrap();
         std::fs::write(sess_dir.join(".blade-owner"), test_pid.to_string()).unwrap();
-        std::fs::write(
-            sess_dir.join("Default/Cookies"),
-            b"fake-cookie-db-data",
-        ).unwrap();
+        std::fs::write(sess_dir.join("Default/Cookies"), b"fake-cookie-db-data").unwrap();
 
-        // Run the reaper.
-        reap_orphans();
+        // Run the reaper against the temp root.
+        reap_orphans_at(&root);
 
         // Session dir should be gone.
         assert!(!sess_dir.exists(), "reaper should have removed session dir");
@@ -899,16 +587,12 @@ mod tests {
             content, b"fake-cookie-db-data",
             "template cookie DB should contain session data"
         );
+        assert!(
+            !template_dir.join("stale-marker").exists(),
+            "template must be replaced by the sync, not merged into"
+        );
 
-        // Restore the original template.
-        let _ = std::fs::remove_dir_all(&template_dir);
-        if template_backup.is_dir() {
-            let tmp = blade_dir.join(".profile.restore");
-            let _ = std::fs::remove_dir_all(&tmp);
-            copy_profile(&template_backup, &tmp);
-            let _ = std::fs::rename(&tmp, &template_dir);
-        }
-        let _ = std::fs::remove_dir_all(&template_backup);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The reaper must not delete the template when a sync-swap was SIGKILLed
@@ -924,27 +608,43 @@ mod tests {
         // Simulate the crash state: template was moved aside, new copy never
         // renamed in. `profile` is missing; `.profile.old` holds the profile.
         std::fs::create_dir_all(blade_dir.join(".profile.old").join("Default")).unwrap();
-        std::fs::write(blade_dir.join(".profile.old").join("Default/Cookies"), b"displaced-cookie").unwrap();
+        std::fs::write(
+            blade_dir.join(".profile.old").join("Default/Cookies"),
+            b"displaced-cookie",
+        )
+        .unwrap();
 
         // The displaced profile must be resurrected, not deleted.
-        assert!(restore_interrupted_swap(&blade_dir), "swap-restore should trigger");
+        assert!(
+            restore_interrupted_swap(&blade_dir),
+            "swap-restore should trigger"
+        );
         assert_eq!(
             std::fs::read(blade_dir.join("profile/Default/Cookies")).unwrap(),
             b"displaced-cookie"
         );
-        assert!(!blade_dir.join(".profile.old").exists(), ".profile.old consumed by restore");
+        assert!(
+            !blade_dir.join(".profile.old").exists(),
+            ".profile.old consumed by restore"
+        );
 
         // When the template is already present, .profile.old is just staging
         // and must be dropped without disturbing `profile`.
         std::fs::write(blade_dir.join("profile/Default/Cookies"), b"live").unwrap();
         std::fs::create_dir_all(blade_dir.join(".profile.old")).unwrap();
-        assert!(!restore_interrupted_swap(&blade_dir), "no restore when profile present");
+        assert!(
+            !restore_interrupted_swap(&blade_dir),
+            "no restore when profile present"
+        );
         assert_eq!(
             std::fs::read(blade_dir.join("profile/Default/Cookies")).unwrap(),
             b"live",
             "present template must be left untouched"
         );
-        assert!(!blade_dir.join(".profile.old").exists(), "stale .profile.old cleaned");
+        assert!(
+            !blade_dir.join(".profile.old").exists(),
+            "stale .profile.old cleaned"
+        );
 
         let _ = std::fs::remove_dir_all(&blade_dir);
     }

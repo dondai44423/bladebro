@@ -78,11 +78,23 @@ impl InterceptState {
     /// Human-readable list of active classes, for `state op=block get`.
     pub fn describe(mask: u32) -> String {
         let mut parts = Vec::new();
-        if mask & BLOCK_IMAGES != 0 { parts.push("images"); }
-        if mask & BLOCK_FONTS != 0 { parts.push("fonts"); }
-        if mask & BLOCK_MEDIA != 0 { parts.push("media"); }
-        if mask & BLOCK_TRACKERS != 0 { parts.push("trackers"); }
-        if parts.is_empty() { "none".to_string() } else { parts.join(",") }
+        if mask & BLOCK_IMAGES != 0 {
+            parts.push("images");
+        }
+        if mask & BLOCK_FONTS != 0 {
+            parts.push("fonts");
+        }
+        if mask & BLOCK_MEDIA != 0 {
+            parts.push("media");
+        }
+        if mask & BLOCK_TRACKERS != 0 {
+            parts.push("trackers");
+        }
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(",")
+        }
     }
 
     pub fn set_rules(&self, mask: u32) {
@@ -102,15 +114,22 @@ impl InterceptState {
     }
 
     fn page_domain(&self) -> String {
-        self.page_domain.read().map(|d| d.clone()).unwrap_or_default()
+        self.page_domain
+            .read()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
 
     fn add_pending(&self, id: &str) {
-        if let Ok(mut p) = self.pending.lock() { p.insert(id.to_string()); }
+        if let Ok(mut p) = self.pending.lock() {
+            p.insert(id.to_string());
+        }
     }
 
     fn remove_pending(&self, id: &str) {
-        if let Ok(mut p) = self.pending.lock() { p.remove(id); }
+        if let Ok(mut p) = self.pending.lock() {
+            p.remove(id);
+        }
     }
 
     fn drain_pending(&self) -> Vec<String> {
@@ -135,23 +154,16 @@ pub fn url_host(url: &str) -> String {
 /// last THREE labels. Not exhaustive (full PSL is heavy) but covers
 /// the common cases that matter for third-party detection.
 const TWO_PART_SUFFIXES: &[&str] = &[
-    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk",
-    "com.au", "net.au", "org.au", "edu.au", "gov.au",
-    "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
-    "com.br", "net.br", "org.br", "gov.br",
-    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
-    "com.tw", "org.tw", "edu.tw", "gov.tw",
-    "co.in", "net.in", "org.in", "gen.in", "firm.in",
-    "co.nz", "net.nz", "org.nz", "ac.nz", "govt.nz",
-    "co.kr", "or.kr", "ne.kr", "ac.kr", "go.kr",
-    "com.sg", "net.sg", "org.sg", "edu.sg", "gov.sg",
-    "com.mx", "org.mx", "gob.mx", "edu.mx",
-    "com.tr", "org.tr", "net.tr", "gen.tr",
-    "co.za", "org.za", "net.za", "ac.za",
-    "com.hk", "org.hk", "net.hk", "edu.hk", "gov.hk",
-    "com.ar", "com.co", "com.pe", "com.ve", "com.ph", "com.my",
-    "co.id", "co.th", "co.il", "com.ng", "com.pk", "com.bd",
-    "com.eg", "com.sa", "com.ae", "com.ua", "com.pl", "com.vn",
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "com.au", "net.au", "org.au",
+    "edu.au", "gov.au", "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp", "com.br", "net.br", "org.br",
+    "gov.br", "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "com.tw", "org.tw", "edu.tw",
+    "gov.tw", "co.in", "net.in", "org.in", "gen.in", "firm.in", "co.nz", "net.nz", "org.nz",
+    "ac.nz", "govt.nz", "co.kr", "or.kr", "ne.kr", "ac.kr", "go.kr", "com.sg", "net.sg", "org.sg",
+    "edu.sg", "gov.sg", "com.mx", "org.mx", "gob.mx", "edu.mx", "com.tr", "org.tr", "net.tr",
+    "gen.tr", "co.za", "org.za", "net.za", "ac.za", "com.hk", "org.hk", "net.hk", "edu.hk",
+    "gov.hk", "com.ar", "com.co", "com.pe", "com.ve", "com.ph", "com.my", "co.id", "co.th",
+    "co.il", "com.ng", "com.pk", "com.bd", "com.eg", "com.sa", "com.ae", "com.ua", "com.pl",
+    "com.vn",
 ];
 
 /// Registrable domain (eTLD+1) heuristic. "www.cdn.example.co.uk"
@@ -178,38 +190,96 @@ pub fn registrable_domain(host: &str) -> String {
 /// excludes bot-detection vendors (see NEVER_BLOCK).
 const TRACKER_DOMAINS: &[&str] = &[
     // Google ads/analytics (not the bot-detection side)
-    "doubleclick.net", "googlesyndication.com", "google-analytics.com",
-    "googletagmanager.com", "googleadservices.com", "analytics.google.com",
-    "adservice.google.com", "pagead2.googlesyndication.com",
+    "doubleclick.net",
+    "googlesyndication.com",
+    "google-analytics.com",
+    "googletagmanager.com",
+    "googleadservices.com",
+    "analytics.google.com",
+    "adservice.google.com",
+    "pagead2.googlesyndication.com",
     // Facebook/Meta
-    "facebook.net", "connect.facebook.net", "fbcdn.net",
+    "facebook.net",
+    "connect.facebook.net",
+    "fbcdn.net",
     // Twitter/X
-    "ads.twitter.com", "analytics.twitter.com", "ads-twitter.com",
+    "ads.twitter.com",
+    "analytics.twitter.com",
+    "ads-twitter.com",
     // Microsoft Clarity / LinkedIn
-    "clarity.ms", "snap.licdn.com",
+    "clarity.ms",
+    "snap.licdn.com",
     // Session replay / heatmaps (third-party trackers users block)
-    "hotjar.com", "fullstory.com", "mouseflow.com", "luckyorange.com",
-    "crazyegg.com", "smartlook.com", "logrocket.com",
+    "hotjar.com",
+    "fullstory.com",
+    "mouseflow.com",
+    "luckyorange.com",
+    "crazyegg.com",
+    "smartlook.com",
+    "logrocket.com",
     // Product analytics
-    "mixpanel.com", "segment.io", "segment.com", "amplitude.com",
-    "heap.io", "heapanalytics.com", "posthog.com", "pendo.io",
-    "kissmetrics.com", "chartbeat.com", "parsely.com",
+    "mixpanel.com",
+    "segment.io",
+    "segment.com",
+    "amplitude.com",
+    "heap.io",
+    "heapanalytics.com",
+    "posthog.com",
+    "pendo.io",
+    "kissmetrics.com",
+    "chartbeat.com",
+    "parsely.com",
     // APM / error tracking
-    "newrelic.com", "nr-data.net", "sentry.io", "bugsnag.com",
-    "datadoghq.com", "rollbar.com",
+    "newrelic.com",
+    "nr-data.net",
+    "sentry.io",
+    "bugsnag.com",
+    "datadoghq.com",
+    "rollbar.com",
     // Ad networks / exchanges
-    "amazon-adsystem.com", "adnxs.com", "adsrvr.org", "rubiconproject.com",
-    "pubmatic.com", "openx.net", "criteo.com", "criteo.net", "taboola.com",
-    "outbrain.com", "scorecardresearch.com", "quantserve.com", "quantcount.com",
-    "moatads.com", "advertising.com", "bidswitch.net", "casalemedia.com",
-    "indexww.com", "lijit.com", "sharethrough.com", "teads.tv", "yieldmo.com",
-    "33across.com", "adform.net", "smartadserver.com", "spotxchange.com",
-    "contextweb.com", "gumgum.com", "media.net", "sovrn.com",
+    "amazon-adsystem.com",
+    "adnxs.com",
+    "adsrvr.org",
+    "rubiconproject.com",
+    "pubmatic.com",
+    "openx.net",
+    "criteo.com",
+    "criteo.net",
+    "taboola.com",
+    "outbrain.com",
+    "scorecardresearch.com",
+    "quantserve.com",
+    "quantcount.com",
+    "moatads.com",
+    "advertising.com",
+    "bidswitch.net",
+    "casalemedia.com",
+    "indexww.com",
+    "lijit.com",
+    "sharethrough.com",
+    "teads.tv",
+    "yieldmo.com",
+    "33across.com",
+    "adform.net",
+    "smartadserver.com",
+    "spotxchange.com",
+    "contextweb.com",
+    "gumgum.com",
+    "media.net",
+    "sovrn.com",
     // Tag managers / beacons
-    "tiqcdn.com", "demdex.net", "omtrdc.net", "everesttech.net",
-    "krxd.net", "bluekai.com", "exelator.com", "mathtag.com",
+    "tiqcdn.com",
+    "demdex.net",
+    "omtrdc.net",
+    "everesttech.net",
+    "krxd.net",
+    "bluekai.com",
+    "exelator.com",
+    "mathtag.com",
     // Consent/analytics extras
-    "onetrust.io", "cookielaw.org", "trustarc.com",
+    "onetrust.io",
+    "cookielaw.org",
+    "trustarc.com",
 ];
 
 /// Bot-detection / challenge vendors that must NEVER be blocked.
@@ -217,14 +287,30 @@ const TRACKER_DOMAINS: &[&str] = &[
 /// list WINS over TRACKER_DOMAINS and over resource-type blocks for
 /// scripts/xhr (resource-type blocks only hit inert assets anyway).
 const NEVER_BLOCK_DOMAINS: &[&str] = &[
-    "datadome.co", "datadome.eu",
-    "challenges.cloudflare.com", "cloudflare.com", "cdn-cgi",
-    "px-cdn.net", "perimeterx.net", "humansecurity.com", "px-cloud.net",
-    "imperva.com", "incapsula.com", "incech.com",
-    "akamaihd.net", "akamaized.net", "akamai.com",
-    "distil.networks", "shieldsquare.com", "kasada.io", "arkoselabs.com",
-    "hcaptcha.com", "recaptcha.net", "google.com", // reCAPTCHA lives under google.com/recaptcha
-    "funcaptcha.com", "geetest.com",
+    "datadome.co",
+    "datadome.eu",
+    "challenges.cloudflare.com",
+    "cloudflare.com",
+    "cdn-cgi",
+    "px-cdn.net",
+    "perimeterx.net",
+    "humansecurity.com",
+    "px-cloud.net",
+    "imperva.com",
+    "incapsula.com",
+    "incech.com",
+    "akamaihd.net",
+    "akamaized.net",
+    "akamai.com",
+    "distil.networks",
+    "shieldsquare.com",
+    "kasada.io",
+    "arkoselabs.com",
+    "hcaptcha.com",
+    "recaptcha.net",
+    "google.com", // reCAPTCHA lives under google.com/recaptcha
+    "funcaptcha.com",
+    "geetest.com",
 ];
 
 /// Decide whether a request should be blocked.
@@ -297,7 +383,10 @@ pub async fn run_interception(
             continue;
         }
         let params = &event.params;
-        let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+        let request_id = params
+            .get("requestId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if request_id.is_empty() {
             continue;
         }
@@ -306,7 +395,10 @@ pub async fn run_interception(
             .and_then(|r| r.get("url"))
             .and_then(|u| u.as_str())
             .unwrap_or("");
-        let resource_type = params.get("resourceType").and_then(|v| v.as_str()).unwrap_or("");
+        let resource_type = params
+            .get("resourceType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         state.add_pending(request_id);
         let rules = state.rules();
@@ -366,10 +458,16 @@ mod tests {
 
     #[test]
     fn parse_classes_mask() {
-        assert_eq!(InterceptState::parse_classes("images,fonts"), BLOCK_IMAGES | BLOCK_FONTS);
+        assert_eq!(
+            InterceptState::parse_classes("images,fonts"),
+            BLOCK_IMAGES | BLOCK_FONTS
+        );
         assert_eq!(InterceptState::parse_classes("media"), BLOCK_MEDIA);
         assert_eq!(InterceptState::parse_classes("trackers"), BLOCK_TRACKERS);
-        assert_eq!(InterceptState::parse_classes("images,garbage,fonts"), BLOCK_IMAGES | BLOCK_FONTS);
+        assert_eq!(
+            InterceptState::parse_classes("images,garbage,fonts"),
+            BLOCK_IMAGES | BLOCK_FONTS
+        );
         assert_eq!(InterceptState::parse_classes(""), 0);
     }
 
@@ -397,52 +495,110 @@ mod tests {
     fn never_block_first_party_script() {
         let r = BLOCK_IMAGES | BLOCK_FONTS | BLOCK_MEDIA | BLOCK_TRACKERS;
         // same-site script: never
-        assert!(!should_block("Script", "https://www.example.com/app.js", r, "example.com"));
+        assert!(!should_block(
+            "Script",
+            "https://www.example.com/app.js",
+            r,
+            "example.com"
+        ));
         // same-site xhr: never
-        assert!(!should_block("XHR", "https://api.example.com/data", r, "example.com"));
+        assert!(!should_block(
+            "XHR",
+            "https://api.example.com/data",
+            r,
+            "example.com"
+        ));
     }
 
     #[test]
     fn block_third_party_tracker_only() {
         let r = BLOCK_TRACKERS;
         // third-party tracker script: block
-        assert!(should_block("Script", "https://www.google-analytics.com/analytics.js", r, "example.com"));
+        assert!(should_block(
+            "Script",
+            "https://www.google-analytics.com/analytics.js",
+            r,
+            "example.com"
+        ));
         // third-party tracker xhr: block
-        assert!(should_block("XHR", "https://stats.mixpanel.com/track", r, "example.com"));
+        assert!(should_block(
+            "XHR",
+            "https://stats.mixpanel.com/track",
+            r,
+            "example.com"
+        ));
         // same-site tracker-looking host is NOT in list anyway, but third_party check:
-        assert!(!should_block("Script", "https://example.com/analytics.js", r, "example.com"));
+        assert!(!should_block(
+            "Script",
+            "https://example.com/analytics.js",
+            r,
+            "example.com"
+        ));
         // subdomain of tracker still resolves to tracker domain
-        assert!(should_block("Image", "https://pixel.doubleclick.net/x.gif", r, "example.com"));
+        assert!(should_block(
+            "Image",
+            "https://pixel.doubleclick.net/x.gif",
+            r,
+            "example.com"
+        ));
     }
 
     #[test]
     fn never_block_bot_detectors() {
         let r = BLOCK_IMAGES | BLOCK_FONTS | BLOCK_MEDIA | BLOCK_TRACKERS;
         // DataDome third-party script: never block
-        assert!(!should_block("Script", "https://js.datadome.co/tags.js", r, "example.com"));
+        assert!(!should_block(
+            "Script",
+            "https://js.datadome.co/tags.js",
+            r,
+            "example.com"
+        ));
         // Cloudflare challenge: never block
-        assert!(!should_block("Script", "https://challenges.cloudflare.com/turnstile.js", r, "example.com"));
+        assert!(!should_block(
+            "Script",
+            "https://challenges.cloudflare.com/turnstile.js",
+            r,
+            "example.com"
+        ));
         // PerimeterX: never
-        assert!(!should_block("Script", "https://px-cdn.net/px.js", r, "example.com"));
+        assert!(!should_block(
+            "Script",
+            "https://px-cdn.net/px.js",
+            r,
+            "example.com"
+        ));
     }
 
     #[test]
     fn images_blocked_even_first_party() {
         // Inert assets are always safe to block, even same-origin.
         let r = BLOCK_IMAGES;
-        assert!(should_block("Image", "https://example.com/logo.png", r, "example.com"));
+        assert!(should_block(
+            "Image",
+            "https://example.com/logo.png",
+            r,
+            "example.com"
+        ));
     }
 
     #[test]
     fn empty_page_domain_no_tracker_block() {
         // With unknown page origin we cannot prove third-party; be safe, don't block.
         let r = BLOCK_TRACKERS;
-        assert!(!should_block("Script", "https://www.google-analytics.com/a.js", r, ""));
+        assert!(!should_block(
+            "Script",
+            "https://www.google-analytics.com/a.js",
+            r,
+            ""
+        ));
     }
 
     #[test]
     fn describe_roundtrip() {
         assert_eq!(InterceptState::describe(0), "none");
-        assert_eq!(InterceptState::describe(BLOCK_IMAGES | BLOCK_MEDIA), "images,media");
+        assert_eq!(
+            InterceptState::describe(BLOCK_IMAGES | BLOCK_MEDIA),
+            "images,media"
+        );
     }
 }

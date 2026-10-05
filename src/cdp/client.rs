@@ -113,9 +113,7 @@ impl CdpClient {
                 let mut stream = stream;
                 while let Some(frame) = stream.next().await {
                     let text = match frame {
-                        Ok(Message::Text(t)) => {
-                            String::from_utf8_lossy(t.as_bytes()).into_owned()
-                        }
+                        Ok(Message::Text(t)) => String::from_utf8_lossy(t.as_bytes()).into_owned(),
                         Ok(Message::Binary(b)) => {
                             // CDP is text; tolerate binary as UTF-8.
                             String::from_utf8_lossy(&b).into_owned()
@@ -140,7 +138,13 @@ impl CdpClient {
             });
         }
 
-        Ok(Self { writer_tx, pending, events_tx, next_id, closed })
+        Ok(Self {
+            writer_tx,
+            pending,
+            events_tx,
+            next_id,
+            closed,
+        })
     }
 
     /// Build a client over `--remote-debugging-pipe` file descriptors (S1:
@@ -222,12 +226,19 @@ impl CdpClient {
             });
         }
 
-        Ok(Self { writer_tx, pending, events_tx, next_id, closed })
+        Ok(Self {
+            writer_tx,
+            pending,
+            events_tx,
+            next_id,
+            closed,
+        })
     }
 
     /// Send a CDP command and await its result, with the default timeout.
     pub async fn send(&self, method: &str, params: Option<Value>) -> Result<Value> {
-        self.send_with_timeout(method, params, DEFAULT_TIMEOUT).await
+        self.send_with_timeout(method, params, DEFAULT_TIMEOUT)
+            .await
     }
 
     /// Send a CDP command with an explicit timeout.
@@ -237,7 +248,8 @@ impl CdpClient {
         params: Option<Value>,
         deadline: Duration,
     ) -> Result<Value> {
-        self.send_session_with_timeout(None, method, params, deadline).await
+        self.send_session_with_timeout(None, method, params, deadline)
+            .await
     }
 
     /// Send a CDP command routed to a sub-session (flat mode). `None` targets
@@ -270,7 +282,10 @@ impl CdpClient {
                 .map_err(|e| BladeError::Other(e.to_string()))?;
             p.insert(id, tx);
         }
-        let _guard = PendingGuard { pending: self.pending.clone(), id };
+        let _guard = PendingGuard {
+            pending: self.pending.clone(),
+            id,
+        };
         // Recheck AFTER insert: if the reader died between our first check
         // and the insert, its drain missed us — fail now instead of hanging.
         if self.closed.load(Ordering::Relaxed) {
@@ -317,9 +332,7 @@ impl CdpClient {
                     Ok(ev) if ev.method == method => return Ok(ev),
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Err(BladeError::Closed)
-                    }
+                    Err(broadcast::error::RecvError::Closed) => return Err(BladeError::Closed),
                 }
             }
         })
@@ -346,12 +359,19 @@ impl CdpClient {
 /// Route one decoded JSON text frame: responses go to their pending caller,
 /// events fan out to the broadcast bus. Returns `false` when the pending map
 /// is poisoned and the reader should stop. Shared by the WS and pipe readers.
-fn route_cdp_text(text: &str, pending: &PendingMap, events_tx: &broadcast::Sender<CdpEvent>) -> bool {
+fn route_cdp_text(
+    text: &str,
+    pending: &PendingMap,
+    events_tx: &broadcast::Sender<CdpEvent>,
+) -> bool {
     match serde_json::from_str::<CdpMessage>(text) {
         Ok(msg) => match msg.classify() {
             Some(CdpIncoming::Response { id, result, error }) => {
                 let outcome = match error {
-                    Some(e) => Err(BladeError::Cdp { code: e.code, message: e.message }),
+                    Some(e) => Err(BladeError::Cdp {
+                        code: e.code,
+                        message: e.message,
+                    }),
                     None => Ok(result),
                 };
                 let tx = {

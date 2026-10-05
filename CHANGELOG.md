@@ -8,6 +8,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-10-02
+
+### Added
+- **Reddit search pages have a dedicated `extract auto` path
+  (`container:"reddit-search"`).** Search results are client-rendered SDUI
+  components — `shreddit-post` never appears on a search page — so the feed
+  fast path never fired and the structural fallback returned items under a
+  generic `container:"div"`: one of reddit's most common task types running
+  on a heuristic, with output indistinguishable from the confident path. The
+  search sweep reads reddit's own listing JSON from page context (the same
+  loid-gated session the comment sweep uses): exact scores (not reddit's
+  fuzzed display values), author/date/url/subreddit, a self-post excerpt, the
+  query it actually answered echoed back (`query`, plus `sort`/`t` when set —
+  something the rendered DOM cannot prove), a paging note when more results
+  exist, and promoted posts skipped with a disclosed count. Covers `/search/`
+  and `/r/<sub>/search/` for the All/Posts/Links tabs; community/user
+  searches keep the DOM path.
+
+### Fixed
+- **Reads no longer answer with the previous route's content after a
+  client-side navigation.** An SPA router moves the URL before the new route
+  renders — the old route's DOM stays mounted and a DOM-quiet settle reads
+  "settled" the whole window — so `extract auto` could return the previous
+  query's results with `phase: ready`, real scores, and no signal at all
+  (reproduced live on reddit search; a deterministic fixture now pins it in
+  the QoL probe). The driver turns CDP's `Page.navigatedWithinDocument` into a
+  route epoch; before any read (`extract`, `collect`, `see`, and the capture
+  after every `act`) it waits for the transition to actually render —
+  DOM-quiet plus the in-flight drain, a minimum patience measured from the
+  navigation event, and a content signature that must hold still — and when it
+  cannot confirm stability inside the budget it says so
+  (`note: the page was still rendering a client-side navigation when this was
+  read`) instead of pretending. Reddit search additionally sidesteps the DOM
+  race by fetching by URL. Idle pages pay one atomic load.
+
+### Changed
+- **Internal refactor — no behavior change.** The largest sources were split
+  into thin cores plus focused submodules (`cli/`, `cli/args/`, `mcp/server/`
+  with boot/serve/proto, `action/` (+ `action/perform`), `page/`,
+  `page/perception/`, `session_profile/`, `stealth/inject/`, `browser/`,
+  `realbrowser/`, `reddit/`, `x/`); embedded stealth/page JS payloads moved
+  to `src/**/js/*.js` assembled with `include_str!`; dead legacy CLI code and
+  never-read payload fields removed. The tree is now `cargo fmt`-clean (CI
+  checks formatting).
+
+## [4.0.2] - 2026-09-29
+
+### Fixed
+- **macOS self-update and rollback were broken on every darwin build —
+  root-caused and fixed.** The downloaded-binary magic check compared a
+  big-endian `u32` against only the big-endian Mach-O spellings, so the
+  little-endian 64-bit bytes every real darwin asset starts with
+  (`cf fa ed fe`, MH_CIGAM_64 — verified against the shipped v4.0.1 assets)
+  were rejected as "not a valid binary for this platform": `bladebro -u`
+  aborted after the download and `--rollback` refused every valid backup.
+  The check now accepts both byte orders of the 32/64-bit and fat-archive
+  magics, lives in one place (`download::binary_magic_ok`) shared with
+  `verify_backup` (the two copies carried the same bug), and is pinned by
+  tests against the real artifact bytes.
+- **A failed copy during swap/rollback no longer leaves the install empty.**
+  If installing the downloaded binary (Windows) or restoring a backup (both
+  platforms) failed after the current binary had been renamed aside, the old
+  binary is now renamed back before the error is reported.
+- **Self-update resume actually resumes.** The retry loop deleted the partial
+  download on every failure — the advertised Range-resume support was dead
+  code; retries were full re-downloads. The partial file is kept now (SHA256
+  verification still gates whatever a resumed download produces).
+- **`release.sh` refuses to publish a partial release.** The five platform
+  binaries are gated before anything is committed, tagged or published (the
+  old warn-and-skip left a GitHub release missing a platform and failed
+  inside npm publish after the tag already existed). The push no longer
+  embeds the gh token into `origin`'s URL — a one-shot authenticated push
+  URL is used, so a hard-killed script can never leave the token in
+  `.git/config`.
+- **The npm shim fails loudly.** `bin.js` exited 0 when the platform binary
+  could not be spawned (missing exec bit, wrong arch, deleted file) — a
+  silent no-op scripts read as success; it now prints the launch error and
+  exits 1. The `bladebro-linux-arm64` package also ships its LICENSE like
+  the other five (tarball parity).
+- **CLI `--host`/`--port` errors are loud.** A missing or non-numeric value
+  used to be silently dropped and re-injected as `--port 0`; both the global
+  parser and the CLI endpoint extraction now answer `usage:` + exit 2
+  (missing values, bad numbers, port 0 on a connect-only endpoint).
+- **The CLI daemon can no longer be stalled by a silent client.** The
+  request read is bounded (30s): a local client that connects and never
+  writes used to wedge the whole daemon (no accepts, deferred signals, idle
+  timer halted) until SIGKILL.
+- **Data-dir fallback.** With `HOME` unset or empty, the data dir resolves
+  via the password database (`getpwuid_r`) instead of falling through to a
+  shared `/tmp` location; an empty `HOME` can no longer produce a relative
+  path.
+- **`validate_write_path` resolves symlinked ancestors** — a path spelled
+  through `~/drop → /etc` is blocked like `/etc` itself — and blocks
+  `/var/spool`. A blocked directory matches under every spelling: what the
+  caller wrote, what the path resolves to, and the platform's own real
+  spelling of the directory (macOS `/etc` → `/private/etc`; Windows
+  `canonicalize` verbatim paths `\\?\C:\…` are normalized before
+  comparison — the first CI run after this audit caught the macOS hole,
+  and the Windows arm carried the same class). The rc-file gate matches
+  both spellings as well, so a symlinked home root cannot unlock
+  `~/.bashrc` and friends.
+- **The orphan reaper resolves its data root once.** `reap_orphans` called
+  `blade_dir()` again inside its sync-back path; with the process env
+  changing mid-reap (the parallel test suite flips `BLADE_HOME`), one reap
+  could read session dirs from one root and write the sync-back into
+  another — the macOS CI red on the audit commits was a test reading the
+  real template after exactly this split. The root is now resolved once and
+  threaded through (`reap_orphans_at` / `sync_back_only_at`), and the
+  reaper/lock tests are hermetic: temp roots, never a real `~/.blade`.
+
 ## [4.0.1] - 2026-09-27
 
 ### Fixed
@@ -1759,7 +1869,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.0.1...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.0.2...HEAD
+[4.0.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.2
 [4.0.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.1
 [4.0.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.0
 [1.0.0]: https://github.com/dondai44423/bladebro/releases/tag/v1.0.0

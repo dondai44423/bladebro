@@ -44,7 +44,11 @@ fn start_daemon(home: &PathBuf) -> Child {
         if let Ok(Some(st)) = child.try_wait() {
             panic!("daemon exited early: {st:?}");
         }
-        assert!(Instant::now() < deadline, "daemon never bound {}", sock.display());
+        assert!(
+            Instant::now() < deadline,
+            "daemon never bound {}",
+            sock.display()
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     child

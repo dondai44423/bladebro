@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Router fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; }
+  .result { display: block; margin: 8px 0; }
+  .result a { font-weight: bold; }
+  .meta { color: #555; margin-left: 8px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Search results</h1>
+<!-- Client-side route change simulator (the reddit search race, in
+     miniature): clicking the link pushState()s the new route IMMEDIATELY —
+     the old feed stays mounted and the new feed paints SWAP_MS later. In that
+     window the DOM is quiet, so a settle reads "settled" on stale content. -->
+<p><a id="go-monitors" href="?q=monitors">search: monitors for programming</a></p>
+<div id="feed">
+  <article class="result"><a href="https://example.com/r/Keyboards/1">Best keyboard for programming in 2026?</a><span class="meta">r/Keyboards · 3 votes · 12 comments</span></article>
+  <article class="result"><a href="https://example.com/r/Keyboards/2">Which mechanical keyboard should a developer buy?</a><span class="meta">r/MechanicalKeyboards · 5 votes · 21 comments</span></article>
+  <article class="result"><a href="https://example.com/r/Keyboards/3">Keyboard switches explained for programmers</a><span class="meta">r/Keyboards · 2 votes · 7 comments</span></article>
+  <article class="result"><a href="https://example.com/r/Keyboards/4">Ergonomic keyboard layouts that actually help</a><span class="meta">r/ErgoMechKeyboards · 4 votes · 9 comments</span></article>
+  <article class="result"><a href="https://example.com/r/Keyboards/5">Do you use a split keyboard daily?</a><span class="meta">r/MechanicalKeyboards · 6 votes · 33 comments</span></article>
+  <article class="result"><a href="https://example.com/r/Keyboards/6">Cheap keyboards that survived years of coding</a><span class="meta">r/BudgetKeebs · 1 vote · 4 comments</span></article>
+</div>
+</main>
+<script>
+(function () {
+  var SWAP_MS = 900; // long enough to sit inside the race deterministically
+  var MONITORS = [
+    ['Best monitor for programming worth buying?', 'r/Monitors', 'https://example.com/r/Monitors/11'],
+    ['What actually makes a monitor good for coding?', 'r/buildapcmonitors', 'https://example.com/r/buildapcmonitors/12'],
+    ['4K vs 1440p for a programming monitor', 'r/Monitors', 'https://example.com/r/Monitors/13'],
+    ['Monitor for long coding sessions (eye strain)', 'r/Ergonomics', 'https://example.com/r/Ergonomics/14'],
+    ['Curved monitors for programmers - worth it?', 'r/Monitors', 'https://example.com/r/Monitors/15'],
+    ['Ultrawide for programming: a year later', 'r/ultrawidemasterrace', 'https://example.com/r/ultrawidemasterrace/16']
+  ];
+  function render(items) {
+    document.getElementById('feed').innerHTML = items.map(function (it) {
+      return '<article class="result"><a href="' + it[2] + '">' + it[0] + '</a><span class="meta">' + it[1] + ' · 3 votes · 12 comments</span></article>';
+    }).join('');
+  }
+  document.getElementById('go-monitors').addEventListener('click', function (e) {
+    e.preventDefault();
+    history.pushState({}, '', '?q=monitors');
+    setTimeout(function () { render(MONITORS); }, SWAP_MS);
+  });
+})();
+</script>
+</body>
+</html>

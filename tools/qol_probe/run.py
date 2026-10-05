@@ -476,6 +476,24 @@ def main():
         fired = ev("String(!!window.__spaceActivated)")
         check("menu item activates via the keyboard lane (role=menuitem)",
               ("via space" in v) and fired == "true", f"{v} | fired={fired}")
+        # S17: a client-side route change must not serve the previous route's
+        # DOM. router.html pushState()s the new route immediately and paints
+        # the new feed 900ms later — the old feed stays mounted, DOM-quiet the
+        # whole window (the live reddit search race: extract=auto answered the
+        # previous query, `phase: ready`, no signal at all).
+        cli("nav", f"http://127.0.0.1:{PORT}/router.html")
+        out = cli("see", "extract", "auto")
+        check("router fixture: the keyboard feed extracts",
+              "keyboard" in out.lower(), first_line(out))
+        cli("act", "click", "--selector", "#go-monitors")
+        out = cli("see", "extract", "auto")
+        fresh = "monitor" in out.lower()
+        stale = "keyboard" in out.lower()
+        check("extract right after a client-side route change reads the NEW route",
+              fresh and not stale, first_line(out))
+        out = cli("see", "extract", "auto")
+        check("the follow-up read agrees (no flip-flop)",
+              "monitor" in out.lower() and "keyboard" not in out.lower(), first_line(out))
     finally:
         try:
             cli("stop", timeout=30)

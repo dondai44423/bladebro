@@ -1,0 +1,1 @@
+function deepAll(root,sel){const out=[];const visit=(c)=>{const m=c.querySelectorAll(sel);for(let i=0;i<m.length;i++)out.push(m[i]);const all=c.querySelectorAll('*');for(let i=0;i<all.length;i++){const s=all[i].shadowRoot;if(s)visit(s);}};visit(root);return out;}

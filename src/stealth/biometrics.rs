@@ -206,9 +206,7 @@ pub fn mouse_path(start: (f64, f64), target: (f64, f64), rng: &mut Rng) -> Vec<P
 
 /// The final click point (last point on the path, after overshoot correction).
 pub fn click_target(path: &[PathPoint]) -> (f64, f64) {
-    path.last()
-        .map(|p| (p.x, p.y))
-        .unwrap_or((0.0, 0.0))
+    path.last().map(|p| (p.x, p.y)).unwrap_or((0.0, 0.0))
 }
 
 // ---- Typing cadence ----
@@ -283,11 +281,20 @@ mod tests {
     fn mouse_path_reaches_target() {
         let mut rng = Rng::new();
         let path = mouse_path((0.0, 0.0), (200.0, 150.0), &mut rng);
-        assert!(path.len() >= 7, "path should have bezier + overshoot + correction");
+        assert!(
+            path.len() >= 7,
+            "path should have bezier + overshoot + correction"
+        );
         let (final_x, final_y) = click_target(&path);
         // Final point should be near the target (within gaussian offset, ~10px).
-        assert!((final_x - 200.0).abs() < 15.0, "final x {final_x} should be near 200");
-        assert!((final_y - 150.0).abs() < 15.0, "final y {final_y} should be near 150");
+        assert!(
+            (final_x - 200.0).abs() < 15.0,
+            "final x {final_x} should be near 200"
+        );
+        assert!(
+            (final_y - 150.0).abs() < 15.0,
+            "final y {final_y} should be near 150"
+        );
     }
 
     #[test]
@@ -301,8 +308,10 @@ mod tests {
         let final_pt = &path[path.len() - 1];
         let overshoot_dist = overshoot.x.abs();
         let final_dist = final_pt.x.abs();
-        assert!(overshoot_dist >= final_dist - 5.0,
-            "overshoot ({overshoot_dist}) should be >= final ({final_dist})");
+        assert!(
+            overshoot_dist >= final_dist - 5.0,
+            "overshoot ({overshoot_dist}) should be >= final ({final_dist})"
+        );
     }
 
     #[test]
@@ -312,12 +321,22 @@ mod tests {
         for _ in 0..30 {
             let path = mouse_path((0.0, 0.0), (1200.0, 0.0), &mut rng);
             totals.push(path.iter().map(|p| p.delay.as_millis() as u64).sum());
-            assert!(path.len() <= 25, "dispatch count stays bounded: {}", path.len());
+            assert!(
+                path.len() <= 25,
+                "dispatch count stays bounded: {}",
+                path.len()
+            );
         }
         totals.sort_unstable();
         let median = totals[totals.len() / 2];
-        assert!(median < 480, "1200px traverse should be fast: median {median}ms");
-        assert!(median > 200, "traverse must not read as teleport: median {median}ms");
+        assert!(
+            median < 480,
+            "1200px traverse should be fast: median {median}ms"
+        );
+        assert!(
+            median > 200,
+            "traverse must not read as teleport: median {median}ms"
+        );
     }
 
     #[test]

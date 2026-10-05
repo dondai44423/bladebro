@@ -60,6 +60,13 @@ const result = spawnSync(binPath, process.argv.slice(2), {
 if (result.signal) {
   // Re-raise the signal so the parent process sees it
   process.kill(process.pid, result.signal);
+} else if (result.error) {
+  // The binary could not be spawned (missing exec bit, wrong arch, deleted
+  // file). Without this branch the shim exited 0 while nothing ran — a
+  // silent no-op that scripts and agents read as success.
+  process.stderr.write('bladebro: failed to launch ' + binPath + ': ' + result.error.message + '\n');
+  process.stderr.write('Reinstall: npm install bladebro\n');
+  process.exit(1);
 } else {
   process.exit(result.status || 0);
 }

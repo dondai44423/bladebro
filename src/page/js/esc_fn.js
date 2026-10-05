@@ -1,0 +1,1 @@
+const esc=s=>(s||'').replace(/["\\]/g,c=>'\\'+c);
