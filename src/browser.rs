@@ -87,9 +87,10 @@ impl Browser {
     /// signal, idle timeout). On SIGKILL nothing runs — the
     /// next launch's orphan reaper cleans up instead.
     pub fn shutdown(self) {
-        let profile_dir = self.profile.dir().to_path_buf();
+        let profile = self.profile.clone();
         drop(self); // kills Chrome + Xvfb
-                    // Chrome is dead — the profile is flushed and safe to sync.
-        crate::session_profile::SessionProfile::cleanup_dir(&profile_dir);
+                    // Retain ownership metadata: a path under /tmp is not proof that
+                    // an adopted user profile belongs to Bladebro.
+        profile.cleanup();
     }
 }

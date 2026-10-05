@@ -68,8 +68,10 @@ impl CdpClient {
     /// `ws_url` is typically a target's `webSocketDebuggerUrl` from
     /// [`crate::cdp::discovery`], e.g. `ws://127.0.0.1:9222/devtools/page/<id>`.
     pub async fn connect(ws_url: &str) -> Result<Self> {
-        let (ws, _resp) = tokio_tungstenite::connect_async(ws_url)
+        let deadline = Duration::from_secs(5);
+        let (ws, _resp) = timeout(deadline, tokio_tungstenite::connect_async(ws_url))
             .await
+            .map_err(|_| BladeError::Timeout(deadline))?
             .map_err(|e| BladeError::Transport(e.to_string()))?;
         Self::from_socket(ws)
     }
@@ -160,7 +162,7 @@ impl CdpClient {
         reader: tokio::net::unix::pipe::Receiver,
         writer: tokio::net::unix::pipe::Sender,
     ) -> Result<Self> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::io::{AsyncWriteExt, BufReader};
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (events_tx, _events_rx) = broadcast::channel(EVENT_BUS_CAPACITY);
@@ -199,14 +201,16 @@ impl CdpClient {
                 let mut buf: Vec<u8> = Vec::with_capacity(8192);
                 loop {
                     buf.clear();
-                    match reader.read_until(0u8, &mut buf).await {
+                    match crate::framing::read_until_limited(
+                        &mut reader,
+                        0,
+                        &mut buf,
+                        64 * 1024 * 1024,
+                    )
+                    .await
+                    {
                         Ok(0) => break, // EOF — Chrome exited.
                         Ok(_) => {
-                            // Cap: a garbage stream without NUL delimiters
-                            // would otherwise grow `buf` unboundedly.
-                            if buf.len() > 64 * 1024 * 1024 {
-                                break;
-                            }
                             if buf.last() == Some(&0u8) {
                                 buf.pop();
                             }
@@ -295,15 +299,18 @@ impl CdpClient {
         let mut req = CdpRequest::new(id, method, params);
         req.session_id = session_id.map(|s| s.to_string());
         let json = serde_json::to_string(&req)?;
-        self.writer_tx
-            .send(Message::Text(json.into()))
-            .await
-            .map_err(|_| BladeError::Closed)?;
-
-        match timeout(deadline, rx).await {
-            Ok(Ok(outcome)) => outcome,
-            // Sender dropped (reader ended) → connection closed.
-            Ok(Err(_)) => Err(BladeError::Closed),
+        // Queue admission is part of the same deadline: a stalled socket
+        // can fill the writer queue before any response wait begins.
+        match timeout(deadline, async {
+            self.writer_tx
+                .send(Message::Text(json.into()))
+                .await
+                .map_err(|_| BladeError::Closed)?;
+            rx.await.map_err(|_| BladeError::Closed)?
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
             Err(_) => Err(BladeError::Timeout(deadline)),
         }
         // guard drops here, removing the slot if the reply already arrived
@@ -435,5 +442,58 @@ impl Drop for PendingGuard {
 impl std::fmt::Debug for CdpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CdpClient").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queue_admission_obeys_command_timeout_and_releases_pending_slot() {
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        writer_tx
+            .send(Message::Text("occupied".into()))
+            .await
+            .unwrap();
+        let (events_tx, _) = broadcast::channel(1);
+        let client = CdpClient {
+            writer_tx,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            events_tx,
+            next_id: Arc::new(AtomicU64::new(0)),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let outcome = timeout(
+            Duration::from_millis(200),
+            client.send_with_timeout("Runtime.evaluate", None, Duration::from_millis(20)),
+        )
+        .await
+        .expect("a saturated writer must not bypass the command deadline");
+        assert!(matches!(outcome, Err(BladeError::Timeout(_))));
+        assert!(
+            client.pending.lock().unwrap().is_empty(),
+            "timed-out queue admission must not leak pending calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_handshake_has_a_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_connection, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result = timeout(
+            Duration::from_secs(6),
+            CdpClient::connect(&format!("ws://{address}")),
+        )
+        .await;
+        server.abort();
+        assert!(
+            matches!(result, Ok(Err(BladeError::Timeout(_)))),
+            "a peer that never upgrades must time out: {result:?}"
+        );
     }
 }

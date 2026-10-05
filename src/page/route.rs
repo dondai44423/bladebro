@@ -103,22 +103,23 @@ impl RouteEpoch {
         }
         let nav_at = self.nav_at_ms.load(Ordering::Relaxed);
         let deadline = tokio::time::Instant::now() + budget;
-        let mut prev = route_signature(cdp).await;
-        let outcome = loop {
-            wait_for_settle_with_network(cdp, SETTLE_CAP, in_flight)
-                .await
-                .ok();
-            tokio::time::sleep(TAIL).await;
-            let sig = route_signature(cdp).await;
-            let patient = now_ms().saturating_sub(nav_at) >= PATIENCE_MS;
-            if sig == prev && patient {
-                break RouteSettle::Settled;
-            }
-            prev = sig;
-            if tokio::time::Instant::now() >= deadline {
-                break RouteSettle::Unsettled;
+        let pass = async {
+            let mut prev = route_signature(cdp).await;
+            loop {
+                let _ = wait_for_settle_with_network(cdp, SETTLE_CAP, in_flight).await;
+                tokio::time::sleep(TAIL).await;
+                let sig = route_signature(cdp).await;
+                let patient = now_ms().saturating_sub(nav_at) >= PATIENCE_MS;
+                if sig.is_some() && sig == prev && patient {
+                    return RouteSettle::Settled;
+                }
+                prev = sig;
             }
         };
+        // Also bounds hung probes and settle calls, whose CDP timeout is longer.
+        let outcome = tokio::time::timeout_at(deadline, pass)
+            .await
+            .unwrap_or(RouteSettle::Unsettled);
         // The epoch we handled (not the latest): a navigation that arrived
         // while we waited keeps the guard armed for the next read.
         self.settled.store(epoch, Ordering::Relaxed);
@@ -131,7 +132,7 @@ impl RouteEpoch {
 
 /// One cheap content fingerprint: url, title, element count, and the head of
 /// the main content. A route swap moves at least one of them.
-async fn route_signature(cdp: &CdpSession) -> String {
+async fn route_signature(cdp: &CdpSession) -> Option<String> {
     let expr = "(()=>{const m=document.querySelector('main')||document.body;\
 const t=m?String(m.textContent||'').slice(0,120):'';\
 return location.href+'\\u0001'+document.title+'\\u0001'+document.getElementsByTagName('*').length+'\\u0001'+t;})()";
@@ -147,7 +148,6 @@ return location.href+'\\u0001'+document.title+'\\u0001'+document.getElementsByTa
             .and_then(|v| v.as_str())
             .map(String::from)
     })
-    .unwrap_or_default()
 }
 
 fn now_ms() -> u64 {
@@ -183,5 +183,71 @@ mod tests {
         let old = now_ms().saturating_sub(NOTE_TTL_MS + 1);
         e.unsettled_at_ms.store(old, Ordering::Relaxed);
         assert!(!e.take_unsettled());
+    }
+    #[tokio::test]
+    async fn unresponsive_probe_cannot_overrun_route_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let cdp = CdpSession::root(client);
+        let epoch = RouteEpoch::new();
+        epoch.note_nav();
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            epoch.settle(&cdp, None, Duration::from_millis(50)),
+        )
+        .await;
+        server.abort();
+        assert_eq!(result.unwrap(), RouteSettle::Unsettled);
+        assert!(
+            epoch.take_unsettled(),
+            "timeout must remain visible to the caller"
+        );
+    }
+    #[tokio::test]
+    async fn failed_signature_samples_cannot_claim_stable_content() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let samples = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = samples.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                observed.fetch_add(1, Ordering::Relaxed);
+                ws.send(Message::Text(json!({"id":request["id"],"result":{"exceptionDetails":{"text":"context unavailable"}}}).to_string().into())).await.unwrap();
+            }
+        });
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let cdp = CdpSession::root(client);
+        let epoch = RouteEpoch::new();
+        epoch.note_nav();
+        epoch
+            .nav_at_ms
+            .store(now_ms().saturating_sub(1000), Ordering::Relaxed);
+        let outcome = epoch.settle(&cdp, None, Duration::from_millis(900)).await;
+        server.abort();
+        assert_eq!(
+            outcome,
+            RouteSettle::Unsettled,
+            "failed probes are not matching content"
+        );
+        assert!(
+            samples.load(Ordering::Relaxed) >= 3,
+            "the failure path actually received repeated CDP requests"
+        );
     }
 }

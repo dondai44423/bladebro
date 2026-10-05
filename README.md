@@ -103,7 +103,7 @@ Source builds self-update too: `bladebro -u` swaps in the official released bina
 
 ### `act` — do, then observe
 
-Every call returns an **outcome verdict + page delta**. Click auto-escalates mouse → JS → Enter; clicking by text skips the read step (`act click text="Sign in"`), and ambiguous text returns matches with refs + `nth` values. Verdicts report observable evidence only: a state-only change is labeled `state-only, no nodes added/removed` (never a phantom `(+0 −0)`), an occluded click names what actually receives it, and a coordinate click that hits nothing names the topmost element at that point.
+Every call returns an **outcome verdict + page delta**. Clicks choose a role-aware activation lane and dispatch once; a quiet DOM never triggers another click. After a disconnect, mutating actions report an unknown outcome so the agent can inspect the destination before repeating them; clicking by text skips the read step (`act click text="Sign in"`), and ambiguous text returns matches with refs + `nth` values. Verdicts report observable evidence only: a state-only change is labeled `state-only, no nodes added/removed` (never a phantom `(+0 −0)`), an occluded click names what actually receives it, and a coordinate click that hits nothing names the topmost element at that point.
 
 | Action | Example | What it does |
 |---|---|---|
@@ -157,7 +157,7 @@ Every call returns an **outcome verdict + page delta**. Click auto-escalates mou
 |---|---|
 | `tabs` / `open-tab` / `switch-tab` / `close-tab` | Tab management (auto-focus on open) |
 | `cookies` / `set-cookie` / `del-cookie` | Cookies |
-| `save name=login` / `load name=login` | Persist + restore a login (cookies + storage, then navigates) |
+| `save name=login` / `load name=login` | Save cookies + storage; navigate to the saved origin before loading, then reload |
 | `ls` / `ss` / `set-ls` / `set-ss` / `rm-ls` / `rm-ss` | localStorage / sessionStorage |
 | `block classes="images,fonts,trackers"` | Block inert assets — never first-party scripts |
 | `compress on/off/status` | Context pruning toggle |

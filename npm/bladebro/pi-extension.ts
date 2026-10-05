@@ -25,6 +25,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
+import { StringDecoder } from "node:string_decoder";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -247,16 +248,21 @@ class McpStdio {
   private pending = new Map<number, PendingReq>();
   private buffer = "";
   private alive = false;
+  private decoder = new StringDecoder("utf8");
 
   start(binaryPath: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.proc = spawn(binaryPath, ["mcp"], {
+      this.buffer = "";
+      this.decoder = new StringDecoder("utf8");
+      const proc = this.proc = spawn(binaryPath, ["mcp"], {
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env },
       });
 
       const onExit = () => {
+        if (this.proc !== proc) return;
         this.alive = false;
+        this.proc = null;
         for (const [, p] of this.pending) {
           clearTimeout(p.timer);
           p.reject(new Error("bladebro process exited"));
@@ -264,7 +270,12 @@ class McpStdio {
         this.pending.clear();
       };
 
-      this.proc.on("exit", onExit);
+      proc.on("exit", onExit);
+      proc.stdin!.on("error", (err) => {
+        onExit();
+        proc.kill();
+        reject(err);
+      });
       this.proc.on("error", (err) => {
         onExit();
         reject(err);
@@ -292,12 +303,25 @@ class McpStdio {
           this.alive = true;
           resolve();
         })
-        .catch(reject);
+        .catch((err) => {
+          onExit();
+          proc.kill();
+          reject(err);
+        });
     });
   }
 
   private onData(data: Buffer): void {
-    this.buffer += data.toString();
+    this.buffer += this.decoder.write(data);
+    if (Buffer.byteLength(this.buffer, "utf8") > 64 * 1024 * 1024) {
+      for (const [, p] of this.pending) {
+        clearTimeout(p.timer);
+        p.reject(new Error("bladebro MCP response exceeds 64 MiB"));
+      }
+      this.pending.clear();
+      this.proc?.kill();
+      return;
+    }
     let idx: number;
     while ((idx = this.buffer.indexOf("\n")) >= 0) {
       const line = this.buffer.slice(0, idx).trim();
@@ -308,18 +332,35 @@ class McpStdio {
 
   private onMessage(line: string): void {
     let msg: any;
-    try { msg = JSON.parse(line); } catch { return; }
+    try { msg = JSON.parse(line); } catch {
+      for (const [, p] of this.pending) {
+        clearTimeout(p.timer);
+        p.reject(new Error("Invalid MCP JSON from bladebro"));
+      }
+      this.pending.clear();
+      this.proc?.kill();
+      return;
+    }
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+      this.proc?.kill();
+      return;
+    }
     if (msg.id !== undefined && this.pending.has(msg.id)) {
       const entry = this.pending.get(msg.id)!;
       this.pending.delete(msg.id);
       clearTimeout(entry.timer);
-      if (msg.error) entry.reject(msg.error);
+      if (msg.error) entry.reject(new Error(msg.error.message || "MCP request failed"));
+      else if (!("result" in msg)) entry.reject(new Error("MCP response missing result"));
       else entry.resolve(msg.result);
     }
   }
 
   private request(method: string, params: any, timeoutMs = 180000): Promise<any> {
     return new Promise((resolve, reject) => {
+      if (!this.proc || this.proc.exitCode !== null || this.proc.signalCode !== null || !this.proc.stdin?.writable) {
+        reject(new Error("bladebro process is not running"));
+        return;
+      }
       const id = this.nextId++;
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -348,18 +389,23 @@ class McpStdio {
   isAlive(): boolean { return this.alive && this.proc !== null; }
 
   async stop(): Promise<void> {
-    if (!this.proc) return;
+    const proc = this.proc;
+    if (!proc) return;
     this.alive = false;
-    try { this.proc.stdin?.end(); } catch {}
-    this.proc.kill("SIGTERM");
-    await new Promise<void>((resolve) => {
-      const t = setTimeout(() => {
-        this.proc?.kill("SIGKILL");
-        resolve();
-      }, 5000);
-      this.proc?.on("exit", () => { clearTimeout(t); resolve(); });
-    });
-    this.proc = null;
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error("bladebro session stopped"));
+    }
+    this.pending.clear();
+    if (proc.exitCode === null && proc.signalCode === null) {
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(() => { proc.kill("SIGKILL"); resolve(); }, 5000);
+        proc.once("exit", () => { clearTimeout(t); resolve(); });
+        proc.stdin?.end();
+        proc.kill("SIGTERM");
+      });
+    }
+    if (this.proc === proc) this.proc = null;
   }
 }
 
@@ -452,6 +498,7 @@ export default function bladebroExtension(pi: ExtensionAPI) {
         },
         async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
           const c = await ensureClient();
+          if (_signal?.aborted) throw new Error("Bladebro tool call cancelled before dispatch");
           const result = await c.callTool(tool.name, params);
           return {
             content: result.content || [],

@@ -181,13 +181,41 @@ pub fn secure_create_dir_all(path: &std::path::Path) -> std::io::Result<()> {
 /// SECURITY: Session files contain cookies and localStorage — world-readable
 /// by default (644). This ensures only the owner can read them.
 pub fn secure_write_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, data)?;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_nanos();
+    let tmp = parent.join(format!(
+        ".blade-write-{}-{timestamp}-{}",
+        std::process::id(),
+        NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(())
+    // A create collision is not our file to remove on the failure path.
+    let mut file = options.open(&tmp)?;
+    let result = (|| {
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Spell a path the way the write-path checks compare it: strip Windows
@@ -423,20 +451,34 @@ pub fn truncate_utf8(s: &str, n: usize) -> &str {
 
 /// Is this process alive?
 pub fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    if pid > i32::MAX as u32 {
+        return false;
+    }
     #[cfg(unix)]
     {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+        unsafe {
+            libc::kill(pid as i32, 0) == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
     }
     #[cfg(windows)]
     {
         // tasklist /FI "PID eq 1234" /NH — if the process exists, output
         // contains the PID; if not, output says "No tasks".
         std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output()
             .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout);
-                !out.contains("No tasks") && out.contains(&pid.to_string())
+                String::from_utf8_lossy(&o.stdout).lines().any(|line| {
+                    line.split(',')
+                        .nth(1)
+                        .and_then(|field| field.trim_matches('"').parse::<u32>().ok())
+                        == Some(pid)
+                })
             })
             .unwrap_or(false)
     }
@@ -446,9 +488,30 @@ pub fn process_alive(pid: u32) -> bool {
 pub fn process_is_chrome(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
-        std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-            .unwrap_or_default()
-            .contains("chrom")
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .ok()
+            .and_then(|bytes| {
+                bytes
+                    .split(|b| *b == 0)
+                    .next()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+            })
+            .is_some_and(|exe| {
+                std::path::Path::new(&exe)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| {
+                        matches!(
+                            name,
+                            "chrome"
+                                | "chromium"
+                                | "chromium-browser"
+                                | "google-chrome"
+                                | "google-chrome-stable"
+                                | "chrome_crashpad_handler"
+                        )
+                    })
+            })
     }
     #[cfg(target_os = "macos")]
     {
@@ -478,6 +541,13 @@ pub fn process_is_chrome(pid: u32) -> bool {
 
 /// Send SIGTERM to a process by PID (Unix) or graceful-terminate (Windows).
 pub fn kill_process_graceful(pid: u32) {
+    if pid <= 1 {
+        return;
+    }
+    #[cfg(unix)]
+    if pid > i32::MAX as u32 {
+        return;
+    }
     #[cfg(unix)]
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
@@ -494,6 +564,13 @@ pub fn kill_process_graceful(pid: u32) {
 
 /// Send SIGKILL to a process by PID (Unix) or force-terminate (Windows).
 pub fn kill_process_force(pid: u32) {
+    if pid <= 1 {
+        return;
+    }
+    #[cfg(unix)]
+    if pid > i32::MAX as u32 {
+        return;
+    }
     #[cfg(unix)]
     unsafe {
         libc::kill(pid as i32, libc::SIGKILL);
@@ -733,5 +810,42 @@ mod write_path_tests {
         let real_etc = std::fs::canonicalize("/etc").expect("canonicalize /etc");
         assert!(validate_write_path(&real_etc.join("bladebro-test")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod persistence_reliability_tests {
+    use super::*;
+    #[test]
+    fn invalid_pids_are_never_process_groups() {
+        assert!(!process_alive(0));
+        assert!(!process_alive(u32::MAX));
+        assert!(process_alive(std::process::id()));
+    }
+    #[test]
+    fn private_atomic_write_replaces_complete_contents() {
+        let dir = std::env::temp_dir().join(format!("blade-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("snapshot.json");
+        secure_write_file(&path, b"old").unwrap();
+        secure_write_file(&path, b"new-complete").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new-complete");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no temporary files left"
+        );
+        // Rename failure must preserve the existing destination and remove its temp.
+        assert!(secure_write_file(&dir, b"cannot replace directory").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"new-complete");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

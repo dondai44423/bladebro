@@ -124,13 +124,12 @@ pub(super) async fn launch_browser(
             let result = async {
                 let session = attach_pipe(&client).await?;
                 let page = Page::attach(session, "pipe", Some(client)).await?;
+                crate::logins::restore(page.cdp_ref()).await?;
                 Ok(page)
             }
             .await;
             match result {
                 Ok(page) => {
-                    // Re-inject saved logins before anything navigates.
-                    let _ = crate::logins::restore(page.cdp_ref()).await;
                     return Ok((page, Some(browser)));
                 }
                 Err(e) => {
@@ -154,15 +153,12 @@ pub(super) async fn launch_browser(
             let target = cdp::first_page_target(&base).await?;
             let client = CdpClient::connect(target.ws_url()?).await?;
             let page = Page::attach(CdpSession::root(client), &base, None).await?;
+            crate::logins::restore(page.cdp_ref()).await?;
             Ok(page)
         }
         .await;
         match result {
-            Ok(page) => {
-                // Re-inject saved logins before anything navigates.
-                let _ = crate::logins::restore(page.cdp_ref()).await;
-                Ok((page, Some(browser)))
-            }
+            Ok(page) => Ok((page, Some(browser))),
             Err(e) => {
                 // Clean up the browser we just launched.
                 let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
@@ -175,11 +171,7 @@ pub(super) async fn launch_browser(
         let target = cdp::first_page_target(&base).await?;
         let client = CdpClient::connect(target.ws_url()?).await?;
         let page = Page::attach(CdpSession::root(client), &base, None).await?;
-        // Re-inject saved logins before anything navigates. Never on the
-        // real lane: those are the user's own cookies in there.
-        if !crate::realbrowser::real_lane() {
-            let _ = crate::logins::restore(page.cdp_ref()).await;
-        }
+        // External Chrome is caller-owned: never inject our login sidecar.
         Ok((page, None))
     }
 }

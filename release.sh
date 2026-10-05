@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bladebro release script — the ONLY way to cut a release.
 # One command does everything: version bump, build all platforms,
-# test, clippy, tag, push, GitHub release with ALL 4 binaries,
+# test, clippy, tag, push, GitHub release with all 5 platforms,
 # and publish to npm.
 # Resource-capped: re-execs under half the CPUs at low priority + sccache,
 # so the machine stays usable while it runs (see status.md workflow).
@@ -18,8 +18,8 @@ set -euo pipefail
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 VERSION="${1:-}"
-if [[ -z "$VERSION" ]]; then
-    echo "usage: ./release.sh <version>  (e.g. 3.0.4)" >&2
+if [[ $# != 1 || ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    echo "usage: ./release.sh <major.minor.patch>" >&2
     exit 1
 fi
 
@@ -52,11 +52,33 @@ fi
 
 echo "=== bladebro release v$VERSION ==="
 
-# 1. Sanity: version must not already exist as a tag.
-if git rev-parse "v$VERSION" >/dev/null 2>&1; then
-    echo "ERROR: tag v$VERSION already exists" >&2
-    exit 1
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo "ERROR: release builds require a Linux x86_64 host" >&2; exit 1; }
+
+# Fail before editing version files: stale artifacts are never a substitute
+# for an unavailable toolchain, and a release starts from a reviewable tree.
+for command in cargo cargo-zigbuild zig git gh npm python3 sha256sum; do
+    command -v "$command" >/dev/null || { echo "ERROR: missing $command" >&2; exit 1; }
+done
+[[ $(git branch --show-current) == main ]] || { echo "ERROR: release from main" >&2; exit 1; }
+[[ -z $(git status --porcelain) ]] || { echo "ERROR: commit tracked changes before releasing" >&2; exit 1; }
+if git rev-parse --verify "refs/tags/v$VERSION" >/dev/null 2>&1; then
+    echo "ERROR: tag v$VERSION already exists" >&2; exit 1
 fi
+gh auth status >/dev/null 2>&1
+npm whoami >/dev/null
+python3 - <<'CHECK'
+from pathlib import Path
+text = Path('CHANGELOG.md').read_text()
+assert text.count('## [Unreleased]') == 1, 'exactly one Unreleased section required'
+section = text.split('## [Unreleased]', 1)[1].split('\n## [', 1)[0]
+assert any(line.startswith('- ') for line in section.splitlines()), 'Unreleased must contain release notes'
+import json
+packages=['bladebro','bladebro-linux-x64','bladebro-linux-arm64','bladebro-windows-x64','bladebro-darwin-x64','bladebro-darwin-arm64']
+for name in packages:
+    path=Path('npm')/name
+    assert json.loads((path/'package.json').read_text())['name']==name
+    assert (path/'LICENSE').is_file(), f'{name} license missing'
+CHECK
 
 # 2. Bump Cargo.toml version.
 sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
@@ -97,99 +119,56 @@ with open("CHANGELOG.md", "w") as f:
 PYEOF
 echo "[2/9] CHANGELOG promoted to [$VERSION] - $TODAY"
 
-# 4. Full verification: build, test, clippy.
-echo "[3/9] cargo build --release (Linux)..."
-cargo build --release 2>&1 | tail -1
+# Synchronize every manifest before verification and the release commit.
+python3 - "$VERSION" <<'SYNC'
+import json,sys
+from pathlib import Path
+for path in Path('npm').glob('*/package.json'):
+    data=json.loads(path.read_text())
+    data['version']=sys.argv[1]
+    for name in data.get('optionalDependencies', {}):
+        data['optionalDependencies'][name]=sys.argv[1]
+    path.write_text(json.dumps(data,indent=2)+'\n')
+SYNC
 
-echo "[4/9] cargo test..."
-cargo test --release 2>&1 | grep -c "test result: ok" >/dev/null
+cargo fmt --check
+cargo clippy --release -- -D warnings
+# Each test process owns fresh fixtures and data roots; cache files stay intact.
+cargo test --release
+cargo test --release
 
-echo "[5/9] clippy..."
-cargo clippy --release -- -D warnings 2>&1 | tail -1
-
-# 5. Build all cross-platform binaries.
-echo "[6/9] Building cross-platform binaries..."
-
-# Windows x86_64 (via cargo-zigbuild)
-if command -v cargo-zigbuild &>/dev/null; then
-    cargo zigbuild --release --target x86_64-pc-windows-gnu 2>&1 | tail -1
-else
-    echo "  WARNING: cargo-zigbuild not found, skipping Windows build"
-fi
-
-# macOS x86_64 (via cargo-zigbuild)
-# Darwin targets build `ring`'s C through cargo-zigbuild's cc wrapper, which
-# sccache (0.17.0) rejects — run the apple builds with the wrapper disabled
-# (the toolchain note in status.md; the battery has always done this).
-if command -v cargo-zigbuild &>/dev/null; then
-    RUSTC_WRAPPER= cargo zigbuild --release --target x86_64-apple-darwin 2>&1 | tail -1
-else
-    echo "  WARNING: cargo-zigbuild not found, skipping macOS x64 build"
-fi
-
-# macOS arm64 (via cargo-zigbuild)
-if command -v cargo-zigbuild &>/dev/null; then
-    RUSTC_WRAPPER= cargo zigbuild --release --target aarch64-apple-darwin 2>&1 | tail -1
-else
-    echo "  WARNING: cargo-zigbuild not found, skipping macOS arm64 build"
-fi
-
-# Linux arm64 (via cargo-zigbuild)
-if command -v cargo-zigbuild &>/dev/null; then
-    cargo zigbuild --release --target aarch64-unknown-linux-gnu 2>&1 | tail -1
-else
-    echo "  WARNING: cargo-zigbuild not found, skipping Linux arm64 build"
-fi
-
-# 5b. Gate: ALL five platform binaries must exist before anything is
-# committed, tagged or published. This script used to warn-and-skip a
-# failing cross target, then create a GitHub release missing that platform
-# and hard-fail inside npm publish AFTER the tag existed — the partial
-# release state the workflow forbids.
-MISSING_ARTIFACTS=0
-for f in \
-    target/release/bladebro \
+# Commit first, build artifacts from this exact clean commit. A failed build
+# leaves a local commit, never a public tag or partial release.
+git add Cargo.toml Cargo.lock CHANGELOG.md npm/*/package.json
+git commit -m "release: v$VERSION"
+RELEASE_SHA=$(git rev-parse HEAD)
+cargo build --release
+cargo zigbuild --release --target x86_64-pc-windows-gnu
+RUSTC_WRAPPER= cargo zigbuild --release --target x86_64-apple-darwin
+RUSTC_WRAPPER= cargo zigbuild --release --target aarch64-apple-darwin
+cargo zigbuild --release --target aarch64-unknown-linux-gnu
+for artifact in target/release/bladebro \
     target/x86_64-pc-windows-gnu/release/bladebro.exe \
     target/x86_64-apple-darwin/release/bladebro \
     target/aarch64-apple-darwin/release/bladebro \
-    target/aarch64-unknown-linux-gnu/release/bladebro ; do
-    if [[ ! -f "$f" ]]; then
-        echo "ERROR: missing build artifact: $f" >&2
-        MISSING_ARTIFACTS=1
-    fi
+    target/aarch64-unknown-linux-gnu/release/bladebro; do
+    [[ -s "$artifact" ]] || { echo "ERROR: missing $artifact" >&2; exit 1; }
 done
-if (( MISSING_ARTIFACTS )); then
-    echo "ERROR: refusing to publish a partial release — fix the build(s) above first." >&2
-    echo "       (The version bump + CHANGELOG edits are uncommitted; restore with" >&2
-    echo "        'git checkout Cargo.toml CHANGELOG.md' before re-running.)" >&2
-    exit 1
-fi
-echo "      gate: all five platform binaries present"
 
-# 6. Commit + tag.
-git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "release: v$VERSION"
+# Native CI is a release gate. Push the commit before making a version tag.
+git push origin main
+RUN_ID=""
+for _ in $(seq 1 12); do
+    RUN_ID=$(gh run list --workflow CI --commit "$RELEASE_SHA" --event push --json databaseId --jq '.[0].databaseId // empty')
+    [[ -n "$RUN_ID" ]] && break
+    sleep 5
+done
+[[ -n "$RUN_ID" ]] || { echo "ERROR: no native CI run for $RELEASE_SHA" >&2; exit 1; }
+gh run watch "$RUN_ID" --exit-status
 git tag -a "v$VERSION" -m "v$VERSION"
-echo "[7/9] committed + tagged v$VERSION"
+git push origin "v$VERSION"
 
-# 7. Push. A token (when present) rides a ONE-SHOT authenticated URL on the
-# push command itself — never `git remote set-url` with the token embedded.
-# The old dance left the token in .git/config whenever the script died
-# before its EXIT trap ran (SIGKILL, power loss).
-REMOTE_URL=$(git remote get-url origin)
-if [[ "$REMOTE_URL" != *"@github.com"* ]]; then
-    TOKEN=$(gh auth token 2>/dev/null || true)
-    if [[ -n "$TOKEN" ]]; then
-        git push "https://dondai44423:${TOKEN}@github.com/dondai44423/bladebro.git" main --tags
-    else
-        git push origin main --tags
-    fi
-else
-    git push origin main --tags
-fi
-echo "[8/9] pushed"
-
-# 8. GitHub release with ALL 4 platform binaries.
+# 8. GitHub release with all 5 platform binaries.
 echo "[9/9] Creating GitHub release with binaries..."
 
 # Prepare asset files with BOTH naming conventions.
@@ -234,10 +213,7 @@ if [[ ${#ASSETS[@]} -eq 0 ]]; then
 fi
 
 # Create release first (without assets, to avoid timeout), then upload.
-gh release create "v$VERSION" \
-    --title "v$VERSION" --latest \
-    --generate-notes 2>/dev/null \
-|| gh release create "v$VERSION" --title "v$VERSION" --latest --notes "Release v$VERSION"
+gh release create "v$VERSION" --verify-tag --title "v$VERSION" --draft --generate-notes
 
 # Generate .sha256 checksums for every binary. SECURITY: the self-updater
 # (v3.3.0+) fail-closes when a release ships no checksum — releases without
@@ -256,14 +232,13 @@ for f in "$TMPDIR_RELEASE"/bladebro-*; do
     gh release upload "v$VERSION" "$f" --clobber 2>&1 | head -1
 done
 
-# 9. Publish to npm (if publish-npm.sh exists).
-if [[ -f scripts/publish-npm.sh ]]; then
-    echo ""
-    echo "=== Publishing to npm ==="
-    # --no-build: step [6/9] just built every binary; the script only copies
-    # + verifies them now (the duplicate 5-target rebuild is gone).
-    bash scripts/publish-npm.sh --no-build
-fi
+# Verify the complete draft before publishing any npm meta package.
+ASSET_COUNT=$(gh release view "v$VERSION" --json assets --jq '.assets | length')
+[[ "$ASSET_COUNT" == 20 ]] || { echo "ERROR: draft has $ASSET_COUNT assets, expected 20" >&2; exit 1; }
+bash scripts/publish-npm.sh --no-build
+# npm publication verifies all exact package versions. Only now expose the
+# GitHub release to self-update clients as Latest.
+gh release edit "v$VERSION" --draft=false --latest
 
 echo ""
 echo "=== RELEASED v$VERSION ==="

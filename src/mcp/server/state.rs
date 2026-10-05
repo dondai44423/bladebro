@@ -5,11 +5,37 @@
 
 use serde_json::{json, Value};
 
-use crate::error::Result;
+use crate::error::{BladeError, Result};
 use crate::page::Page;
 use crate::state::StateOp;
 
 pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
+    if !args.is_object() {
+        return Err(BladeError::Other(
+            "state arguments must be an object".into(),
+        ));
+    }
+    for key in [
+        "op",
+        "name",
+        "value",
+        "url",
+        "domain",
+        "path",
+        "sameSite",
+        "target_id",
+        "mode",
+        "classes",
+    ] {
+        if args.get(key).is_some_and(|value| !value.is_string()) {
+            return Err(BladeError::Other(format!("state {key} must be a string")));
+        }
+    }
+    for key in ["secure", "httpOnly", "clear"] {
+        if args.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Err(BladeError::Other(format!("state {key} must be a boolean")));
+        }
+    }
     let op_str = args.get("op").and_then(|o| o.as_str()).unwrap_or("");
     let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
@@ -131,6 +157,8 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
             // relevant cookies, not a 100+ line dump of all browser cookies.
             let filter_url = if !url.is_empty() {
                 Some(url.to_string())
+            } else if args.get("domain").and_then(Value::as_str).is_some() {
+                None
             } else {
                 let current = page.model().url().to_string();
                 if current.is_empty() || current == "about:blank" {
@@ -151,6 +179,8 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
             // current page's url so the call never fails for missing scope.
             url: if !url.is_empty() {
                 Some(url.into())
+            } else if args.get("domain").and_then(Value::as_str).is_some() {
+                None
             } else {
                 let current = page.model().url().to_string();
                 if current.is_empty() || current == "about:blank" {
@@ -182,6 +212,8 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
             // current page's url so the call never fails for missing scope.
             url: if !url.is_empty() {
                 Some(url.into())
+            } else if args.get("domain").and_then(Value::as_str).is_some() {
+                None
             } else {
                 let current = page.model().url().to_string();
                 if current.is_empty() || current == "about:blank" {

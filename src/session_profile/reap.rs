@@ -55,9 +55,12 @@ pub(super) fn restore_interrupted_swap(blade_dir: &Path) -> bool {
 /// process-global env changing on another thread (tests flip BLADE_HOME in
 /// parallel), which is the split-brain this signature exists to prevent.
 pub(super) fn reap_orphans_at(blade_dir: &Path) {
-    // `.profile.sync` is just the staging copy, safe to drop.
-    let _ = std::fs::remove_dir_all(blade_dir.join(".profile.sync"));
-    restore_interrupted_swap(blade_dir);
+    // Startup overlaps other sessions' sync-back. Staging is disposable only
+    // while we hold the same lock as the copier; otherwise leave it intact.
+    if let Some(_lock) = SessionProfile::acquire_lock_at(blade_dir) {
+        let _ = std::fs::remove_dir_all(blade_dir.join(".profile.sync"));
+        restore_interrupted_swap(blade_dir);
+    }
 
     // 1. Dead session profiles + their Chromes (agent lane).
     reap_session_root(blade_dir, None);
@@ -71,8 +74,10 @@ pub(super) fn reap_orphans_at(blade_dir: &Path) {
             if !root.is_dir() {
                 continue;
             }
-            restore_interrupted_real_swap(&root);
-            let _ = std::fs::remove_dir_all(root.join("template.sync"));
+            if let Some(_lock) = SessionProfile::acquire_lock_at(&root) {
+                restore_interrupted_real_swap(&root);
+                let _ = std::fs::remove_dir_all(root.join("template.sync"));
+            }
             reap_session_root(&root, Some(&root));
         }
     }
@@ -150,7 +155,10 @@ fn kill_orphan_chrome(dir: &Path) {
 /// swap. Mirrors [`restore_interrupted_swap`] for the per-browser root.
 fn restore_interrupted_real_swap(root: &Path) {
     let template = root.join("template");
-    for (name, what) in [("template.old", "sync swap"), ("template.tmp", "import")] {
+    for (name, what) in [
+        (".template.old", "sync swap"),
+        ("template.old", "import swap"),
+    ] {
         let dir = root.join(name);
         if dir.is_dir() {
             if !template.exists() {
@@ -163,6 +171,7 @@ fn restore_interrupted_real_swap(root: &Path) {
             }
         }
     }
+    let _ = std::fs::remove_dir_all(root.join("template.tmp"));
 }
 
 /// Read the pid from a profile dir's SingletonLock (a `hostname-pid`
@@ -436,5 +445,34 @@ mod xvfb_tests {
         );
         assert!(!lock.exists());
         assert!(!claim.exists());
+    }
+}
+
+#[cfg(test)]
+mod template_recovery_tests {
+    use super::*;
+    #[test]
+    fn real_sync_backup_recovers_but_incomplete_import_is_discarded() {
+        let root = std::env::temp_dir().join(format!("blade-real-swap-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".template.old/Default")).unwrap();
+        std::fs::create_dir_all(root.join("template.tmp")).unwrap();
+        std::fs::write(root.join(".template.old/Default/state"), "last-good").unwrap();
+        std::fs::write(root.join("template.tmp/partial"), "not-complete").unwrap();
+        restore_interrupted_real_swap(&root);
+        assert_eq!(
+            std::fs::read_to_string(root.join("template/Default/state")).unwrap(),
+            "last-good"
+        );
+        assert!(!root.join("template.tmp").exists());
+        std::fs::remove_dir_all(root.join("template")).unwrap();
+        std::fs::create_dir_all(root.join("template.tmp")).unwrap();
+        std::fs::write(root.join("template.tmp/partial"), "not-complete").unwrap();
+        restore_interrupted_real_swap(&root);
+        assert!(
+            !root.join("template").exists(),
+            "a half-copied import must never become a template"
+        );
+        assert!(!root.join("template.tmp").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -69,7 +69,7 @@ pub fn all_tools() -> Vec<ToolDef> {
 ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > selector=\"#overflow-trigger\" (CSS; pierces open shadow roots - use when a control has no ref or label; works on click/hover/type/select/clear/read/upload/eval) > x,y. Add role= or nth= if ambiguous.\n\
 ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call.\n\
-fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit gets JS click fallback if mouse click fails.\n\
+fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit dispatches once; an unobserved effect is never replayed.\n\
 EDITORS: type replaces the field (clear verified) and works on rich contenteditable editors - the verdict names where the text landed (e.g. the live editor) and catches late draft hydration; press takes key chords (Control+a).\n\n\\
 WAIT: condition=settle (default) | element | text | title | url | js — text= without a condition means \"wait for this text\" (a timeout inside run errors with page state; wait+else runs the else branch instead).\n\\
 batch: same action set as act (fill/eval/pdf/download/collect/save/load included) plus {\"action\":\"see\", mode|extract|find, budget} steps — their read lands in a --- read --- section. Use text/label/selector addressing in steps (not ref) — refs go stale after navigation; auto-settles after navigation. optional:true on a step continues past its failure.\n\
@@ -116,7 +116,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                             }
                         }
                     },
-                    "submit": {"type": "string", "description": "Fill: ref or text of submit button. JS click fallback if mouse click fails."},
+                    "submit": {"type": "string", "description": "Fill: ref or text of submit button. Dispatched once; inspect the verdict before repeating."},
                     "steps": {
                         "type": "array",
                         "description": "Batch: sequential steps — every act action (fill, eval, pdf, download, collect, save, load all work) plus see steps ({action:'see', mode, extract, find, budget}) that read inline. Navigation doesn't halt — subsequent steps act on the new page. A step with optional:true continues past its own failure; otherwise the batch stops at the first error and says so.",
@@ -176,7 +176,7 @@ Truncation: model output over budget ends with '…(N more: X link, Y button)' �
         ToolDef {
             name: "state",
             description: "Browser state: tabs, cookies, sessions, storage, resource blocking.\n\
-LOGIN PERSISTENCE: save <name> after login → load <name> in a later session (restores cookies+storage, then navigate to site).\n\
+LOGIN PERSISTENCE: save <name> after login → navigate to the saved origin → load <name> → reload (cookies+storage restored).\n\
 TABS: tabs (list), open-tab <url> (returns tab ID — save it for switch-tab), switch-tab <id>, close-tab <id>.\n\
 COOKIES/STORAGE: cookies, set-cookie, ls/ss, set-ls/set-ss, rm-ls/rm-ss, clear-ls/clear-ss.\n\
 BLOCKING: op=block classes=\"images,fonts,media,trackers\" (inert assets only, never first-party scripts).\n\

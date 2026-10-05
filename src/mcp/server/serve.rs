@@ -4,7 +4,7 @@
 
 use std::io::Write;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 
 use serde_json::{json, Value};
 
@@ -38,8 +38,8 @@ use super::{request_version, shape_result, SUPPORTED_VERSIONS};
 ///   profiles are per-process (`~/.blade/profiles/sess-<pid>`).
 pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
     let stdin = tokio::io::stdin();
-    let reader = BufReader::new(stdin);
-    let mut lines = reader.lines();
+    let mut reader = BufReader::new(stdin);
+    let mut input = Vec::new();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
@@ -81,10 +81,18 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                 eprintln!("[bladebro] termination signal — shutting down Chrome gracefully");
                 break;
             }
-            line = lines.next_line() => {
+            line = crate::framing::read_until_limited(&mut reader, b'\n', &mut input, 8 * 1024 * 1024) => {
                 let line = match line {
-                    Ok(Some(l)) => l,
-                    Ok(None) => break,
+                    Ok(0) => break,
+                    Ok(_) => match String::from_utf8(std::mem::take(&mut input)) {
+                        Ok(line) => line,
+                        Err(e) => {
+                            let resp = json!({"jsonrpc":"2.0", "id":null, "error":{"code":-32700, "message":format!("Parse error: invalid UTF-8: {e}")}});
+                            writeln!(out, "{resp}")?;
+                            out.flush()?;
+                            continue;
+                        }
+                    },
                     Err(e) => {
                         eprintln!("[bladebro] stdin read error: {e}");
                         break;
@@ -321,16 +329,10 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                 // double-fire the action (double purchase,
                                 // duplicate message): the first dispatch may
                                 // have landed before the connection died.
-                                let retry_safe = {
-                                    let tn = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                    tn == "see"
-                                        || (tn == "state" && matches!(
-                                            params.get("arguments")
-                                                .and_then(|a| a.get("op"))
-                                                .and_then(|o| o.as_str()),
-                                            Some("cookies") | Some("ls") | Some("ss") | Some("tabs")
-                                        ))
-                                };
+                                let retry_safe = super::retry_safe(
+                                    params.get("name").and_then(Value::as_str).unwrap_or(""),
+                                    &params["arguments"],
+                                );
                                 eprintln!("[bladebro] browser closed during tool call, reconnecting...");
                                 if let Some(b) = browser.take() {
                                     shutdown_browser(b).await;
@@ -377,7 +379,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                                 "id": id_retry,
                                                 "result": {
                                                     "content": [{ "type": "text", "text":
-                                                        "\u{2717} Browser connection was lost mid-action. Chrome has been restarted (page reset to about:blank). The action's outcome is UNKNOWN — it may have taken effect before the crash. Re-issue the action (and verify the result) rather than assuming it failed.".to_string() }],
+                                                        "\u{2717} Browser connection was lost mid-action. Chrome has been restarted (page reset to about:blank). The action's outcome is UNKNOWN — it may have taken effect before the crash. Inspect the result at the destination before deciding whether to repeat the action.".to_string() }],
                                                     "isError": true,
                                                 }
                                             })
@@ -412,7 +414,10 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                     eprintln!("[bladebro] attached tab died, opening a fresh tab...");
                                     let p = page.as_mut().unwrap();
                                     match recover_dead_tab(p).await {
-                                        Ok(()) => {
+                                        Ok(()) if super::retry_safe(
+                                            params.get("name").and_then(Value::as_str).unwrap_or(""),
+                                            &params["arguments"],
+                                        ) => {
                                             let p = page.as_mut().unwrap();
                                             match handle_tools_call(id_retry.clone(), &params, p).await {
                                                 Ok(v) => v,
@@ -423,6 +428,10 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                                 }),
                                             }
                                         }
+                                        Ok(()) => json!({
+                                            "jsonrpc": "2.0", "id": id_retry,
+                                            "result": {"content": [{"type":"text", "text":"Tab closed mid-action; outcome UNKNOWN. A fresh tab is ready. Inspect the destination before repeating the action."}], "isError":true}
+                                        }),
                                         Err(re) => json!({
                                             "jsonrpc": "2.0",
                                             "id": id_retry,
@@ -541,7 +550,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                 if browser.is_some() && last_sync.elapsed() >= sync_interval {
                     if let Some(ref p) = page {
                         if !p.cdp_ref().is_closed() && !crate::realbrowser::real_lane() {
-                            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                            if let Err(e) = crate::logins::snapshot(p.cdp_ref()).await { eprintln!("[bladebro] login snapshot failed: {e}"); }
                         }
                     }
                     // Sync knowledge base to disk (prune + write).
@@ -571,7 +580,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         // (Never on the real lane — not our cookie store.)
                         if let Some(ref p) = page {
                             if !crate::realbrowser::real_lane() {
-                                let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                                if let Err(e) = crate::logins::snapshot(p.cdp_ref()).await { eprintln!("[bladebro] login snapshot failed: {e}"); }
                             }
                         }
                         shutdown_browser(b).await;
@@ -589,7 +598,9 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
         // (Never on the real lane — not our cookie store.)
         if let Some(ref p) = page {
             if !crate::realbrowser::real_lane() {
-                let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                if let Err(e) = crate::logins::snapshot(p.cdp_ref()).await {
+                    eprintln!("[bladebro] login snapshot failed: {e}");
+                }
             }
         }
         shutdown_browser(b).await;

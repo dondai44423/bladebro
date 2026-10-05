@@ -32,13 +32,17 @@ impl VirtualDisplay {
     /// session B's Chrome via a shared Xvfb).
     pub(super) fn start() -> Result<Self> {
         let xvfb_path = find_xvfb().ok_or_else(|| BladeError::Other("Xvfb not found".into()))?;
+        Self::start_with_path(&xvfb_path)
+    }
+
+    fn start_with_path(xvfb_path: &str) -> Result<Self> {
         let mut last_err = String::new();
         for _attempt in 0..3 {
             let Some(display_num) = claim_display_num() else {
                 last_err = "no free display claim".into();
                 break;
             };
-            let child = Command::new(&xvfb_path)
+            let child = Command::new(xvfb_path)
                 .args([
                     &format!(":{display_num}"),
                     "-screen",
@@ -76,9 +80,7 @@ impl VirtualDisplay {
                         break;
                     }
                     Ok(None) => {
-                        if std::os::unix::net::UnixStream::connect(&sock).is_ok()
-                            || std::time::Instant::now() >= ready_deadline
-                        {
+                        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
                             let wm = spawn_session_chrome(display_num);
                             eprintln!("[bladebro] Xvfb virtual display on :{display_num}");
                             return Ok(Self {
@@ -87,9 +89,19 @@ impl VirtualDisplay {
                                 display_num,
                             });
                         }
+                        if std::time::Instant::now() >= ready_deadline {
+                            last_err =
+                                format!("Xvfb :{display_num} did not open its socket within 500ms");
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            release_display_claim(display_num);
+                            break;
+                        }
                         std::thread::sleep(Duration::from_millis(25));
                     }
                     Err(e) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
                         release_display_claim(display_num);
                         last_err = format!("poll: {e}");
                         break;
@@ -294,4 +306,33 @@ pub(super) fn apply_xvfb_env(cmd: &mut Command, xvfb: &VirtualDisplay) {
     cmd.env_remove("XDG_SESSION_TYPE");
     // The --ozone-platform=x11 pin itself lives in `launch_args` (both
     // transports build from that single source).
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod readiness_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn a_live_process_without_a_display_socket_is_not_ready() {
+        let dir = std::env::temp_dir().join(format!("blade-xvfb-ready-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-xvfb");
+        let pids = dir.join("pids");
+        std::fs::write(&script, format!("#!/usr/bin/env python3\nimport os,time\nwith open({:?},'a') as f:f.write(str(os.getpid())+'\\n')\ntime.sleep(60)\n", pids.to_string_lossy())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = VirtualDisplay::start_with_path(script.to_str().unwrap());
+        let recorded = std::fs::read_to_string(&pids).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(result.is_err(), "process survival is not display readiness");
+        let pids: Vec<u32> = recorded.lines().map(|s| s.parse().unwrap()).collect();
+        assert_eq!(
+            pids.len(),
+            3,
+            "all bounded attempts reached the fake server"
+        );
+        assert!(
+            pids.iter().all(|pid| !crate::platform::process_alive(*pid)),
+            "timed-out servers must be reaped"
+        );
+    }
 }
