@@ -13,7 +13,7 @@ import tempfile
 repo = Path(__file__).resolve().parents[2]
 with tempfile.TemporaryDirectory(prefix='blade-release-test-') as tmp:
     root = Path(tmp)
-    for name in ('release.sh', 'scripts/publish-npm.sh', 'Cargo.toml', 'CHANGELOG.md'):
+    for name in ('release.sh', 'scripts/publish-npm.sh', 'Cargo.toml', 'CHANGELOG.md', 'tools/reliability_probe/linux-abi.py'):
         destination = root / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(repo / name, destination)
@@ -57,6 +57,7 @@ with tempfile.TemporaryDirectory(prefix='blade-release-test-') as tmp:
     env.update(PATH=str(commands)+':'+os.environ['PATH'], TEST_NPM_CALLS=str(calls))
     script('npm', 'echo "$PWD $*" >> "$TEST_NPM_CALLS"\ncase "$1" in publish) echo Publishing;; view) echo 4.0.30;; *) exit 1;; esac')
     script('sleep', 'exit 0')
+    script('objdump', 'echo "0000 DF .text (GLIBC_2.28) statx"')
     result = subprocess.run(['/bin/bash', str(root / 'scripts/publish-npm.sh'),'--no-build'], env=env,cwd=root,capture_output=True,text=True)
     assert result.returncode != 0 and 'main package was not published' in result.stderr, (result.stdout,result.stderr)
     lines = calls.read_text().splitlines()

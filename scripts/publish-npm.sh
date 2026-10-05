@@ -63,7 +63,9 @@ if [[ "$SKIP_BUILD" == "0" ]]; then
   echo "Building binaries (native + 4 cross targets)..."
   cargo build --release
   if command -v cargo-zigbuild >/dev/null 2>&1; then
-    cargo zigbuild --release --target aarch64-unknown-linux-gnu
+    cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28
+    cp target/x86_64-unknown-linux-gnu/release/bladebro target/release/bladebro
+    cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.28
     cargo zigbuild --release --target x86_64-pc-windows-gnu
     RUSTC_WRAPPER= cargo zigbuild --release --target x86_64-apple-darwin
     RUSTC_WRAPPER= cargo zigbuild --release --target aarch64-apple-darwin
@@ -74,6 +76,8 @@ if [[ "$SKIP_BUILD" == "0" ]]; then
 else
   echo "Using the binaries from the current release build (--no-build)."
 fi
+
+python3 tools/reliability_probe/linux-abi.py target/release/bladebro target/aarch64-unknown-linux-gnu/release/bladebro
 
 # Copy every binary into its package. All five platforms are mandatory —
 # a missing binary is a hard error, never a partial publish.

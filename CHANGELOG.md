@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Pin both Linux release binaries to glibc 2.28 rather than the build host's 2.39, with an ABI gate before publication.
+
 ### Fixed
 - Xvfb orphan cleanup requires a dead Bladebro claim and exact server/display identity; system-managed displays are preserved (#24).
 - Clicks and form submits dispatch once. DOM silence and ambiguous transport failures no longer replay side effects; daemon and MCP recovery retry only observational calls.

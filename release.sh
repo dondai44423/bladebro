@@ -56,7 +56,7 @@ echo "=== bladebro release v$VERSION ==="
 
 # Fail before editing version files: stale artifacts are never a substitute
 # for an unavailable toolchain, and a release starts from a reviewable tree.
-for command in cargo cargo-zigbuild zig git gh npm python3 sha256sum; do
+for command in cargo cargo-zigbuild zig git gh npm python3 sha256sum objdump; do
     command -v "$command" >/dev/null || { echo "ERROR: missing $command" >&2; exit 1; }
 done
 [[ $(git branch --show-current) == main ]] || { echo "ERROR: release from main" >&2; exit 1; }
@@ -143,10 +143,14 @@ git add Cargo.toml Cargo.lock CHANGELOG.md npm/*/package.json
 git commit -m "release: v$VERSION"
 RELEASE_SHA=$(git rev-parse HEAD)
 cargo build --release
+# Pin the shipped Linux ABI instead of inheriting the release host's libc.
+cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28
+cp target/x86_64-unknown-linux-gnu/release/bladebro target/release/bladebro
 cargo zigbuild --release --target x86_64-pc-windows-gnu
 RUSTC_WRAPPER= cargo zigbuild --release --target x86_64-apple-darwin
 RUSTC_WRAPPER= cargo zigbuild --release --target aarch64-apple-darwin
-cargo zigbuild --release --target aarch64-unknown-linux-gnu
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.28
+python3 tools/reliability_probe/linux-abi.py target/release/bladebro target/aarch64-unknown-linux-gnu/release/bladebro
 for artifact in target/release/bladebro \
     target/x86_64-pc-windows-gnu/release/bladebro.exe \
     target/x86_64-apple-darwin/release/bladebro \

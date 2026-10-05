@@ -55,6 +55,7 @@ bladebro help --json
 
 - Node.js >= 14
 - Chrome/Chromium installed (Bladebro finds it automatically)
+- Linux prebuilt binaries: glibc >= 2.28
 
 ## Platforms
 

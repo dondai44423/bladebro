@@ -9,3 +9,6 @@ Run `node tools/reliability_probe/pi-stdio.mjs` (Node >=23) for split UTF-8,
 failed-handshake cleanup, dead-child errors and an actual binary handshake.
 Run `python3 tools/reliability_probe/release-preflight.py` for copied-file
 release guards; fake publishers prove the refusal paths without a real publish.
+
+Run `python3 tools/reliability_probe/linux-abi.py <linux-binary> ...` to
+reject release binaries whose required glibc symbol versions exceed 2.28.

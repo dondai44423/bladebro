@@ -66,7 +66,7 @@ npm install -g bladebro
 bladebro mcp
 ```
 
-No Rust, no compilation, no dependencies. npm resolves the prebuilt binary for your platform — zero postinstall scripts. Update later with `npm update -g bladebro`.
+Requires Chrome/Chromium; prebuilt Linux binaries require glibc 2.28 or newer. No Rust or compilation. npm resolves the prebuilt binary for your platform — zero postinstall scripts. Update later with `npm update -g bladebro`.
 
 | Platform | Package | Size | Status |
 |---|---|---|---|
