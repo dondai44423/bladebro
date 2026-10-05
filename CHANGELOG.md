@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-10-06
+
 - Pin both Linux release binaries to glibc 2.28 rather than the build host's 2.39, with an ABI gate before publication.
 
 ### Fixed
