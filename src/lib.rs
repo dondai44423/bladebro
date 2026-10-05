@@ -21,6 +21,7 @@ pub mod cdp;
 pub mod cli;
 pub mod error;
 pub mod fingerprint;
+mod framing;
 pub mod knowledge;
 pub mod logins;
 pub mod mcp;

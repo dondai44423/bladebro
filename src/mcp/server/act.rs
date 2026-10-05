@@ -15,7 +15,7 @@ use super::see::handle_see;
 use super::state::handle_state;
 
 /// `fill` — multi-field forms in ONE call (type/select/checkbox-aware, with
-/// submit + JS-click fallback). Shared by `act`, `act batch` steps, and `run`
+/// a single submit dispatch). Shared by `act`, `act batch` steps, and `run`
 /// steps: the step vocabulary and the act schema had drifted, which is why
 /// `fill` used to be "unknown action" inside run and schema-rejected in batch.
 pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
@@ -23,6 +23,36 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
         .get("fields")
         .and_then(|f| f.as_array())
         .ok_or_else(|| BladeError::Other("fill requires 'fields' array".into()))?;
+    // Reject malformed fields before changing any earlier field.
+    for (index, field) in fields.iter().enumerate() {
+        if !field.is_object()
+            || !["ref", "label", "selector"].iter().any(|key| {
+                field
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            })
+        {
+            return Err(BladeError::Other(format!(
+                "fill field {} requires ref, label or selector",
+                index + 1
+            )));
+        }
+        for key in ["ref", "label", "selector", "text", "option"] {
+            if field.get(key).is_some_and(|value| !value.is_string()) {
+                return Err(BladeError::Other(format!(
+                    "fill field {}: {key} must be a string",
+                    index + 1
+                )));
+            }
+        }
+        if field.get("check").is_some_and(|value| !value.is_boolean()) {
+            return Err(BladeError::Other(format!(
+                "fill field {}: check must be a boolean",
+                index + 1
+            )));
+        }
+    }
     let submit = args.get("submit").and_then(|s| s.as_str()).unwrap_or("");
     let mut last_verdict = String::new();
     let mut count = 0usize;
@@ -98,7 +128,9 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
     let last_delta = if !submit.is_empty() {
         // Refs are 'e' followed by digits (e1, e2, ...).
         // 'Edit', 'Enter', 'Email' start with 'e' but are text, not refs.
-        let is_ref = submit.starts_with('e') && submit[1..].chars().all(|c| c.is_ascii_digit());
+        let is_ref = submit.len() > 1
+            && submit.starts_with('e')
+            && submit[1..].chars().all(|c| c.is_ascii_digit());
         let resolved = if is_ref {
             submit.to_string()
         } else {
@@ -111,22 +143,8 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
                 ref_id: resolved.clone(),
             })
             .await?;
-        last_verdict = verdict.clone();
-        // If the mouse click had no effect (no navigation, no DOM change),
-        // the submit button may be a div styled as a button or require
-        // JS dispatch. Try el.click() as a fallback.
-        if !delta.navigated && delta.is_empty() {
-            match handle_eval(page, "el ? (el.click(), true) : false", &resolved).await {
-                Ok(_) => {
-                    last_verdict = format!("{verdict} (submit via JS click fallback)");
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    page.recapture().await?
-                }
-                Err(_) => delta,
-            }
-        } else {
-            delta
-        }
+        last_verdict = verdict;
+        delta
     } else {
         page.recapture().await?
     };

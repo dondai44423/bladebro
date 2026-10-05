@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Pin both Linux release binaries to glibc 2.28 rather than the build host's 2.39, with an ABI gate before publication.
+
+### Fixed
+- Xvfb orphan cleanup requires a dead Bladebro claim and exact server/display identity; system-managed displays are preserved (#24).
+- Clicks and form submits dispatch once. DOM silence and ambiguous transport failures no longer replay side effects; daemon and MCP recovery retry only observational calls.
+- Storage writes verify page readback and surface security exceptions. Named sessions refuse a different origin before changing browser state, preserve full values and empty keys, restore session cookies correctly, and reject nonportable filenames.
+- Login snapshots cover the whole cookie store, retain other sites, and honor logout. Cookie restoration preserves host/domain scope and IPv6 URLs; failed restoration preserves the sidecar. External MCP attach never injects saved logins.
+- Concurrent profile cleanup/import/sync share an OS lock; startup preserves active staging, recovers the actual interrupted sync backup, and discards incomplete imports. Borrowed browser profiles survive shutdown. CDP handshake and queue admission have deadlines; MCP, daemon and pipe framing have bounded, cancellation-safe reads.
+- Simultaneous daemon starts have one socket owner. Partial requests cannot block termination, and stop reports unacknowledged shutdown honestly. JSON stop and lane switches emit one machine-readable object.
+- Xvfb startup requires a working display socket, kills timed-out children, and releases its claims. SPA route guards enforce their time budget and cannot treat failed probes as stable content.
+- Pi integration preserves UTF-8 split across subprocess chunks, cleans failed handshakes, fails promptly after process exit, and stops the captured child safely.
+- Session/login writes are atomic and private from creation; invalid process IDs cannot address process groups.
+
+### Changed
+- Release publishing requires all cross-build tools and platforms, stages GitHub assets before public visibility, and verifies exact npm versions before completing.
+- Added live reliability probes for side effects, storage, cookies, attach isolation, and pi subprocess behavior.
+
 ## [4.0.3] - 2026-10-02
 
 ### Added

@@ -281,7 +281,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro state block images,fonts",
                 "bladebro state compress off"
             ],
-            "notes": ["save/load persists cookies+storage; load then navigate to the site"]
+            "notes": ["save/load persists cookies+storage; navigate to the saved origin before load, then reload"]
         }),
         "run" => json!({
             "usage": "bladebro run '<json-steps>' | @file | -",

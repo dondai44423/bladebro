@@ -53,7 +53,7 @@ pub(super) async fn restart_daemon_for_lane() {
 /// Same lifecycle as MCP (lazy launch, self-healing, idle timeout, reaper).
 #[cfg(unix)]
 pub async fn run_daemon() -> Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     // Ignore SIGHUP — the daemon must survive the parent CLI exiting.
@@ -61,6 +61,30 @@ pub async fn run_daemon() -> Result<()> {
     ignore_sighup();
 
     let path = socket_path();
+    // Hold an OS lock for the daemon lifetime. A connect/remove/bind sequence
+    // alone races two cold starts and can unlink the winner's live socket.
+    if let Some(parent) = path.parent() {
+        crate::platform::secure_create_dir_all(parent)?;
+    }
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path.with_extension("lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            eprintln!(
+                "[bladebro] daemon already running or starting on {}",
+                path.display()
+            );
+            return Ok(());
+        }
+        return Err(error.into());
+    }
     // Never steal a LIVE daemon's socket: connect to check first. Without
     // this, a second `bladebro daemon` rebinds over the active one and
     // orphans it — a ghost that keeps its Chrome but that `stop` can no
@@ -134,19 +158,26 @@ pub async fn run_daemon() -> Result<()> {
                 };
 
                 let mut reader = BufReader::new(stream);
-                let mut line = String::new();
+                let mut input = Vec::new();
                 // Bounded read: a client that connects and never writes (or
                 // dies mid-request) must not stall the whole daemon — accepts,
                 // signals and the idle timer all sit behind this await.
-                match tokio::time::timeout(
+                let read = tokio::select! {
+                    _ = wait_for_shutdown_signal() => break,
+                    read = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    reader.read_line(&mut line),
+                    crate::framing::read_until_limited(&mut reader, b'\n', &mut input, 8 * 1024 * 1024),
                 )
-                .await
-                {
+                    => read,
+                };
+                match read {
                     Ok(Ok(_)) => {}
                     _ => continue, // io error, or a silent client — drop it
                 }
+                let line = match std::str::from_utf8(&input) {
+                    Ok(line) => line,
+                    Err(_) => continue,
+                };
                 let line = line.trim();
                 if line.is_empty() { continue; }
 
@@ -307,9 +338,10 @@ pub async fn run_daemon() -> Result<()> {
                                 if let Some(ref mut p) = page {
                                     p.set_knowledge(knowledge.clone());
                                 }
-                                // Retry.
                                 let p = page.as_mut().unwrap();
-                                match dispatch(tool, &args, p).await {
+                                if !crate::mcp::server::retry_safe(tool, &args) {
+                                    json!({"ok":false,"error":"Browser connection lost mid-action; outcome UNKNOWN. Chrome restarted. Inspect the destination before repeating the action."})
+                                } else { match dispatch(tool, &args, p).await {
                                     Ok(r) => json!({
                                         "ok": true,
                                         "text": with_notes(r.text),
@@ -317,7 +349,7 @@ pub async fn run_daemon() -> Result<()> {
                                         "is_error": r.is_error,
                                     }),
                                     Err(e) => json!({ "ok": false, "error": e.to_string() }),
-                                }
+                                } }
                             }
                             Err(e) => json!({ "ok": false, "error": format!("reconnect failed: {e}") }),
                         }
@@ -343,7 +375,7 @@ pub async fn run_daemon() -> Result<()> {
                     if let Some(b) = browser.take() {
                         if let Some(ref p) = page {
                             if !crate::realbrowser::real_lane() {
-                                let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                                if let Err(e) = crate::logins::snapshot(p.cdp_ref()).await { eprintln!("[bladebro] login snapshot failed: {e}"); }
                             }
                         }
                         let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
@@ -359,7 +391,7 @@ pub async fn run_daemon() -> Result<()> {
                     if !crate::realbrowser::real_lane() {
                         if let Some(ref p) = page {
                             if !p.cdp_ref().is_closed() {
-                                let _ = crate::logins::snapshot(p.cdp_ref()).await;
+                                if let Err(e) = crate::logins::snapshot(p.cdp_ref()).await { eprintln!("[bladebro] login snapshot failed: {e}"); }
                             }
                         }
                     }
@@ -381,7 +413,9 @@ pub async fn run_daemon() -> Result<()> {
     // (Never on the real lane — not our cookie store.)
     if let Some(ref p) = page {
         if !crate::realbrowser::real_lane() {
-            let _ = crate::logins::snapshot(p.cdp_ref()).await;
+            if let Err(e) = crate::logins::snapshot(p.cdp_ref()).await {
+                eprintln!("[bladebro] login snapshot failed: {e}");
+            }
         }
     }
     if let Some(b) = browser {
@@ -425,19 +459,15 @@ async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
         let target = crate::cdp::first_page_target(&base).await?;
         let client = crate::cdp::CdpClient::connect(target.ws_url()?).await?;
         let page = Page::attach(crate::cdp::CdpSession::root(client), &base, None).await?;
+        if browser.is_some() && !crate::realbrowser::real_lane() {
+            crate::logins::restore(page.cdp_ref()).await?;
+        }
         Ok(page)
     }
     .await;
 
     match result {
-        Ok(page) => {
-            // Re-inject saved logins before anything navigates. Never on the
-            // real lane: the user's own cookies are not ours to write.
-            if !crate::realbrowser::real_lane() {
-                let _ = crate::logins::restore(page.cdp_ref()).await;
-            }
-            Ok((page, browser))
-        }
+        Ok(page) => Ok((page, browser)),
         Err(e) => {
             // Clean up a browser we launched (attach lane: never ours).
             if let Some(b) = browser {
@@ -468,18 +498,29 @@ fn read_pid_file() -> Option<i32> {
 
 #[cfg(unix)]
 fn process_alive(pid: i32) -> bool {
-    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+    pid > 1 && crate::platform::process_alive(pid as u32)
 }
 
 /// Verify the pid is actually a bladebro process before killing it — pids
-/// get recycled and a blind kill could hit an innocent process. Without
-/// /proc (macOS), assume yes: the file was just written by a daemon whose
-/// socket went dead, so the risk window is tiny.
+/// get recycled and a blind kill could hit an innocent process. macOS uses
+/// ps executable identity; an unreadable identity never authorizes a kill.
 #[cfg(unix)]
 fn looks_like_bladebro(pid: i32) -> bool {
-    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        Ok(comm) => comm.trim().starts_with("bladebro"),
-        Err(_) => true,
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .is_ok_and(|comm| comm.trim() == "bladebro")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+            .is_ok_and(|output| {
+                std::path::Path::new(String::from_utf8_lossy(&output.stdout).trim())
+                    .file_name()
+                    .is_some_and(|name| name == "bladebro")
+            })
     }
 }
 
@@ -489,7 +530,7 @@ fn looks_like_bladebro(pid: i32) -> bool {
 /// alive (wedged, or SIGKILLed mid-cleanup), terminate it — otherwise
 /// `stop` would lie "not running" while an orphan Chrome kept running.
 #[cfg(unix)]
-pub async fn stop_daemon() -> Result<()> {
+pub async fn stop_daemon() -> Result<String> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -502,7 +543,13 @@ pub async fn stop_daemon() -> Result<()> {
         writeln!(stream, "{{\"tool\":\"stop\"}}")?;
         stream.flush()?;
         let mut resp = String::new();
-        let _ = stream.read_to_string(&mut resp);
+        stream.read_to_string(&mut resp)?;
+        let response: Value = serde_json::from_str(resp.trim())?;
+        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(BladeError::Other(
+                "daemon did not acknowledge shutdown".into(),
+            ));
+        }
         // Wait for the daemon to finish teardown — it removes the socket
         // file last. Without this, an immediate second `stop` could connect
         // to the dying daemon's still-bound socket and report "stopped"
@@ -513,8 +560,10 @@ pub async fn stop_daemon() -> Result<()> {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        println!("daemon stopped");
-        return Ok(());
+        if path.exists() {
+            return Err(BladeError::Other("daemon acknowledged stop but cleanup is still running; check again before restarting".into()));
+        }
+        return Ok("daemon stopped".into());
     }
 
     // No socket. A daemon process may still linger — check the pid file.
@@ -535,22 +584,20 @@ pub async fn stop_daemon() -> Result<()> {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
-            println!("daemon (pid {pid}) was unresponsive — terminated");
-        } else {
-            println!("daemon not running");
+            let _ = std::fs::remove_file(pid_path());
+            let _ = std::fs::remove_file(&path);
+            return Ok(format!("daemon (pid {pid}) was unresponsive — terminated"));
         }
         let _ = std::fs::remove_file(pid_path());
         let _ = std::fs::remove_file(&path);
-        return Ok(());
+        return Ok("daemon not running".into());
     }
 
     let _ = std::fs::remove_file(&path);
-    println!("daemon not running");
-    Ok(())
+    Ok("daemon not running".into())
 }
 
 #[cfg(not(unix))]
-pub async fn stop_daemon() -> Result<()> {
-    println!("daemon mode is Unix-only — commands run one-shot on this platform");
-    Ok(())
+pub async fn stop_daemon() -> Result<String> {
+    Ok("daemon mode is Unix-only — commands run one-shot on this platform".into())
 }

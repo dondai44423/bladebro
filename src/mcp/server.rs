@@ -111,3 +111,33 @@ fn shape_result(result: &mut Value, version: Option<&str>) {
 fn artifact_hint(path: &str) -> String {
     format!("full payload: {path} — read it back in pages with see artifact=\"{path}\" (offset/limit) or any file tool")
 }
+
+/// Only observational calls may be replayed after an ambiguous disconnect.
+pub(crate) fn retry_safe(tool: &str, args: &Value) -> bool {
+    (tool == "see" && args.get("url").is_none() && args.get("eval").is_none())
+        || (tool == "state"
+            && matches!(
+                args.get("op").and_then(Value::as_str),
+                Some("cookies" | "ls" | "ss" | "tabs")
+            ))
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    #[test]
+    fn recovery_does_not_replay_mutations_or_unknown_calls() {
+        for tool in ["act", "run", "unknown"] {
+            assert!(!retry_safe(tool, &json!({"action":"click"})));
+        }
+        assert!(!retry_safe("see", &json!({"url":"https://example.com"})));
+        assert!(!retry_safe("see", &json!({"eval":"fetch('/pay')"})));
+        assert!(retry_safe("see", &json!({"mode":"content"})));
+        for op in ["set-cookie", "clear-ls", "save", "load", "close-tab", ""] {
+            assert!(!retry_safe("state", &json!({"op":op})), "unsafe op {op}");
+        }
+        for op in ["cookies", "ls", "ss", "tabs"] {
+            assert!(retry_safe("state", &json!({"op":op})));
+        }
+    }
+}

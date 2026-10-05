@@ -46,6 +46,13 @@ pub fn import_template(id: &str, src: &Path) -> Result<ImportStats> {
     let root = root_for(id);
     platform::secure_create_dir_all(&root)
         .map_err(|e| BladeError::Other(format!("cannot create {}: {e}", root.display())))?;
+    let _lock =
+        crate::session_profile::SessionProfile::acquire_lock_at(&root).ok_or_else(|| {
+            BladeError::Other(
+                "browser template is busy; retry import after the current session finishes syncing"
+                    .into(),
+            )
+        })?;
     let tmp = root.join("template.tmp");
     let _ = std::fs::remove_dir_all(&tmp);
 
@@ -67,7 +74,7 @@ pub fn import_template(id: &str, src: &Path) -> Result<ImportStats> {
     }
 
     // Atomic-ish swap (same discipline as the agent-lane template).
-    let template = template_dir(id);
+    let template = root.join("template");
     let old = root.join("template.old");
     let _ = std::fs::remove_dir_all(&old);
     if template.exists() {
@@ -92,7 +99,10 @@ pub fn import_template(id: &str, src: &Path) -> Result<ImportStats> {
         "files": files,
         "bytes": bytes,
     });
-    let _ = platform::secure_write_file(&source_meta_path(id), meta.to_string().as_bytes());
+    let _ = platform::secure_write_file(
+        &root.join("profile-source.json"),
+        meta.to_string().as_bytes(),
+    );
 
     Ok(ImportStats {
         files,

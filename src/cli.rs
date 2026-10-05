@@ -364,7 +364,18 @@ async fn run_cli_inner(
     match cmd {
         "rb" | "realbrowser" => run_rb(rest, json_mode).await,
         "daemon" => run_daemon().await,
-        "stop" => stop_daemon().await,
+        "stop" => {
+            let text = stop_daemon().await?;
+            print_result(
+                &ToolResult {
+                    text,
+                    image: None,
+                    is_error: false,
+                },
+                json_mode,
+            );
+            Ok(())
+        }
         "nav" => {
             let parsed = parse_nav_args(rest)?;
             run_tool("act", &parsed, json_mode, no_daemon, external).await
@@ -545,7 +556,7 @@ async fn run_connected(tool: &str, args: &Value, base: &str, external: bool) -> 
 
     if !external {
         // Re-inject saved logins before anything navigates.
-        let _ = crate::logins::restore(page.cdp_ref()).await;
+        crate::logins::restore(page.cdp_ref()).await?;
 
         // Warm profile on first run.
         if crate::session_profile::SessionProfile::claim_warming() {
@@ -560,7 +571,9 @@ async fn run_connected(tool: &str, args: &Value, base: &str, external: bool) -> 
     // in a one-shot run never survived into the next one). Never for an
     // external browser we don't own.
     if !external {
-        let _ = crate::logins::snapshot(page.cdp_ref()).await;
+        if let Err(e) = crate::logins::snapshot(page.cdp_ref()).await {
+            eprintln!("[bladebro] login snapshot failed: {e}");
+        }
     }
 
     Ok(result)

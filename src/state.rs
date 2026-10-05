@@ -10,21 +10,6 @@ use serde_json::{json, Value};
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
 
-/// Percent-encode a cookie value for the `document.cookie` JS fallback.
-/// Raw values containing `;`, `=`, `,`, or whitespace are silently
-/// truncated or reshaped by the cookie parser. RFC 3986 unreserved set.
-fn js_percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
 /// What the agent wants to do with page/browser state.
 #[derive(Debug, Clone)]
 pub enum StateOp {
@@ -188,68 +173,43 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             let ss = same_site.as_deref().unwrap_or("Lax");
             params["sameSite"] = json!(ss);
 
-            #[allow(clippy::needless_late_init)]
-            let cdp_err;
-            match cdp.send("Network.setCookie", Some(params)).await {
-                Ok(res) => {
-                    let ok = res.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
-                    if ok {
-                        return Ok(format!("✓ cookie set: {name}={}", truncate(value, 40)));
-                    }
-                    // CDP returned success=false — fall through to JS fallback.
-                    cdp_err = "CDP success=false".into();
-                }
-                Err(e) => {
-                    // CDP error — fall through to JS fallback (reason kept
-                    // for the failure message; the old code discarded it).
-                    cdp_err = e.to_string();
-                }
+            let res = cdp.send("Network.setCookie", Some(params)).await?;
+            if res.get("success").and_then(Value::as_bool) == Some(false) {
+                return Err(BladeError::Other(format!("Chrome rejected cookie {name:?}; check its URL, domain and security attributes")));
             }
-
-            // Fallback: set cookie via document.cookie in JavaScript.
-            // Works even when CDP Network.setCookie fails (Chrome version
-            // quirks, partitioned cookies, sanitizer edge cases).
-            // The value is percent-encoded: a raw value containing ';', '=',
-            // ',', or whitespace used to be silently truncated or reshaped
-            // by the cookie parser.
-            let mut cookie_parts = vec![format!("{name}={}", js_percent_encode(value))];
-            if let Some(d) = domain {
-                cookie_parts.push(format!("domain={d}"));
+            let stored = cdp.send("Storage.getCookies", None).await?;
+            let expected_domain = if let Some(u) = url {
+                url::Url::parse(u)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_owned))
+            } else {
+                domain.clone()
+            };
+            let verified = stored
+                .get("cookies")
+                .and_then(Value::as_array)
+                .is_some_and(|cookies| {
+                    cookies.iter().any(|c| {
+                        c["name"].as_str() == Some(name)
+                            && c["value"].as_str() == Some(value)
+                            && expected_domain.as_deref().is_some_and(|d| {
+                                c["domain"].as_str().is_some_and(|actual| {
+                                    actual.trim_start_matches('.') == d.trim_start_matches('.')
+                                })
+                            })
+                            && path
+                                .as_deref()
+                                .is_none_or(|p| c["path"].as_str() == Some(p))
+                            && http_only.is_none_or(|h| c["httpOnly"].as_bool() == Some(h))
+                            && secure.is_none_or(|s| c["secure"].as_bool() == Some(s))
+                    })
+                });
+            if !verified {
+                return Err(BladeError::Other(format!(
+                    "cookie {name:?} did not match readback; check its scope and attributes"
+                )));
             }
-            cookie_parts.push(format!("path={}", path.as_deref().unwrap_or("/")));
-            if matches!(secure, Some(true)) {
-                cookie_parts.push("secure".to_string());
-            }
-            // httpOnly can't be set via document.cookie — skip it.
-            cookie_parts.push(format!(
-                "samesite={}",
-                same_site.as_deref().unwrap_or("Lax")
-            ));
-            let cookie_str = cookie_parts.join("; ");
-            // JSON-escape into a JS string literal. Rust's `{:?}` Debug
-            // escaping is NOT JS escaping — edge-case characters produced
-            // invalid JS (or changed semantics).
-            let cookie_js = serde_json::to_string(&cookie_str)
-                .map_err(|e| BladeError::Other(format!("cookie encode: {e}")))?;
-            let js = format!("document.cookie={cookie_js}");
-            match cdp
-                .send(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": js,
-                        "returnByValue": true,
-                    })),
-                )
-                .await
-            {
-                Ok(_) => Ok(format!(
-                    "✓ cookie set (via JS): {name}={}",
-                    truncate(value, 40)
-                )),
-                Err(e) => Ok(format!(
-                    "✗ cookie set failed: {name} (CDP: {cdp_err}, JS: {e})"
-                )),
-            }
+            Ok(format!("✓ cookie set: {name}={}", truncate(value, 40)))
         }
 
         StateOp::DeleteCookies { name, domain, url } => {
@@ -330,16 +290,20 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
         }
 
         StateOp::CloseTab { target_id } => {
-            cdp.send("Target.closeTarget", Some(json!({ "targetId": target_id })))
+            let result = cdp
+                .send("Target.closeTarget", Some(json!({ "targetId": target_id })))
                 .await?;
+            if result.get("success").and_then(Value::as_bool) != Some(true) {
+                return Err(BladeError::Other(format!(
+                    "could not close tab {target_id}"
+                )));
+            }
             Ok(format!("✓ closed tab {target_id}"))
         }
 
         // ---- sessions (M10) ----
         StateOp::SaveSession { name } => {
-            if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\\') {
-                return Err(BladeError::Other(format!("invalid session name: {name:?}")));
-            }
+            validate_session_name(name)?;
 
             cdp.enable("Network").await?;
             let origin_res = cdp
@@ -364,28 +328,34 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 ));
             }
             let res = cdp.send("Network.getCookies", Some(json!({}))).await?;
-            let cookies = res.get("cookies").cloned().unwrap_or(json!([]));
+            let cookies = res
+                .get("cookies")
+                .filter(|v| v.is_array())
+                .cloned()
+                .ok_or_else(|| BladeError::Other("cookie snapshot missing cookie array".into()))?;
             // Full-fidelity dump: NOT via get_storage (that truncates values
             // to 60 chars for display — saving from it corrupts tokens) and
             // not via text lines (values may contain '=' or newlines).
-            let ls_entries: Vec<StorageEntry> = cdp.send("Runtime.evaluate", Some(json!({
+            let ls_result = cdp.send("Runtime.evaluate", Some(json!({
                 "expression": "Object.keys(localStorage).map(k=>({key:k,value:localStorage.getItem(k)}))",
                 "returnByValue": true,
-            }))).await.ok()
-                .and_then(|r| extract_eval_value(&r).ok())
-                .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or_default();
+            }))).await?;
+            let ls_entries: Vec<StorageEntry> =
+                serde_json::from_value(extract_eval_value(&ls_result)?)?;
             let session =
                 json!({ "cookies": cookies, "localStorage": ls_entries, "origin": origin });
             let dir = crate::platform::blade_dir().join("sessions");
             crate::platform::secure_create_dir_all(&dir)
                 .map_err(|e| BladeError::Other(format!("cannot create sessions dir: {e}")))?;
             let path = dir.join(format!("{name}.json"));
-            crate::platform::secure_write_file(
-                &path,
-                serde_json::to_string_pretty(&session)?.as_bytes(),
-            )
-            .map_err(|e| BladeError::Other(format!("cannot write session: {e}")))?;
+            let bytes = serde_json::to_vec_pretty(&session)?;
+            if bytes.len() > 8 * 1024 * 1024 {
+                return Err(BladeError::Other(
+                    "session exceeds 8 MiB; existing snapshot preserved".into(),
+                ));
+            }
+            crate::platform::secure_write_file(&path, &bytes)
+                .map_err(|e| BladeError::Other(format!("cannot write session: {e}")))?;
             let cookie_count = cookies.as_array().map(|a| a.len()).unwrap_or(0);
             Ok(format!(
                 "✓ saved session '{}': {} cookies, {} localStorage entries\n  → {}",
@@ -397,64 +367,85 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
         }
 
         StateOp::LoadSession { name } => {
-            if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\\') {
-                return Err(BladeError::Other(format!("invalid session name: {name:?}")));
-            }
-
-            cdp.enable("Network").await?;
+            validate_session_name(name)?;
             let path = crate::platform::blade_dir()
                 .join("sessions")
                 .join(format!("{name}.json"));
-            let content = std::fs::read_to_string(&path)
+            use std::io::Read;
+            let file = std::fs::File::open(&path)
                 .map_err(|e| BladeError::Other(format!("cannot read session '{name}': {e}")))?;
-            let session: Value = serde_json::from_str(&content)?;
+            let mut content = Vec::new();
+            file.take(8 * 1024 * 1024 + 1).read_to_end(&mut content)?;
+            if content.len() > 8 * 1024 * 1024 {
+                return Err(BladeError::Other("saved session exceeds 8 MiB".into()));
+            }
+            #[derive(Deserialize)]
+            struct SavedSession {
+                origin: String,
+                cookies: Vec<Value>,
+                #[serde(rename = "localStorage")]
+                storage: Vec<StorageEntry>,
+            }
+            let session: SavedSession = serde_json::from_slice(&content)?;
+            // Validate every cookie and the origin before changing browser state.
             let cookies = session
-                .get("cookies")
-                .and_then(|c| c.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let mut cookie_count = 0usize;
+                .cookies
+                .iter()
+                .map(crate::logins::cookie_params)
+                .collect::<Result<Vec<_>>>()?;
+            let origin_res = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(json!({
+                        "expression": "location.origin", "returnByValue": true,
+                    })),
+                )
+                .await?;
+            let origin = extract_eval_value(&origin_res)?;
+            if session.origin == "null" || origin.as_str() != Some(session.origin.as_str()) {
+                return Err(BladeError::Other(format!(
+                    "session '{name}' belongs to {}; navigate there before loading it",
+                    session.origin
+                )));
+            }
+            cdp.enable("Network").await?;
             for cookie in &cookies {
-                let mut params = json!({
-                    "name": cookie.get("name").unwrap_or(&json!("")),
-                    "value": cookie.get("value").unwrap_or(&json!("")),
-                });
-                if let Some(d) = cookie.get("domain") {
-                    params["domain"] = d.clone();
-                }
-                if let Some(p) = cookie.get("path") {
-                    params["path"] = p.clone();
-                }
-                if let Some(s) = cookie.get("secure") {
-                    params["secure"] = s.clone();
-                }
-                if let Some(h) = cookie.get("httpOnly") {
-                    params["httpOnly"] = h.clone();
-                }
-                if let Some(e) = cookie.get("expires") {
-                    params["expires"] = e.clone();
-                }
-                if cdp.send("Network.setCookie", Some(params)).await.is_ok() {
-                    cookie_count += 1;
+                let result = cdp.send("Network.setCookie", Some(cookie.clone())).await?;
+                if result.get("success").and_then(Value::as_bool) == Some(false) {
+                    return Err(BladeError::Other(format!(
+                        "Chrome rejected saved cookie {}; session only partially restored",
+                        cookie["name"]
+                    )));
                 }
             }
-            let ls_entries = session
-                .get("localStorage")
-                .and_then(|l| l.as_array())
-                .cloned()
-                .unwrap_or_default();
-            for entry in &ls_entries {
-                let key = entry.get("key").and_then(|k| k.as_str()).unwrap_or("");
-                let value = entry.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                if !key.is_empty() {
-                    let _ = set_storage(cdp, "localStorage", key, value).await;
+            let restored = cdp.send("Storage.getCookies", None).await?;
+            let all = restored
+                .get("cookies")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    BladeError::Other("cookie readback missing after session restore".into())
+                })?;
+            for saved in &session.cookies {
+                if !all.iter().any(|c| {
+                    c["name"] == saved["name"]
+                        && c["value"] == saved["value"]
+                        && c["domain"] == saved["domain"]
+                        && c["path"] == saved["path"]
+                }) {
+                    return Err(BladeError::Other(format!(
+                        "saved cookie {} did not match readback; session only partially restored",
+                        saved["name"]
+                    )));
                 }
+            }
+            for entry in &session.storage {
+                set_storage(cdp, "localStorage", &entry.key, &entry.value).await?;
             }
             Ok(format!(
-                "✓ loaded session '{}': {} cookies, {} localStorage entries — navigate to apply",
+                "✓ loaded session '{}': {} cookies, {} localStorage entries — reload to apply",
                 name,
-                cookie_count,
-                ls_entries.len()
+                cookies.len(),
+                session.storage.len()
             ))
         }
     }
@@ -486,39 +477,55 @@ async fn get_storage(cdp: &CdpSession, storage: &str) -> Result<String> {
 async fn set_storage(cdp: &CdpSession, storage: &str, key: &str, value: &str) -> Result<String> {
     let key_js = serde_json::to_string(key)?;
     let val_js = serde_json::to_string(value)?;
-    cdp.send(
+    let result = cdp.send(
         "Runtime.evaluate",
         Some(json!({
-            "expression": format!("{storage}.setItem({key_js},{val_js})"),
+            "expression": format!("(()=>{{{storage}.setItem({key_js},{val_js});return {storage}.getItem({key_js})==={val_js};}})()"),
             "returnByValue": true,
         })),
     )
     .await?;
+    if extract_eval_value(&result)? != json!(true) {
+        return Err(BladeError::Other(format!(
+            "{storage} mutation did not match readback"
+        )));
+    }
     Ok(format!("✓ {storage} set: {key}={}", truncate(value, 40)))
 }
 
 async fn remove_storage(cdp: &CdpSession, storage: &str, key: &str) -> Result<String> {
     let key_js = serde_json::to_string(key)?;
-    cdp.send(
+    let result = cdp.send(
         "Runtime.evaluate",
         Some(json!({
-            "expression": format!("{storage}.removeItem({key_js})"),
+            "expression": format!("(()=>{{{storage}.removeItem({key_js});return {storage}.getItem({key_js})===null;}})()"),
             "returnByValue": true,
         })),
     )
     .await?;
+    if extract_eval_value(&result)? != json!(true) {
+        return Err(BladeError::Other(format!(
+            "{storage} mutation did not match readback"
+        )));
+    }
     Ok(format!("✓ {storage} removed: {key}"))
 }
 
 async fn clear_storage(cdp: &CdpSession, storage: &str) -> Result<String> {
-    cdp.send(
-        "Runtime.evaluate",
-        Some(json!({
-            "expression": format!("{storage}.clear()"),
-            "returnByValue": true,
-        })),
-    )
-    .await?;
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": format!("(()=>{{{storage}.clear();return {storage}.length===0;}})()"),
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    if extract_eval_value(&result)? != json!(true) {
+        return Err(BladeError::Other(format!(
+            "{storage} mutation did not match readback"
+        )));
+    }
     Ok(format!("✓ {storage} cleared"))
 }
 
@@ -545,5 +552,70 @@ fn truncate(s: &str, n: usize) -> String {
         let mut t: String = s.chars().take(n).collect();
         t.push('…');
         t
+    }
+}
+
+fn validate_session_name(name: &str) -> Result<()> {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let device = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"));
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || device.is_some_and(|s| {
+            matches!(
+                s,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
+    if name.is_empty()
+        || name.len() > 128
+        || name.contains("..")
+        || name.ends_with(['.', ' '])
+        || reserved
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+    {
+        return Err(BladeError::Other(format!("invalid session name: {name:?}")));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+    #[test]
+    fn session_names_are_portable_and_cannot_escape_storage() {
+        for name in [
+            "",
+            "../escape",
+            "a/b",
+            "a\\b",
+            "a:b",
+            "CON",
+            "con.txt",
+            "LPT1",
+            "COM9",
+            "a.",
+            "a ",
+            "bad\0",
+            "x?",
+            "<x>",
+        ] {
+            assert!(validate_session_name(name).is_err(), "accepted {name:?}");
+        }
+        assert!(validate_session_name(&"a".repeat(129)).is_err());
+        for name in ["account", "π 🦀", "work.account", "COM10"] {
+            validate_session_name(name).unwrap();
+        }
+    }
+    #[test]
+    fn page_exceptions_never_count_as_storage_success() {
+        let value = json!({"result":{"value":true},"exceptionDetails":{"text":"SecurityError"}});
+        assert!(extract_eval_value(&value)
+            .unwrap_err()
+            .to_string()
+            .contains("SecurityError"));
+        assert!(extract_eval_value(&json!({"result":{}})).is_err());
     }
 }

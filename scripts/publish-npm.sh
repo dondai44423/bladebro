@@ -63,16 +63,21 @@ if [[ "$SKIP_BUILD" == "0" ]]; then
   echo "Building binaries (native + 4 cross targets)..."
   cargo build --release
   if command -v cargo-zigbuild >/dev/null 2>&1; then
-    cargo zigbuild --release --target aarch64-unknown-linux-gnu
+    cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28
+    cp target/x86_64-unknown-linux-gnu/release/bladebro target/release/bladebro
+    cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.28
     cargo zigbuild --release --target x86_64-pc-windows-gnu
-    cargo zigbuild --release --target x86_64-apple-darwin
-    cargo zigbuild --release --target aarch64-apple-darwin
+    RUSTC_WRAPPER= cargo zigbuild --release --target x86_64-apple-darwin
+    RUSTC_WRAPPER= cargo zigbuild --release --target aarch64-apple-darwin
   else
-    echo "WARNING: cargo-zigbuild not found — cross binaries will not be rebuilt."
+    echo "ERROR: cargo-zigbuild is required; refusing stale cross binaries" >&2
+    exit 1
   fi
 else
   echo "Using the binaries from the current release build (--no-build)."
 fi
+
+python3 tools/reliability_probe/linux-abi.py target/release/bladebro target/aarch64-unknown-linux-gnu/release/bladebro
 
 # Copy every binary into its package. All five platforms are mandatory —
 # a missing binary is a hard error, never a partial publish.
@@ -105,7 +110,7 @@ echo "Waiting for npm registry propagation..."
 for i in $(seq 1 12); do
   ALL_OK=true
   for pkg in bladebro-linux-x64 bladebro-linux-arm64 bladebro-windows-x64 bladebro-darwin-x64 bladebro-darwin-arm64; do
-    if ! npm view "$pkg@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
+    if ! npm view "$pkg@$VERSION" version --prefer-online 2>/dev/null | grep -Fxq "$VERSION"; then
       ALL_OK=false
     fi
   done
@@ -116,6 +121,11 @@ for i in $(seq 1 12); do
   sleep 10
   echo "  waiting... ($((i*10))s)"
 done
+
+if [[ "$ALL_OK" != true ]]; then
+  echo "ERROR: platform packages not all available; main package was not published" >&2
+  exit 1
+fi
 
 # ── publish main package ────────────────────────────────────────────
 echo "Publishing main package: bladebro@$VERSION..."
@@ -130,7 +140,7 @@ echo "Publishing main package: bladebro@$VERSION..."
 echo "Waiting for bladebro@$VERSION to go live..."
 META_OK=false
 for i in $(seq 1 18); do
-  if npm view "bladebro@$VERSION" version --prefer-online 2>/dev/null | grep -q "$VERSION"; then
+  if npm view "bladebro@$VERSION" version --prefer-online 2>/dev/null | grep -Fxq "$VERSION"; then
     echo "  bladebro@$VERSION is live after $((i*10))s"
     META_OK=true
     break

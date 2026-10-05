@@ -66,3 +66,15 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.86
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: msrv-1.86-registry-${{ hashFiles('Cargo.lock') }}
+      - name: Check advertised minimum Rust version
+        run: cargo check --locked --all-targets

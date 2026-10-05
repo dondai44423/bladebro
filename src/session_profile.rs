@@ -54,8 +54,11 @@ pub use self::reap::reap_orphans;
 
 /// A per-process session profile. Cleaned up by [`cleanup`]
 /// after Chrome has exited (never while Chrome holds it).
+#[derive(Clone)]
 pub struct SessionProfile {
     dir: PathBuf,
+    /// Borrowed/custom profiles stay caller-owned regardless of their path.
+    owned: bool,
     /// Whether to copy this profile back over the agent-lane template
     /// on cleanup (false for BLADE_FRESH ephemeral sessions).
     seasoned: bool,
@@ -63,6 +66,18 @@ pub struct SessionProfile {
     /// (`<data-dir>/realbrowser/<id>`) whose `template/` this session
     /// syncs back to. `None` on the agent lane.
     real_root: Option<PathBuf>,
+}
+
+/// The OS lock protects stale-marker replacement and stays held through a copy.
+/// Dropping it removes our PID marker before releasing the underlying handle.
+pub(crate) struct TemplateLock {
+    _file: std::fs::File,
+    marker: PathBuf,
+}
+impl Drop for TemplateLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.marker);
+    }
 }
 
 impl SessionProfile {
@@ -85,6 +100,7 @@ impl SessionProfile {
                     .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
                 return Ok(Self {
                     dir: d,
+                    owned: false,
                     seasoned: false,
                     real_root: None,
                 });
@@ -112,12 +128,13 @@ impl SessionProfile {
             if template.is_dir() {
                 copy_profile(&template, &dir);
             }
-            // Mark ownership for the orphan reaper.
-            let _ = std::fs::write(dir.join(".blade-owner"), std::process::id().to_string());
         }
+        std::fs::write(dir.join(".blade-owner"), std::process::id().to_string())
+            .map_err(|e| BladeError::Other(format!("cannot mark profile ownership: {e}")))?;
 
         Ok(Self {
             dir,
+            owned: true,
             seasoned,
             real_root: None,
         })
@@ -144,9 +161,11 @@ impl SessionProfile {
         if template.is_dir() {
             copy_profile(&template, &dir);
         }
-        let _ = std::fs::write(dir.join(".blade-owner"), std::process::id().to_string());
+        std::fs::write(dir.join(".blade-owner"), std::process::id().to_string())
+            .map_err(|e| BladeError::Other(format!("cannot mark profile ownership: {e}")))?;
         Ok(Self {
             dir,
+            owned: true,
             seasoned: false,
             real_root: Some(root.to_path_buf()),
         })
@@ -165,6 +184,7 @@ impl SessionProfile {
         }
         Ok(Self {
             dir: dir.to_path_buf(),
+            owned: false,
             seasoned: false,
             real_root: None,
         })
@@ -179,6 +199,9 @@ impl SessionProfile {
     /// concurrent sessions don't clobber each other), then
     /// removes the session dir.
     pub fn cleanup(&self) {
+        if !self.owned {
+            return;
+        }
         if let Some(root) = &self.real_root {
             // Real-lane (clone) session: sync back into this browser's own
             // template under the realbrowser root.
@@ -192,44 +215,57 @@ impl SessionProfile {
             return;
         }
         if !self.seasoned {
-            // Ephemeral or custom dir: just remove if it's ours.
-            if self.dir.starts_with(std::env::temp_dir()) {
-                let _ = std::fs::remove_dir_all(&self.dir);
-            }
+            let _ = std::fs::remove_dir_all(&self.dir);
             return;
         }
         Self::sync_back_and_remove(&self.dir);
     }
 
-    /// Acquire the template-copy lock, unless it is held by a live process.
-    /// The lock carries the owner pid + timestamp so a crashed holder (which
-    /// would otherwise block every future sync-back and silently lose all
-    /// logins) can be detected and broken. Returns true when we hold it.
-    /// Acquire the template-copy lock under `root`, unless it is held by a
-    /// live process. The lock carries the owner pid + timestamp so a crashed
-    /// holder (which would otherwise block every future sync-back and
-    /// silently lose all logins) can be detected and broken.
-    fn acquire_lock_at(root: &Path) -> bool {
-        let lock = root.join(".template.lock");
-        match std::fs::OpenOptions::new()
+    /// Serialize cleanup/import/sync and stale PID-marker replacement across
+    /// processes. OS locks release on crashes; live pre-4.1 markers still win.
+    pub(crate) fn acquire_lock_at(root: &Path) -> Option<TemplateLock> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let file = options.open(root.join(".template.guard")).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return None;
+            }
+        }
+        let marker = root.join(".template.lock");
+        if marker.exists() {
+            if !template_lock_stale(&marker) {
+                return None;
+            }
+            std::fs::remove_file(&marker).ok()?;
+        }
+        let mut output = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&lock)
-        {
-            Ok(mut f) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let _ = writeln!(f, "{} {}", std::process::id(), now);
-                true
-            }
-            Err(_) if template_lock_stale(&lock) => {
-                let _ = std::fs::remove_file(&lock);
-                Self::acquire_lock_at(root)
-            }
-            Err(_) => false,
-        }
+            .open(&marker)
+            .ok()?;
+        let lock = TemplateLock {
+            _file: file,
+            marker,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        writeln!(output, "{} {}", std::process::id(), now).ok()?;
+        Some(lock)
     }
 
     /// Promote a fully-written temp profile into the template atomically:
@@ -260,16 +296,15 @@ impl SessionProfile {
         if other_live_sessions_at(&root.join("profiles")) {
             return;
         }
-        if !Self::acquire_lock_at(root) {
+        let Some(_lock) = Self::acquire_lock_at(root) else {
             return;
-        }
+        };
         let tmp = root.join(".profile.sync");
         let _ = std::fs::remove_dir_all(&tmp);
         copy_profile(dir, &tmp);
         if tmp.is_dir() {
             Self::swap_into_template(&tmp, &root.join("profile"), &root.join(".profile.old"));
         }
-        let _ = std::fs::remove_file(root.join(".template.lock"));
     }
 
     /// Claim first-run warming via an O_EXCL marker file. Returns true if
@@ -328,7 +363,12 @@ impl SessionProfile {
                 .unwrap_or(false);
         if is_session {
             Self::sync_back_and_remove(dir);
-        } else if dir.starts_with(std::env::temp_dir()) {
+        } else if dir
+            == std::env::temp_dir().join(format!("bladebro-chrome-{}", std::process::id()))
+            && std::fs::read_to_string(dir.join(".blade-owner"))
+                .ok()
+                .is_some_and(|s| s.trim() == std::process::id().to_string())
+        {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
@@ -359,14 +399,16 @@ impl SessionProfile {
         old_name: &str,
         dir: &Path,
     ) {
-        if !other_live_sessions_at(&root.join("profiles")) && Self::acquire_lock_at(root) {
+        if !other_live_sessions_at(&root.join("profiles")) {
+            let Some(_lock) = Self::acquire_lock_at(root) else {
+                return;
+            };
             let tmp = root.join(tmp_name);
             let _ = std::fs::remove_dir_all(&tmp);
             copy_profile(dir, &tmp);
             if tmp.is_dir() {
                 Self::swap_into_template(&tmp, &root.join(template_name), &root.join(old_name));
             }
-            let _ = std::fs::remove_file(root.join(".template.lock"));
         }
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -545,6 +587,48 @@ mod tests {
     }
 
     #[test]
+    fn template_guard_excludes_concurrent_handles_and_recovers_after_drop() {
+        let root =
+            std::env::temp_dir().join(format!("blade-template-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let held = SessionProfile::acquire_lock_at(&root).unwrap();
+        std::fs::remove_file(root.join(".template.lock")).unwrap();
+        assert!(
+            SessionProfile::acquire_lock_at(&root).is_none(),
+            "missing marker must not bypass OS ownership"
+        );
+        drop(held);
+        let next = SessionProfile::acquire_lock_at(&root).expect("released lock must be reusable");
+        assert!(root.join(".template.lock").exists());
+        drop(next);
+        assert!(!root.join(".template.lock").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reaper_preserves_active_template_staging() {
+        let root = std::env::temp_dir().join(format!("blade-live-staging-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".profile.sync")).unwrap();
+        std::fs::create_dir_all(root.join(".profile.old")).unwrap();
+        std::fs::create_dir_all(root.join("profile")).unwrap();
+        std::fs::write(root.join(".profile.sync/in-progress"), "copying").unwrap();
+        std::fs::write(root.join(".profile.old/last-good"), "backup").unwrap();
+        std::fs::write(
+            root.join(".template.lock"),
+            format!("{} 1", std::process::id()),
+        )
+        .unwrap();
+        reap_orphans_at(&root);
+        let survived = root.join(".profile.sync/in-progress").exists()
+            && root.join(".profile.old/last-good").exists();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            survived,
+            "startup reaper must not delete another live template transaction"
+        );
+    }
+
+    #[test]
     fn reaper_syncs_back_before_delete() {
         // Hermetic: a temp root, never the shared real data dir. The env is
         // process-global and parallel tests flip BLADE_HOME; the pre-fix
@@ -647,5 +731,32 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&blade_dir);
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn adopted_temporary_profile_survives_both_cleanup_paths() {
+        let dir =
+            std::env::temp_dir().join(format!("blade-borrowed-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("user-data");
+        std::fs::write(&marker, "must survive").unwrap();
+        let profile = SessionProfile::adopt(&dir).unwrap();
+        profile.cleanup();
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "must survive",
+            "a borrowed profile is never ours to delete"
+        );
+        SessionProfile::cleanup_dir(&dir);
+        assert!(
+            marker.is_file(),
+            "path-only cleanup must preserve unowned directories"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

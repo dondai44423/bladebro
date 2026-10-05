@@ -118,7 +118,8 @@ pub async fn perform_with_network(
                 return Err(BladeError::NotInteractable(format!("{ref_id} is disabled")));
             }
 
-            // M2: Click auto-escalation. Try mouse -> JS -> Enter until effect.
+            // Choose an activation lane before dispatch. A quiet DOM does not
+            // prove failure: clicks can send messages or payments without repainting.
             // Install the mutation watcher first: it sees DOM effects on
             // non-actionable content that the element delta cannot.
             let _ = cdp
@@ -148,13 +149,6 @@ pub async fn perform_with_network(
             let mut via = "";
             let mut delta = PageDelta::default();
             let mut dialog_fired = false;
-            // M8: dispatch-level failures (transport) are counted separately
-            // from "clicked but no effect" — if EVERY strategy failed at the
-            // transport level, reporting "element may be disabled" sends the
-            // agent debugging the page when the driver was the problem.
-            let mut dispatch_errors = 0usize;
-            let mut last_dispatch_err: Option<BladeError> = None;
-
             for &strategy in strategies {
                 tried.push(strategy);
                 via = strategy;
@@ -171,11 +165,7 @@ pub async fn perform_with_network(
                         if let Some(box_) = found.box_ {
                             let cx = box_[0] + box_[2] / 2.0;
                             let cy = box_[1] + box_[3] / 2.0;
-                            if let Err(e) = dispatch_mouse_click(cdp, cx, cy, last_mouse).await {
-                                dispatch_errors += 1;
-                                last_dispatch_err = Some(e);
-                                continue;
-                            }
+                            dispatch_mouse_click(cdp, cx, cy, last_mouse).await?;
                         } else {
                             continue;
                         }
@@ -183,23 +173,17 @@ pub async fn perform_with_network(
                     "js" => match find_by_sig(cdp, sig, frame, "click", None).await {
                         Ok(f) if f.ok => {}
                         Ok(_) => continue,
-                        Err(e) => {
-                            dispatch_errors += 1;
-                            last_dispatch_err = Some(e);
-                            continue;
-                        }
+                        Err(e) => return Err(e),
                     },
                     "enter" => {
-                        let fr = find_by_sig(cdp, sig, frame, "focus", None).await;
-                        let focused = fr.map(|f| f.focused.unwrap_or(false)).unwrap_or(false);
+                        let focused = find_by_sig(cdp, sig, frame, "focus", None)
+                            .await?
+                            .focused
+                            .unwrap_or(false);
                         if !focused {
                             continue;
                         }
-                        if let Err(e) = dispatch_key(cdp, "Enter").await {
-                            dispatch_errors += 1;
-                            last_dispatch_err = Some(e);
-                            continue;
-                        }
+                        dispatch_key(cdp, "Enter").await?;
                     }
                     "space" => {
                         // Space over the focused element - the activation key
@@ -208,16 +192,14 @@ pub async fn perform_with_network(
                         // (see the 'focus' mode) and is VERIFIED: a failed
                         // focus must not press Space - the key would scroll
                         // the page (observed live) and read as an effect.
-                        let fr = find_by_sig(cdp, sig, frame, "focus", None).await;
-                        let focused = fr.map(|f| f.focused.unwrap_or(false)).unwrap_or(false);
+                        let focused = find_by_sig(cdp, sig, frame, "focus", None)
+                            .await?
+                            .focused
+                            .unwrap_or(false);
                         if !focused {
                             continue;
                         }
-                        if let Err(e) = dispatch_key(cdp, "Space").await {
-                            dispatch_errors += 1;
-                            last_dispatch_err = Some(e);
-                            continue;
-                        }
+                        dispatch_key(cdp, "Space").await?;
                     }
                     _ => {}
                 }
@@ -247,17 +229,8 @@ pub async fn perform_with_network(
                 let cap = capture(cdp).await?;
                 delta = lpm.ingest(cap);
 
-                if delta.navigated || !delta.is_empty() || delta.content_changed || dialog_fired {
-                    break;
-                }
-            }
-
-            // All strategies errored at the DISPATCH level: the driver
-            // failed, not the page — surface the transport error.
-            if dispatch_errors == tried.len() && !tried.is_empty() {
-                if let Some(e) = last_dispatch_err {
-                    return Err(e);
-                }
+                // Accepted dispatch is never replayed, including a no-effect verdict.
+                break;
             }
             // Expose the resolved click target so no-effect verdicts can
             // distinguish a bad selector from a page that rejected a well-
