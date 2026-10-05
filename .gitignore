@@ -1,6 +1,7 @@
 # Private working docs — never tracked
 status.md
 project.md
+design.md
 SECURITY-AUDIT-*.md
 
 # Local build / dev artifacts
