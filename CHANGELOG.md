@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Update Rustls to 0.23.45 and rustls-webpki to 0.103.15 for GHSA-2mjx-qc3c-rqvc; replace the yanked ChaCha20 dependency with a supported version.
+- Gate releases on open GitHub security alerts and a fresh locked dependency advisory check, before version changes and again after native CI.
+
 ## [4.1.0] - 2026-10-06
 
 ### Maintenance

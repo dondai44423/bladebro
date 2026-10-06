@@ -9,7 +9,7 @@
 # Usage: ./release.sh <version>     e.g. ./release.sh 3.0.4
 #
 # Requires: cargo, cargo-zigbuild (for macOS/Windows cross-compile),
-#           git, gh (GitHub CLI), npm (for npm publish)
+#           git, gh (GitHub CLI), npm (for npm publish), cargo-deny
 #           A clean-ish tree (uncommitted changes OK only in gitignored files).
 
 set -euo pipefail
@@ -56,7 +56,7 @@ echo "=== bladebro release v$VERSION ==="
 
 # Fail before editing version files: stale artifacts are never a substitute
 # for an unavailable toolchain, and a release starts from a reviewable tree.
-for command in cargo cargo-zigbuild zig git gh npm python3 sha256sum objdump; do
+for command in cargo cargo-zigbuild zig git gh npm python3 sha256sum objdump cargo-deny; do
     command -v "$command" >/dev/null || { echo "ERROR: missing $command" >&2; exit 1; }
 done
 [[ $(git branch --show-current) == main ]] || { echo "ERROR: release from main" >&2; exit 1; }
@@ -66,10 +66,26 @@ if git rev-parse --verify "refs/tags/v$VERSION" >/dev/null 2>&1; then
 fi
 gh auth status >/dev/null 2>&1
 npm whoami >/dev/null
+RELEASE_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+[[ -n "$RELEASE_REPO" ]] || { echo "ERROR: cannot resolve release repository" >&2; exit 1; }
+
+# Advisories can appear while builds/CI run. Check both before editing
+# versions and at the final freeze, before a tag or npm version is public.
+check_release_security() {
+    local open_alerts
+    open_alerts=$(gh api "repos/$RELEASE_REPO/dependabot/alerts?state=open" --paginate --jq '.[].number')
+    [[ -z "$open_alerts" ]] || {
+        echo "ERROR: resolve open security advisories before release: $open_alerts" >&2
+        return 1
+    }
+    cargo deny --locked check advisories
+}
+check_release_security
 python3 - <<'CHECK'
 from pathlib import Path
 text = Path('CHANGELOG.md').read_text()
 assert text.count('## [Unreleased]') == 1, 'exactly one Unreleased section required'
+assert text.count('[Unreleased]: ') == 1, 'exactly one Unreleased link required'
 section = text.split('## [Unreleased]', 1)[1].split('\n## [', 1)[0]
 assert any(line.startswith('- ') for line in section.splitlines()), 'Unreleased must contain release notes'
 import json
@@ -112,6 +128,13 @@ assert new != text, "[Unreleased] heading not found"
 new = new.replace(
     f"## [{version}] - {today}",
     f"## [Unreleased]\n\n## [{version}] - {today}",
+    1,
+)
+unreleased_ref = next(line for line in text.splitlines() if line.startswith("[Unreleased]: "))
+repo_url = unreleased_ref[len("[Unreleased]: "):].split("/compare/", 1)[0]
+new = new.replace(
+    unreleased_ref,
+    f"[Unreleased]: {repo_url}/compare/v{version}...HEAD\n[{version}]: {repo_url}/releases/tag/v{version}",
     1,
 )
 with open("CHANGELOG.md", "w") as f:
@@ -169,6 +192,7 @@ for _ in $(seq 1 12); do
 done
 [[ -n "$RUN_ID" ]] || { echo "ERROR: no native CI run for $RELEASE_SHA" >&2; exit 1; }
 gh run watch "$RUN_ID" --exit-status
+check_release_security
 git tag -a "v$VERSION" -m "v$VERSION"
 git push origin "v$VERSION"
 
