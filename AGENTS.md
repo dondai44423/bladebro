@@ -15,7 +15,7 @@ Two properties shape every change:
 cargo build --release                     # → ./target/release/bladebro
 cargo fmt --check                         # formatting (CI-enforced)
 cargo clippy --release -- -D warnings     # zero warnings, always
-cargo test --release                      # all must pass (229 tests)
+cargo test --release                      # all tests must pass
 
 ./target/release/bladebro doctor          # environment check
 ./target/release/bladebro nav example.com # auto-starts its daemon + browser
