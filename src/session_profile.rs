@@ -80,6 +80,32 @@ impl Drop for TemplateLock {
     }
 }
 
+/// Owned profiles must be private before Chrome or the template copy writes.
+/// Never chmod a borrowed path, symlink or directory another user can change.
+fn create_private_profile_dir(dir: &Path) -> Result<()> {
+    platform::secure_create_dir_all(dir)
+        .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() {
+        return Err(BladeError::Other(format!(
+            "unsafe owned profile directory: {}",
+            dir.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+            return Err(BladeError::Other(format!(
+                "unsafe profile ownership or public write permissions: {}",
+                dir.display()
+            )));
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 impl SessionProfile {
     /// Create the session profile for this process: reap
     /// orphans from dead bladebro processes, then copy the
@@ -118,8 +144,7 @@ impl SessionProfile {
 
         // SECURITY: 0700 — the profile contains cookies and localStorage.
         // Plain create_dir_all gave umask perms (755 on default setups).
-        crate::platform::secure_create_dir_all(&dir)
-            .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
+        create_private_profile_dir(&dir)?;
 
         if seasoned {
             // Copy the seasoned template in (returning-visitor
@@ -153,10 +178,11 @@ impl SessionProfile {
             .join(format!("sess-{}", std::process::id()));
         if dir.exists() {
             // PID reuse after a crash: never copy on top of a stale dir.
-            let _ = std::fs::remove_dir_all(&dir);
+            create_private_profile_dir(&dir)?;
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| BladeError::Other(format!("cannot replace stale profile: {e}")))?;
         }
-        crate::platform::secure_create_dir_all(&dir)
-            .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
+        create_private_profile_dir(&dir)?;
         let template = root.join("template");
         if template.is_dir() {
             copy_profile(&template, &dir);
@@ -510,6 +536,58 @@ fn other_live_sessions_at(profiles: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn reused_owned_profile_is_private_without_chmodding_ancestors() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("blade-profile-mode-{}", std::process::id()));
+        let dir = root.join("profile");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("existing"), b"preserve").unwrap();
+        create_private_profile_dir(&dir).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(std::fs::read(dir.join("existing")).unwrap(), b"preserve");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_profile_refuses_symlinks_and_public_write_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root =
+            std::env::temp_dir().join(format!("blade-profile-refusal-{}", std::process::id()));
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(target.join("existing"), b"preserve").unwrap();
+        let link = root.join("link");
+        symlink(&target, &link).unwrap();
+        assert!(create_private_profile_dir(&link).is_err());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(std::fs::read(target.join("existing")).unwrap(), b"preserve");
+        let writable = root.join("public");
+        std::fs::create_dir(&writable).unwrap();
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(create_private_profile_dir(&writable).is_err());
+        assert_eq!(
+            std::fs::metadata(&writable).unwrap().permissions().mode() & 0o777,
+            0o777
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     use super::copy::copy_profile;
     use super::reap::{reap_orphans_at, restore_interrupted_swap};

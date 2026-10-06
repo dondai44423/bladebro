@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simultaneous daemon starts have one socket owner. Partial requests cannot block termination, and stop reports unacknowledged shutdown honestly. JSON stop and lane switches emit one machine-readable object.
 - Xvfb startup requires a working display socket, kills timed-out children, and releases its claims. SPA route guards enforce their time budget and cannot treat failed probes as stable content.
 - Pi integration preserves UTF-8 split across subprocess chunks, cleans failed handshakes, fails promptly after process exit, and stops the captured child safely.
+- Owned profile directories reject symlinks, foreign ownership and public write access; reused safe directories become private before copying or launching Chrome.
 - Session/login writes are atomic and private from creation; invalid process IDs cannot address process groups.
 
 ### Changed
