@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.1] - 2026-10-06
+
 ### Security
 
 - Update Rustls to 0.23.45 and rustls-webpki to 0.103.15 for GHSA-2mjx-qc3c-rqvc; replace the yanked ChaCha20 dependency with a supported version.
@@ -1898,7 +1900,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.1.1...HEAD
+[4.1.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.1.1
 [4.1.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.1.0
 [4.0.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.3
 [4.0.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.2
