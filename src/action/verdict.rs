@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
+use crate::page::perception::JS_PREAMBLE;
 use crate::page::{wait_for_settle, LivePageModel, PageDelta};
 
 use super::edit::{clear_verdict_text, type_verdict_text, EditReport};
@@ -95,7 +96,7 @@ pub struct ScrollReport {
 /// Build the scroll-position probe: window scroller state + the deepest
 /// scrollable element under (cx, cy). One evaluate, best-effort.
 pub(super) fn scroll_probe_expr(cx: f64, cy: f64) -> String {
-    let js = "(()=>{var d=document;var se=d.scrollingElement||d.documentElement;var out={y:se?se.scrollTop:0,max:Math.max(0,(se?se.scrollHeight:0)-(window.innerHeight||0)),el:'',elTop:null};try{var hit=d.elementFromPoint(__X__,__Y__);var hops=0;while(hit&&hops<40){if(hit!==d.body&&hit!==d.documentElement){var cs=getComputedStyle(hit);if((cs.overflowY==='auto'||cs.overflowY==='scroll'||cs.overflowY==='overlay')&&hit.scrollHeight>hit.clientHeight+1){out.el=hit.tagName.toLowerCase()+((hit.getAttribute&&hit.getAttribute('id'))?('#'+String(hit.getAttribute('id')).slice(0,24)):'');out.elTop=hit.scrollTop;break;}}hit=hit.parentElement;hops++;}}catch(e){}return out;})()";
+    let js = "(()=>{var d=document;var se=d.scrollingElement||d.documentElement;var out={y:se?se.scrollTop:0,max:Math.max(0,(se?se.scrollHeight:0)-(window.innerHeight||0)),el:'',elTop:null};try{var hit=d.elementFromPoint(__X__,__Y__);var hops=0;while(hit&&hops<40){if(hit!==d.body&&hit!==d.documentElement){var cs=getComputedStyle(hit);if((cs.overflowY==='auto'||cs.overflowY==='scroll'||cs.overflowY==='overlay')&&hit.scrollHeight>hit.clientHeight+1){out.el=hit.tagName.toLowerCase()+((hit.getAttribute&&hit.getAttribute('id'))?('#'+String(hit.getAttribute('id')).slice(0,24)):'');out.elTop=hit.scrollTop;break;}}hit=hit.parentElement||(hit.getRootNode&&hit.getRootNode().host)||null;hops++;}}catch(e){}return out;})()";
     js.replace("__X__", &format!("{cx}"))
         .replace("__Y__", &format!("{cy}"))
 }
@@ -305,6 +306,36 @@ pub(super) fn absence_confirmed(
     since.elapsed() >= ABSENCE_CONFIRM && counter.load(std::sync::atomic::Ordering::Relaxed) == 0
 }
 
+/// Build the `element` condition probe. Walks with the same shadow-piercing
+/// `deepAll` as the capture, so a condition can see exactly the elements the
+/// model can — a shadow-DOM control must not read as "not present" (the
+/// 2026-10-07 shadow round: `if element="…"` skipped against an element the
+/// very same model displayed).
+pub(crate) fn element_condition_expr(needle: &str) -> String {
+    let needle_js =
+        serde_json::to_string(&needle.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
+    "(()=>{const d=document;if(!d||!d.body)return false;"
+        .to_string()
+        + &JS_PREAMBLE
+        + "const all=deepAll(d,sel);const nodes=all.filter(vis);const t="
+        + &needle_js
+        + ".toLowerCase();return nodes.some(n=>{const role=(n.getAttribute('role')||n.tagName.toLowerCase());const name=(n.getAttribute('aria-label')||n.textContent||n.placeholder||'').trim();return role.toLowerCase().includes(t)||name.toLowerCase().includes(t);});})()"
+}
+
+/// Build the `text` condition probe. Fast path: visible light-DOM text
+/// (`innerText`). On a miss, a bounded deep sweep checks open shadow roots
+/// and same-origin iframes — the same trees the capture reads — so
+/// `wait`/`if` `text="X"` cannot report "absent" for text the model shows.
+/// The sweep is contains-only and caps the roots it inspects.
+pub(crate) fn text_condition_expr(needle: &str) -> String {
+    let needle_js =
+        serde_json::to_string(&needle.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
+    "(()=>{const d=document;if(!d||!d.body)return false;const nd="
+        .to_string()
+        + &needle_js
+        + ";if((d.body.innerText||'').toLowerCase().indexOf(nd)>=0)return true;var found=false;var stack=[d];var roots=0;while(stack.length&&!found){var root=stack.pop();var all=null;try{all=root.querySelectorAll('*');}catch(_e){continue;}for(var i=0;i<all.length;i++){var el=all[i];var sr=el.shadowRoot;if(sr){if(roots++>400)return found;if((sr.textContent||'').toLowerCase().indexOf(nd)>=0){found=true;break;}stack.push(sr);}if(el.tagName==='IFRAME'){try{var fd=el.contentDocument;if(fd&&fd.body){if((fd.body.textContent||'').toLowerCase().indexOf(nd)>=0){found=true;break;}stack.push(fd.documentElement);}}catch(_e2){}}}}return found;})()"
+}
+
 /// Check if a condition is met, optionally waiting up to `timeout`.
 /// Returns `true` if the condition was met, `false` if timed out.
 ///
@@ -366,12 +397,7 @@ pub async fn check_condition(
             }
         }
         "element" => {
-            let needle_js =
-                serde_json::to_string(&text.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
-            let check = format!(
-                "(()=>{{const d=document;if(!d||!d.body)return false;const sel='{selector}';const all=[...d.querySelectorAll(sel)];const vis=n=>{{const r=n.getBoundingClientRect();if(r.width===0||r.height===0)return false;const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;return true;}};const nodes=all.filter(vis);const t={needle_js}.toLowerCase();return nodes.some(n=>{{const role=(n.getAttribute('role')||n.tagName.toLowerCase());const name=(n.getAttribute('aria-label')||n.textContent||n.placeholder||'').trim();return role.toLowerCase().includes(t)||name.toLowerCase().includes(t);}});}})()",
-                selector = crate::page::perception::JS_SELECTOR
-            );
+            let check = element_condition_expr(text);
             loop {
                 let res = cdp
                     .send(
@@ -446,11 +472,7 @@ pub async fn check_condition(
             }
         }
         "text" => {
-            let needle_js =
-                serde_json::to_string(&text.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
-            let expr = format!(
-                "(document.body&&document.body.innerText||'').toLowerCase().includes({needle_js})"
-            );
+            let expr = text_condition_expr(text);
             loop {
                 let res = cdp
                     .send(
@@ -552,7 +574,7 @@ pub async fn check_condition(
 pub(super) const LEAF_TARGET_JS: &str = concat!(
     "var _lClick=_lbx(n);var _lht=(n.getAttribute&&(n.getAttribute('aria-label')||n.getAttribute('title')))||'';var _lhr=(n.getAttribute&&n.getAttribute('role'))||n.tagName.toLowerCase();",
     "var _ltopN=doc.elementFromPoint(cx,cy);var _lNative=_lnb(_ltopN);",
-    "if(!_lNative){var _lbest=null,_lbd=Infinity,_lcands=[];try{_lcands=n.querySelectorAll('button,a[href],input:not([type=hidden]),select,textarea');}catch(e){}",
+    "if(!_lNative){var _lbest=null,_lbd=Infinity,_lcands=[];try{_lcands=deepAll(n,'button,a[href],input:not([type=hidden]),select,textarea');}catch(e){}",
     "for(var _lk=0;_lk<_lcands.length;_lk++){var _lc=_lcands[_lk];var _lrc=_lc.getBoundingClientRect();if(_lrc.width<2||_lrc.height<2)continue;var _lbn=n.getBoundingClientRect();if(!(_lrc.left<=_lbn.right&&_lrc.right>=_lbn.left))continue;var _lccx=_lrc.x+_lrc.width/2,_lccy=_lrc.y+_lrc.height/2;var _ltc=doc.elementFromPoint(_lccx,_lccy);if(!(_ltc===_lc||(_lc.contains&&_lc.contains(_ltc))))continue;var _ldd=Math.hypot(_lccx-cx,_lccy-cy);if(_ldd<_lbd){_lbd=_ldd;_lbest=_lc;}}",
     "if(_lbest){_lClick=_lbx(_lbest);_lht=(_lbest.getAttribute&&(_lbest.getAttribute('aria-label')||_lbest.textContent||_lbest.getAttribute('title')))||'';_lhr=(_lbest.getAttribute&&_lbest.getAttribute('role'))||_lbest.tagName.toLowerCase();}}",
 );

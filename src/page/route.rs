@@ -133,9 +133,19 @@ impl RouteEpoch {
 /// One cheap content fingerprint: url, title, element count, and the head of
 /// the main content. A route swap moves at least one of them.
 async fn route_signature(cdp: &CdpSession) -> Option<String> {
+    // Shadow-aware text sample (2026-10-07): a component that renders ONLY
+    // inside its shadow tree (LWC, Shoelace, …) moves no light-DOM text, so
+    // a light-only signature could hold still while the new route's content
+    // was still swapping. Bounded: 1200-element walk, 120 sampled chars.
     let expr = "(()=>{const m=document.querySelector('main')||document.body;\
 const t=m?String(m.textContent||'').slice(0,120):'';\
-return location.href+'\\u0001'+document.title+'\\u0001'+document.getElementsByTagName('*').length+'\\u0001'+t;})()";
+var sh='';var stack=m?[m]:[];var n=0;\
+while(stack.length&&n<1200&&sh.length<120){var e=stack.pop();n++;\
+if(!e||e.nodeType!==1)continue;\
+var sr=e.shadowRoot;if(sr){sh+=String(sr.textContent||'');if(sh.length>=120)break;var a=sr.querySelectorAll('*');for(var i=0;i<a.length;i++)stack.push(a[i]);}\
+if(e.tagName==='IFRAME'){try{var fd=e.contentDocument;if(fd&&fd.body)sh+=String(fd.body.textContent||'');}catch(_e){}}\
+var cs=e.children;if(cs){for(var i2=0;i2<cs.length;i2++)stack.push(cs[i2]);}}\
+return location.href+'\\u0001'+document.title+'\\u0001'+document.getElementsByTagName('*').length+'\\u0001'+t+'\\u0001'+sh.slice(0,120);})()";
     cdp.send(
         "Runtime.evaluate",
         Some(serde_json::json!({ "expression": expr, "returnByValue": true })),

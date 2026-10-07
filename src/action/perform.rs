@@ -45,11 +45,20 @@ pub async fn perform(
 /// script after it reads the count. No attributes: class/animation churn
 /// would flood the counter on animated pages.
 ///
+/// 2026-10-07: a MutationObserver watching only the document cannot see
+/// inside a shadow root or a same-origin iframe (platform limitation), so
+/// a shadow button that swapped its own text read as `no-effect` while the
+/// very same response's capture showed the new name. The watcher now
+/// attaches the same observer to every open shadow root and same-origin
+/// iframe document (a bounded walk finds them, and childList records keep
+/// new subtrees in step), so the mutation count covers exactly the tree
+/// the capture can read — light DOM, shadows, and iframes.
+///
 /// v3.9: state lives under Symbol-keyed window slots (invisible to
 /// Object.keys / for-in / `'name' in window` probes). The old
 /// `window.__blade_muts` / `__blade_mo` string properties named the tool
 /// outright on every page after the first action — a one-line detection.
-pub const MUT_WATCH: &str = "(function(){var K=Symbol.for('m'),O=Symbol.for('n');var c=window[K];if(!c){c={n:0};try{window[K]=c;}catch(e){return;}if(!window[O]){try{var mo=new MutationObserver(function(l){c.n+=l.length;});window[O]=mo;mo.observe(document.documentElement||document,{childList:true,subtree:true,characterData:true});}catch(e){}}}c.n=0;})();";
+pub const MUT_WATCH: &str = "(function(){var K=Symbol.for('m'),O=Symbol.for('n');var c=window[K];if(!c){c={n:0};try{window[K]=c;}catch(e){return;}if(!window[O]){try{var left=2000;var seen=new WeakSet();var mo=null;var obs=function(r){try{if(!r||seen.has(r)||left<=0)return;seen.add(r);mo.observe(r,{childList:true,subtree:true,characterData:true});left--;}catch(e){}};var scan=function(node){try{if(!node)return;if(node.shadowRoot)obs(node.shadowRoot);if(node.tagName==='IFRAME'){var fd0=null;try{fd0=node.contentDocument;}catch(e){}if(fd0&&fd0.documentElement)scanDoc(fd0);}var all=null;try{all=node.querySelectorAll('*');}catch(e){return;}for(var i=0;i<all.length;i++){if(left<=0)return;var el=all[i];var sr=el.shadowRoot;if(sr&&!seen.has(sr)){obs(sr);scan(sr);}if(el.tagName==='IFRAME'){var fd=null;try{fd=el.contentDocument;}catch(e){}if(fd&&fd.documentElement)scanDoc(fd);}}}catch(e){}};var scanDoc=function(doc){try{if(!doc)return;var dr=doc.documentElement||doc;obs(dr);scan(dr);}catch(e){}};mo=new MutationObserver(function(l){c.n+=l.length;if(left<=0)return;for(var i=0;i<l.length;i++){var r=l[i];if(r.type==='childList'&&r.addedNodes){for(var j=0;j<r.addedNodes.length;j++){var nd=r.addedNodes[j];if(nd&&nd.nodeType===1){scan(nd);}}}}});window[O]=mo;scanDoc(document);}catch(e){}}}c.n=0;})();";
 
 /// Eagerly-subscribed event waiter. `cdp.wait_for` subscribes LAZILY
 /// on first poll — events fired between creation and poll (a

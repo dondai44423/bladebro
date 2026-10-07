@@ -10,12 +10,16 @@ use crate::error::Result;
 use super::JS_PREAMBLE;
 
 /// Extract visible text content from the page body, excluding scripts,
-/// styles, and hidden elements. Returns at most `budget` characters.
+/// styles, ads, and hidden elements. Returns at most `budget` characters.
 ///
-/// Uses `innerText` which respects CSS visibility (unlike `textContent`).
-/// The text is collapsed to single spaces and truncated to the budget.
+/// Walks the live tree with computed-style visibility, descending open
+/// shadow roots and same-origin iframes. (The old clone-based version lost
+/// every shadow and iframe text — cloneNode does not clone shadow trees —
+/// and, because `innerText` on a detached clone degrades to `textContent`,
+/// leaked display:none text against this contract.) Text collapses to
+/// single spaces and truncates to the budget.
 pub async fn capture_content(cdp: &CdpSession, budget: usize) -> Result<String> {
-    let expr = r#"(()=>{const d=document;if(!d||!d.body)return'';const c=d.body.cloneNode(true);c.querySelectorAll("script,style,noscript,svg,template,link,meta,[class*='dfp'],[id*='dfp'],[class*='advert'],[id*='advert'],[class*='sponsored'],[data-sponsored],[data-ad],[data-ad-slot],[data-ad-client],[data-google-query-id],ins.adsbygoogle,[id*='google_ads'],[class*='ad-container'],[class*='ad-wrapper'],[class*='ad-slot'],[class*='ad-banner'],[class*='ad-feedback'],[class*='adBanner'],[class*='adSense'],[class*='adBlock'],[class*='ad-label'],[class*='ads-label'],[class*='ads-container'],[class*='mol-ads'],[class*='promoted'],[aria-label*='advertisement' i]").forEach(e=>e.remove());c.querySelectorAll('select').forEach(s=>{const ts=[...s.options].map(o=>(o.label||o.text||'').trim()).filter(Boolean).slice(0,12);if(ts.length){const extra=Math.max(0,s.options.length-ts.length);s.replaceChildren(document.createTextNode('['+ts.join(' | ')+(extra?' | +'+extra+' more':'')+'] '));}});const t=(c.innerText||c.textContent||'').replace(/\s+/g,' ').trim();return t.slice(0,__BUDGET__);})()"#.replace("__BUDGET__", &budget.to_string());
+    let expr = content_expr(budget);
     let res = cdp
         .send(
             "Runtime.evaluate",
@@ -32,6 +36,12 @@ pub async fn capture_content(cdp: &CdpSession, budget: usize) -> Result<String> 
         .and_then(|v| v.as_str())
         .unwrap_or("");
     Ok(text.to_string())
+}
+
+/// Build the visible-text probe used by [`capture_content`]. The script
+/// lives in `js/content_text.js`.
+pub(super) fn content_expr(budget: usize) -> String {
+    include_str!("../js/content_text.js").replace("__BUDGET__", &budget.to_string())
 }
 
 /// Semantic content extraction: find the main content area and convert it
@@ -113,7 +123,7 @@ async fn run_markdown(cdp: &CdpSession, expr: String) -> Result<String> {
 /// Ultra-minimal output for "what's on this page" without reading everything.
 /// ~50-200 bytes typically. If no headings, suggests mode=content.
 pub async fn capture_outline(cdp: &CdpSession) -> Result<String> {
-    let expr = r#"(function(){var title=document.title||'';var hs=document.querySelectorAll('h1,h2,h3,h4,h5,h6');var out='';if(title)out+=title+'\n';if(!hs.length)return out+'(no headings — use see mode=content to read)';for(var i=0;i<hs.length;i++){var h=hs[i];var lvl=parseInt(h.tagName.charAt(1));var txt=h.innerText.trim();if(!txt)continue;for(var j=0;j<lvl-1;j++)out+='  ';out+=txt+'\n';}return out.trim();})()"#;
+    let expr = outline_expr();
     let res = cdp
         .send(
             "Runtime.evaluate",
@@ -129,4 +139,14 @@ pub async fn capture_outline(cdp: &CdpSession) -> Result<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     Ok(text.to_string())
+}
+
+/// Build the heading-outline probe. `deepAll` so headings inside open
+/// shadow roots are found (a component-library page read "(no headings)"
+/// while its shadow headings were plainly on screen).
+pub(super) fn outline_expr() -> String {
+    "(()=>{const d=document;"
+        .to_string()
+        + &JS_PREAMBLE
+        + "var title=document.title||'';var out='';if(title)out+=title+'\\n';const hs=deepAll(d,'h1,h2,h3,h4,h5,h6');if(!hs.length)return out+'(no headings — use see mode=content to read)';for(let i=0;i<hs.length;i++){const h=hs[i];const lvl=parseInt(h.tagName.charAt(1));const txt=(h.innerText||'').trim();if(!txt)continue;for(let j=0;j<lvl-1;j++)out+='  ';out+=txt+'\\n';}return out.trim();})()"
 }

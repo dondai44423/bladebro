@@ -36,6 +36,8 @@ pub use self::find::{
 };
 pub use self::perform::{perform, perform_with_network, MUT_WATCH};
 pub use self::verdict::check_condition;
+#[cfg(test)]
+pub(crate) use self::verdict::{element_condition_expr, text_condition_expr};
 /// What the agent can do. Few verbs, full control.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -194,8 +196,8 @@ mod action_tests {
             "leaf-target uses hit-testing"
         );
         assert!(
-            js.contains("querySelectorAll('button,a[href]"),
-            "leaf-target finds native controls"
+            js.contains("deepAll(n,'button,a[href]"),
+            "leaf-target finds native controls (shadow roots included)"
         );
         assert!(
             js.contains("_lbest"),

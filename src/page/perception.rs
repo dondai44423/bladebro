@@ -465,13 +465,51 @@ pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
 }
 
 /// True for browser-internal pages whose own UI must not be captured as
-/// actionable elements. `about:blank` is allowed (it is empty anyway).
+/// actionable elements. `about:blank` — in ALL its URL shapes, fragments
+/// and queries included (`about:blank#route`) — is an ordinary empty page:
+/// agents inject their own DOM into it, so its elements must never be
+/// wiped just because a same-document navigation added a fragment.
 fn is_internal_page(url: &str) -> bool {
     url.starts_with("chrome://")
         || url.starts_with("chrome-extension://")
         || url.starts_with("devtools://")
         || url.starts_with("edge://")
-        || url.starts_with("about:") && url != "about:blank"
+        || (url.starts_with("about:") && !is_about_blank(url))
+}
+
+/// `about:blank` plus its same-document-navigation shapes (fragment/query).
+fn is_about_blank(url: &str) -> bool {
+    url == "about:blank" || url.starts_with("about:blank#") || url.starts_with("about:blank?")
+}
+
+#[cfg(test)]
+mod internal_page_tests {
+    use super::is_internal_page;
+
+    #[test]
+    fn about_blank_shapes_are_capturable() {
+        // A pushState fragment on about:blank wiped every captured element
+        // ("0 actionable" against a live DOM): all these shapes are
+        // ordinary empty pages, never browser chrome.
+        assert!(!is_internal_page("about:blank"));
+        assert!(!is_internal_page("about:blank#route"));
+        assert!(!is_internal_page("about:blank#/spa/route?q=1"));
+        assert!(!is_internal_page("about:blank?q=1"));
+        assert!(!is_internal_page("http://127.0.0.1/x"));
+        assert!(!is_internal_page("https://example.com/#/"));
+        assert!(!is_internal_page("file:///tmp/x.html"));
+        assert!(!is_internal_page("data:text/html,<b>x</b>"));
+    }
+
+    #[test]
+    fn browser_internal_pages_stay_uncapturable() {
+        assert!(is_internal_page("chrome://newtab"));
+        assert!(is_internal_page("chrome-extension://abc/x.html"));
+        assert!(is_internal_page("devtools://devtools/x"));
+        assert!(is_internal_page("edge://settings"));
+        assert!(is_internal_page("about:srcdoc"));
+        assert!(is_internal_page("about:newtab"));
+    }
 }
 
 #[cfg(test)]
@@ -533,6 +571,22 @@ mod script_syntax_tests {
     #[test]
     fn capture_script_is_valid_js() {
         node_check("capture", &super::CAPTURE_SCRIPT);
+    }
+
+    #[test]
+    fn shadow_awareness_and_condition_scripts_are_valid_js() {
+        // The mutation watcher now observes shadow roots and same-origin
+        // iframes; the content/outline/condition probes are shadow-piercing
+        // too. A syntax slip in any of them disables that layer at runtime,
+        // so guard them all at test time.
+        node_check("mut-watch", crate::action::MUT_WATCH);
+        node_check("content-text", &super::content::content_expr(8000));
+        node_check("outline", &super::content::outline_expr());
+        node_check(
+            "cond-element",
+            &crate::action::element_condition_expr("sign in"),
+        );
+        node_check("cond-text", &crate::action::text_condition_expr("sign in"));
     }
 
     #[test]

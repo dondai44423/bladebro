@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shadow-DOM and same-origin-iframe mutations are counted by action verdicts.** A `MutationObserver` on the document cannot see inside a shadow root or an iframe (a platform limitation), so a shadow button that swapped its own text read `outcome: no-effect` while the very same response's model showed the new name — the perception layer pierces shadow roots, the verdict classifier did not. The dispatch-time watcher now attaches to every open shadow root and same-origin iframe document (bounded discovery walk; childList records keep added subtrees in step), so verdicts and content-change detection cover exactly the tree the capture reads. Nested shadow roots included; a click inside a same-origin iframe that mutates its own document no longer reads as a no-op.
+- **`about:blank` keeps its elements through same-document navigation.** A `pushState` fragment on `about:blank` (`about:blank#route`) made the URL look like browser chrome, and the capture wiped every element — "0 actionable" against a live DOM with buttons in it. `about:blank` in all its fragment/query shapes is now treated as an ordinary empty page (agents inject their own DOM into it constantly); `chrome://`, `chrome-extension://`, `devtools://`, `edge://` and non-blank `about:` pages stay uncapturable.
+- **Condition checks (`wait` / `if` / `while`) and `see` reads pierce shadow roots.** `if element="…"` skipped against a shadow-DOM element the very same model displayed; `if text="…"` read light-DOM `innerText` only. Element conditions now use the same shadow-piercing walk as the capture; text conditions add a bounded deep sweep over open shadow roots and same-origin iframes on top of the visible-text fast path.
+- **`see mode=content`, auto-content and the heading outline read shadow and iframe text.** The markdown walk only recursed `childNodes`, and the plain-text probe cloned the body — `cloneNode` does not clone shadow trees, so every shadow and iframe text was lost on component-library pages (LWC, Shoelace, …) whose text lives in shadow roots. Both readers now descend open shadow roots and same-origin iframes, and the outline finds headings inside open shadow roots.
+- **The plain-text read no longer leaks hidden text.** `innerText` on the detached clone degraded to `textContent` (including `display:none` content) against the documented visible-text contract. The probe is now a bounded live-tree walk with computed-style visibility that still strips ads and renders `select` options.
+- The SPA route guard's content signature samples shadow-root text too, so a route render that happens only inside shadow components can no longer read as "stable" before it painted; the scroll-movement probe and the container leaf-target search hop shadow boundaries as well.
+
 ## [4.2.1] - 2026-10-07
 
 ### Fixed
