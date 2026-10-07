@@ -218,6 +218,105 @@ fn is_software_gl(renderer: &str) -> bool {
     crate::browser::is_software_renderer(renderer)
 }
 
+/// Decide the WebGL spoof from the launch-time verdict reconciled with the
+/// live page: live truth wins when it exists (spoof software renderers,
+/// report hardware honestly). A *confirmed* absent context against a
+/// GL-bearing verdict demotes the recorded state to `Missing` with a loud
+/// warning and the mid-session-loss marker — pages are never served under a
+/// silently stale GL verdict. Inconclusive probes keep the recorded state
+/// (fail-safe spoof).
+async fn adaptive_gl_spoof(env: &EnvProbe, cdp: &CdpSession) -> bool {
+    use crate::browser::{
+        gpu_state, mark_gl_mid_session_loss, probe_gl_live, reconcile_gl, set_gpu_state, GlLive,
+        GlReconcile, GpuState,
+    };
+    let state = gpu_state();
+    let live: Option<String>;
+    if let Some(renderer) = env.gl_renderer.clone() {
+        live = Some(renderer);
+    } else if matches!(state, Some(GpuState::Missing)) {
+        // Already known GL-less: nothing to confirm, nothing to change.
+        live = None;
+    } else {
+        match probe_gl_live(cdp).await {
+            GlLive::Live(renderer) => live = Some(renderer),
+            GlLive::NoContext => live = None,
+            GlLive::Unknown => {
+                // Inconclusive (transport failure or a restricted origin):
+                // keep the recorded verdict; fail-safe spoof.
+                return !matches!(state, Some(GpuState::Hardware(_)));
+            }
+        }
+    }
+    match reconcile_gl(state.as_ref(), live.as_deref()) {
+        GlReconcile::Live {
+            spoof,
+            state: st,
+            changed,
+        } => {
+            if changed {
+                let shown = match &st {
+                    GpuState::Hardware(r) | GpuState::Software(r) => r.as_str(),
+                    GpuState::Missing => "",
+                };
+                match &state {
+                    Some(GpuState::Missing) => {
+                        eprintln!("[stealth] GL recovered: {shown} — state updated");
+                    }
+                    Some(_) => {
+                        eprintln!("[stealth] GL now reports {shown} — state updated");
+                    }
+                    None => {
+                        if is_software_gl(shown) {
+                            eprintln!(
+                                "[stealth] real GL is software ({shown}) — registering WebGL spoof"
+                            );
+                        }
+                    }
+                }
+                set_gpu_state(Some(st));
+            } else {
+                // Steady state — the same diagnostic lines as before.
+                match &state {
+                    Some(GpuState::Hardware(rec)) => {
+                        eprintln!("[stealth] GL healthcheck says hardware ({rec}) — no WebGL spoof")
+                    }
+                    Some(GpuState::Software(rec)) => eprintln!(
+                        "[stealth] GL healthcheck says software ({rec}) — registering WebGL spoof"
+                    ),
+                    _ => {}
+                }
+            }
+            spoof
+        }
+        GlReconcile::Dead {
+            spoof,
+            state: st,
+            changed,
+        } => {
+            if changed {
+                if state.is_some() {
+                    eprintln!(
+                        "[stealth] WARNING: WebGL context creation now returns null on this \
+                         browser — the GPU process degraded mid-session (Chrome restarts it \
+                         with GL disabled after a GPU crash). Pages will see no WebGL; no GL \
+                         mask can apply until the browser is relaunched."
+                    );
+                    set_gpu_state(Some(st));
+                    mark_gl_mid_session_loss();
+                } else {
+                    eprintln!(
+                        "[stealth] WARNING: no WebGL context on this browser — pages will see \
+                         getContext('webgl') === null; no GL mask applies."
+                    );
+                    set_gpu_state(Some(st));
+                }
+            }
+            spoof
+        }
+    }
+}
+
 /// Legacy alias kept for external references (doc/examples).
 pub const STEALTH_SCRIPT_TEMPLATE: &str = STEALTH_CORE;
 
@@ -245,43 +344,18 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     // One environment probe drives every adaptive decision (S8/S15).
     let env = probe_environment(cdp).await;
 
-    // Adaptive GL decision. The launch healthcheck (browser.rs) already
-    // probed the real backend when Bladebro launched the browser itself —
-    // trust it: hardware GL is reported honestly (nothing to mask), software
-    // GL gets the spoof. Only an externally-attached browser (no healthcheck
-    // in this process) falls back to a live probe here.
+    // Adaptive GL decision, reconciled against the live page on every
+    // attach (see `adaptive_gl_spoof`). The launch healthcheck (browser.rs)
+    // probes the real backend when Bladebro launches the browser itself, but
+    // a GPU process can degrade mid-session (crash → Chrome restarts it with
+    // GL disabled → every context is null). Trusting the launch verdict
+    // alone served pages a null-GL browser with the spoof inert and no
+    // warning; the live reconcile closes that.
     let gl_mode = std::env::var("BLADE_WEBGL").unwrap_or_else(|_| "auto".to_string());
     let spoof_gl = match gl_mode.as_str() {
         "spoof" => true,
         "real" => false,
-        _ => {
-            match crate::browser::gpu_state() {
-                Some(crate::browser::GpuState::Hardware(renderer)) => {
-                    eprintln!(
-                        "[stealth] GL healthcheck says hardware ({renderer}) — no WebGL spoof"
-                    );
-                    false
-                }
-                Some(crate::browser::GpuState::Software(renderer)) => {
-                    eprintln!("[stealth] GL healthcheck says software ({renderer}) — registering WebGL spoof");
-                    true
-                }
-                // No context existed at launch — the spoof is inert either way;
-                // keep the fail-safe default.
-                Some(crate::browser::GpuState::Missing) => true,
-                None => match &env.gl_renderer {
-                    Some(renderer) => {
-                        let software = is_software_gl(renderer);
-                        if software {
-                            eprintln!("[stealth] real GL is software ({renderer}) — registering WebGL spoof");
-                        }
-                        software
-                    }
-                    // Probe failed — safest default is to spoof (hides SwiftShader).
-                    None => true,
-                },
-            }
-        }
+        _ => adaptive_gl_spoof(&env, cdp).await,
     };
     // S15: mediaDevices patch only when the machine reports zero devices.
     let patch_media = match std::env::var("BLADE_MEDIA").as_deref() {

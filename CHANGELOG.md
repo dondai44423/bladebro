@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A mid-session WebGL loss is detected instead of silently served.** A GPU-process crash makes Chrome restart the GPU with GL disabled (`--use-gl=disabled`) — every `getContext('webgl')` then returns null, the recorded GL verdict still said "software", the WebGL mask had nothing to mask, and nothing anywhere said so (field report: a long MCP session ran with a dead GL profile while `bladebro audit` — which launches its own browser — stayed at 61/61). The GL verdict is now reconciled against the live page on every tab attach and re-checked on a bounded 60-second cadence from tool calls; a confirmed loss demotes the recorded state, prints a loud warning, and delivers a one-shot note to the agent on the very result that detected it ("this browser LOST WebGL mid-session … restart the client for a fresh browser"). Inconclusive probes (transport failures, restricted `chrome://` origins) never demote — only answered-without-a-context replies do — and a fresh healthy verdict re-arms the advisory for the next browser generation.
+- **All applicable one-shot advisories now reach the agent.** The single note slot could silently drop a second applicable note in the same response (e.g. a relaunch note plus a GL-loss note); the lanes batch every note.
+- **New one-shot advisories for previously stderr-only degradations:** headless fallback (no Xvfb display), `--no-sandbox` fallback (sandboxed startup failed — root or restricted container), `BLADE_PROXY` set without `BLADE_TZ` (timezone/IP mismatch that detection will catch), a failed stealth injection, and a failed headless UA override.
 - Release publishing waits up to five minutes for npm registry propagation before failing closed; the previous two-minute window could expire while npm was still processing a platform package (the 4.2.0 Windows package needed ~3 minutes).
 
 ## [4.2.0] - 2026-10-07

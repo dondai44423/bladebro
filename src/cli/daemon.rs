@@ -139,8 +139,6 @@ pub async fn run_daemon() -> Result<()> {
     // latch (see the per-command drift check below).
     let mut launched = 0u64;
     let mut stale_warned = false;
-    // One-shot latch: has the GL-less advisory been delivered?
-    let mut gl_warned = false;
     let mut last_activity = std::time::Instant::now();
     let idle_secs: u64 = std::env::var("BLADE_IDLE_TIMEOUT")
         .ok()
@@ -307,6 +305,14 @@ pub async fn run_daemon() -> Result<()> {
                     dispatch(tool, &args, p).await
                 };
 
+                // GL cadence revalidation (see `Page::gl_health_refresh`):
+                // demote a stale GL verdict before the advisories below so a
+                // mid-session loss surfaces on this response instead of the
+                // lane silently serving a broken GL profile.
+                if let Some(p) = page.as_ref() {
+                    p.gl_health_refresh().await;
+                }
+
                 // One-line advisories for the human: a mid-session lane switch
                 // actually landed, or this daemon runs a binary that was
                 // replaced on disk (a restart is one `bladebro stop` away).
@@ -325,14 +331,7 @@ pub async fn run_daemon() -> Result<()> {
                         "note: this daemon runs a binary that was replaced on disk — `bladebro stop` to pick up the new build".into(),
                     );
                 }
-                if !gl_warned {
-                    if let Some(crate::browser::GpuState::Missing) = crate::browser::gpu_state() {
-                        gl_warned = true;
-                        advisories.push(
-                            "note: this browser has no WebGL (getContext('webgl') returns null — stock-equivalent on this host); no GL mask is applied".into(),
-                        );
-                    }
-                }
+                advisories.extend(crate::browser::pending_notes());
                 let with_notes = |text: String| -> String {
                     if advisories.is_empty() {
                         text

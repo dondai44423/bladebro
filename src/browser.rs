@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use crate::error::{BladeError, Result};
 use crate::platform;
 
+mod alerts;
 mod discover;
 #[cfg(target_os = "linux")]
 mod display;
@@ -31,14 +32,19 @@ mod launch;
 mod pipe;
 mod probe;
 
+pub use self::alerts::{
+    pending_notes, reset_gl_alert, set_stealth_inject_failed, set_ua_override_failed,
+};
 pub(crate) use self::discover::endpoint_owned_by_own_browser;
 #[cfg(target_os = "linux")]
 pub use self::display::VirtualDisplay;
 pub use self::flags::{
-    gpu_state, is_software_renderer, launched_headless, launched_pipe, set_gpu_state,
-    set_launched_headless, set_launched_pipe, GlStage, GpuState, Transport,
+    gl_mid_session_loss, gpu_state, is_software_renderer, launched_headless, launched_no_sandbox,
+    launched_pipe, mark_gl_mid_session_loss, reconcile_gl, set_gpu_state, set_launched_headless,
+    set_launched_no_sandbox, set_launched_pipe, GlReconcile, GlStage, GpuState, Transport,
 };
 pub use self::launch::launch_lane;
+pub use self::probe::{probe_gl_live, GlLive};
 /// A launched Chrome process + virtual display + session
 /// profile. Chrome killed on Drop; the session profile is
 /// synced back to the template and removed on explicit

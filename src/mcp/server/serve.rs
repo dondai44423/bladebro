@@ -62,9 +62,9 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
     // browser relaunches instead of being silently ignored.
     let mut launched = 0u64;
     // One-shot latch: has the stale-binary advisory been delivered?
+    // (GL and other degradation advisories live in `browser::alerts` —
+    // process-global one-shot latches shared with the daemon lane.)
     let mut stale_warned = false;
-    // One-shot latch: has the GL-less advisory been delivered?
-    let mut gl_warned = false;
     // Track resource-blocking config so it survives idle shutdown/relaunch.
     let mut block_classes: Option<String> = None;
     // Domain knowledge base: consent selectors, visit tracking, stats.
@@ -458,40 +458,39 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                 }
                             }),
                         };
+                        // Revalidate GL liveness on a bounded cadence: a
+                        // mid-session GPU crash degrades the browser to null
+                        // WebGL while the recorded verdict still claims GL.
+                        // The refresh demotes the state so the advisory below
+                        // fires on THIS result instead of the lane silently
+                        // serving a broken GL profile.
+                        if let Some(p) = page.as_ref() {
+                            p.gl_health_refresh().await;
+                        }
                         let mut resp = resp;
                         if let Some(result) = resp.get_mut("result") {
                             // Prepend advisory notes to the first text content
-                            // block: a relaunch reset the page state, and/or
-                            // this process runs a replaced binary (the fix is
-                            // in the file on disk, not in the running process).
-                            // One-time WebGL advisory: a GL-less browser is
-                            // stock-equivalent, but the agent must know the GL
-                            // mask is off (nothing to mask) instead of assuming
-                            // the environment was spoofed.
-                            if !gl_warned {
-                                if let Some(crate::browser::GpuState::Missing) = crate::browser::gpu_state() {
-                                    gl_warned = true;
-                                    if relaunch_note.is_none() {
-                                        relaunch_note = Some(
-                                            "note: this browser has no WebGL (getContext('webgl') returns null — the same as stock Chrome on this host); no GL mask is applied.".into()
-                                        );
-                                    }
-                                }
+                            // block: a relaunch reset the page state, a
+                            // degradation was detected (GL loss, headless or
+                            // sandbox fallback, ...), and/or this process runs
+                            // a replaced binary (the fix is in the file on
+                            // disk, not in the running process). Every
+                            // applicable one-shot note is appended — a taken
+                            // slot must never drop another note.
+                            let mut notes: Vec<String> = Vec::new();
+                            if let Some(note) = relaunch_note.take() {
+                                notes.push(note);
                             }
                             if !stale_warned && crate::platform::stale_binary() {
                                 stale_warned = true;
-                                if relaunch_note.is_none() {
-                                    relaunch_note = Some(
-                                        "note: this MCP process runs a binary that was replaced on disk — restart the app that spawned it (e.g. opencode) to pick up the new build; this session keeps working meanwhile.".into()
-                                    );
-                                }
+                                notes.push(
+                                    "note: this MCP process runs a binary that was replaced on disk — restart the app that spawned it (e.g. opencode) to pick up the new build; this session keeps working meanwhile.".into()
+                                );
                             }
-                            // Prepend the relaunch note to the first
-                            // text content block so the agent knows
-                            // its page state was reset.
-                            if let Some(note) = relaunch_note.take() {
+                            notes.extend(crate::browser::pending_notes());
+                            if !notes.is_empty() {
                                 if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
-                                    content.insert(0, json!({ "type": "text", "text": note }));
+                                    content.insert(0, json!({ "type": "text", "text": notes.join("\n") }));
                                 }
                             }
                             shape_result(result, version);

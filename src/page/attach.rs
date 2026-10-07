@@ -112,6 +112,7 @@ impl Page {
                 )
                 .await
             {
+                crate::browser::set_ua_override_failed();
                 eprintln!("[bladebro] WARNING: UA override failed: {e}");
             }
         }
@@ -164,6 +165,7 @@ impl Page {
         let stealth_script_id = match crate::stealth::apply_stealth(&cdp, None).await {
             Ok(id) => Some(id),
             Err(e) => {
+                crate::browser::set_stealth_inject_failed();
                 eprintln!("[bladebro] WARNING: stealth injection failed: {e}");
                 None
             }

@@ -66,7 +66,7 @@ pub enum Transport {
 /// Launch-time GL healthcheck result. Consumed by `stealth::apply`: the
 /// WebGL spoof registers only when the real backend is software (D14 —
 /// coherence over noise; a real GPU is reported honestly, nothing to mask).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GpuState {
     Hardware(String),
     Software(String),
@@ -77,10 +77,37 @@ pub enum GpuState {
 /// Launch-time GL state, read by `stealth::apply` at attach time.
 static GPU_STATE: std::sync::RwLock<Option<GpuState>> = std::sync::RwLock::new(None);
 
-/// Record the GL healthcheck result (called by the launch paths).
+/// Mid-session loss marker: the recorded verdict claimed GL and a
+/// confirmed-absent context demoted it. `set_gpu_state` clears it, so the
+/// demotion order is always set-then-mark (see `stealth::inject` and
+/// `Page::gl_health_refresh`).
+static GL_MID_SESSION_LOSS: AtomicBool = AtomicBool::new(false);
+
+/// Mark a confirmed mid-session GL loss (the one-shot advisory reads it).
+pub fn mark_gl_mid_session_loss() {
+    GL_MID_SESSION_LOSS.store(true, Ordering::Relaxed);
+}
+
+/// Was the last GL demotion a mid-session loss (vs a GL-less launch)?
+pub fn gl_mid_session_loss() -> bool {
+    GL_MID_SESSION_LOSS.load(Ordering::Relaxed)
+}
+
+/// Record the GL verdict (called by the launch paths and the attach-time
+/// reconciler). A new verdict supersedes the old loss record; a healthy
+/// verdict also re-arms the one-shot GL advisory — a fresh browser
+/// generation gets a fresh advisement cycle.
 pub fn set_gpu_state(state: Option<GpuState>) {
+    let healthy = matches!(
+        &state,
+        Some(GpuState::Hardware(_)) | Some(GpuState::Software(_))
+    );
     if let Ok(mut g) = GPU_STATE.write() {
         *g = state;
+    }
+    GL_MID_SESSION_LOSS.store(false, Ordering::Relaxed);
+    if healthy {
+        crate::browser::alerts::reset_gl_alert();
     }
 }
 
@@ -119,6 +146,10 @@ pub fn launched_headless() -> bool {
 /// stealth layer masks it there — see `WEBDRIVER_PATCH`.
 static LAUNCH_PIPE: AtomicBool = AtomicBool::new(false);
 
+/// Launch-mode flag: true when the browser needed `--no-sandbox` (the
+/// sandboxed startup failed — root or restricted container).
+static LAUNCHED_NO_SANDBOX: AtomicBool = AtomicBool::new(false);
+
 /// Record whether the launch used the pipe transport.
 pub fn set_launched_pipe(pipe: bool) {
     LAUNCH_PIPE.store(pipe, Ordering::Relaxed);
@@ -127,6 +158,18 @@ pub fn set_launched_pipe(pipe: bool) {
 /// True when this process launched the browser over `--remote-debugging-pipe`.
 pub fn launched_pipe() -> bool {
     LAUNCH_PIPE.load(Ordering::Relaxed)
+}
+
+/// Record whether the launch fell back to `--no-sandbox`.
+pub fn set_launched_no_sandbox(no_sandbox: bool) {
+    LAUNCHED_NO_SANDBOX.store(no_sandbox, Ordering::Relaxed);
+}
+
+/// True when the last launch needed `--no-sandbox` (sandboxed startup
+/// failed: root or restricted container). The renderer sandbox being OFF is
+/// a security posture the agent must learn once.
+pub fn launched_no_sandbox() -> bool {
+    LAUNCHED_NO_SANDBOX.load(Ordering::Relaxed)
 }
 
 /// True for software/headless renderer artifacts (llvmpipe, SwiftShader,
@@ -146,6 +189,49 @@ pub(super) fn classify_gl(renderer: &str) -> GpuState {
         GpuState::Software(renderer.to_string())
     } else {
         GpuState::Hardware(renderer.to_string())
+    }
+}
+
+/// Outcome of reconciling the launch-time GL verdict with a live probe.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GlReconcile {
+    /// A live context exists: the spoof follows the renderer's class and the
+    /// recorded state updates when it changed.
+    Live {
+        spoof: bool,
+        state: GpuState,
+        changed: bool,
+    },
+    /// A confirmed-absent context: the recorded state becomes `Missing`.
+    Dead {
+        spoof: bool,
+        state: GpuState,
+        changed: bool,
+    },
+}
+
+/// Reconcile the launch-time verdict with the live page (D14 trust with a
+/// live override): when a context exists, its renderer decides the spoof and
+/// the recorded state; a confirmed-absent context against a GL-bearing
+/// verdict demotes the state to `Missing` (`changed`) so the loss is loud,
+/// never silent. `live = None` must only be passed for a *confirmed*
+/// absence — an inconclusive probe keeps the recorded state untouched.
+pub fn reconcile_gl(state: Option<&GpuState>, live: Option<&str>) -> GlReconcile {
+    match live {
+        Some(r) => {
+            let st = classify_gl(r);
+            let changed = state != Some(&st);
+            GlReconcile::Live {
+                spoof: matches!(st, GpuState::Software(_)),
+                state: st,
+                changed,
+            }
+        }
+        None => GlReconcile::Dead {
+            spoof: true,
+            state: GpuState::Missing,
+            changed: !matches!(state, Some(GpuState::Missing)),
+        },
     }
 }
 
@@ -420,5 +506,135 @@ mod launch_flag_tests {
         assert!(a.iter().any(|f| f.starts_with("--user-data-dir=")));
         let h = launch_args(&cfg(GlStage::NativeGl, false, Transport::Ws));
         assert!(!h.iter().any(|f| f == "--window-size=1920,1080"));
+    }
+}
+
+#[cfg(test)]
+mod gl_reconcile_tests {
+    use super::*;
+
+    const SW: &str = "ANGLE (Mesa, llvmpipe (LLVM 21.1.7 256 bits), OpenGL 4.6)";
+    const HW: &str = "ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)";
+
+    fn sw() -> GpuState {
+        GpuState::Software(SW.into())
+    }
+    fn hw() -> GpuState {
+        GpuState::Hardware(HW.into())
+    }
+
+    #[test]
+    fn live_truth_sets_spoof_and_state() {
+        assert_eq!(
+            reconcile_gl(None, Some(SW)),
+            GlReconcile::Live {
+                spoof: true,
+                state: sw(),
+                changed: true
+            }
+        );
+        assert_eq!(
+            reconcile_gl(None, Some(HW)),
+            GlReconcile::Live {
+                spoof: false,
+                state: hw(),
+                changed: true
+            }
+        );
+    }
+
+    #[test]
+    fn steady_states_are_unchanged() {
+        assert!(matches!(
+            reconcile_gl(Some(&sw()), Some(SW)),
+            GlReconcile::Live {
+                spoof: true,
+                changed: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            reconcile_gl(Some(&hw()), Some(HW)),
+            GlReconcile::Live {
+                spoof: false,
+                changed: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn confirmed_death_demotes_a_gl_bearing_state() {
+        for prior in [sw(), hw()] {
+            assert_eq!(
+                reconcile_gl(Some(&prior), None),
+                GlReconcile::Dead {
+                    spoof: true,
+                    state: GpuState::Missing,
+                    changed: true
+                }
+            );
+        }
+        // Already known GL-less: no repeat change (no repeat warning).
+        assert_eq!(
+            reconcile_gl(Some(&GpuState::Missing), None),
+            GlReconcile::Dead {
+                spoof: true,
+                state: GpuState::Missing,
+                changed: false
+            }
+        );
+        // External attach with no verdict at all: record the absence once.
+        assert_eq!(
+            reconcile_gl(None, None),
+            GlReconcile::Dead {
+                spoof: true,
+                state: GpuState::Missing,
+                changed: true
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_updates_the_state() {
+        assert_eq!(
+            reconcile_gl(Some(&GpuState::Missing), Some(SW)),
+            GlReconcile::Live {
+                spoof: true,
+                state: sw(),
+                changed: true
+            }
+        );
+    }
+
+    #[test]
+    fn live_truth_overrides_a_stale_verdict() {
+        // Launch said hardware, the live page now reports software: the live
+        // truth wins — mask what pages actually see.
+        assert_eq!(
+            reconcile_gl(Some(&hw()), Some(SW)),
+            GlReconcile::Live {
+                spoof: true,
+                state: sw(),
+                changed: true
+            }
+        );
+    }
+
+    #[test]
+    fn mid_session_marker_clears_on_new_verdicts() {
+        mark_gl_mid_session_loss();
+        assert!(gl_mid_session_loss());
+        // A fresh verdict (any) supersedes the old loss record.
+        set_gpu_state(Some(GpuState::Missing));
+        assert!(!gl_mid_session_loss());
+        // The demotion order used by the reconcilers: set, then mark.
+        set_gpu_state(Some(GpuState::Missing));
+        mark_gl_mid_session_loss();
+        assert!(gl_mid_session_loss());
+        set_gpu_state(Some(sw()));
+        assert!(!gl_mid_session_loss());
+        set_gpu_state(None);
+        assert!(!gl_mid_session_loss());
     }
 }

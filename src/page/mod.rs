@@ -21,6 +21,7 @@ pub mod logs;
 pub mod navigate;
 pub mod tabs;
 
+mod gl;
 mod route;
 
 pub use self::logs::{NetEntry, XhrEntry};

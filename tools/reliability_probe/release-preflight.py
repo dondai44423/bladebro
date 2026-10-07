@@ -82,6 +82,8 @@ with tempfile.TemporaryDirectory(prefix='blade-release-test-') as tmp:
     lines = calls.read_text().splitlines()
     assert sum(' publish ' in line for line in lines) == 5, lines
     assert not any('/npm/bladebro publish ' in line for line in lines), lines
-    assert sum(' view ' in line for line in lines) == 60, 'propagation deadline not reached'
+    # 30 platform-propagation iterations × 5 packages (the deadline was
+    # widened 12→30 in the 4.2.0 post-ship fix; the fixture never propagates).
+    assert sum(' view ' in line for line in lines) == 150, 'propagation deadline not reached'
     print('PASS exact-version mismatch reaches propagation deadline and prevents meta publish')
     print('RELEASE PREFLIGHT 5/5')

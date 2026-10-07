@@ -159,6 +159,7 @@ impl Browser {
 
         // After both bindings: the recording must compile on every target.
         set_launched_headless(!headful);
+        set_launched_no_sandbox(no_sandbox);
 
         // M18: Proxy support via BLADE_PROXY env var.
         let proxy = std::env::var("BLADE_PROXY").ok().filter(|p| !p.is_empty());
@@ -363,6 +364,7 @@ impl Browser {
                 ));
                 break;
             };
+            set_launched_no_sandbox(no_sandbox);
             let args = launch_args_real(&RealLaunchCfg {
                 headless,
                 no_sandbox,
