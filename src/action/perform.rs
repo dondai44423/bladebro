@@ -718,6 +718,13 @@ pub async fn perform_with_network(
             // (Removed 300ms pre-settle sleep; settle already waits for DOM quiet.)
         }
         Action::Upload { ref_id, path } => {
+            // SECURITY: the file path comes from tool args, which are not
+            // always operator intent — a prompt-injected page can steer the
+            // agent at credential files, and DOM.setFileInputFiles delivers
+            // their bytes straight into the page. Gate the read like the
+            // write side gates writes (pdf path= → validate_write_path).
+            crate::platform::validate_upload_path(std::path::Path::new(path.as_str()))
+                .map_err(BladeError::Other)?;
             let (sig, frame) = sig_frame.as_ref().unwrap();
             // Validate the element is a file input.
             let el = lpm

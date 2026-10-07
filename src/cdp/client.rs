@@ -40,6 +40,17 @@ pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// leaves a `waitForDebuggerOnStart` target paused forever (frozen worker).
 const EVENT_BUS_CAPACITY: usize = 16384;
 
+/// Byte bound for a single broadcast event. The bus's only other bound is
+/// its slot count; without a byte bound, page-authored bulk payloads
+/// (WebSocket frames, SSE data, oversized URLs) are retained up to
+/// capacity-fold while any subscriber lags (16384 × 1 MB ≈ 16 GiB).
+/// Consumers match on `method` and read small identity fields via `.get()`
+/// accessors that degrade to defaults, so stripping oversized params
+/// preserves event delivery (attach/dialog/download/network tracking)
+/// while capping worst-case ring retention at
+/// EVENT_BUS_CAPACITY × MAX_EVENT_BYTES.
+const MAX_EVENT_BYTES: usize = 16 * 1024;
+
 /// The result delivered to a pending command caller.
 type CdpOutcome = std::result::Result<Value, BladeError>;
 
@@ -363,6 +374,70 @@ impl CdpClient {
     }
 }
 
+/// Shrink an oversized event's `params` to its small identity fields.
+/// Bulk payloads (WS/SSE frame data, headers, long URLs) have no consumer
+/// in the driver; the fields tracking consumers read are kept so attach/
+/// dialog/download/network bookkeeping degrades gracefully at worst.
+fn shrink_oversized_event(method: &str, params: &mut Value) {
+    use serde_json::Map;
+    let trunc = |v: &Value, cap: usize| -> Option<Value> {
+        v.as_str()
+            .map(|s| Value::String(crate::platform::truncate_utf8(s, cap).to_string()))
+    };
+    let mut keep = Map::new();
+    match method {
+        "Network.requestWillBeSent" => {
+            if let Some(id) = params.get("requestId") {
+                keep.insert("requestId".into(), id.clone());
+            }
+            if let Some(ty) = params.get("type") {
+                keep.insert("type".into(), ty.clone());
+            }
+            if let Some(req) = params.get("request") {
+                let mut r = Map::new();
+                if let Some(m) = req.get("method") {
+                    r.insert("method".into(), m.clone());
+                }
+                if let Some(u) = trunc(req.get("url").unwrap_or(&Value::Null), 4096) {
+                    r.insert("url".into(), u);
+                }
+                keep.insert("request".into(), Value::Object(r));
+            }
+        }
+        "Network.responseReceived" => {
+            if let Some(id) = params.get("requestId") {
+                keep.insert("requestId".into(), id.clone());
+            }
+            if let Some(status) = params.get("response").and_then(|r| r.get("status")) {
+                keep.insert(
+                    "response".into(),
+                    serde_json::json!({ "status": status.clone() }),
+                );
+            }
+        }
+        "Network.loadingFinished" | "Network.loadingFailed" => {
+            if let Some(id) = params.get("requestId") {
+                keep.insert("requestId".into(), id.clone());
+            }
+            if let Some(err) = trunc(params.get("errorText").unwrap_or(&Value::Null), 512) {
+                keep.insert("errorText".into(), err);
+            }
+        }
+        "Page.javascriptDialogOpening" => {
+            if let Some(ty) = params.get("type") {
+                keep.insert("type".into(), ty.clone());
+            }
+            if let Some(msg) = trunc(params.get("message").unwrap_or(&Value::Null), 2048) {
+                keep.insert("message".into(), msg);
+            }
+        }
+        // WS/SSE frames and everything else have no consumer — an empty
+        // identity set is safe and nothing bulk is retained.
+        _ => {}
+    }
+    *params = Value::Object(keep);
+}
+
 /// Route one decoded JSON text frame: responses go to their pending caller,
 /// events fan out to the broadcast bus. Returns `false` when the pending map
 /// is poisoned and the reader should stop. Shared by the WS and pipe readers.
@@ -392,10 +467,18 @@ fn route_cdp_text(
                     let _ = tx.send(outcome);
                 }
             }
-            Some(CdpIncoming::Event(ev)) => {
+            Some(CdpIncoming::Event(mut ev)) => {
                 // Drop on full — never block the reader (Bug 20: a new tab
                 // can flood the channel with events nobody consumes, hanging
                 // all CDP commands including Target.getTargets).
+                // SECURITY: byte-bound the ring. Slot count alone let a
+                // hostile page pin retention at capacity × per-event bytes
+                // while any subscriber lagged; oversized events keep their
+                // small identity fields and drop the bulk payloads nobody
+                // consumes.
+                if text.len() > MAX_EVENT_BYTES {
+                    shrink_oversized_event(&ev.method, &mut ev.params);
+                }
                 let _ = events_tx.send(ev);
             }
             None => {
@@ -448,6 +531,48 @@ impl std::fmt::Debug for CdpClient {
 #[cfg(test)]
 mod reliability_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn oversized_events_are_shrunk_on_the_bus() {
+        let (events_tx, mut rx) = broadcast::channel(8);
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        // A page-authored WS frame with a 100 KB payload.
+        let big = "A".repeat(100 * 1024);
+        let text = format!(
+            "{{\"method\":\"Network.webSocketFrameReceived\",\"params\":{{\"requestId\":\"r1\",\"response\":{{\"payloadData\":\"{big}\"}}}}}}"
+        );
+        assert!(route_cdp_text(&text, &pending, &events_tx));
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(ev.method, "Network.webSocketFrameReceived");
+        assert!(
+            ev.params.as_object().map(|o| o.is_empty()).unwrap_or(false),
+            "bulk payload must not be retained"
+        );
+        // A small event passes through untouched.
+        let small = "{\"method\":\"Page.javascriptDialogOpening\",\"params\":{\"type\":\"alert\",\"message\":\"hi\"}}";
+        assert!(route_cdp_text(small, &pending, &events_tx));
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(
+            ev.params.get("message").and_then(|m| m.as_str()),
+            Some("hi")
+        );
+        // An oversized requestWillBeSent keeps its identity fields.
+        let big_url = "u".repeat(100 * 1024);
+        let text = format!(
+            "{{\"method\":\"Network.requestWillBeSent\",\"params\":{{\"requestId\":\"r2\",\"type\":\"XHR\",\"request\":{{\"method\":\"POST\",\"url\":\"{big_url}\"}}}}}}"
+        );
+        assert!(route_cdp_text(&text, &pending, &events_tx));
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(
+            ev.params.get("requestId").and_then(|v| v.as_str()),
+            Some("r2")
+        );
+        assert!(ev
+            .params
+            .get("request")
+            .and_then(|r| r.get("url"))
+            .is_some());
+    }
 
     #[tokio::test]
     async fn queue_admission_obeys_command_timeout_and_releases_pending_slot() {

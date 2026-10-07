@@ -29,10 +29,15 @@ pub fn swap_binary(downloaded: &Path) -> Result<PathBuf> {
 
     let backup = backup_dir.join(format!("bladebro-v{}", super::CURRENT_VERSION));
 
-    // Remove old backup if it exists (same version).
-    if backup.exists() {
-        std::fs::remove_file(&backup)
-            .map_err(|e| BladeError::Other(format!("cannot remove old backup: {e}")))?;
+    // Remove old backup if it exists (same version). symlink_metadata, not
+    // Path::exists() — exists() follows symlinks, so a pre-planted DANGLING
+    // symlink at this predictable name skipped the remove and the write
+    // below then went THROUGH the link to an attacker-chosen target.
+    if let Ok(meta) = std::fs::symlink_metadata(&backup) {
+        if !meta.is_dir() {
+            std::fs::remove_file(&backup)
+                .map_err(|e| BladeError::Other(format!("cannot remove old backup: {e}")))?;
+        }
     }
 
     #[cfg(windows)]
@@ -64,8 +69,32 @@ pub fn swap_binary(downloaded: &Path) -> Result<PathBuf> {
     {
         // On Unix, we can atomically replace a running binary.
         // The kernel keeps the old inode alive until the process exits.
-        std::fs::copy(&current, &backup)
-            .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
+        // O_EXCL copy: creation at an existing object (a raced-in symlink)
+        // fails instead of writing through it.
+        {
+            let mut src = std::fs::File::open(&current)
+                .map_err(|e| BladeError::Other(format!("cannot open current binary: {e}")))?;
+            let mut dst = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup)
+                .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
+            std::io::copy(&mut src, &mut dst)
+                .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
+            use std::io::Write;
+            dst.flush()
+                .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(m) = std::fs::metadata(&current) {
+                let _ = std::fs::set_permissions(
+                    &backup,
+                    std::fs::Permissions::from_mode(m.permissions().mode() & 0o777),
+                );
+            }
+        }
         std::fs::rename(downloaded, &current)
             .map_err(|e| BladeError::Other(format!("cannot install new binary: {e}")))?;
         // Set executable permission.
@@ -327,8 +356,40 @@ async fn do_rollback(backup_path: &Path, backup_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Verify a backup file is a valid binary (magic bytes + size).
+/// Verify a backup file is a valid binary (magic bytes + size) AND a
+/// regular file owned by the current user. SECURITY: the backups tree may
+/// be writable by a local co-user (degraded HOME resolution, relocated
+/// BLADE_HOME/XDG_STATE_HOME, legacy group-writable trees). A planted
+/// "backup" that passes magic+size is installed over the executable and
+/// chmodded 0755 by do_rollback — code execution at the next launch.
+/// Ownership is the one property the planter cannot forge: only the
+/// victim's own swap_binary writes create files owned by this uid.
 fn verify_backup(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path)
+            .map_err(|e| BladeError::Other(format!("cannot stat backup: {e}")))?;
+        if meta.file_type().is_symlink() {
+            return Err(BladeError::Other(format!(
+                "backup {} is a symlink — refusing it (possible local hijack)",
+                path.display()
+            )));
+        }
+        if !meta.is_file() {
+            return Err(BladeError::Other(format!(
+                "backup {} is not a regular file — refusing it",
+                path.display()
+            )));
+        }
+        if meta.uid() != unsafe { libc::getuid() } {
+            return Err(BladeError::Other(format!(
+                "backup {} is owned by uid {} (not this user) — refusing it (possible local hijack)",
+                path.display(),
+                meta.uid()
+            )));
+        }
+    }
     let data =
         std::fs::read(path).map_err(|e| BladeError::Other(format!("cannot read backup: {e}")))?;
 
@@ -358,6 +419,32 @@ fn verify_backup(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod backup_verify_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_backup_refuses_symlinks_and_non_files() {
+        let dir = std::env::temp_dir().join(format!("blade-swap-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        let mut data = vec![0u8; 1_000_100];
+        data[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        std::fs::write(&victim, &data).unwrap();
+        let link = dir.join("bladebro-v9.9.9");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(
+            verify_backup(&link).is_err(),
+            "a symlinked backup must be refused"
+        );
+        assert!(verify_backup(&dir).is_err(), "a directory is not a backup");
+        let real = dir.join("bladebro-v9.9.8");
+        std::fs::write(&real, &data).unwrap();
+        assert!(
+            verify_backup(&real).is_ok(),
+            "a plain real-magic file passes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `verify_backup` must accept a file whose magic matches this
     /// platform's real release artifacts (via the shared

@@ -106,6 +106,132 @@ fn create_private_profile_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Prepare the operator's BLADE_PROFILE_DIR override: validate the target
+/// and its ancestors, refuse symlinks / foreign ownership / non-dirs, and
+/// lock the directory to 0700 (it holds the live cookie jar).
+fn prepare_custom_profile_dir(d: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        crate::platform::validate_dir_ancestors(d)
+            .map_err(|e| BladeError::Other(format!("BLADE_PROFILE_DIR {}: {e}", d.display())))?;
+        let lock_private = |p: &Path| -> Result<()> {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| BladeError::Other(format!("cannot secure profile dir: {e}")))
+        };
+        match std::fs::symlink_metadata(d) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(BladeError::Other(format!(
+                        "BLADE_PROFILE_DIR {} is a symlink — refusing it (possible local profile hijack)",
+                        d.display()
+                    )));
+                }
+                if !meta.is_dir() {
+                    return Err(BladeError::Other(format!(
+                        "BLADE_PROFILE_DIR {} is not a directory",
+                        d.display()
+                    )));
+                }
+                if meta.uid() != unsafe { libc::geteuid() } {
+                    return Err(BladeError::Other(format!(
+                        "BLADE_PROFILE_DIR {} is owned by another user — refusing it (possible local profile hijack)",
+                        d.display()
+                    )));
+                }
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    eprintln!(
+                        "[bladebro] WARNING: BLADE_PROFILE_DIR {} is group/other-accessible ({mode:o}) — it holds cookies and localStorage",
+                        d.display()
+                    );
+                }
+                lock_private(d)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(parent) = d.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        BladeError::Other(format!("cannot create profile dir parent: {e}"))
+                    })?;
+                }
+                // mkdir(2): fails for ANY pre-placed object (file, dir or
+                // symlink) — the profile can never be created through a
+                // plant.
+                std::fs::create_dir(d)
+                    .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
+                // Re-validate what now exists (dir, ours, no symlink).
+                let meta = std::fs::symlink_metadata(d)?;
+                if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+                    return Err(BladeError::Other(format!(
+                        "BLADE_PROFILE_DIR {} is not a plain directory owned by this user — refusing it",
+                        d.display()
+                    )));
+                }
+                lock_private(d)?;
+            }
+            Err(e) => return Err(BladeError::Other(format!("cannot stat profile dir: {e}"))),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        crate::platform::secure_create_dir_all(d)
+            .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Create the ephemeral (BLADE_FRESH) profile dir: unpredictable name +
+/// exclusive mkdir + 0700 + ancestor validation. The name must be
+/// unguessable (a pid-sprayed plant in shared /tmp must never land) and
+/// creation must fail-if-exists (mkdir(2)) so a pre-placed object can
+/// never be adopted.
+fn create_ephemeral_profile_dir() -> Result<PathBuf> {
+    let base = std::env::temp_dir();
+    #[cfg(unix)]
+    crate::platform::validate_dir_ancestors(&base).map_err(|e| {
+        BladeError::Other(format!(
+            "refusing an ephemeral profile under an unsafe temp path: {e}"
+        ))
+    })?;
+    for _ in 0..5 {
+        let candidate = base.join(format!("bladebro-chrome-{:x}", fresh_profile_entropy()));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &candidate,
+                        std::fs::Permissions::from_mode(0o700),
+                    );
+                }
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(BladeError::Other(format!("cannot create profile dir: {e}"))),
+        }
+    }
+    Err(BladeError::Other(
+        "cannot create profile dir: name collisions".into(),
+    ))
+}
+
+/// Entropy for the ephemeral profile dir name: nanosecond clock XOR
+/// ASLR-derived address entropy XOR a monotonic counter — unpredictable to
+/// a local co-user without a new dependency (mirrors the updater's
+/// rand_suffix idiom).
+fn fresh_profile_entropy() -> u128 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let aslr = &n as *const _ as usize as u128;
+    t ^ aslr.rotate_left(64) ^ n.rotate_left(32)
+}
+
 impl SessionProfile {
     /// Create the session profile for this process: reap
     /// orphans from dead bladebro processes, then copy the
@@ -118,12 +244,16 @@ impl SessionProfile {
             .unwrap_or(false);
 
         let dir = if let Ok(custom) = std::env::var("BLADE_PROFILE_DIR") {
-            // Explicit override: use it as-is (the caller owns
-            // the consequences — this is the escape hatch).
+            // Explicit override of the LOCATION — not of the security
+            // posture. The profile holds the live cookie jar, so the same
+            // 0700 discipline as every other lane applies, and a
+            // pre-planted directory/symlink in co-user-writable space is
+            // refused instead of silently adopted (std::fs::create_dir_all
+            // returns Ok through an attacker-created directory AND through
+            // a symlink-to-dir, with no owner/type/mode validation).
             if !custom.is_empty() {
                 let d = PathBuf::from(custom);
-                std::fs::create_dir_all(&d)
-                    .map_err(|e| BladeError::Other(format!("cannot create profile dir: {e}")))?;
+                prepare_custom_profile_dir(&d)?;
                 return Ok(Self {
                     dir: d,
                     owned: false,
@@ -135,11 +265,14 @@ impl SessionProfile {
         } else if seasoned {
             session_dir()
         } else {
-            // BLADE_FRESH=1: ephemeral temp dir. 0700 — it holds a full
-            // Chrome profile (cookies, storage); a predictable
-            // world-readable /tmp/bladebro-chrome-<pid> leaked it to
-            // every local user.
-            std::env::temp_dir().join(format!("bladebro-chrome-{}", std::process::id()))
+            // BLADE_FRESH=1: ephemeral temp dir. SECURITY: unpredictable
+            // name + mkdir(2) exclusive create — a pid-predictable name in
+            // shared /tmp let a local co-user pre-plant the dir with a
+            // `Default/Cookies` symlink for Chromium to write the live
+            // cookie DB through. Creation at ANY pre-placed object now
+            // fails and the name cannot be guessed; 0700 because the dir
+            // holds a full Chrome profile.
+            create_ephemeral_profile_dir()?
         };
 
         // SECURITY: 0700 — the profile contains cookies and localStorage.
@@ -389,13 +522,27 @@ impl SessionProfile {
                 .unwrap_or(false);
         if is_session {
             Self::sync_back_and_remove(dir);
-        } else if dir
-            == std::env::temp_dir().join(format!("bladebro-chrome-{}", std::process::id()))
-            && std::fs::read_to_string(dir.join(".blade-owner"))
+        } else {
+            // Ephemeral (BLADE_FRESH) dir: only a dir WE created — an
+            // unpredictable `bladebro-chrome-<entropy>` name directly under
+            // temp_dir whose owner marker names this pid — is removed. The
+            // name is entropy-based since 2026-10-07 (a pid-predictable
+            // name was the pre-plant target), so the marker, not the name,
+            // is the ownership proof; the prefix check keeps the removal
+            // inside the scheme.
+            let under_temp = dir
+                .parent()
+                .is_some_and(|p| p == std::env::temp_dir().as_path());
+            let named = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().starts_with("bladebro-chrome-"))
+                .unwrap_or(false);
+            let mine = std::fs::read_to_string(dir.join(".blade-owner"))
                 .ok()
-                .is_some_and(|s| s.trim() == std::process::id().to_string())
-        {
-            let _ = std::fs::remove_dir_all(dir);
+                .is_some_and(|s| s.trim() == std::process::id().to_string());
+            if under_temp && named && mine {
+                let _ = std::fs::remove_dir_all(dir);
+            }
         }
     }
 
@@ -558,6 +705,47 @@ mod tests {
         );
         assert_eq!(std::fs::read(dir.join("existing")).unwrap(), b"preserve");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ephemeral_profile_creation_is_private_and_unique() {
+        use std::os::unix::fs::PermissionsExt;
+        let a = create_ephemeral_profile_dir().unwrap();
+        let b = create_ephemeral_profile_dir().unwrap();
+        assert_ne!(a, b, "names must be unpredictable, not pid-based");
+        let name = a.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("bladebro-chrome-"));
+        let meta = std::fs::metadata(&a).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn ephemeral_cleanup_removes_only_our_marked_dir() {
+        // Our marked dir is removed...
+        let a = create_ephemeral_profile_dir().unwrap();
+        std::fs::write(a.join(".blade-owner"), std::process::id().to_string()).unwrap();
+        SessionProfile::cleanup_dir(&a);
+        assert!(
+            !a.exists(),
+            "an owned, marked ephemeral dir must be removed"
+        );
+        // ...a same-scheme dir with a FOREIGN owner marker survives...
+        let b = create_ephemeral_profile_dir().unwrap();
+        std::fs::write(b.join(".blade-owner"), "1").unwrap();
+        SessionProfile::cleanup_dir(&b);
+        assert!(b.exists(), "a foreign marker must never authorize removal");
+        // ...and an unmarked plant at a scheme name survives too.
+        let planted = std::env::temp_dir().join("bladebro-chrome-planted-test");
+        let _ = std::fs::remove_dir_all(&planted);
+        std::fs::create_dir_all(&planted).unwrap();
+        SessionProfile::cleanup_dir(&planted);
+        assert!(planted.exists(), "an unmarked dir must never be removed");
+        let _ = std::fs::remove_dir_all(&b);
+        let _ = std::fs::remove_dir_all(&planted);
     }
 
     #[cfg(unix)]

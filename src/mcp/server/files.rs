@@ -28,6 +28,28 @@ pub async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
         .unwrap_or(1.0)
         .clamp(0.1, 2.0);
 
+    // SECURITY: validate an explicit target BEFORE rendering, and refuse
+    // to replace anything that already exists. A PDF export has no business
+    // destroying what lives at `path` — a prompt-injected page steering the
+    // agent at an existing file (saved sessions, project source, .git
+    // objects, keychain files) would otherwise replace it with PDF bytes,
+    // irreversibly, and still get a clean "pdf saved" success.
+    let explicit = args
+        .get("path")
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from);
+    if let Some(pb) = &explicit {
+        if let Err(e) = crate::platform::validate_write_path(pb) {
+            return Err(BladeError::Other(e));
+        }
+        ensure_new_output(pb).map_err(BladeError::Other)?;
+        if let Some(parent) = pb.parent() {
+            crate::platform::secure_create_dir_all(parent)
+                .map_err(|e| BladeError::Other(format!("pdf dir: {e}")))?;
+        }
+    }
+
     let res = page
         .cdp_ref()
         .send(
@@ -57,26 +79,63 @@ pub async fn handle_pdf(page: &mut Page, args: &Value) -> Result<String> {
         .decode(data)
         .map_err(|e| BladeError::Other(format!("pdf base64 decode: {e}")))?;
 
-    let path = match args.get("path").and_then(|p| p.as_str()) {
-        Some(p) if !p.is_empty() => {
-            let pb = std::path::PathBuf::from(p);
-            // SECURITY: Block writes to system directories to prevent path
-            // traversal attacks via prompt injection.
-            if let Err(e) = crate::platform::validate_write_path(&pb) {
-                return Err(BladeError::Other(e));
-            }
-            if let Some(parent) = pb.parent() {
-                crate::platform::secure_create_dir_all(parent)
-                    .map_err(|e| BladeError::Other(format!("pdf dir: {e}")))?;
-            }
+    let path = match explicit {
+        Some(pb) => {
+            // Re-check before the write: the target must not have appeared
+            // between validation and render.
+            ensure_new_output(&pb).map_err(BladeError::Other)?;
             // 0600 — consistent with every other bladebro-written file.
             crate::platform::secure_write_file(&pb, &bytes)
                 .map_err(|e| BladeError::Other(format!("pdf write: {e}")))?;
             pb.display().to_string()
         }
-        _ => crate::artifacts::write_artifact_bytes(&bytes, "pdf")?,
+        None => crate::artifacts::write_artifact_bytes(&bytes, "pdf")?,
     };
     Ok(format!("pdf saved: {} ({} bytes)", path, bytes.len()))
+}
+
+/// Refuse a PDF export that would replace an existing file/dir/symlink.
+/// A symlink is refused on the entry itself (never write through it), and
+/// a dangling link must not be silently replaced either — an export target
+/// the operator did not create is not ours to overwrite.
+fn ensure_new_output(pb: &std::path::Path) -> std::result::Result<(), String> {
+    if pb.symlink_metadata().is_ok() {
+        return Err(format!(
+            "refusing to overwrite existing path: {} — save to a new path instead",
+            pb.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pdf_output_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_new_output_refuses_existing_files_dirs_and_symlinks() {
+        let dir = std::env::temp_dir().join(format!("blade-pdf-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fresh = dir.join("fresh.pdf");
+        assert!(ensure_new_output(&fresh).is_ok());
+        let existing = dir.join("existing.pdf");
+        std::fs::write(&existing, b"%PDF-old").unwrap();
+        assert!(ensure_new_output(&existing).is_err());
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(ensure_new_output(&sub).is_err());
+        #[cfg(unix)]
+        {
+            let victim = dir.join("victim.txt");
+            std::fs::write(&victim, b"keep").unwrap();
+            let link = dir.join("link.pdf");
+            std::os::unix::fs::symlink(&victim, &link).unwrap();
+            assert!(ensure_new_output(&link).is_err());
+            assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// How long a completed pre-existing entry is held back (no-url flow) so a

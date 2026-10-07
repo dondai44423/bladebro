@@ -217,133 +217,158 @@ impl Page {
                             let target_type = target_info
                                 .and_then(|t| t.get("type"))
                                 .and_then(|t| t.as_str())
-                                .unwrap_or("");
+                                .unwrap_or("")
+                                .to_string();
                             let session_id = event
                                 .params
                                 .get("sessionId")
                                 .and_then(|s| s.as_str())
-                                .unwrap_or("");
+                                .unwrap_or("")
+                                .to_string();
                             if session_id.is_empty() {
                                 continue;
                             }
                             if dbg {
                                 eprintln!("[workers] attach type={target_type} sid={session_id}");
                             }
-                            let worker_session = CdpSession::child(client.clone(), session_id);
-                            // Runtime.evaluate against a PAUSED service worker
-                            // deadlocks — its execution context only exists once
-                            // the script runs — and the 30s command timeout then
-                            // froze this whole handler (every later target stayed
-                            // paused; live effect: hung SW registration and
-                            // CreepJS's worker card reading `blocked`). Service
-                            // workers are resumed FIRST, then patched best-effort.
-                            let is_sw = target_type == "service_worker";
-                            if is_sw {
-                                let res = worker_session
-                                    .send("Runtime.runIfWaitingForDebugger", None)
-                                    .await;
-                                if dbg {
-                                    eprintln!(
-                                        "[workers] resume(sw-first) {target_type}: {}",
-                                        if res.is_ok() {
-                                            "ok".to_string()
-                                        } else {
-                                            format!("ERR {:?}", res.err())
-                                        }
-                                    );
-                                }
-                            }
-                            match target_type {
-                                "worker" | "shared_worker" => {
-                                    if let Some(ref script) = worker_script {
-                                        // Bounded: a pathological target must not
-                                        // stall the attach pipeline.
-                                        let res = worker_session
-                                            .send_with_timeout(
-                                                "Runtime.evaluate",
-                                                Some(serde_json::json!({
-                                                    "expression": script,
-                                                    "returnByValue": true,
-                                                })),
-                                                std::time::Duration::from_secs(5),
-                                            )
-                                            .await;
-                                        if dbg {
-                                            eprintln!(
-                                                "[workers] eval {target_type}: {}",
-                                                if res.is_ok() {
-                                                    "ok".to_string()
-                                                } else {
-                                                    format!("ERR {:?}", res.err())
-                                                }
-                                            );
-                                        }
+                            // SECURITY: handle each attach in its OWN task. A
+                            // sequential handler parked in a per-attach send
+                            // (e.g. a busy-looping service worker eating the
+                            // 3s eval timeout) froze this loop's recv(),
+                            // pinning the broadcast ring's retention window at
+                            // capacity (16384 × per-event bytes of
+                            // page-authored events) and dropping attach/
+                            // dialog events — the exact failure the
+                            // EVENT_BUS_CAPACITY comment warns about. The
+                            // loop itself now only ever awaits recv();
+                            // per-target ordering (resume → eval → resume) is
+                            // preserved inside the task, and tasks are
+                            // bounded by the same 3–5s/30s command timeouts.
+                            let client = client.clone();
+                            let worker_script = worker_script.clone();
+                            let full_script = full_script.clone();
+                            tokio::spawn(async move {
+                                let worker_session = CdpSession::child(client, session_id);
+                                // Runtime.evaluate against a PAUSED service
+                                // worker deadlocks — its execution context
+                                // only exists once the script runs — and the
+                                // 30s command timeout then froze the old
+                                // sequential handler (every later target
+                                // stayed paused; live effect: hung SW
+                                // registration and CreepJS's worker card
+                                // reading `blocked`). Service workers are
+                                // resumed FIRST, then patched best-effort.
+                                let is_sw = target_type == "service_worker";
+                                if is_sw {
+                                    let res = worker_session
+                                        .send("Runtime.runIfWaitingForDebugger", None)
+                                        .await;
+                                    if dbg {
+                                        eprintln!(
+                                            "[workers] resume(sw-first) {target_type}: {}",
+                                            if res.is_ok() {
+                                                "ok".to_string()
+                                            } else {
+                                                format!("ERR {:?}", res.err())
+                                            }
+                                        );
                                     }
                                 }
-                                "service_worker" => {
-                                    // Already resumed above. The SW realm has no
-                                    // WebGL; this only matters for the locale
-                                    // patch — best-effort, bounded.
-                                    if let Some(ref script) = worker_script {
-                                        let res = worker_session
-                                            .send_with_timeout(
-                                                "Runtime.evaluate",
-                                                Some(serde_json::json!({
-                                                    "expression": script,
-                                                    "returnByValue": true,
-                                                })),
-                                                std::time::Duration::from_secs(3),
-                                            )
-                                            .await;
-                                        if dbg {
-                                            eprintln!(
-                                                "[workers] eval {target_type}: {}",
-                                                if res.is_ok() {
-                                                    "ok".to_string()
-                                                } else {
-                                                    format!("ERR {:?}", res.err())
-                                                }
-                                            );
+                                match target_type.as_str() {
+                                    "worker" | "shared_worker" => {
+                                        if let Some(ref script) = worker_script {
+                                            // Bounded: a pathological target
+                                            // must not stall the pipeline.
+                                            let res = worker_session
+                                                .send_with_timeout(
+                                                    "Runtime.evaluate",
+                                                    Some(serde_json::json!({
+                                                        "expression": script,
+                                                        "returnByValue": true,
+                                                    })),
+                                                    std::time::Duration::from_secs(5),
+                                                )
+                                                .await;
+                                            if dbg {
+                                                eprintln!(
+                                                    "[workers] eval {target_type}: {}",
+                                                    if res.is_ok() {
+                                                        "ok".to_string()
+                                                    } else {
+                                                        format!("ERR {:?}", res.err())
+                                                    }
+                                                );
+                                            }
                                         }
                                     }
+                                    "service_worker" => {
+                                        // Already resumed above. The SW realm
+                                        // has no WebGL; this only matters for
+                                        // the locale patch — best-effort,
+                                        // bounded.
+                                        if let Some(ref script) = worker_script {
+                                            let res = worker_session
+                                                .send_with_timeout(
+                                                    "Runtime.evaluate",
+                                                    Some(serde_json::json!({
+                                                        "expression": script,
+                                                        "returnByValue": true,
+                                                    })),
+                                                    std::time::Duration::from_secs(3),
+                                                )
+                                                .await;
+                                            if dbg {
+                                                eprintln!(
+                                                    "[workers] eval {target_type}: {}",
+                                                    if res.is_ok() {
+                                                        "ok".to_string()
+                                                    } else {
+                                                        format!("ERR {:?}", res.err())
+                                                    }
+                                                );
+                                            }
+                                        }
+                                    }
+                                    "iframe" | "oopif" => {
+                                        // Full stealth into out-of-process
+                                        // frames: document_start semantics via
+                                        // evaluate before resume, so the
+                                        // frame's scripts run against the
+                                        // patched environment.
+                                        if let Some(ref script) = full_script {
+                                            let _ = worker_session
+                                                .send_with_timeout(
+                                                    "Runtime.evaluate",
+                                                    Some(serde_json::json!({
+                                                        "expression": script,
+                                                        "returnByValue": true,
+                                                    })),
+                                                    std::time::Duration::from_secs(5),
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                "iframe" | "oopif" => {
-                                    // Full stealth into out-of-process frames:
-                                    // document_start semantics via evaluate
-                                    // before resume, so the frame's scripts
-                                    // run against the patched environment.
-                                    if let Some(ref script) = full_script {
-                                        let _ = worker_session
-                                            .send_with_timeout(
-                                                "Runtime.evaluate",
-                                                Some(serde_json::json!({
-                                                    "expression": script,
-                                                    "returnByValue": true,
-                                                })),
-                                                std::time::Duration::from_secs(5),
-                                            )
-                                            .await;
+                                // ALWAYS resume — an unresumed target stays
+                                // frozen. (Service workers were already
+                                // resumed above.)
+                                if !is_sw {
+                                    let res = worker_session
+                                        .send("Runtime.runIfWaitingForDebugger", None)
+                                        .await;
+                                    if dbg {
+                                        eprintln!(
+                                            "[workers] resume {target_type}: {}",
+                                            if res.is_ok() {
+                                                "ok".to_string()
+                                            } else {
+                                                format!("ERR {:?}", res.err())
+                                            }
+                                        );
                                     }
                                 }
-                                _ => {}
-                            }
-                            // ALWAYS resume — an unresumed target stays frozen.
-                            // (Service workers were already resumed above.)
-                            if !is_sw {
-                                let res = worker_session
-                                    .send("Runtime.runIfWaitingForDebugger", None)
-                                    .await;
-                                if dbg {
-                                    eprintln!(
-                                        "[workers] resume {target_type}: {}",
-                                        if res.is_ok() {
-                                            "ok".to_string()
-                                        } else {
-                                            format!("ERR {:?}", res.err())
-                                        }
-                                    );
-                                }
-                            }
+                            });
                         }
                         Ok(_) => {}
                         // Lagged: we skipped events but the connection is

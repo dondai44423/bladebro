@@ -303,6 +303,17 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
 
         // ---- sessions (M10) ----
         StateOp::SaveSession { name } => {
+            // SECURITY: the real-browser lane skips the login snapshot
+            // ("not our cookie store") — the same boundary must hold here.
+            // Without this gate, one agent-callable state save on the rb
+            // lane writes the user's REAL browser cookie jar in cleartext
+            // under the blade data dir, where the upload read lane could
+            // forward it to any driven page.
+            if crate::realbrowser::real_lane() {
+                return Err(BladeError::Other(
+                    "state save is disabled on the real-browser lane — it would persist your real browser's cookies into bladebro's data dir".into(),
+                ));
+            }
             validate_session_name(name)?;
 
             cdp.enable("Network").await?;
@@ -371,8 +382,18 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             let path = crate::platform::blade_dir()
                 .join("sessions")
                 .join(format!("{name}.json"));
+            if std::fs::symlink_metadata(&path)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                // A symlinked session file is attack state — never read
+                // through it into the restore path.
+                return Err(BladeError::Other(format!(
+                    "session '{name}' is a symlink — refusing to read it"
+                )));
+            }
             use std::io::Read;
-            let file = std::fs::File::open(&path)
+            let file = crate::platform::open_nofollow(&path)
                 .map_err(|e| BladeError::Other(format!("cannot read session '{name}': {e}")))?;
             let mut content = Vec::new();
             file.take(8 * 1024 * 1024 + 1).read_to_end(&mut content)?;

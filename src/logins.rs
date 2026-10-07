@@ -155,7 +155,19 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
 /// Safe to call before any navigation: `setCookies` writes into the live
 /// cookie store and the values win over whatever a stale profile copy left.
 pub async fn restore(cdp: &CdpSession) -> Result<()> {
-    let list: Vec<SavedCookie> = match std::fs::read(logins_path()) {
+    let sidecar = logins_path();
+    if std::fs::symlink_metadata(&sidecar)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        // SECURITY: a symlinked sidecar is attack state, not a login store —
+        // refusing it prevents re-injecting attacker-authored cookies into
+        // every future browser context.
+        return Err(BladeError::Other(
+            "logins sidecar is a symlink — refusing to restore it".into(),
+        ));
+    }
+    let list: Vec<SavedCookie> = match crate::platform::read_file_nofollow(&sidecar) {
         Ok(b) => serde_json::from_slice(&b)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
@@ -241,6 +253,43 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Shared restore encoding for named sessions and the login sidecar.
+pub(crate) fn cookie_params(value: &Value) -> Result<Value> {
+    if value.get("partitionKey").is_some_and(|key| !key.is_null()) {
+        return Err(BladeError::Other(
+            "partitioned cookies cannot be restored as ordinary cookies".into(),
+        ));
+    }
+    saved_cookie_params(&serde_json::from_value(value.clone())?)
+}
+
+fn saved_cookie_params(c: &SavedCookie) -> Result<Value> {
+    if c.domain.is_empty()
+        || !c.path.starts_with('/')
+        || c.same_site
+            .as_deref()
+            .is_some_and(|s| !matches!(s, "Strict" | "Lax" | "None"))
+    {
+        return Err(BladeError::Other(format!(
+            "invalid saved cookie {:?}: domain, path or sameSite",
+            c.name
+        )));
+    }
+    let mut params = cookie_target(c);
+    params["name"] = json!(c.name);
+    params["value"] = json!(c.value);
+    params["path"] = json!(c.path);
+    params["secure"] = json!(c.secure);
+    params["httpOnly"] = json!(c.http_only);
+    if let Some(same_site) = &c.same_site {
+        params["sameSite"] = json!(same_site);
+    }
+    if let Some(expires) = c.expires.filter(|e| *e >= 0.0) {
+        params["expires"] = json!(expires);
+    }
+    Ok(params)
 }
 
 #[cfg(test)]
@@ -371,41 +420,4 @@ mod tests {
         c.path = "relative".into();
         assert!(saved_cookie_params(&c).is_err());
     }
-}
-
-/// Shared restore encoding for named sessions and the login sidecar.
-pub(crate) fn cookie_params(value: &Value) -> Result<Value> {
-    if value.get("partitionKey").is_some_and(|key| !key.is_null()) {
-        return Err(BladeError::Other(
-            "partitioned cookies cannot be restored as ordinary cookies".into(),
-        ));
-    }
-    saved_cookie_params(&serde_json::from_value(value.clone())?)
-}
-
-fn saved_cookie_params(c: &SavedCookie) -> Result<Value> {
-    if c.domain.is_empty()
-        || !c.path.starts_with('/')
-        || c.same_site
-            .as_deref()
-            .is_some_and(|s| !matches!(s, "Strict" | "Lax" | "None"))
-    {
-        return Err(BladeError::Other(format!(
-            "invalid saved cookie {:?}: domain, path or sameSite",
-            c.name
-        )));
-    }
-    let mut params = cookie_target(c);
-    params["name"] = json!(c.name);
-    params["value"] = json!(c.value);
-    params["path"] = json!(c.path);
-    params["secure"] = json!(c.secure);
-    params["httpOnly"] = json!(c.http_only);
-    if let Some(same_site) = &c.same_site {
-        params["sameSite"] = json!(same_site);
-    }
-    if let Some(expires) = c.expires.filter(|e| *e >= 0.0) {
-        params["expires"] = json!(expires);
-    }
-    Ok(params)
 }

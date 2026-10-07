@@ -194,6 +194,13 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             );
             println!("    identity (accounts, sessions, reputation).");
             println!();
+            println!(
+                "  {} while a session runs, browser control is served on a loopback debug",
+                ui::yellow("⚠")
+            );
+            println!("    endpoint any local user of this machine can reach — avoid shared/");
+            println!("    multi-user hosts (headless sessions idle-close automatically).");
+            println!();
             println!("{}", rb_row("revert", "`bladebro rb off` · wipe the imported copy: `rb forget`"));
             println!("{}", rb_row("control", "`rb pause` / `rb resume` hand the browser to you"));
             println!("{}", rb_row("note", "running surfaces (daemon, MCP) switch at their next action — an owned browser relaunches; an attached browser is left running"));

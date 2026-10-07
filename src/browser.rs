@@ -31,6 +31,7 @@ mod launch;
 mod pipe;
 mod probe;
 
+pub(crate) use self::discover::endpoint_owned_by_own_browser;
 #[cfg(target_os = "linux")]
 pub use self::display::VirtualDisplay;
 pub use self::flags::{

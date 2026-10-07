@@ -15,6 +15,12 @@ pub struct VirtualDisplay {
     /// no WM binary is installed — the JS masks are then the fallback.
     wm: Option<Child>,
     display_num: u16,
+    /// Per-session Xauthority file (0600, O_EXCL). Xvfb runs with
+    /// `-auth <file>` instead of `-ac`: with access control disabled, any
+    /// local co-user could connect to `/tmp/.X11-unix/X<n>` (or its abstract
+    /// twin, which carries no permission bits at all) and read every
+    /// rendered page / inject XTEST input into the live browser.
+    auth_file: std::path::PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -30,6 +36,11 @@ impl VirtualDisplay {
     /// owner exits, the survivor's Chrome loses its display
     /// and dies (observed live: SIGTERM on session A killed
     /// session B's Chrome via a shared Xvfb).
+    ///
+    /// SECURITY: the display is cookie-authorized (`-auth`, never `-ac`)
+    /// and ready only when the socket is served by the child we spawned —
+    /// connect-success alone would accept a co-user's pre-placed listener
+    /// in the world-writable `/tmp/.X11-unix` (see `xvfb_socket_owned_by`).
     pub(super) fn start() -> Result<Self> {
         let xvfb_path = find_xvfb().ok_or_else(|| BladeError::Other("Xvfb not found".into()))?;
         Self::start_with_path(&xvfb_path)
@@ -42,13 +53,27 @@ impl VirtualDisplay {
                 last_err = "no free display claim".into();
                 break;
             };
+            // SECURITY: authorize the display with a fresh per-session
+            // MIT-MAGIC-COOKIE-1 instead of `-ac`. `-ac` disabled ALL
+            // access control: on a multi-user host any local user could
+            // attach to the display and capture/inject at will. The cookie
+            // file is 0600 and O_EXCL-created under an unpredictable name;
+            // only children of this process (handed XAUTHORITY below) can
+            // open the display.
+            let Some(auth_file) = write_xvfb_auth_file(display_num) else {
+                release_display_claim(display_num);
+                last_err = "cannot write Xauthority file".into();
+                continue;
+            };
+            let auth_arg = auth_file.to_string_lossy().into_owned();
             let child = Command::new(xvfb_path)
                 .args([
                     &format!(":{display_num}"),
                     "-screen",
                     "0",
                     &format!("{XVFB_SCREEN_WIDTH}x{XVFB_SCREEN_HEIGHT}x24"),
-                    "-ac", // disable access control (headless server)
+                    "-auth",
+                    &auth_arg, // cookie-only access control (never -ac)
                     "-nolisten",
                     "tcp",
                 ])
@@ -59,17 +84,21 @@ impl VirtualDisplay {
                 Ok(c) => c,
                 Err(e) => {
                     release_display_claim(display_num);
+                    let _ = std::fs::remove_file(&auth_file);
                     last_err = format!("spawn: {e}");
                     continue;
                 }
             };
-            // Readiness is observable: the X socket accepts connections as
-            // soon as the server is up (tens of ms). Poll it and check
-            // survival on a 25ms cadence — a foreign owner (Xvfb exits
-            // quickly) is caught just as well as with the old single 300ms
-            // check, and the normal start no longer pays a flat 300ms. Cap
-            // at 500ms so a pathological case still fails over.
-            let sock = format!("/tmp/.X11-unix/X{display_num}");
+            // Readiness: the X socket accepts connections as soon as the
+            // server is up (tens of ms), but connect-success on a
+            // predictable path in the world-writable /tmp/.X11-unix proves
+            // only that SOMETHING listens — a co-user's pre-placed socket
+            // satisfies it just as well as our child (whose own bind
+            // failure is invisible: stdio → /dev/null). Require the peer
+            // credentials of the connected listener to be the child we
+            // spawned, on BOTH the pathname and abstract sockets (Chrome
+            // tries the abstract name first), and check survival on a
+            // 25ms cadence. Deadline expiry is a FAILURE, never readiness.
             let ready_deadline = std::time::Instant::now() + Duration::from_millis(500);
             loop {
                 match child.try_wait() {
@@ -77,24 +106,28 @@ impl VirtualDisplay {
                         last_err = format!("Xvfb :{display_num} exited ({status})");
                         eprintln!("[bladebro] Xvfb :{display_num} died ({status}), retrying");
                         release_display_claim(display_num);
+                        let _ = std::fs::remove_file(&auth_file);
                         break;
                     }
                     Ok(None) => {
-                        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
-                            let wm = spawn_session_chrome(display_num);
+                        if xvfb_socket_owned_by(child.id(), display_num) {
+                            let wm = spawn_session_chrome(display_num, &auth_file);
                             eprintln!("[bladebro] Xvfb virtual display on :{display_num}");
                             return Ok(Self {
                                 child,
                                 wm,
                                 display_num,
+                                auth_file,
                             });
                         }
                         if std::time::Instant::now() >= ready_deadline {
-                            last_err =
-                                format!("Xvfb :{display_num} did not open its socket within 500ms");
+                            last_err = format!(
+                                "Xvfb :{display_num} never served a socket owned by our process within 500ms"
+                            );
                             let _ = child.kill();
                             let _ = child.wait();
                             release_display_claim(display_num);
+                            let _ = std::fs::remove_file(&auth_file);
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(25));
@@ -103,6 +136,7 @@ impl VirtualDisplay {
                         let _ = child.kill();
                         let _ = child.wait();
                         release_display_claim(display_num);
+                        let _ = std::fs::remove_file(&auth_file);
                         last_err = format!("poll: {e}");
                         break;
                     }
@@ -133,7 +167,7 @@ impl VirtualDisplay {
 /// Degrades silently when the tools are missing — the JS geometry masks are
 /// then the fallback.
 #[cfg(target_os = "linux")]
-fn spawn_session_chrome(display_num: u16) -> Option<Child> {
+fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Child> {
     fn find_bin(name: &str, extra: &[&str]) -> Option<String> {
         for path in extra {
             if std::path::Path::new(path).exists() {
@@ -146,6 +180,7 @@ fn spawn_session_chrome(display_num: u16) -> Option<Child> {
         let mut cmd = Command::new(path);
         cmd.args(["--compositor=off", "--replace"])
             .env("DISPLAY", format!(":{display_num}"))
+            .env("XAUTHORITY", xauth)
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("XDG_SESSION_TYPE")
             .stdout(Stdio::null())
@@ -164,7 +199,7 @@ fn spawn_session_chrome(display_num: u16) -> Option<Child> {
         // (_NET_SUPPORTING_WM_CHECK), so poll it tightly (50ms) up to 3s.
         let mut done = false;
         for _ in 0..60 {
-            if wm_ready(display_num) && set_work_area(display_num) {
+            if wm_ready(display_num, xauth) && set_work_area(display_num, xauth) {
                 done = true;
                 break;
             }
@@ -173,7 +208,7 @@ fn spawn_session_chrome(display_num: u16) -> Option<Child> {
         if !done {
             // A WM that never publishes the atom: try once blindly — the
             // read-back inside set_work_area is still the instrument.
-            let _ = set_work_area(display_num);
+            let _ = set_work_area(display_num, xauth);
         }
     }
     wm
@@ -183,10 +218,11 @@ fn spawn_session_chrome(display_num: u16) -> Option<Child> {
 /// resolves to a window). True when `xprop` is unavailable — `set_work_area`'s
 /// own read-back is then the fallback instrument, as before.
 #[cfg(target_os = "linux")]
-fn wm_ready(display_num: u16) -> bool {
+fn wm_ready(display_num: u16, xauth: &std::path::Path) -> bool {
     match Command::new("xprop")
         .args(["-root", "-notype", "_NET_SUPPORTING_WM_CHECK"])
         .env("DISPLAY", format!(":{display_num}"))
+        .env("XAUTHORITY", xauth)
         .output()
     {
         Ok(o) => {
@@ -204,7 +240,7 @@ fn wm_ready(display_num: u16) -> bool {
 /// self-correcting guard is then the fallback — never spin without an
 /// instrument).
 #[cfg(target_os = "linux")]
-fn set_work_area(display_num: u16) -> bool {
+fn set_work_area(display_num: u16, xauth: &std::path::Path) -> bool {
     let disp = format!(":{display_num}");
     let want = XVFB_SCREEN_HEIGHT - 40;
     let value = format!("0, 0, {XVFB_SCREEN_WIDTH}, {want}");
@@ -220,6 +256,7 @@ fn set_work_area(display_num: u16) -> bool {
             "_NET_WORKAREA",
             &value,
         ])
+        .env("XAUTHORITY", xauth)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -228,6 +265,7 @@ fn set_work_area(display_num: u16) -> bool {
     }
     let out = Command::new("xprop")
         .args(["-display", &disp, "-root", "-notype", "_NET_WORKAREA"])
+        .env("XAUTHORITY", xauth)
         .output();
     match out {
         Ok(o) => {
@@ -240,6 +278,157 @@ fn set_work_area(display_num: u16) -> bool {
         }
         Err(_) => true,
     }
+}
+
+/// True when the display's X sockets are served by the process `child_pid`:
+/// the pathname socket `/tmp/.X11-unix/X<n>` must report OUR child via
+/// SO_PEERCRED, and the abstract twin (`\0/tmp/.X11-unix/X<n>`, which Chrome
+/// tries FIRST) must either be absent or served by our child too. This is
+/// the ownership proof the readiness gate needs: ANY listener in the
+/// world-writable /tmp/.X11-unix makes a bare connect() succeed.
+#[cfg(target_os = "linux")]
+fn xvfb_socket_owned_by(child_pid: u32, display_num: u16) -> bool {
+    let path_owned =
+        std::os::unix::net::UnixStream::connect(format!("/tmp/.X11-unix/X{display_num}"))
+            .ok()
+            .and_then(|s| socket_peer_pid(&s))
+            .is_some_and(|peer| peer == child_pid);
+    if !path_owned {
+        return false;
+    }
+    let abs_name = format!("\0/tmp/.X11-unix/X{display_num}");
+    match connect_abstract(abs_name.as_bytes()) {
+        Ok(s) => socket_peer_pid(&s).is_some_and(|peer| peer == child_pid),
+        Err(_) => true, // no abstract listener — the pathname socket is the only channel
+    }
+}
+
+/// Peer pid of a connected AF_UNIX stream (SO_PEERCRED): for a client, the
+/// credentials of the process that created the listening socket — the only
+/// trustworthy answer to "is this display ours?" in a world-writable
+/// directory.
+#[cfg(target_os = "linux")]
+fn socket_peer_pid(sock: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let mut creds = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut creds as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc == 0 {
+        Some(creds.pid as u32)
+    } else {
+        None
+    }
+}
+
+/// Connect to a Linux abstract-namespace unix socket by name (the leading
+/// NUL selects the abstract namespace, which has no filesystem permission
+/// checks). std's `UnixStream::connect` needs a real path, so this builds
+/// the sockaddr directly.
+#[cfg(target_os = "linux")]
+fn connect_abstract(name: &[u8]) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::FromRawFd;
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let cap = addr.sun_path.len();
+        if name.len() > cap {
+            libc::close(fd);
+            return Err(std::io::Error::other("abstract socket name too long"));
+        }
+        for (i, b) in name.iter().enumerate() {
+            addr.sun_path[i] = *b as libc::c_char;
+        }
+        let len = (std::mem::size_of::<libc::sa_family_t>() + name.len()) as libc::socklen_t;
+        if libc::connect(
+            fd,
+            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+            len,
+        ) != 0
+        {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(err);
+        }
+        Ok(std::os::unix::net::UnixStream::from_raw_fd(fd))
+    }
+}
+
+/// Write a per-display Xauthority file holding a fresh MIT-MAGIC-COOKIE-1
+/// (16 bytes from /dev/urandom): 0600, O_EXCL, unpredictable name — the
+/// same scheme xvfb-run uses. Xvfb is started with `-auth <file>` so only
+/// processes of this uid (handed the cookie via XAUTHORITY) can open the
+/// display; a local co-user connecting to the unix or abstract socket is
+/// rejected by the X server's access control.
+#[cfg(target_os = "linux")]
+fn write_xvfb_auth_file(display_num: u16) -> Option<std::path::PathBuf> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut cookie = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut cookie))
+        .ok()?;
+    let mut host_buf = [0 as libc::c_char; 256];
+    let host = match unsafe { libc::gethostname(host_buf.as_mut_ptr(), host_buf.len()) } {
+        0 => {
+            let bytes: Vec<u8> = host_buf
+                .iter()
+                .take_while(|c| **c != 0)
+                .map(|c| *c as u8)
+                .collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+        _ => "localhost".into(),
+    };
+    let disp = display_num.to_string();
+    let name = b"MIT-MAGIC-COOKIE-1";
+    // Xauthority record: 2-byte big-endian family, then (2-byte big-endian
+    // length + bytes) for address, display number, auth name, auth data.
+    // FamilyLocal + this host + "<n>" matches what xvfb-run's `xauth add`
+    // stores and what libX11/libxcb (clients) and the X server look up.
+    let mut rec = Vec::with_capacity(48 + host.len() + disp.len());
+    rec.extend_from_slice(&256u16.to_be_bytes()); // FamilyLocal
+    rec.extend_from_slice(&(host.len() as u16).to_be_bytes());
+    rec.extend_from_slice(host.as_bytes());
+    rec.extend_from_slice(&(disp.len() as u16).to_be_bytes());
+    rec.extend_from_slice(disp.as_bytes());
+    rec.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    rec.extend_from_slice(name);
+    rec.extend_from_slice(&(cookie.len() as u16).to_be_bytes());
+    rec.extend_from_slice(&cookie);
+    // Unpredictable name (pid + clock) — a fixed name in /tmp would let a
+    // co-user pre-create it and (best case) only DoS every launch.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/.blade-x{display_num}-xauth-{}-{nanos}",
+        std::process::id()
+    ));
+    let mut f = std::fs::OpenOptions::new()
+        .create_new(true) // O_EXCL — no pre-placement, no clobbering
+        .write(true)
+        .mode(0o600) // the cookie is readable by this uid only
+        .open(&path)
+        .ok()?;
+    f.write_all(&rec).ok()?;
+    Some(path)
 }
 
 /// The virtual display's geometry (one source for the Xvfb args and the
@@ -289,9 +478,10 @@ impl Drop for VirtualDisplay {
             let _ = w.kill();
             let _ = w.wait();
         }
-        // Clean up the lock file + our claim.
+        // Clean up the lock file + our claim + our Xauthority cookie.
         let lock = format!("/tmp/.X{}-lock", self.display_num);
         let _ = std::fs::remove_file(lock);
+        let _ = std::fs::remove_file(&self.auth_file);
         release_display_claim(self.display_num);
     }
 }
@@ -302,6 +492,10 @@ impl Drop for VirtualDisplay {
 #[cfg(target_os = "linux")]
 pub(super) fn apply_xvfb_env(cmd: &mut Command, xvfb: &VirtualDisplay) {
     cmd.env("DISPLAY", xvfb.display_env());
+    // The display is cookie-authorized (`-auth`, never `-ac`): Chrome
+    // presents the same MIT-MAGIC-COOKIE-1 to attach; without this it
+    // would be rejected by our own access control.
+    cmd.env("XAUTHORITY", &xvfb.auth_file);
     cmd.env_remove("WAYLAND_DISPLAY");
     cmd.env_remove("XDG_SESSION_TYPE");
     // The --ozone-platform=x11 pin itself lives in `launch_args` (both
@@ -334,5 +528,59 @@ mod readiness_tests {
             pids.iter().all(|pid| !crate::platform::process_alive(*pid)),
             "timed-out servers must be reaped"
         );
+        // The per-session Xauthority files must not outlive the attempts.
+        let mine = format!("xauth-{}- ", std::process::id()).replace(' ', "");
+        let leftovers: Vec<_> = std::fs::read_dir("/tmp")
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with(".blade-x") && n.contains(&mine)
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "auth files must be cleaned on failure"
+        );
+    }
+
+    #[test]
+    fn auth_file_is_private_and_well_formed() {
+        let path = write_xvfb_auth_file(199).expect("auth file");
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..2], &256u16.to_be_bytes(), "FamilyLocal");
+        let mut o = 2usize;
+        let mut rd = || -> Vec<u8> {
+            let l = u16::from_be_bytes([bytes[o], bytes[o + 1]]) as usize;
+            o += 2;
+            let s = bytes[o..o + l].to_vec();
+            o += l;
+            s
+        };
+        let addr = rd();
+        let disp = rd();
+        let name = rd();
+        let data = rd();
+        assert!(!addr.is_empty(), "local hostname");
+        assert_eq!(disp, b"199".to_vec());
+        assert_eq!(name, b"MIT-MAGIC-COOKIE-1".to_vec());
+        assert_eq!(data.len(), 16);
+        assert_eq!(o, bytes.len(), "no trailing bytes");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn peer_credentials_match_the_listening_process() {
+        let dir = std::env::temp_dir().join(format!("blade-peer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        assert_eq!(socket_peer_pid(&client), Some(std::process::id()));
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -47,7 +47,12 @@ pub fn should_idle_shutdown() -> bool {
     if !real_lane() {
         return true;
     }
-    config().idle_shutdown
+    // SECURITY: a headless real-lane session (no user watching the screen)
+    // has no human present to justify holding its unauthenticated CDP debug
+    // endpoint open for the daemon's lifetime — loopback is reachable by
+    // every local uid. Close on idle instead. Visible sessions keep the
+    // contract: a human is at the browser.
+    config().idle_shutdown || crate::browser::launched_headless()
 }
 
 /// Whether the idle-hum behavior layer runs on this lane. The pause marker

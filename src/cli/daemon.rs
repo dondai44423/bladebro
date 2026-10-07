@@ -9,7 +9,10 @@
 use crate::error::{BladeError, Result};
 
 #[cfg(unix)]
-use super::{daemon_running, dispatch, ignore_sighup, socket_path, warm_profile};
+use super::{
+    daemon_running, dispatch, ignore_sighup, peer_uid_matches_self, socket_dir_trusted,
+    socket_path, warm_profile,
+};
 #[cfg(unix)]
 use crate::page::Page;
 #[cfg(unix)]
@@ -65,6 +68,18 @@ pub async fn run_daemon() -> Result<()> {
     // alone races two cold starts and can unlink the winner's live socket.
     if let Some(parent) = path.parent() {
         crate::platform::secure_create_dir_all(parent)?;
+    }
+    // Trust boundary: never serve from a state dir that is not an
+    // owner-only directory owned by this user — the connect-check alone
+    // would bless any co-user listener planted through a loose tree as
+    // "the daemon", capturing every request and authoring every response.
+    if !socket_dir_trusted() {
+        return Err(BladeError::Other(format!(
+            "refusing to run the daemon: state dir {} is not an owner-only directory owned by the current user — check BLADE_HOME/XDG_STATE_HOME and its permissions",
+            path.parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        )));
     }
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
@@ -156,6 +171,15 @@ pub async fn run_daemon() -> Result<()> {
                         continue;
                     }
                 };
+                // Only this user's processes may drive the daemon — the
+                // 0600 socket already enforces it; this rejects a foreign
+                // peer even if the mode was loosened underneath us.
+                {
+                    use std::os::fd::AsRawFd;
+                    if !peer_uid_matches_self(stream.as_raw_fd()) {
+                        continue;
+                    }
+                }
 
                 let mut reader = BufReader::new(stream);
                 let mut input = Vec::new();

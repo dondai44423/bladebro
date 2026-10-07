@@ -1,7 +1,7 @@
 //! Launch paths — the agent-lane launch ladder (WS), the real-lane launch,
 //! the lane dispatcher and the font audit.
 
-use super::discover::{find_chrome, free_port};
+use super::discover::{endpoint_owned_by_pid, find_chrome, free_port};
 #[cfg(target_os = "linux")]
 use super::display::{apply_xvfb_env, VirtualDisplay};
 use super::flags::{
@@ -31,7 +31,13 @@ impl Browser {
         // policy as before; avoids tripling a 20s wait).
         let attempts: [(u8, bool); 3] = [(0, false), (1, true), (2, true)];
         for (attempt, no_sandbox) in attempts {
-            let p = if auto { free_port() } else { port };
+            let p = if auto { free_port() } else { Some(port) };
+            let Some(p) = p else {
+                last_err = Some(BladeError::Other(
+                    "cannot allocate a loopback debug port (ephemeral range exhausted)".into(),
+                ));
+                break;
+            };
             match Self::launch_inner(p, no_sandbox).await {
                 Ok(b) => return Ok(b),
                 Err(e) => {
@@ -215,6 +221,23 @@ impl Browser {
         loop {
             match crate::cdp::version(&base).await {
                 Ok(v) => {
+                    // SECURITY: a parseable-JSON responder is not proof the
+                    // endpoint belongs to the Chrome we spawned —
+                    // free_port's bind-release window can be won by a local
+                    // impostor. On Linux require our child to hold the
+                    // listening socket; keep polling otherwise (the window
+                    // resolves once Chrome finishes binding). Elsewhere the
+                    // check is skipped.
+                    if !endpoint_owned_by_pid(port, child.id()) {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            return Err(BladeError::Other(
+                                "the debug endpoint on this port is not served by the browser process — refusing it (possible local port hijack)".into(),
+                            ));
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
                     eprintln!(
                         "[bladebro] Chrome ready: {} (protocol {})",
                         v.browser, v.protocol_version
@@ -334,7 +357,12 @@ impl Browser {
         for (attempt, no_sandbox) in [(0u8, false), (1u8, true)] {
             let mut startup_exit = false;
             let spawned_at = Instant::now();
-            let port = free_port();
+            let Some(port) = free_port() else {
+                last_err = Some(BladeError::Other(
+                    "cannot allocate a loopback debug port (ephemeral range exhausted)".into(),
+                ));
+                break;
+            };
             let args = launch_args_real(&RealLaunchCfg {
                 headless,
                 no_sandbox,
@@ -379,6 +407,20 @@ impl Browser {
             loop {
                 match crate::cdp::version(&base).await {
                     Ok(v) => {
+                        // SECURITY: same ownership requirement as the agent
+                        // lane — the endpoint must be held by the browser
+                        // process we spawned.
+                        if !endpoint_owned_by_pid(port, child.id()) {
+                            if Instant::now() >= deadline {
+                                let _ = child.kill();
+                                last_err = Some(BladeError::Other(
+                                    "the debug endpoint on this port is not served by the browser process — refusing it (possible local port hijack)".into(),
+                                ));
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
                         eprintln!(
                             "[realbrowser] browser ready: {} (protocol {})",
                             v.browser, v.protocol_version
@@ -485,6 +527,20 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
                     profile.path.display()
                 ))
             })?;
+            // SECURITY: the DevToolsActivePort file survives unclean exits
+            // (SIGKILL/OOM) and the port it names can be squatted — verify a
+            // live browser of this user actually holds the endpoint before
+            // driving it (Linux; elsewhere the file's existence is the best
+            // available signal).
+            if !crate::browser::endpoint_owned_by_own_browser(port) {
+                return Err(BladeError::Other(format!(
+                    "the debug endpoint on port {port} (from {}'s DevToolsActivePort) is not \
+                     served by any live browser of this user — the file is stale or something \
+                     else took the port. Start the browser with `--remote-debugging-port=0`, \
+                     or use `rb mode clone`.",
+                    profile.root.display()
+                )));
+            }
             eprintln!(
                 "[realbrowser] attaching to {} (`{}`) on port {port} — the browser stays yours \
                  (no launch, no shutdown)",

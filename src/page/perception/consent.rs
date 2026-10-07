@@ -90,8 +90,16 @@ pub async fn dismiss_consent_with_stored(
     // Try the stored selector first — skip the full detection JS if it works.
     if let Some(sel) = stored.filter(|s| !s.is_empty() && *s != "generic") {
         let sel_json = serde_json::to_string(sel).unwrap_or_default();
+        // SECURITY: re-validate before clicking. The store is file-backed
+        // state whose integrity rests on directory permissions — but the
+        // browser rendering this page can itself write those files (CDP
+        // download routing), so a stored selector is not proof of consent
+        // context. Require the same gates as the generic pass: a visible
+        // match inside a consent-looking container with consent vocabulary.
+        // A stale or poisoned selector falls through to full detection
+        // instead of clicking.
         let expr = format!(
-            "(()={{const b=document.querySelector({sel_json});if(b){{b.click();return {sel_json};}}return null;}})()"
+            "(()={{const b=document.querySelector({sel_json});if(b&&b.offsetWidth+b.offsetHeight>0){{const d=b.closest('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');if(d&&/cookie|consent|gdpr/.test((d.textContent||'').toLowerCase())){{b.click();return {sel_json};}}}}return null;}})()"
         );
         let res = cdp
             .send(

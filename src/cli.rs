@@ -54,6 +54,73 @@ fn socket_path() -> std::path::PathBuf {
     crate::platform::blade_dir().join("cli.sock")
 }
 
+/// Trust boundary for the daemon channel. A connect-success test proves
+/// only that *something* is listening at `cli.sock`; the channel carries
+/// every tool request and authors every response the CLI prints, yet would
+/// otherwise be authenticated solely by the state dir's permissions — a
+/// local co-user with write access to a relocated/insecure state dir can
+/// bind a listener at the path, lock the real daemon out ("already
+/// running"), capture every `{"tool","args"}` request, and author every
+/// response. Trust the socket only when its parent directory is a real
+/// directory (no symlink), owned by this user, with no group/world write
+/// bits.
+#[cfg(unix)]
+fn socket_dir_trusted() -> bool {
+    socket_dir_trusted_at(&socket_path())
+}
+
+#[cfg(unix)]
+fn socket_dir_trusted_at(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let dir = match path.parent() {
+        Some(p) => p,
+        None => return false,
+    };
+    match std::fs::symlink_metadata(dir) {
+        Ok(md) => md.is_dir() && md.uid() == unsafe { libc::geteuid() } && (md.mode() & 0o022) == 0,
+        Err(_) => false,
+    }
+}
+
+/// True when the connected daemon socket's peer runs as this user
+/// (SO_PEERCRED on Linux, getpeereid on macOS). The dir-trust check is the
+/// primary gate; this rejects a same-name impostor even if that check was
+/// passed on a loosened tree.
+#[cfg(unix)]
+fn peer_uid_matches_self(fd: std::os::fd::RawFd) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let mut creds = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut creds as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        rc == 0 && creds.uid == unsafe { libc::geteuid() }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+        rc == 0 && uid == unsafe { libc::geteuid() }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = fd;
+        true
+    }
+}
+
 /// Result of a tool dispatch — shared between CLI and daemon.
 pub struct ToolResult {
     pub text: String,
@@ -210,6 +277,13 @@ fn ignore_sighup() {
 /// Check if the daemon is running by trying to connect to the socket.
 #[cfg(unix)]
 fn daemon_running() -> bool {
+    // Trust boundary: connect-success alone proves only that SOMETHING
+    // listens — a co-user listener placed through a loose state dir would
+    // otherwise be believed, locking the genuine daemon out and authoring
+    // every response the CLI prints.
+    if !socket_dir_trusted() {
+        return false;
+    }
     let path = socket_path();
     if !path.exists() {
         return false;
@@ -244,6 +318,14 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
 
     let mut stream = UnixStream::connect(socket_path())
         .map_err(|e| BladeError::Other(format!("daemon not running: {e}")))?;
+    {
+        use std::os::fd::AsRawFd;
+        if !peer_uid_matches_self(stream.as_raw_fd()) {
+            return Err(BladeError::Other(
+                "refusing the daemon channel: the socket peer is not this user".into(),
+            ));
+        }
+    }
 
     let req = serde_json::to_string(&json!({ "tool": tool, "args": args }))?;
     writeln!(stream, "{req}")?;

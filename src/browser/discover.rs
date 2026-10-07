@@ -215,9 +215,170 @@ fn find_via_nix_shell() -> Option<String> {
     }
 }
 
-pub(super) fn free_port() -> u16 {
+pub(super) fn free_port() -> Option<u16> {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
-        .unwrap_or(9222)
+        .ok()
+}
+
+/// Inode of the listening socket on 127.0.0.1:`port`, read from
+/// /proc/net/tcp. Linux-only; `None` when /proc is unavailable or no
+/// listener exists (callers then skip verification).
+#[cfg(target_os = "linux")]
+pub(crate) fn loopback_listener_inode(port: u16) -> Option<u64> {
+    let tcp = std::fs::read_to_string("/proc/net/tcp").ok()?;
+    let want_port = format!("{port:04X}");
+    for line in tcp.lines().skip(1) {
+        let mut f = line.split_whitespace();
+        let Some(_sl) = f.next() else { continue };
+        let Some(local) = f.next() else { continue };
+        let Some(_rem) = f.next() else { continue };
+        let Some(state) = f.next() else { continue };
+        if state != "0A" {
+            continue; // 0A = LISTEN
+        }
+        // 127.0.0.1 in /proc/net/tcp's byte-swapped hex.
+        if !local.starts_with("0100007F:") {
+            continue;
+        }
+        if local.rsplit(':').next() != Some(want_port.as_str()) {
+            continue;
+        }
+        // Column 10 of the row carries the socket inode.
+        return line.split_whitespace().nth(9).and_then(|i| i.parse().ok());
+    }
+    None
+}
+
+/// True when the process `pid` holds the listening socket for `port` open.
+/// The readiness gate uses this to require the debug endpoint to belong to
+/// the Chrome we just spawned — a bare JSON responder on the port could be
+/// any process that won the free_port bind-release window.
+#[cfg(target_os = "linux")]
+pub(crate) fn endpoint_owned_by_pid(port: u16, pid: u32) -> bool {
+    let Some(ino) = loopback_listener_inode(port) else {
+        return false;
+    };
+    pid_holds_socket(pid, ino)
+}
+
+/// True when ANY live process of this uid holds the loopback listener for
+/// `port` AND looks like a Chromium-family browser. The attach lane uses
+/// this as its liveness+identity proof: a stale DevToolsActivePort file or
+/// an impostor squatting the remembered port fails it.
+#[cfg(target_os = "linux")]
+pub(crate) fn endpoint_owned_by_own_browser(port: u16) -> bool {
+    let dbg = std::env::var("BLADE_DBG_OWNERSHIP").is_ok();
+    let Some(ino) = loopback_listener_inode(port) else {
+        if dbg {
+            eprintln!("[ownership] port {port}: no listener found in /proc/net/tcp");
+        }
+        return false;
+    };
+    let uid = unsafe { libc::getuid() };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    let mut holders = 0usize;
+    for e in procs.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if process_uid(pid) != Some(uid) {
+            continue;
+        }
+        if pid_holds_socket(pid, ino) {
+            holders += 1;
+            let chromeish = looks_like_chromium(pid);
+            if dbg {
+                let cmd = std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
+                    .unwrap_or_default();
+                eprintln!(
+                    "[ownership] port {port} inode {ino}: pid {pid} holds socket; chromium-like={chromeish}; cmd={}",
+                    crate::platform::truncate_utf8(&cmd, 120)
+                );
+            }
+            if chromeish {
+                return true;
+            }
+        }
+    }
+    if dbg && holders == 0 {
+        eprintln!("[ownership] port {port} inode {ino}: no same-uid process holds the socket");
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn pid_holds_socket(pid: u32, inode: u64) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    fds.flatten().any(|e| {
+        std::fs::metadata(e.path())
+            .map(|m| m.file_type().is_socket() && m.ino() == inode)
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn process_uid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|u| u.parse().ok())
+}
+
+#[cfg(target_os = "linux")]
+fn looks_like_chromium(pid: u32) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    // First token of the cmdline. The kernel's normal form separates argv
+    // entries with NULs, but Chromium rewrites its own argv block into one
+    // space-joined string early in startup (measured live: the browser
+    // process's /proc/<pid>/cmdline has no NUL bytes at all once rewritten),
+    // so splitting on NUL alone would yield the WHOLE command line as one
+    // token and every name check below would fail. Split on either byte.
+    let exe = cmdline
+        .split(|b| *b == 0 || *b == b' ')
+        .find(|tok| !tok.is_empty())
+        .unwrap_or_default();
+    let s = String::from_utf8_lossy(exe);
+    let name = std::path::Path::new(s.as_ref())
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    [
+        "chrome",
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+        "brave",
+        "brave-browser",
+        "microsoft-edge",
+        "msedge",
+        "vivaldi",
+        "opera",
+    ]
+    .iter()
+    .any(|f| name == *f || name.starts_with(&format!("{f}-")))
+}
+
+/// Non-Linux: no /proc, so the ownership checks are skipped (verification
+/// is Linux-only; documented residual).
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn endpoint_owned_by_pid(_port: u16, _pid: u32) -> bool {
+    true
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn endpoint_owned_by_own_browser(_port: u16) -> bool {
+    true
 }

@@ -483,7 +483,7 @@ Everything optional; configuration is environment variables.
 |---|---|---|
 | `BLADE_HOME` | auto | Data root override (highest priority): knowledge, logins, artifacts, fingerprint |
 | `XDG_STATE_HOME` | XDG spec | Data root becomes `$XDG_STATE_HOME/blade` when set |
-| `BLADE_PROFILE_DIR` | `<data root>/profile` | Persistent browser profile location |
+| `BLADE_PROFILE_DIR` | `<data root>/profile` | Persistent browser profile location — point it at a directory only you can write (it holds the live cookie jar) |
 | `BLADE_FRESH` | unset | `1` = ephemeral profile (no persistence) |
 | `CHROME_PATH` | auto-detected | Chrome/Chromium binary |
 

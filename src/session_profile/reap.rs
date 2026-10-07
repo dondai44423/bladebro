@@ -242,6 +242,15 @@ fn reap_xvfb_at(tmp: &Path) {
         let Some(_) = owner.filter(|&pid| pid > 1 && !platform::process_alive(pid)) else {
             continue;
         };
+        // The sibling Xauthority file (if any) dies with its claim's owner.
+        if let Ok(rd) = std::fs::read_dir(tmp) {
+            let prefix = format!(".blade-x{n}-xauth-");
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         let lock = tmp.join(format!(".X{n}-lock"));
         let content = match std::fs::read_to_string(&lock) {
             Ok(c) => c,
@@ -399,7 +408,8 @@ mod xvfb_tests {
 
     #[test]
     fn xvfb_identity_requires_exact_executable_and_display_arguments() {
-        assert!(xvfb_cmdline_matches("/usr/bin/Xvfb\0:99\0-screen\00\0", 99));
+        let cmdline = format!("{}\0", ["/usr/bin/Xvfb", ":99", "-screen", "0"].join("\0"));
+        assert!(xvfb_cmdline_matches(&cmdline, 99));
         assert!(!xvfb_cmdline_matches("/usr/bin/Xvfb\0:199\0", 19));
         assert!(!xvfb_cmdline_matches("/usr/bin/sh\0Xvfb\0:99\0", 99));
         assert!(!xvfb_cmdline_matches(

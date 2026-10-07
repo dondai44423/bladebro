@@ -331,9 +331,22 @@ fn check_profile_dir() -> Check {
             fix: None,
         };
     }
-    // Check writability.
-    let test_file = dir.join(".bladebro-write-test");
-    match std::fs::write(&test_file, b"test") {
+    // Check writability. Unpredictable name + O_EXCL: a fixed name let a
+    // local attacker pre-place a symlink and turn this probe into an
+    // arbitrary-file write (the same class the updater's check fixed).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let test_file = dir.join(format!(
+        ".bladebro-write-test-{}-{nanos}",
+        std::process::id()
+    ));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&test_file)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(&test_file);
             Check {
@@ -496,7 +509,7 @@ fn check_stale_locks() -> Check {
                     name: "Profile locks",
                     status: Status::Warn,
                     detail: format!("lock held by PID {p} (another bladebro may be running)"),
-                    fix: Some("Close other bladebro instances, or use BLADE_PROFILE_DIR for a separate profile".into()),
+                    fix: Some("Close other bladebro instances, or use BLADE_PROFILE_DIR pointing at an empty directory only you can write".into()),
                 }
             } else {
                 Check {
