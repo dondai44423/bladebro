@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.2] - 2026-10-07
+
 ### Fixed
 
 - **Shadow-DOM and same-origin-iframe mutations are counted by action verdicts.** A `MutationObserver` on the document cannot see inside a shadow root or an iframe (a platform limitation), so a shadow button that swapped its own text read `outcome: no-effect` while the very same response's model showed the new name — the perception layer pierces shadow roots, the verdict classifier did not. The dispatch-time watcher now attaches to every open shadow root and same-origin iframe document (bounded discovery walk; childList records keep added subtrees in step), so verdicts and content-change detection cover exactly the tree the capture reads. Nested shadow roots included; a click inside a same-origin iframe that mutates its own document no longer reads as a no-op.
@@ -1936,7 +1938,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.1...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.2...HEAD
+[4.2.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.2
 [4.2.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.1
 [4.2.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.0
 [4.1.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.1.1
