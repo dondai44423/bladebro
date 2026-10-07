@@ -420,6 +420,19 @@ fn verify_backup(path: &Path) -> Result<()> {
 mod backup_verify_tests {
     use super::*;
 
+    /// The magic bytes of this platform's real release artifacts (must
+    /// agree with `download::binary_magic_ok`).
+    fn platform_magic(data: &mut [u8]) {
+        if cfg!(target_os = "linux") {
+            data[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        } else if cfg!(target_os = "macos") {
+            // Real darwin artifact header: MH_CIGAM_64.
+            data[..4].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]);
+        } else if cfg!(windows) {
+            data[..2].copy_from_slice(b"MZ");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn verify_backup_refuses_symlinks_and_non_files() {
@@ -428,7 +441,7 @@ mod backup_verify_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let victim = dir.join("victim");
         let mut data = vec![0u8; 1_000_100];
-        data[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        platform_magic(&mut data);
         std::fs::write(&victim, &data).unwrap();
         let link = dir.join("bladebro-v9.9.9");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
@@ -458,14 +471,7 @@ mod backup_verify_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("backup");
         let mut data = vec![0u8; 1_000_100];
-        if cfg!(target_os = "linux") {
-            data[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
-        } else if cfg!(target_os = "macos") {
-            // Real darwin artifact header: MH_CIGAM_64.
-            data[..4].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]);
-        } else if cfg!(windows) {
-            data[..2].copy_from_slice(b"MZ");
-        }
+        platform_magic(&mut data);
         std::fs::write(&path, &data).unwrap();
         assert!(
             verify_backup(&path).is_ok(),

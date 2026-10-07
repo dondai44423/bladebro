@@ -693,13 +693,15 @@ pub fn read_file_nofollow(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
 }
 
 /// Walk a directory's ancestors (root → parent): every existing component
-/// must be a real directory (no symlink), owned by this uid or root, and
-/// not group/other-writable unless sticky (the /tmp case — /tmp is
-/// root-owned 1777, and stickiness is what makes creation inside it safe;
-/// a non-sticky world-writable ancestor lets any local user replace this
-/// process's freshly created directory with a symlink between creation and
-/// use). Used for the operator-override profile lanes, where the
-/// destination can be far outside the 0700 state tree.
+/// must be a real directory — or a root-owned symlink, which only the OS
+/// itself can place (macOS /var → private/var, /tmp → private/tmp) — owned
+/// by this uid or root, and not group/other-writable unless sticky (the
+/// /tmp case — /tmp is root-owned 1777, and stickiness is what makes
+/// creation inside it safe; a non-sticky world-writable ancestor lets any
+/// local user replace this process's freshly created directory with a
+/// symlink between creation and use). Used for the operator-override
+/// profile lanes, where the destination can be far outside the 0700 state
+/// tree.
 pub fn validate_dir_ancestors(path: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -717,10 +719,18 @@ pub fn validate_dir_ancestors(path: &std::path::Path) -> Result<(), String> {
                 Err(_) => continue, // not there yet — creation handles it
             };
             if md.file_type().is_symlink() {
-                return Err(format!(
-                    "{} resolves through a symlink — refusing it",
-                    cur.display()
-                ));
+                // Root-owned symlinks are the OS's own layout — macOS
+                // /var → private/var, /tmp → private/tmp; merged-/usr
+                // /bin → usr/bin. A local co-user cannot create a
+                // root-owned entry, so these are trusted; any other
+                // symlink is an attacker-plantable redirect and refuses.
+                if md.uid() != 0 {
+                    return Err(format!(
+                        "{} resolves through a symlink — refusing it",
+                        cur.display()
+                    ));
+                }
+                continue;
             }
             if !md.is_dir() {
                 return Err(format!("{} is not a directory", cur.display()));
@@ -1289,11 +1299,38 @@ mod security_hardening_tests {
         std::fs::create_dir_all(&loose).unwrap();
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(validate_dir_ancestors(&loose.join("target")).is_err());
-        // A symlinked ancestor refuses.
+        // A user-planted (non-root) symlinked ancestor refuses.
         let link = base.join("link");
         std::os::unix::fs::symlink(&safe, &link).unwrap();
         assert!(validate_dir_ancestors(&link.join("deeper")).is_err());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_owned_system_symlinks_are_traversed() {
+        use std::os::unix::fs::MetadataExt;
+        // The OS's own redirects must not trip the walk: macOS routes
+        // $TMPDIR through /var → private/var and /tmp → private/tmp;
+        // merged-/usr Linux ships /bin → usr/bin. A local co-user cannot
+        // create a root-owned symlink, so these are trusted, while the
+        // user-owned plant case above still refuses.
+        for probe in ["/var", "/tmp", "/bin"] {
+            let path = std::path::Path::new(probe);
+            let is_root_symlink = path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink() && m.uid() == 0)
+                .unwrap_or(false);
+            if is_root_symlink {
+                assert!(
+                    validate_dir_ancestors(&path.join("blade-ancestor-probe")).is_ok(),
+                    "{probe} is a root-owned system symlink and must be traversed"
+                );
+            }
+        }
+        // The real temp chain — what BLADE_FRESH creation walks — must
+        // pass on every OS (this walk is what failed on macOS CI).
+        assert!(validate_dir_ancestors(&std::env::temp_dir().join("blade-ancestor-probe")).is_ok());
     }
 }
 
