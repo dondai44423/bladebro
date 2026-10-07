@@ -8,8 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.2.0] - 2026-10-07
-
 ### Security
 
 - **Prompt-injection file-read surface closed for `act upload`.** A hostile page could steer the agent into attaching credential files (`~/.ssh/id_rsa`, `~/.aws/credentials`) or bladebro's own cookie/session sidecars to a page's file input and exfiltrate their bytes. Uploads now require an absolute path to an existing regular file, refuse system directories and credential/config locations anywhere in the path, and refuse everything under the data dir except the artifacts exchange zone. The check runs at the single dispatch point — `act`, `run`/`batch` steps and the CLI all pass through it. Relative and `~` spellings (which crashed the browser process) now fail as a clean error.
@@ -1918,8 +1916,7 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.0...HEAD
-[4.2.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.0
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.1.1...HEAD
 [4.1.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.1.1
 [4.1.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.1.0
 [4.0.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.0.3
