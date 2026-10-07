@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-10-07
+
 ### Fixed
 
 - **A mid-session WebGL loss is detected instead of silently served.** A GPU-process crash makes Chrome restart the GPU with GL disabled (`--use-gl=disabled`) — every `getContext('webgl')` then returns null, the recorded GL verdict still said "software", the WebGL mask had nothing to mask, and nothing anywhere said so (field report: a long MCP session ran with a dead GL profile while `bladebro audit` — which launches its own browser — stayed at 61/61). The GL verdict is now reconciled against the live page on every tab attach and re-checked on a bounded 60-second cadence from tool calls; a confirmed loss demotes the recorded state, prints a loud warning, and delivers a one-shot note to the agent on the very result that detected it ("this browser LOST WebGL mid-session … restart the client for a fresh browser"). Inconclusive probes (transport failures, restricted `chrome://` origins) never demote — only answered-without-a-context replies do — and a fresh healthy verdict re-arms the advisory for the next browser generation.
@@ -1925,7 +1927,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.0...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.1...HEAD
+[4.2.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.1
 [4.2.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.0
 [4.1.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.1.1
 [4.1.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.1.0
