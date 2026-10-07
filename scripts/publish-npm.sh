@@ -106,8 +106,10 @@ for pkg in bladebro-linux-x64 bladebro-linux-arm64 bladebro-windows-x64 bladebro
 done
 
 # ── wait for npm registry propagation ───────────────────────────────
+# npm "processing" after a publish can take minutes (the 4.2.0 Windows
+# package needed ~3 min); allow up to 5 minutes before failing closed.
 echo "Waiting for npm registry propagation..."
-for i in $(seq 1 12); do
+for i in $(seq 1 30); do
   ALL_OK=true
   for pkg in bladebro-linux-x64 bladebro-linux-arm64 bladebro-windows-x64 bladebro-darwin-x64 bladebro-darwin-arm64; do
     if ! npm view "$pkg@$VERSION" version --prefer-online 2>/dev/null | grep -Fxq "$VERSION"; then
@@ -139,7 +141,7 @@ echo "Publishing main package: bladebro@$VERSION..."
 # serves a stale cache entry for minutes and reads as "missing".
 echo "Waiting for bladebro@$VERSION to go live..."
 META_OK=false
-for i in $(seq 1 18); do
+for i in $(seq 1 30); do
   if npm view "bladebro@$VERSION" version --prefer-online 2>/dev/null | grep -Fxq "$VERSION"; then
     echo "  bladebro@$VERSION is live after $((i*10))s"
     META_OK=true

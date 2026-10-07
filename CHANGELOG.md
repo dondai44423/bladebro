@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Release publishing waits up to five minutes for npm registry propagation before failing closed; the previous two-minute window could expire while npm was still processing a platform package (the 4.2.0 Windows package needed ~3 minutes).
+
 ## [4.2.0] - 2026-10-07
 
 ### Security
