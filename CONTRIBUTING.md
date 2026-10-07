@@ -1,6 +1,6 @@
 # Contributing to Bladebro
 
-Thanks for your interest in improving Bladebro. This is a small, focused project, keep PRs scoped.
+Thanks for your interest in improving Bladebro. This is a small, focused project — keep PRs scoped.
 
 Working with a coding agent? Point it at [AGENTS.md](AGENTS.md) — the agent-facing repo guide (commands, house rules, verification instruments).
 
@@ -27,12 +27,12 @@ If any of these fail, fix them before opening a PR.
 - Adapter fixes (the `extract=auto` site-aware paths — with a live repro on the real site)
 - New adapters (pure optimization only — zero new tools, zero new params; must be live-tested, token-efficient and actually good — reviewed closely)
 - Performance improvements (with benchmarks)
-- Cross-platform support (macOS, Windows — currently Only linux is live tested)
+- Cross-platform support (macOS, Windows — Linux is the live-tested platform today; macOS/Windows are CI-verified)
 - AI generated PR are fine but make sure to review it first.
 
 ## What we don't accept
 
-- More tools. The surface is 5 tools. New capabilities go as params/behaviors of existing tools, More tools only are added if the new tool helps massively instead of little.
+- More tools — the surface is 5. New capabilities go as params/behaviors of existing tools; a sixth tool only lands if it is massively net-positive, never marginal.
 - An LLM inside the driver. Deterministic machinery only.
 - CAPTCHA solving as a general capability. Detect + honest `blocked:` verdict + remediation ladder. One exception, kept deliberately narrow: a site adapter may pass a challenge that is trivial for a human — a single checkbox click, like reddit's humanity gate; image grids are never solved.
 - Chromium source forks. Stock Chrome stays the engine.
@@ -59,10 +59,10 @@ If your change touches the stealth system, verify it doesn't regress:
 # Differential oracle — divergent must be 0 (stock vs bladebro, same display)
 python3 tools/diff_oracle/oracle.py
 
-# CreepJS lie-engine port — headless-relevant flags clean, 189 properties
-# (also the instrument that catches cross-realm toString leaks)
+# CreepJS lie-engine port (tools/diff_oracle/lieport.js) — eval it in the
+# page; flags + the toString-leak list must stay clean (189 properties)
 
-# Per-lane smoke (daemon / one-shot / MCP-pipe), 5 cold starts each
+# Per-lane smoke (daemon / one-shot / MCP / MCP-pipe / real), 5 cold starts each
 python3 tools/lane_matrix.py all 5
 
 # Real-browser lane: 0 expected, 0 divergent — page-visibly identical to stock

@@ -70,11 +70,11 @@ Requires Chrome/Chromium; prebuilt Linux binaries require glibc 2.28 or newer. N
 
 | Platform | Package | Size | Status |
 |---|---|---|---|
-| Linux x86_64 | `bladebro-linux-x64` | 7.3 MB | Live-verified |
-| Linux ARM64 | `bladebro-linux-arm64` | 6.3 MB | Not live-verified |
-| Windows x86_64 | `bladebro-windows-x64` | 6.7 MB | Live-verified |
-| macOS Intel | `bladebro-darwin-x64` | 6.7 MB | CI-verified |
-| macOS Apple Silicon | `bladebro-darwin-arm64` | 6.2 MB | CI-verified |
+| Linux x86_64 | `bladebro-linux-x64` | 7.4 MB | Live-verified |
+| Linux ARM64 | `bladebro-linux-arm64` | 6.5 MB | Not live-verified |
+| Windows x86_64 | `bladebro-windows-x64` | 6.9 MB | Live-verified |
+| macOS Intel | `bladebro-darwin-x64` | 6.9 MB | CI-verified |
+| macOS Apple Silicon | `bladebro-darwin-arm64` | 6.4 MB | CI-verified |
 
 <sub>Every release builds and passes CI on Ubuntu, macOS and Windows. Linux ARM64 and macOS binaries are cross-compiled from Linux with cargo-zigbuild.</sub>
 
@@ -425,7 +425,7 @@ Learns from every session, persists in `knowledge/` under your data root, surviv
 | Infinite-scroll collect | **Yes** | No | No | No |
 | Runtime | **None (static binary)** | Node.js daemon | Node.js | Node.js |
 | Page model | **Persistent, ref-stable, diff-first** | A11y snapshot | None | None |
-| Binary size | **7.3 MB** | ~50 MB (node + deps) | ~50 MB | ~50 MB |
+| Binary size | **7.4 MB** | ~50 MB (node + deps) | ~50 MB | ~50 MB |
 | Platforms | **Linux, macOS, Windows** | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
 
 ### Head-to-head: Bladebro vs agent-browser
@@ -452,6 +452,8 @@ A pure stealth comparison — Camoufox is a patched Firefox for scraping, not an
 | BotD / FingerprintJS | Pass | Pass |
 | Pixelscan | Pass (masking detected) | Pass (masking detected) |
 | Zillow / Reddit / Fiverr | Pass | Pass |
+
+CreepJS values in this block are from that earlier round — the current suite reads headless 0% / stealth 0% (stealth table above).
 
 Near equal on stealth; both flagged for masking on Pixelscan (expected for any anti-detect tool). The difference is delivery: Bladebro ships this out of the box in one binary — Camoufox needs Python, a venv and a Playwright script to drive it.
 

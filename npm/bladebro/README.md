@@ -67,7 +67,7 @@ Prebuilt binaries available for:
 - macOS Intel (`darwin-x64`)
 - Windows x86_64 (`windows-x64`)
 
-Other platforms: [build from source](https://github.com/dondai44423/bladebro#building-from-source).
+Other platforms: [build from source](https://github.com/dondai44423/bladebro#from-source).
 
 ## License
 
