@@ -107,7 +107,7 @@ pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
     let browsers = discover();
     if browsers.is_empty() {
         return Err(BladeError::Other(
-            "no Chromium-family browser found. Install one (Chromium, Chrome, Brave, Edge, Vivaldi, Opera) or set a custom binary via `bladebro rb use --binary <path>`.".into(),
+            "no Chromium-family browser found. Install one (Chromium, Chrome, Brave, Helium, Edge, Vivaldi, Opera) or set a custom binary via `bladebro rb use --binary <path>`.".into(),
         ));
     }
 

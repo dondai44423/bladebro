@@ -120,6 +120,17 @@ pub fn template_source(id: &str) -> Option<String> {
 
 /// Wipe a browser's template + any leftover session dirs.
 pub fn forget(id: &str) -> Result<bool> {
+    // Config and on-disk orphan names reach this destructive boundary without
+    // browser discovery. Never let a malformed id become a filesystem path.
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(BladeError::Other(format!(
+            "invalid browser id `{id}` — select a browser with `bladebro rb use <id>`"
+        )));
+    }
     let root = root_for(id);
     if !root.exists() {
         return Ok(false);

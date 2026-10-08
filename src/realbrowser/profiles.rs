@@ -70,6 +70,16 @@ pub fn list_profiles(root: &Path) -> Vec<ProfileInfo> {
 
     let mut out: Vec<ProfileInfo> = names
         .into_iter()
+        // Local State can retain deleted profiles. Its keys are directory
+        // names, never paths: don't select a ghost or let metadata escape
+        // the user-data root via an absolute name or parent traversal.
+        .filter(|(key, _)| {
+            !key.is_empty()
+                && key != "."
+                && key != ".."
+                && !key.contains(['/', '\\', ':', '\0'])
+                && std::fs::symlink_metadata(root.join(key)).is_ok_and(|m| m.is_dir())
+        })
         .map(|(key, name)| {
             let path = root.join(&key);
             let last_used = std::fs::metadata(path.join("Preferences"))

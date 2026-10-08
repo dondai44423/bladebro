@@ -25,3 +25,16 @@ BLADEBRO=/path/to/bladebro python3 tools/rb_live/attach_drift.py
 Checks: the attach lands in the scratch browser (and launches no blade-owned
 browser); the flip's response carries the detach note; the attached browser
 was not navigated; a new agent browser came up on the current lane.
+
+## `helium.py` — official Helium end to end
+
+Set `HELIUM_BINARY` to an official Linux Helium executable (tarball or installed
+binary). `BLADEBRO` optionally selects the driver under test. This uses a local
+HTTP fixture and disposable HOME/XDG/BLADE_HOME: PATH discovery, JSON listings,
+auto/attach ownership, all five MCP tools, Unicode input/storage, clone cookie
+and storage preservation, byte-for-byte source immutability, profile mode,
+and binary override/reset. Run twice; each invocation creates fresh profiles.
+
+```bash
+HELIUM_BINARY=/absolute/path/to/helium python3 tools/rb_live/helium.py
+```

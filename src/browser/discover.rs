@@ -362,6 +362,7 @@ fn looks_like_chromium(pid: u32) -> bool {
         "google-chrome-stable",
         "brave",
         "brave-browser",
+        "helium",
         "microsoft-edge",
         "msedge",
         "vivaldi",
