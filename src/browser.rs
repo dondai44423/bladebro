@@ -45,6 +45,19 @@ pub use self::flags::{
 };
 pub use self::launch::launch_lane;
 pub use self::probe::{probe_gl_live, GlLive};
+// Chromium appends a singleton socket name under TMPDIR. Hermes and other
+// harnesses may supply a long workspace path, exceeding even macOS's 104-byte
+// sockaddr_un limit and fatally aborting Chrome. Only the browser child uses
+// the short system temp root; Chromium creates its own private random directory.
+fn browser_temp_env(cmd: &mut Command) {
+    #[cfg(unix)]
+    if std::env::temp_dir().as_os_str().as_encoded_bytes().len() > 48 {
+        cmd.env("TMPDIR", "/tmp");
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
+}
+
 /// A launched Chrome process + virtual display + session
 /// profile. Chrome killed on Drop; the session profile is
 /// synced back to the template and removed on explicit

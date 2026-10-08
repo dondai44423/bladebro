@@ -86,6 +86,45 @@ pi install npm:bladebro
 
 Registers 5 native tools (`browser.act`, `browser.see`, `browser.state`, `browser.run`, `browser.vision`) from the binary's own `tools/list` — tool definitions auto-adapt to any change, with zero extension maintenance.
 
+### Hermes Agent
+
+```bash
+npm install -g bladebro
+bladebro hermes on
+```
+
+Requires a current Hermes CLI with `config get --json --raw`, `config unset`
+and `mcp test`; update Hermes if those commands are unavailable.
+
+Start a **new Hermes chat** (restart a running gateway or desktop client).
+This connects the standard MCP server and removes Hermes' built-in browser
+toolset, including `browser_exec`, from the agent's tools. Web search and
+extraction keep their existing settings. Chrome/Chromium must be installed;
+`bladebro doctor` checks browser prerequisites.
+
+```bash
+bladebro hermes status          # inspect the setup
+bladebro hermes off             # restore the previous browser settings
+bladebro hermes on --profile work  # target a named Hermes profile
+```
+
+Use the same profile for `off`; `HERMES_HOME` is also respected. If Hermes isn't
+on PATH, add `--hermes /path/to/hermes` (its CLI executable on Windows).
+Setup uses Hermes' public `config` and `mcp test` commands, saves private
+recovery state beside `config.yaml`, and reads settings back after writing.
+Interrupted switches can resume with `on` or restore with `off`. A changed
+MCP entry is refused during recovery rather than overwritten. Existing server environment settings are retained; explicit `BLADE_HOME` and
+`CHROME_PATH` from setup are forwarded because Hermes filters inherited variables.
+Other settings and pre-existing browser suppression survive restore. Avoid concurrent manual
+configuration edits while switching.
+
+There is no separate plugin or copied tool schema: normal Bladebro updates
+update the Hermes browser too. Hermes may expose MCP tools through its built-in
+Tool Search; all five remain discoverable there. `browser.backend: off` selects
+Hermes' alternative native browser stack; it does **not** disable browser tools.
+See [Hermes browser documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser/)
+and [MCP documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/).
+
 ### From source
 
 Requires Chromium or Chrome (auto-detected) and Rust 1.86+. Linux servers need Xvfb for headful.

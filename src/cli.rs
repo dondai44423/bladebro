@@ -38,6 +38,7 @@ use crate::page::Page;
 mod args;
 mod daemon;
 mod help;
+mod hermes;
 mod rb;
 
 use self::args::{
@@ -445,6 +446,7 @@ async fn run_cli_inner(
 
     match cmd {
         "rb" | "realbrowser" => run_rb(rest, json_mode).await,
+        "hermes" => hermes::run(rest, json_mode).await,
         "daemon" => run_daemon().await,
         "stop" => {
             let text = stop_daemon().await?;

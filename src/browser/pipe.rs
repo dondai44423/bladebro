@@ -195,6 +195,7 @@ impl Browser {
         eprintln!("[bladebro] launching Chrome from {chrome_path} on CDP pipe ({mode_str})");
 
         let mut cmd = Command::new(&chrome_path);
+        browser_temp_env(&mut cmd);
         cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
         #[cfg(target_os = "linux")]
         if let Some(ref xvfb) = xvfb {
