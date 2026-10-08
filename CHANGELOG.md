@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.4] - 2026-10-08
+
 ### Added
 - Reversible Hermes Agent setup: `bladebro hermes on|off|status` connects the standard five-tool MCP server, disables only native browser tools, and restores prior settings. Supports profiles, private recovery, configuration readback, and existing server environment settings.
 
@@ -1955,7 +1957,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.3...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.4...HEAD
+[4.2.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.4
 [4.2.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.3
 [4.2.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.2
 [4.2.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.1
