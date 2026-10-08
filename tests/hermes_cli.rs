@@ -147,14 +147,18 @@ fn main() {
         read(&path)["agent"]["disabled_toolsets"] == json!(["tts", "browser"]),
         "only browser suppression added",
     );
-    f.check(
-        installed["env"]["BLADE_HOME"] == f.root.join("blade").to_str().unwrap(),
-        "explicit data root reaches MCP despite Hermes environment filtering",
-    );
-    f.check(
-        installed["env"]["CHROME_PATH"] == f.root.join("explicit-chrome").to_str().unwrap(),
-        "explicit browser path reaches MCP",
-    );
+    // getcwd resolves macOS /var to /private/var. Compare directory identity,
+    // while still requiring absolute paths and the exact intended leaf names.
+    let cwd = f.root.canonicalize().unwrap();
+    for (key, leaf) in [("BLADE_HOME", "blade"), ("CHROME_PATH", "explicit-chrome")] {
+        let actual = Path::new(installed["env"][key].as_str().unwrap());
+        f.check(
+            actual.is_absolute()
+                && actual.file_name() == Some(std::ffi::OsStr::new(leaf))
+                && actual.parent().unwrap().canonicalize().unwrap() == cwd,
+            "explicit absolute path reaches the same directory through OS aliases",
+        );
+    }
     let recovery = f.root.join(".bladebro-browser/state.json");
     let saved = std::fs::read(&recovery).unwrap();
     f.run(&["on"], true);
