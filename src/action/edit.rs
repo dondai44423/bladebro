@@ -235,13 +235,16 @@ pub(super) async fn js_select_all(
 
 /// Dispatch the typing itself: humanized per-char key events for short text
 /// (the biometrics path - keydown/keyup pairs, Shift wrapping, the full
-/// log-normal cadence), one `Input.insertText` for long text (a paste/IME
+/// log-normal cadence), one `Input.insertText` for long or Unicode text (a paste/IME
 /// commit - human-plausible and fast). Returns true when a dispatch path
 /// reported success; the readback remains the authority on what landed.
 pub(super) async fn type_text(cdp: &CdpSession, text: &str) -> bool {
     const PER_CHAR_MAX: usize = 120;
     let mut typed = false;
-    if text.chars().count() <= PER_CHAR_MAX {
+    // VK 229 without an IME commit acknowledges the key events but inserts
+    // nothing. Commit Unicode natively, including combining/emoji sequences;
+    // never repair it with a DOM setter that desyncs framework editors.
+    if text.is_ascii() && text.len() <= PER_CHAR_MAX {
         typed = type_per_char(cdp, text).await;
     }
     if !typed {

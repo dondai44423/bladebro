@@ -216,6 +216,26 @@ def main():
         check("plain input type verified", 'value="plain"' in v1, v1)
         check("plain input clear verified", "(verified empty)" in v2 and val == "", f"{v2} | {val!r}")
 
+        # Native Unicode commits must preserve complete values and trusted
+        # input events. Searching the verdict for the requested text is NOT a
+        # readback: mismatches contain that text too.
+        for target, label in [("plain-text", "Plain text input"),
+                              ("plain-area", "Plain textarea"),
+                              ("plain-ce", "Plain editor")]:
+            ref = see_ref(label)
+            for sample in ["Hermes Δ✓", "浏览器", "नमस्ते", "e\u0301 👨‍👩‍👧‍👦"]:
+                cli("act", "clear", ref)
+                ev("window.__unicodeEvents=[];document.getElementById(" + json.dumps(target) +
+                   ").oninput=e=>window.__unicodeEvents.push(e.isTrusted);''")
+                out = cli("act", "type", ref, sample)
+                actual = ev("(()=>{let e=document.getElementById(" + json.dumps(target) +
+                            ");return e.isContentEditable?e.innerText:e.value})()")
+                trusted = ev("JSON.stringify(window.__unicodeEvents)")
+                check("Unicode exact readback " + target + " " + sample,
+                      actual == sample and "readback mismatch" not in out, repr(actual))
+                check("Unicode native input " + target + " " + sample,
+                      "true" in trusted and "false" not in trusted, trusted)
+
         # S9: fill as a BATCH step (the schema used to reject it outright).
         out = cli("act", "batch", '[{"action":"fill","fields":[{"label":"Plain text input","text":"batch-fill"}]}]')
         check("batch accepts a fill step", "step1[fill]:" in out and "HALT" not in out, first_line(out))

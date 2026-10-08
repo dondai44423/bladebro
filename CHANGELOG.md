@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Reversible Hermes Agent setup: `bladebro hermes on|off|status` connects the standard five-tool MCP server, disables only native browser tools, and restores prior settings. Supports profiles, private recovery, configuration readback, and existing server environment settings.
+
+### Fixed
+- Short Unicode input now uses native IME commits, preserving non-Latin text, combining marks and emoji in form fields and editors.
+- Chromium launches tolerate long Unix temporary paths supplied by agent harnesses, avoiding fatal singleton socket path errors across WebSocket, pipe and real-browser launches.
+
 ## [4.2.3] - 2026-10-08
 
 ### Added

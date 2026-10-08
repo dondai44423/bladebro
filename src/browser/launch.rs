@@ -194,6 +194,7 @@ impl Browser {
         eprintln!("[bladebro] launching Chrome from {chrome_path} on port {port} ({mode_str})");
 
         let mut cmd = Command::new(&chrome_path);
+        browser_temp_env(&mut cmd);
         cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
 
         // Set DISPLAY env var for headful mode (Linux only).
@@ -382,6 +383,7 @@ impl Browser {
             );
 
             let mut cmd = Command::new(binary);
+            browser_temp_env(&mut cmd);
             // BLADE_RB_DEBUG=1 surfaces the browser's own stderr — the only
             // way to see WHY a real-lane launch died (X11/Wayland/GL errors
             // are otherwise discarded into /dev/null).

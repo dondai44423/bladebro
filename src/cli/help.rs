@@ -54,6 +54,7 @@ COMMANDS
   daemon | stop                   manage the persistent Chrome session
   mcp                             MCP server on stdio — add to your agent's client config
   rb on|off [sub]                 real-browser lane: drive YOUR browser (see 'help rb')
+  hermes on|off|status             switch Hermes' browser to Bladebro; reversible MCP setup
   audit                           stealth audit — 61-check suite + boot self-check + drift stamp
   update | -u [--check] [--force]  self-update; --rollback restores the previous binary
   doctor | -doc                   system diagnostics (13 checks)
@@ -128,6 +129,7 @@ pub fn suggest_command(cmd: &str) -> Option<&'static str> {
         "help",
         "rb",
         "realbrowser",
+        "hermes",
         "mcp",
         "audit",
         "probe",
@@ -337,6 +339,12 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "`rb pause` refuses input, navigation, history, downloads, collecting and tab operations (reads, waits and eval stay available); `rb forget` wipes the imported copy; `rb refresh` re-imports; `rb use --binary` supports custom/nix/flatpak-wrapper binaries"
             ]
         }),
+        "hermes" => json!({
+            "usage": "bladebro hermes on|off|status [--profile <name>] [--hermes <path>] [--json]",
+            "tool": null,
+            "examples": ["bladebro hermes on", "bladebro hermes off", "bladebro hermes status --json", "bladebro hermes on --profile work"],
+            "notes": ["Uses Hermes' public configuration CLI and the ordinary Bladebro MCP server; no plugin or schema copies. Preserves other disabled toolsets and web search/extraction. off restores the prior MCP entry and browser policy, retaining unrelated settings. Start a new chat and restart gateways/desktop clients after switching. HERMES_HOME or --profile selects the Hermes profile. Chrome/Chromium is required; doctor checks prerequisites."]
+        }),
         "mcp" => json!({
             "usage": "bladebro mcp",
             "tool": null,
@@ -431,7 +439,7 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
     let mut commands = serde_json::Map::new();
     for c in [
         "nav", "see", "act", "state", "run", "vision", "daemon", "stop", "help", "rb", "mcp",
-        "audit", "update", "doctor", "rollback", "version",
+        "audit", "update", "doctor", "rollback", "version", "hermes",
     ] {
         if let Some(d) = command_help_json(c) {
             commands.insert(c.to_string(), d);
@@ -734,6 +742,27 @@ USAGE
                              payload conventions, examples — call ONCE and
                              you know the whole CLI
   bladebro help <cmd> --json per-command machine help
+"#
+        }
+        "hermes" => {
+            r#"bladebro hermes — reversible Hermes browser setup
+
+USAGE
+  bladebro hermes on             connect MCP, then disable Hermes' built-in browser tools
+  bladebro hermes off            restore the previous browser policy and MCP entry
+  bladebro hermes status         inspect the managed setup
+  --profile <name>               select a Hermes profile (forwarded as hermes -p)
+  --hermes <path>                select the Hermes CLI executable
+  --json                        one machine-readable result
+
+Uses the ordinary MCP server and Hermes' public configuration commands.
+Web search/extraction and unrelated settings are preserved. Configuration
+recovery is stored privately beside Hermes' config.yaml in .bladebro-browser/.
+An interrupted switch can resume with on or restore with off. Changed MCP
+entries are never overwritten during recovery. Use the same profile for off.
+Start a new chat; restart running gateways/desktop clients after switching.
+Chrome/Chromium must be installed; bladebro doctor checks prerequisites.
+Updates use your normal Bladebro updater; no separate Hermes plugin to update.
 "#
         }
         "mcp" => {

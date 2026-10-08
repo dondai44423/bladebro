@@ -14,7 +14,7 @@ BLADEBRO=/path/to/bladebro python3 tools/qol_probe/run.py
 ```
 
 Own fixture server (port 8794), own `BLADE_HOME` (`/tmp/qol_probe_home`),
-no display leakage. Exit 0 = all passed. Takes ~10s.
+no display leakage. Exit 0 = all 117 assertions passed.
 
 ## What it proves
 
@@ -87,3 +87,8 @@ no display leakage. Exit 0 = all passed. Takes ~10s.
   programmatic `focus()` event until the first trusted input. The product
   handles both worlds (deferred and immediate focus); the fixture exercises
   the harder one.
+
+Unicode insertion checks cover Latin/Greek, Chinese, Devanagari, combining marks
+and joined emoji in inputs, textareas and contenteditable. They verify actual
+complete values and trusted insertion events; the replace-clear step is tested
+separately because value fields intentionally use a native setter to clear.

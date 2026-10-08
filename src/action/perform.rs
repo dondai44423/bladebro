@@ -384,7 +384,7 @@ pub async fn perform_with_network(
                 pre_cleared = cl.ok;
             }
             // Type: short text via per-char key events (the biometrics
-            // path: Shift wrapping, hold-time cadence), long text via one
+            // path: Shift wrapping, hold-time cadence), long/Unicode text via one
             // insertText (a paste/IME commit - human-plausible and fast).
             let _ = type_text(cdp, text).await;
             // Readback with a bounded poll: framework editors (and late

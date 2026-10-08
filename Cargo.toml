@@ -15,9 +15,13 @@ path = "src/lib.rs"
 name = "bladebro"
 path = "src/main.rs"
 
+[[test]]
+name = "hermes_cli"
+harness = false
+
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util", "io-std", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util", "io-std", "signal", "process"] }
 # CDP transport — plain ws:// to localhost; no TLS feature needed (avoids any OpenSSL)
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
