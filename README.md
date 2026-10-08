@@ -374,6 +374,13 @@ bladebro rb off       # back to the isolated agent browser
 | `profile` | Launches your binary on your live profile | Purists — close the browser first; Google Chrome 136+ refuses CDP on the default profile dir |
 | `attach` | Drives a browser that already exposes a debug endpoint (`--remote-debugging-port=0`, or Chrome 144+ `chrome://inspect#remote-debugging`) | Zero disruption; never owned, never shut down. Caveat (measured, Chrome 151): an *ephemeral* `--remote-debugging-port=0` arm — and the approval flow — makes Chrome itself report `navigator.webdriver=true`; a fixed port reports `false` |
 
+Supported browsers: Chromium, Google Chrome, Brave, **Helium**, Edge, Vivaldi,
+and Opera. `bladebro rb use` lists detected installs; `bladebro rb use helium`
+selects Helium on Linux, macOS, or Windows. On Linux, Helium wrappers on PATH
+and `HELIUM_CONFIG_HOME` are recognized. For an AppImage or portable install,
+launch Helium once to create its profile, select it, then set
+`bladebro rb use --binary /absolute/path/to/helium.AppImage` (or executable).
+
 `rb mode auto` (default) attaches when a live endpoint exists, else clones.
 Browser override: `rb use <id>` · custom binary (nix/flatpak wrapper):
 `rb use --binary <path|auto>` · profile pick: `rb profile <key>` (validated;

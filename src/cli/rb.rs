@@ -354,6 +354,16 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             match rest.first() {
                 None => {
                     let browsers = rb::discover();
+                    if json_mode {
+                        println!("{}", serde_json::json!({
+                            "ok": true, "browser": cfg.browser, "binary": cfg.binary,
+                            "browsers": browsers.iter().map(|b| serde_json::json!({
+                                "id": b.id, "name": b.name, "binary": b.binary,
+                                "profile_root": b.profile_root,
+                            })).collect::<Vec<_>>()
+                        }));
+                        return Ok(());
+                    }
                     if browsers.is_empty() {
                         println!("{}", ui::yellow("no Chromium-family browsers found"));
                     }
@@ -422,8 +432,20 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
         "profile" => {
             match rest.first().map(|s| s.as_str()) {
                 None => {
-                    let (spec, _) = rb::resolve_selection(&cfg)?;
+                    let (spec, _) = rb::resolve_selection(&rb::Config {
+                        profile: None,
+                        ..cfg.clone()
+                    })?;
                     let profiles = rb::list_profiles(&spec.profile_root);
+                    if json_mode {
+                        println!("{}", serde_json::json!({
+                            "ok": true, "profile": cfg.profile,
+                            "profiles": profiles.iter().map(|p| serde_json::json!({
+                                "key": p.key, "name": p.name, "path": p.path,
+                            })).collect::<Vec<_>>()
+                        }));
+                        return Ok(());
+                    }
                     let key_w = profiles.iter().map(|p| p.key.chars().count()).max().unwrap_or(4);
                     for p in &profiles {
                         let sel = cfg.profile.as_deref() == Some(p.key.as_str());
@@ -459,7 +481,10 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                     } else {
                         // Validate against the selected browser so a typo
                         // fails here, not inside a later launch.
-                        let (spec, _) = rb::resolve_selection(&cfg)?;
+                        let (spec, _) = rb::resolve_selection(&rb::Config {
+                            profile: None,
+                            ..cfg.clone()
+                        })?;
                         let profiles = rb::list_profiles(&spec.profile_root);
                         if !profiles.iter().any(|p| p.key == *key) {
                             let avail: Vec<&str> =

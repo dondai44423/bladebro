@@ -9,6 +9,7 @@ pub enum Brand {
     Chrome,
     Chromium,
     Brave,
+    Helium,
     Edge,
     Vivaldi,
     Opera,
@@ -20,6 +21,7 @@ impl Brand {
             Brand::Chrome => "Chrome",
             Brand::Chromium => "Chromium",
             Brand::Brave => "Brave",
+            Brand::Helium => "Helium",
             Brand::Edge => "Edge",
             Brand::Vivaldi => "Vivaldi",
             Brand::Opera => "Opera",
@@ -50,6 +52,8 @@ pub fn brand_from_version(out: &str) -> Option<Brand> {
         Some(Brand::Vivaldi)
     } else if l.contains("opera") {
         Some(Brand::Opera)
+    } else if l.contains("helium") {
+        Some(Brand::Helium)
     } else if l.contains("chromium") {
         Some(Brand::Chromium)
     } else {
@@ -97,9 +101,10 @@ fn candidates() -> Vec<(
 
     #[cfg(target_os = "linux")]
     {
-        let xdg = std::env::var("XDG_CONFIG_HOME")
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| home.join(".config"));
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".config"));
         let mut push = |id: &'static str,
                         name: &'static str,
                         brand: Brand,
@@ -150,6 +155,29 @@ fn candidates() -> Vec<(
                 xdg.join("BraveSoftware/Brave-Browser"),
                 home.join(".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
             ],
+        );
+        // Official packages use /opt/helium; PATH also covers Nix and
+        // user-local tarball wrappers. AppImages with arbitrary names use
+        // the existing --binary override (their profile is still discovered).
+        let mut helium_bins = vec![
+            PathBuf::from("/usr/bin/helium"),
+            PathBuf::from("/usr/local/bin/helium"),
+            PathBuf::from("/opt/helium/helium-wrapper"),
+            PathBuf::from("/opt/helium/helium"),
+        ];
+        if let Some(path) = std::env::var_os("PATH") {
+            helium_bins.extend(std::env::split_paths(&path).map(|p| p.join("helium")));
+        }
+        let helium_config = std::env::var_os("HELIUM_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| xdg.clone());
+        push(
+            "helium",
+            "Helium",
+            Brand::Helium,
+            helium_bins,
+            vec![helium_config.join("net.imput.helium")],
         );
         push(
             "edge",
@@ -228,6 +256,16 @@ fn candidates() -> Vec<(
                 user_apps.join("Brave Browser.app/Contents/MacOS/Brave Browser"),
             ],
             vec![sup.join("BraveSoftware/Brave-Browser")],
+        );
+        push(
+            "helium",
+            "Helium",
+            Brand::Helium,
+            vec![
+                apps.join("Helium.app/Contents/MacOS/Helium"),
+                user_apps.join("Helium.app/Contents/MacOS/Helium"),
+            ],
+            vec![sup.join("net.imput.helium")],
         );
         push(
             "edge",
@@ -319,6 +357,17 @@ fn candidates() -> Vec<(
             vec![j(&local, "BraveSoftware/Brave-Browser/User Data")],
         );
         push(
+            "helium",
+            "Helium",
+            Brand::Helium,
+            vec![
+                j(&local, "imput/Helium/Application/chrome.exe"),
+                j(&pf, "imput/Helium/Application/chrome.exe"),
+                j(&pf86, "imput/Helium/Application/chrome.exe"),
+            ],
+            vec![j(&local, "imput/Helium/User Data")],
+        );
+        push(
             "edge",
             "Microsoft Edge",
             Brand::Edge,
@@ -359,8 +408,10 @@ fn candidates() -> Vec<(
 pub fn discover() -> Vec<BrowserSpec> {
     let mut found = Vec::new();
     for (id, name, brand, bins, roots) in candidates() {
-        let binary = bins.iter().find(|p| p.exists()).cloned();
-        let root = roots.iter().find(|p| p.exists()).cloned();
+        let binary = bins
+            .iter()
+            .find_map(|p| super::validate_binary_override(&p.to_string_lossy()).ok());
+        let root = roots.iter().find(|p| p.is_dir()).cloned();
         let root = match (root, binary.as_ref()) {
             (Some(r), _) => r,
             // Binary without a profile root: show the canonical path. Never

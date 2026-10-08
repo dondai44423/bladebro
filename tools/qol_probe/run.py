@@ -494,6 +494,49 @@ def main():
         out = cli("see", "extract", "auto")
         check("the follow-up read agrees (no flip-flop)",
               "monitor" in out.lower() and "keyboard" not in out.lower(), first_line(out))
+        # Read/condition regressions: product fast path must obey scope;
+        # frame controls/headings and shadow text must agree with visibility.
+        cli("nav", f"http://127.0.0.1:{PORT}/reads.html")
+        model = cli("see")
+        check("read fixture exposes frame and shadow controls",
+              "Frame checkout" in model and "Shadow checkout" in model, first_line(model))
+        out = cli("see", "content")
+        check("markdown excludes stylesheet-hidden text",
+              "CSS_HIDDEN_MARKDOWN_SENTINEL" not in out and "visible description" in out,
+              first_line(out))
+        out = cli("see", "outline")
+        check("outline includes visible iframe and shadow headings",
+              "Frame heading" in out and "Shadow heading" in out, first_line(out))
+        check("outline excludes hidden and inaccessible frame headings",
+              "Hidden frame heading" not in out and "Opaque frame heading" not in out,
+              first_line(out))
+        for kind, text, expected in [
+            ("element", "Frame checkout", True),
+            ("element", "Shadow checkout", True),
+            ("element", "Hidden frame control", False),
+            ("element", "Opaque frame control", False),
+            ("text", "Frame heading", True),
+            ("text", "Shadow heading", True),
+            ("text", "SHADOW_HIDDEN_SENTINEL", False),
+            ("text", "SHADOW_SCRIPT_SENTINEL", False),
+        ]:
+            out = cli("run", json.dumps([{
+                "action": "if", "condition": kind, "text": text, "timeout": 0,
+                "then": [{"action": "eval", "js": "'matched-marker'"}],
+                "else": [{"action": "eval", "js": "'missed-marker'"}],
+            }]))
+            marker = "matched-marker" if expected else "missed-marker"
+            check(f"{kind} condition respects visible tree: {text}",
+                  marker in out, first_line(out))
+        cli("act", "eval", "document.querySelector('main').insertAdjacentHTML('beforeend','<p class=price>$125.00</p><button id=add-to-cart>Add to cart</button>');true")
+        scoped_ref = see_ref_any("Scoped details")
+        out = cli("see", "content", "--scope", scoped_ref)
+        check("product fast path respects subtree scope",
+              bool(scoped_ref) and "Scoped details" in out and "Whole page" not in out,
+              first_line(out))
+        out = cli("see", "content")
+        check("whole-page product fast path still extracts price",
+              "Whole page product title" in out and "$125.00" in out, first_line(out))
     finally:
         try:
             cli("stop", timeout=30)

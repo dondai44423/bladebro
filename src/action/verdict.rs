@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
-use crate::page::perception::JS_PREAMBLE;
+use crate::page::perception::{JS_PREAMBLE, JS_READ_TREE};
 use crate::page::{wait_for_settle, LivePageModel, PageDelta};
 
 use super::edit::{clear_verdict_text, type_verdict_text, EditReport};
@@ -306,34 +306,31 @@ pub(super) fn absence_confirmed(
     since.elapsed() >= ABSENCE_CONFIRM && counter.load(std::sync::atomic::Ordering::Relaxed) == 0
 }
 
-/// Build the `element` condition probe. Walks with the same shadow-piercing
-/// `deepAll` as the capture, so a condition can see exactly the elements the
-/// model can — a shadow-DOM control must not read as "not present" (the
-/// 2026-10-07 shadow round: `if element="…"` skipped against an element the
-/// very same model displayed).
+/// Element conditions traverse visible light DOM, shadows and same-origin
+/// frames. A control shown in the model must not read as absent in a branch.
 pub(crate) fn element_condition_expr(needle: &str) -> String {
     let needle_js =
         serde_json::to_string(&needle.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
     "(()=>{const d=document;if(!d||!d.body)return false;"
         .to_string()
         + &JS_PREAMBLE
-        + "const all=deepAll(d,sel);const nodes=all.filter(vis);const t="
+        + JS_READ_TREE
+        + "const t="
         + &needle_js
-        + ".toLowerCase();return nodes.some(n=>{const role=(n.getAttribute('role')||n.tagName.toLowerCase());const name=(n.getAttribute('aria-label')||n.textContent||n.placeholder||'').trim();return role.toLowerCase().includes(t)||name.toLowerCase().includes(t);});})()"
+        + ";let found=false;walkReadTree(d.body,n=>{if(n.nodeType!==1||!n.matches(sel)||!vis(n))return;const r=(n.getAttribute('role')||n.tagName.toLowerCase());const nm=(n.getAttribute('aria-label')||n.innerText||n.placeholder||'').trim();if(r.toLowerCase().includes(t)||nm.toLowerCase().includes(t)){found=true;return false;}});return found;})()"
 }
 
-/// Build the `text` condition probe. Fast path: visible light-DOM text
-/// (`innerText`). On a miss, a bounded deep sweep checks open shadow roots
-/// and same-origin iframes — the same trees the capture reads — so
-/// `wait`/`if` `text="X"` cannot report "absent" for text the model shows.
-/// The sweep is contains-only and caps the roots it inspects.
+/// Text conditions use rendered light-DOM text first; the bounded fallback
+/// traverses visible shadow/iframe text, never script/style or hidden content.
 pub(crate) fn text_condition_expr(needle: &str) -> String {
     let needle_js =
         serde_json::to_string(&needle.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
     "(()=>{const d=document;if(!d||!d.body)return false;const nd="
         .to_string()
         + &needle_js
-        + ";if((d.body.innerText||'').toLowerCase().indexOf(nd)>=0)return true;var found=false;var stack=[d];var roots=0;while(stack.length&&!found){var root=stack.pop();var all=null;try{all=root.querySelectorAll('*');}catch(_e){continue;}for(var i=0;i<all.length;i++){var el=all[i];var sr=el.shadowRoot;if(sr){if(roots++>400)return found;if((sr.textContent||'').toLowerCase().indexOf(nd)>=0){found=true;break;}stack.push(sr);}if(el.tagName==='IFRAME'){try{var fd=el.contentDocument;if(fd&&fd.body){if((fd.body.textContent||'').toLowerCase().indexOf(nd)>=0){found=true;break;}stack.push(fd.documentElement);}}catch(_e2){}}}}return found;})()"
+        + ";if((d.body.innerText||'').toLowerCase().includes(nd))return true;"
+        + JS_READ_TREE
+        + "const parts=[];walkReadTree(d.body,n=>{if(n.nodeType===3)parts.push(n.textContent);});return parts.join(' ').replace(/\\s+/g,' ').toLowerCase().includes(nd.replace(/\\s+/g,' '));})()"
 }
 
 /// Check if a condition is met, optionally waiting up to `timeout`.

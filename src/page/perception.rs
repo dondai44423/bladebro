@@ -243,6 +243,10 @@ pub const JS_NAME_FN: &str = include_str!("js/name_fn.js");
 /// hosts), capped, best-effort.
 pub const JS_CTX_FN: &str = include_str!("js/ctx_fn.js");
 
+/// Bounded visible-tree traversal for reads/conditions, including same-origin
+/// frames. Separate from deepAll: refs depend on per-document collection.
+pub(crate) const JS_READ_TREE: &str = include_str!("js/read_tree.js");
+
 /// The shared preamble: just the selector + helper functions.
 /// Each script (capture, find-by-sig) sets up its own document context,
 /// node list, and counts — necessary because frame walking needs different

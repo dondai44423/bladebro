@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Helium in `rb use` on Linux, macOS and Windows, with its native profile roots, Linux PATH wrappers and `HELIUM_CONFIG_HOME`. Clone, profile and attach use the existing real-browser lane; portable/AppImage installs use `rb use --binary` (#31).
+
+### Fixed
+- `rb forget` rejects malformed browser IDs before deletion, preventing saved-config paths from escaping the clone namespace.
+- `rb use --json` and `rb profile --json` return one structured JSON object. Discovery skips non-executable candidates and ignores relative/empty Linux config homes; deleted, symlinked and path-traversing profile metadata cannot win selection, and a removed saved profile no longer prevents selecting its replacement.
+- Scoped product reads obey the requested subtree; markdown excludes stylesheet-hidden content. Outlines and element conditions include visible same-origin iframe content; text conditions exclude hidden and script text in shadow roots.
+
 ## [4.2.2] - 2026-10-07
 
 ### Fixed

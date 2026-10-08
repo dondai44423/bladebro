@@ -53,6 +53,11 @@ no display leakage. Exit 0 = all passed. Takes ~10s.
     `read`/`eval` honor `selector=`; a scoped content read renders a
     `nav`/`aside`/`header`/`footer` root (`shadow.html`'s aside).
 
+13. **Read/condition parity** (`reads.html`): scoped product content stays in
+    its subtree; markdown excludes stylesheet-hidden text; outlines and
+    element/text branches include visible same-origin frames and shadows,
+    excluding hidden frames, inaccessible frames and shadow script text.
+
 ## The fixture models
 
 - **Facade composer**: wrapper textarea → focus mounts the rich editor

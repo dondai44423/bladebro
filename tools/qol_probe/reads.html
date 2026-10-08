@@ -1,0 +1,26 @@
+<!doctype html>
+<title>Read contract fixture</title>
+<style>.hidden { display: none; }</style>
+<main>
+  <h1>Whole page product title</h1>
+  <p>A visible description long enough to select this main region for content.
+     This fixture checks scoped product reads, iframe headings and conditions,
+     and hidden text in stylesheets and shadow roots. Every match must agree
+     with the browser's visible tree.</p>
+  <a href="/details" aria-label="Scoped details">Scoped details</a>
+  <p class="hidden">CSS_HIDDEN_MARKDOWN_SENTINEL</p>
+  <iframe srcdoc="&lt;h2&gt;Frame heading&lt;/h2&gt;&lt;button&gt;Frame checkout&lt;/button&gt;"></iframe>
+  <iframe style="display:none" srcdoc="&lt;h2&gt;Hidden frame heading&lt;/h2&gt;&lt;button&gt;Hidden frame control&lt;/button&gt;"></iframe>
+  <iframe sandbox srcdoc="&lt;h2&gt;Opaque frame heading&lt;/h2&gt;&lt;button&gt;Opaque frame control&lt;/button&gt;"></iframe>
+  <read-shadow></read-shadow>
+</main>
+<script>
+customElements.define('read-shadow', class extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({mode: 'open'}).innerHTML =
+      '<h2>Shadow heading</h2><button>Shadow checkout</button>' +
+      '<p style="display:none">SHADOW_HIDDEN_SENTINEL</p>' +
+      '<script type="application/json">SHADOW_SCRIPT_SENTINEL<\/script>';
+  }
+});
+</script>

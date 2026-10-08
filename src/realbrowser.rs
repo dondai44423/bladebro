@@ -190,6 +190,10 @@ mod tests {
             Some(Brand::Vivaldi)
         );
         assert_eq!(brand_from_version("Opera 118.0.0.0"), Some(Brand::Opera));
+        assert_eq!(
+            brand_from_version("Helium 0.18.3.1 (Chromium 154.0.8037.97)").map(Brand::as_str),
+            Some("Helium"),
+        );
         assert_eq!(brand_from_version("Mozilla Firefox 141"), None);
     }
 
@@ -199,6 +203,7 @@ mod tests {
         for b in [
             Brand::Chromium,
             Brand::Brave,
+            Brand::Helium,
             Brand::Edge,
             Brand::Vivaldi,
             Brand::Opera,
