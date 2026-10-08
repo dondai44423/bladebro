@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.3] - 2026-10-08
+
 ### Added
 - Helium in `rb use` on Linux, macOS and Windows, with its native profile roots, Linux PATH wrappers and `HELIUM_CONFIG_HOME`. Clone, profile and attach use the existing real-browser lane; portable/AppImage installs use `rb use --binary` (#31).
 
@@ -1946,7 +1948,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.2...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.3...HEAD
+[4.2.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.3
 [4.2.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.2
 [4.2.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.1
 [4.2.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.0
