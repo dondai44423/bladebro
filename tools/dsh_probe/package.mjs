@@ -33,7 +33,7 @@ try {
     const module = { exports: {} };
     runInNewContext(source, { require: customRequire, module, process: { platform, arch } });
     const { resolveBinary } = module.exports;
-    if (!pkg) { assert.throws(() => resolveBinary(), /no prebuilt binary/); checks++; }
+    if (!pkg) { assert.throws(() => resolveBinary(), /no prebuilt binary.*Build from source: https:/); checks++; }
     else check(`${platform}-${arch} resolves exact native package with spaces and Unicode`, resolveBinary() === binary);
     check(`${platform}-${arch} accepts explicit absolute source build`, resolveBinary(binary) === binary);
     for (const invalid of ['', 'relative', null, 4, true, {}, `${binary}\0`]) {

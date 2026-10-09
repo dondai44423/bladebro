@@ -21,7 +21,7 @@ function resolveBinary(override) {
   if (path === undefined) {
     const key = `${process.platform}-${process.arch}`;
     const pkg = PLATFORMS[key];
-    if (!pkg) throw new Error(`bladebro: no prebuilt binary for ${key}. Build from source and set binaryPath.`);
+    if (!pkg) throw new Error(`bladebro: no prebuilt binary for ${key}. Build from source: https://github.com/dondai44423/bladebro#from-source`);
     try {
       const manifest = require.resolve(`${pkg}/package.json`);
       path = join(dirname(manifest), process.platform === 'win32' ? 'bladebro.exe' : 'bladebro');
