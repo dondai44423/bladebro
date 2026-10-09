@@ -155,6 +155,11 @@ try {
   await reload.dispose();
   check('second unload is clean', ctx.tools.schemas().length === 0);
   console.log(`DSH native probe: ${checks} checks passed`);
+} catch (error) {
+  // Windows can keep a profile file locked after a killed server. Report the
+  // assertion before cleanup so that a later EBUSY cannot hide its cause.
+  console.error(error);
+  throw error;
 } finally {
   await ctx.fiber.dispose();
   server.closeAllConnections();
@@ -162,5 +167,5 @@ try {
   childProcess.spawn = originalSpawn;
   syncBuiltinESMExports();
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-  await rm(scratch, { recursive: true, force: true });
+  await rm(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
