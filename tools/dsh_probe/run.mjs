@@ -84,7 +84,9 @@ try {
   }
   ctx.llm.registerAdapter(['fixture'], new ImageMetadata());
   check('fresh registry has zero tools', ctx.tools.schemas().length === 0);
-  check('packaged binary resolves independently of PATH', resolveBinary().includes('bladebro-'));
+  check('packaged binary resolves independently of PATH and matches this build',
+    resolveBinary().includes('bladebro-') && (!process.env.BLADEBRO ||
+      (await readFile(resolveBinary())).equals(await readFile(resolve(process.env.BLADEBRO)))));
   await assert.rejects(() => plugin.apply(ctx, { binaryPath: 'relative' }), /absolute/); checks++;
   await assert.rejects(() => plugin.apply(ctx, { wrong: true }), /unknown/); checks++;
   await assert.rejects(() => plugin.apply(ctx, []), /object/); checks++;
