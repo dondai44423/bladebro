@@ -190,6 +190,19 @@ for _ in $(seq 1 12); do
     [[ -n "$RUN_ID" ]] && break
     sleep 5
 done
+# Same-version recovery can change only release notes, which push CI skips.
+# Dispatch explicitly, but never accept a run for an advanced main branch.
+if [[ -z "$RUN_ID" ]]; then
+    [[ $(gh api "repos/$RELEASE_REPO/git/ref/heads/main" --jq .object.sha) == "$RELEASE_SHA" ]] || {
+        echo "ERROR: main advanced before release CI dispatch" >&2; exit 1;
+    }
+    gh workflow run CI --ref main
+    for _ in $(seq 1 12); do
+        RUN_ID=$(gh run list --workflow CI --commit "$RELEASE_SHA" --event workflow_dispatch --json databaseId --jq '.[0].databaseId // empty')
+        [[ -n "$RUN_ID" ]] && break
+        sleep 5
+    done
+fi
 [[ -n "$RUN_ID" ]] || { echo "ERROR: no native CI run for $RELEASE_SHA" >&2; exit 1; }
 gh run watch "$RUN_ID" --exit-status
 check_release_security

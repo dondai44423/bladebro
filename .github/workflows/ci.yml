@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     # Docs-only pushes don't need CI — see status.md §0/§4 CI discipline.

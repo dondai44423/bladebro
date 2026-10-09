@@ -86,4 +86,50 @@ with tempfile.TemporaryDirectory(prefix='blade-release-test-') as tmp:
     # widened 12→30 in the 4.2.0 post-ship fix; the fixture never propagates).
     assert sum(' view ' in line for line in lines) == 150, 'propagation deadline not reached'
     print('PASS exact-version mismatch reaches propagation deadline and prevents meta publish')
-    print('RELEASE PREFLIGHT 5/5')
+    # Exercise the real CI block against command receipts, never a publisher.
+    text = (root / 'release.sh').read_text()
+    start = text.index('git push origin main\n', text.index('# Native CI is a release gate.'))
+    end = text.index('\ncheck_release_security\n', start)
+    gate = root / 'ci-gate.sh'
+    gate.write_text('set -euo pipefail\n' + text[start:end] + '\necho CI_GATE_PASSED\n')
+    script('git', 'test "$1" = push')
+    script('gh', r"""exec python3 - "$@" <<'GH'
+import json,os,sys
+args=sys.argv[1:];mode=os.environ['TEST_CI_MODE'];sha=os.environ['RELEASE_SHA']
+with open(os.environ['TEST_CI_CALLS'],'a') as f:f.write(json.dumps(args)+'\n')
+if args[:2]==['run','list']:
+    assert args[args.index('--commit')+1]==sha
+    event=args[args.index('--event')+1]
+    if event=='push' and mode=='push':print('101')
+    elif event=='workflow_dispatch' and mode in ('dispatch','ci-failure'):print('202')
+elif args[0]=='api':
+    assert args[1]=='repos/fixture/bladebro/git/ref/heads/main'
+    print('b'*40 if mode=='advanced' else sha)
+elif args[:2]==['workflow','run']:assert args==['workflow','run','CI','--ref','main']
+elif args[:2]==['run','watch']:
+    assert args==['run','watch','101' if mode=='push' else '202','--exit-status']
+    if mode=='ci-failure':sys.exit(1)
+else:raise AssertionError(args)
+GH""")
+    env.update(RELEASE_SHA='a'*40, RELEASE_REPO='fixture/bladebro', TEST_CI_CALLS=str(root/'ci-calls'))
+    for mode in ('push','dispatch','advanced','race','ci-failure'):
+        calls_path = root / 'ci-calls'
+        calls_path.unlink(missing_ok=True)
+        env['TEST_CI_MODE'] = mode
+        result = subprocess.run(['/bin/bash',str(gate)],env=env,cwd=root,capture_output=True,text=True)
+        assert calls_path.exists(),(mode,result.stderr)
+        calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+        dispatches = [a for a in calls if a[:2]==['workflow','run']]
+        watches = [a for a in calls if a[:2]==['run','watch']]
+        if mode in ('push','dispatch'):
+            assert result.returncode==0 and 'CI_GATE_PASSED' in result.stdout, (mode,result.stderr)
+            assert len(watches)==1 and len(dispatches)==(mode=='dispatch'),calls
+        else:
+            assert result.returncode!=0 and 'CI_GATE_PASSED' not in result.stdout,(mode,result.stdout)
+            assert len(watches)==(mode=='ci-failure') and len(dispatches)==(mode!='advanced'),calls
+        if mode=='advanced':assert 'main advanced' in result.stderr
+        if mode=='race':
+            assert 'no native CI run' in result.stderr
+            assert sum('--event' in a and a[a.index('--event')+1]=='workflow_dispatch' for a in calls)==12
+        print('PASS release CI gate:',mode)
+    print('RELEASE PREFLIGHT 10/10')
