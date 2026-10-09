@@ -23,7 +23,8 @@
     "stealth",
     "scraper",
     "puppeteer",
-    "playwright"
+    "playwright",
+    "dsh-plugin"
   ],
   "pi": {
     "extensions": [
@@ -43,6 +44,9 @@
   },
   "files": [
     "bin.js",
+    "binary.cjs",
+    "dsh-plugin.mjs",
+    "cordis.patch.yml",
     "pi-extension.ts",
     "README.md",
     "LICENSE"
@@ -56,5 +60,10 @@
   },
   "engines": {
     "node": ">=14"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }

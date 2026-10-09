@@ -3,11 +3,16 @@
 //! Every OS-specific operation lives here. The rest of the codebase
 //! calls these helpers — no `#[cfg]` outside this module (except for
 //! transport-level differences that can't be abstracted).
+//! `windows_job` owns kernel cleanup of the driver's browser descendants.
 
 use std::path::PathBuf;
 use std::process::Child;
+#[cfg(windows)]
+mod windows_job;
 #[cfg(unix)]
 use std::time::Duration;
+#[cfg(windows)]
+pub(crate) use windows_job::guard_browser_process_tree;
 
 /// The user's home directory.
 pub fn home_dir() -> PathBuf {

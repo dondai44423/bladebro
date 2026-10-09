@@ -21,6 +21,7 @@ jobs:
   lint-test-build:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         rust-version: ["stable"]
@@ -34,12 +35,14 @@ jobs:
           toolchain: ${{ matrix.rust-version }}
           components: clippy, rustfmt
 
-      - name: Install Chromium (Linux)
+      - name: Install Chrome (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           echo "deb http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb
+          # Use the browser installed for this fixture, not a runner's Chromium wrapper.
+          echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -66,6 +69,26 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+      - name: Install Node for native DSH integration
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Verify native DSH package and browser lifecycle
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -e
+          npm pack ./npm/bladebro --pack-destination .
+          version=$(node -p "require('./npm/bladebro/package.json').version")
+          npm install --prefix target/dsh-runtime --no-audit --no-fund --ignore-scripts @deepseek-ai/dsh@0.2.0-rc.2 "./bladebro-${version}.tgz"
+          node tools/dsh_probe/package.mjs
+          node tools/dsh_probe/package.mjs
+          export DSH_RUNTIME=target/dsh-runtime
+          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
+          node tools/dsh_probe/run.mjs
+          node tools/dsh_probe/run.mjs
 
   msrv:
     runs-on: ubuntu-latest
