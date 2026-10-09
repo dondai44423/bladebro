@@ -94,6 +94,12 @@ Add Bladebro as a native plugin in the Web UI's **Plugins** page, or run:
 dsh plugin --profile web add bladebro
 ```
 
+pnpm 11 defaults to a [one-day release-age delay](https://pnpm.io/blog/releases/11.0),
+so an unversioned install immediately after a release can select an older package.
+To install this release, use `dsh plugin --profile web add bladebro@4.3.0`
+(or enter `bladebro@4.3.0` in Plugins). If your package manager explicitly enforces
+a stricter release-age policy, wait for its configured delay. Keep that policy intact.
+
 Restart the profile and start a new chat. Desktop users can install `bladebro`
 from the same **Plugins** page. For terminal setup, enable Desktop's **Manage dsh
 Command**, fully quit the app, then use its bundled command:
