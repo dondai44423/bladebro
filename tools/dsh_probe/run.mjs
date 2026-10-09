@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, copyFile, chmod } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -65,7 +65,13 @@ const call = (tool, args, extra = {}) => ctx.tools.execute({
   name: `mcp__bladebro__${tool}`, arguments: args, ...extra,
 });
 const text = r => r.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-const config = process.env.BLADEBRO ? { binaryPath: resolve(process.env.BLADEBRO) } : {};
+const config = {};
+if (process.env.BLADEBRO) {
+  const executable = join(scratch, 'Bladebro 日本語 tool' + (process.platform === 'win32' ? '.exe' : ''));
+  await copyFile(resolve(process.env.BLADEBRO), executable);
+  await chmod(executable, 0o755);
+  config.binaryPath = executable;
+}
 try {
   await ctx.plugin(SystemPrompt);
   await ctx.plugin(Tools);

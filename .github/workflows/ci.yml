@@ -76,6 +76,7 @@ jobs:
           node-version: '24'
 
       - name: Verify native DSH package and browser lifecycle
+        timeout-minutes: 10
         shell: bash
         run: |
           set -e

@@ -22,6 +22,8 @@ impl Browser {
     /// `--no-sandbox` — availability preserved, sandbox used whenever the
     /// environment allows it.
     pub async fn launch(port: u16) -> Result<Self> {
+        #[cfg(windows)]
+        platform::guard_browser_process_tree()?;
         let auto = port == 0;
         let mut last_err = None;
         // Attempt sequence: sandboxed first; then --no-sandbox (sandbox
@@ -305,6 +307,8 @@ impl Browser {
         visible: bool,
         profile_directory: Option<&str>,
     ) -> Result<Self> {
+        #[cfg(windows)]
+        platform::guard_browser_process_tree()?;
         let user_data_dir = profile.dir().to_path_buf();
 
         // Visible needs a display on Linux. No display → an honest
