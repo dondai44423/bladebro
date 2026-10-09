@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Native DeepSeek Harness plugin in the existing `bladebro` npm package. Install through Web or Desktop Plugins, or `dsh plugin --profile web add bladebro`; the host manages the shared five-tool MCP connection, permissions, cancellation and reconnects.
+
+### Fixed
+- Update downloads stream to disk, retain interrupted progress and validate resumed byte ranges and size limits before checksum verification.
+- Windows-owned browser processes are cleaned up when their driver is forcibly terminated, allowing MCP clients to reconnect without abandoned Chrome processes locking profiles.
+
 ## [4.2.4] - 2026-10-08
 
 ### Added
