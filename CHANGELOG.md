@@ -8,8 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.4.0] - 2026-10-10
-
 ### Added
 - Dialog expectations: arm a one-use `act dialog` (type, optional message match, prompt answer, expiry) before the action that triggers a confirm or prompt. Mismatches keep the safe default cancel, unused expectations are reported, and stacked dialogs stay predictable.
 - PDF pages read as an explicit explanation with the supported paths: `act download` hands over the real bytes for your own reader, or vision for the viewer, instead of a silent empty read.
@@ -1984,8 +1982,7 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.4.0...HEAD
-[4.4.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.4.0
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.3.0...HEAD
 [4.3.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.3.0
 [4.2.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.4
 [4.2.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.3
