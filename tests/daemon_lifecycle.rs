@@ -28,7 +28,14 @@ fn tmp_home(tag: &str) -> PathBuf {
     dir
 }
 
-/// Spawn `bladebro daemon` and wait (bounded) until it bound its socket.
+/// Spawn `bladebro daemon` and wait (bounded) until it bound its socket
+/// AND wrote its pidfile.
+///
+/// The socket appears before the pidfile write, so tests that inspect or
+/// rewrite either file must wait for both. Simulating a takeover inside
+/// that startup window lets the daemon's own pidfile write clobber the
+/// test's overwrite — a race macOS CI hit once (ghost teardown, 2026-10),
+/// never a daemon defect.
 fn start_daemon(home: &PathBuf) -> Child {
     let mut child = Command::new(bin())
         .arg("daemon")
@@ -48,6 +55,20 @@ fn start_daemon(home: &PathBuf) -> Child {
             Instant::now() < deadline,
             "daemon never bound {}",
             sock.display()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let pidfile = home.join("cli.pid");
+    let own = child.id().to_string();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::read_to_string(&pidfile).unwrap_or_default().trim() != own {
+        if let Ok(Some(st)) = child.try_wait() {
+            panic!("daemon exited early: {st:?}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon never wrote its pidfile at {}",
+            pidfile.display()
         );
         std::thread::sleep(Duration::from_millis(25));
     }
