@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-10-09
+
 ### Added
 - Native DeepSeek Harness plugin in the existing `bladebro` npm package. Install through Web or Desktop Plugins, or `dsh plugin --profile web add bladebro`; the host manages the shared five-tool MCP connection, permissions, cancellation and reconnects.
 
@@ -1964,7 +1966,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.2.4...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.3.0...HEAD
+[4.3.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.3.0
 [4.2.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.4
 [4.2.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.3
 [4.2.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.2
