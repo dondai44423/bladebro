@@ -17,6 +17,7 @@ const { LlmAdapter } = await load('@deepseek-ai/dsh-llm');
 const { ctx, shutdown } = await runProfile({ environment: loadLayeredEnv('dsh'), profile: 'web', patchFiles: [], args: ['--no-open', '--port', '0'] });
 const watchdog = setTimeout(() => { console.error('FAIL profile probe did not finish'); process.exit(1); }, 20000);
 let checks = 0;
+let completed = false;
 function check(label, value) { assert.ok(value, label); checks++; console.log(`PASS ${label}`); }
 const names = ['act','see','state','run','vision'].map(n => `mcp__bladebro__${n}`);
 try {
@@ -64,5 +65,6 @@ try {
     }
     assert.deepEqual(ctx.tools.schemas().filter(t => !names.includes(t.name)).map(t => t.name).sort(), others); checks++;
   }
+  completed = true;
   console.log(`DSH full profile probe: ${checks} checks passed`);
-} finally { clearTimeout(watchdog); await shutdown.shutdown(checks >= 14 ? 0 : 1); }
+} finally { clearTimeout(watchdog); await shutdown.shutdown(completed ? 0 : 1); }
