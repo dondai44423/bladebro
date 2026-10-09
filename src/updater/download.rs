@@ -24,6 +24,7 @@ const TMP_PREFIX: &str = ".bladebro-update";
 /// keep the warn-and-skip behavior — otherwise `--force` downgrades to
 /// them would become impossible.
 const FIRST_CHECKSUMMED_TAG: &str = "3.3.0";
+const MAX_BINARY_SIZE: u64 = 500_000_000;
 
 /// Is checksum verification mandatory for this target tag?
 pub fn checksum_required(tag: &str) -> bool {
@@ -287,56 +288,119 @@ fn rand_suffix() -> u64 {
 /// If the server responds 206 (Partial Content), append.
 /// If the server responds 200 (full content) despite the Range header,
 /// truncate and start fresh (server doesn't support range requests).
-async fn download_once(url: &str, tmp: &std::path::Path, _expected_size: u64) -> Result<u64> {
+async fn download_once(url: &str, tmp: &std::path::Path, expected_size: u64) -> Result<u64> {
+    use std::io::Write;
+    // The post-download verifier has the same ceiling. Enforce it while
+    // reading, before a bad response can fill memory or the install disk.
+    let limit = if expected_size == 0 {
+        MAX_BINARY_SIZE
+    } else {
+        expected_size
+    };
+    if limit > MAX_BINARY_SIZE {
+        return Err(BladeError::Other("download size exceeds 500 MB".into()));
+    }
     let existing = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
-
+    if existing > limit {
+        return Err(BladeError::Other(
+            "partial download exceeds expected size".into(),
+        ));
+    }
+    // A connection can fail after all bytes reached disk. SHA256 still gates
+    // installation; requesting an empty suffix would only produce HTTP 416.
+    if expected_size > 0 && existing == expected_size {
+        return Ok(existing);
+    }
     let client = reqwest::Client::builder()
         .user_agent("bladebro-updater")
         .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
-
     let mut req = client.get(url);
     if existing > 0 {
         req = req.header("Range", format!("bytes={existing}-"));
     }
-
-    let resp = req
+    let mut resp = req
         .send()
         .await
         .map_err(|e| BladeError::Other(format!("download failed: {e}")))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(BladeError::Other(format!("download failed: HTTP {status}")));
+    let partial = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    if resp.status() != reqwest::StatusCode::OK && !partial {
+        return Err(BladeError::Other(format!(
+            "download failed: HTTP {}",
+            resp.status()
+        )));
     }
-
-    let is_partial = status == reqwest::StatusCode::PARTIAL_CONTENT;
-    let bytes = resp
-        .bytes()
+    let offset = if partial { existing } else { 0 };
+    let mut target_size = expected_size;
+    let mut response_limit = limit;
+    if partial {
+        let range = resp
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("bytes "))
+            .and_then(|h| h.split_once('/'))
+            .and_then(|(range, total)| {
+                let (start, end) = range.split_once('-')?;
+                Some((
+                    start.parse::<u64>().ok()?,
+                    end.parse::<u64>().ok()?,
+                    total.parse::<u64>().ok()?,
+                ))
+            });
+        match range {
+            Some((start, end, total))
+                if start == existing
+                    && start <= end
+                    && end < total
+                    && total <= limit
+                    && (expected_size == 0 || total == expected_size)
+                    && resp
+                        .content_length()
+                        .is_none_or(|len| len == end - start + 1) =>
+            {
+                target_size = total;
+                response_limit = end + 1;
+            }
+            _ => {
+                return Err(BladeError::Other(
+                    "download returned an invalid content range (Content-Range)".into(),
+                ))
+            }
+        }
+    }
+    if resp
+        .content_length()
+        .is_some_and(|len| len > response_limit - offset)
+    {
+        return Err(BladeError::Other("download exceeds expected size".into()));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .append(partial)
+        .truncate(!partial)
+        .open(tmp)
+        .map_err(|e| BladeError::Other(format!("cannot open temp file: {e}")))?;
+    let mut size = offset;
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| BladeError::Other(format!("download interrupted: {e}")))?;
-
-    if bytes.is_empty() && existing == 0 {
-        return Err(BladeError::Other("downloaded file is empty".into()));
-    }
-
-    if existing > 0 && is_partial {
-        // Server honored our range request — append the partial content.
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(tmp)
-            .map_err(|e| BladeError::Other(format!("cannot open temp file: {e}")))?;
-        f.write_all(&bytes)
+        .map_err(|e| BladeError::Other(format!("download interrupted: {e}")))?
+    {
+        if chunk.len() as u64 > response_limit - size {
+            return Err(BladeError::Other("download exceeds expected size".into()));
+        }
+        file.write_all(&chunk)
             .map_err(|e| BladeError::Other(format!("cannot write temp file: {e}")))?;
-        Ok(existing + bytes.len() as u64)
-    } else {
-        // Fresh download, or server ignored range request (200 not 206).
-        std::fs::write(tmp, &bytes)
-            .map_err(|e| BladeError::Other(format!("cannot write temp file: {e}")))?;
-        Ok(bytes.len() as u64)
+        size += chunk.len() as u64;
     }
+    if size == 0 || (target_size > 0 && size != target_size) {
+        return Err(BladeError::Other(format!(
+            "incomplete download: {size} bytes, expected {target_size}"
+        )));
+    }
+    Ok(size)
 }
 
 /// Check if there's enough disk space for a download.
@@ -448,7 +512,7 @@ pub fn verify_binary(dl: &DownloadedBinary) -> Result<()> {
             dl.size
         )));
     }
-    if dl.size > 500_000_000 {
+    if dl.size > MAX_BINARY_SIZE {
         return Err(BladeError::Other(format!(
             "downloaded file suspiciously large ({} bytes)",
             dl.size
@@ -536,6 +600,119 @@ pub fn cleanup_tmp(path: &std::path::Path) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    async fn http_fixture(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/binary", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    request.push_str(&line);
+                }
+                requests.push(request);
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn interrupted_download_keeps_bytes_and_resumes_exactly() {
+        let tmp = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        let (url, server) = http_fixture(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabc".into(),
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 7\r\nContent-Range: bytes 3-9/10\r\nConnection: close\r\n\r\ndefghij".into(),
+        ]).await;
+        assert!(download_once(&url, &tmp, 10).await.is_err());
+        assert_eq!(
+            std::fs::read(&tmp).unwrap(),
+            b"abc",
+            "interrupted bytes must reach disk before retry"
+        );
+        assert_eq!(download_once(&url, &tmp, 10).await.unwrap(), 10);
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"abcdefghij");
+        let requests = server.await.unwrap();
+        assert!(!requests[0].to_lowercase().contains("range:"));
+        assert!(requests[1].to_lowercase().contains("range: bytes=3-"));
+        std::fs::remove_file(tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_refuses_wrong_ranges_and_oversized_bodies() {
+        let tmp = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        std::fs::write(&tmp, b"abc").unwrap();
+        let (url, server) = http_fixture(vec![
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 7\r\nContent-Range: bytes 2-8/10\r\nConnection: close\r\n\r\ndefghij".into(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nabcdefghijk".into(),
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nb\r\nabcdefghijk\r\n0\r\n\r\n".into(),
+        ]).await;
+        assert!(download_once(&url, &tmp, 10)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("range"));
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"abc");
+        assert!(download_once(&url, &tmp, 10)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("size"));
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"abc");
+        assert!(download_once(&url, &tmp, 10)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("size"));
+        assert!(std::fs::metadata(&tmp).unwrap().len() <= 10);
+        assert_eq!(server.await.unwrap().len(), 3);
+        std::fs::remove_file(tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn chunked_resume_cannot_exceed_its_declared_range() {
+        let tmp = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        std::fs::write(&tmp, b"abc").unwrap();
+        let (url, server) = http_fixture(vec![
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-4/10\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\ndefghij\r\n0\r\n\r\n".into(),
+        ]).await;
+        assert!(download_once(&url, &tmp, 10).await.is_err());
+        assert!(std::fs::metadata(&tmp).unwrap().len() <= 5);
+        assert_eq!(server.await.unwrap().len(), 1);
+        std::fs::remove_file(tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_ignoring_range_replaces_partial_file() {
+        let tmp = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        std::fs::write(&tmp, b"old").unwrap();
+        let (url, server) = http_fixture(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnew!".into(),
+        ])
+        .await;
+        assert_eq!(download_once(&url, &tmp, 4).await.unwrap(), 4);
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"new!");
+        assert!(server.await.unwrap()[0]
+            .to_lowercase()
+            .contains("range: bytes=3-"));
+        std::fs::remove_file(tmp).unwrap();
+    }
 
     #[test]
     fn verify_rejects_empty() {
