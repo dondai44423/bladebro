@@ -67,6 +67,25 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Install Node for native DSH integration
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Verify native DSH package and browser lifecycle
+        shell: bash
+        run: |
+          set -e
+          npm pack ./npm/bladebro --pack-destination .
+          version=$(node -p "require('./npm/bladebro/package.json').version")
+          npm install --prefix target/dsh-runtime --no-audit --no-fund --ignore-scripts @deepseek-ai/dsh@0.2.0-rc.2 "./bladebro-${version}.tgz"
+          node tools/dsh_probe/package.mjs
+          node tools/dsh_probe/package.mjs
+          export DSH_RUNTIME=target/dsh-runtime
+          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
+          node tools/dsh_probe/run.mjs
+          node tools/dsh_probe/run.mjs
+
   msrv:
     runs-on: ubuntu-latest
     steps:

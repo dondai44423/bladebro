@@ -1,0 +1,4 @@
+# A native DSH bundle: tools and lifecycle belong to the host's MCP bridge.
+- insert:
+    - id: bladebro
+      name: ./dsh-plugin.mjs
