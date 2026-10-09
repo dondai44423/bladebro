@@ -107,9 +107,10 @@ done
 
 # ── wait for npm registry propagation ───────────────────────────────
 # npm "processing" after a publish can take minutes (the 4.2.0 Windows
-# package needed ~3 min); allow up to 5 minutes before failing closed.
+# package needed ~3 min; an accepted 4.2.3 publish exceeded the old 5-minute
+# window). Allow up to 10 minutes before failing closed.
 echo "Waiting for npm registry propagation..."
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   ALL_OK=true
   for pkg in bladebro-linux-x64 bladebro-linux-arm64 bladebro-windows-x64 bladebro-darwin-x64 bladebro-darwin-arm64; do
     if ! npm view "$pkg@$VERSION" version --prefer-online 2>/dev/null | grep -Fxq "$VERSION"; then
@@ -125,7 +126,12 @@ for i in $(seq 1 30); do
 done
 
 if [[ "$ALL_OK" != true ]]; then
-  echo "ERROR: platform packages not all available; main package was not published" >&2
+  echo "ERROR: platform packages not all available after 10 minutes; main package was not published" >&2
+  echo "       If \`npm stage list\` shows an entry for this version, the publish is STAGED and" >&2
+  echo "       awaits approval (npm stage approve <id>; interactive 2FA required)." >&2
+  echo "       If it shows nothing, a publish may still be PROCESSING on the registry —" >&2
+  echo "       re-check `npm view` for a few more minutes before retrying, and never" >&2
+  echo "       republish a version the registry already accepted." >&2
   exit 1
 fi
 
@@ -141,7 +147,7 @@ echo "Publishing main package: bladebro@$VERSION..."
 # serves a stale cache entry for minutes and reads as "missing".
 echo "Waiting for bladebro@$VERSION to go live..."
 META_OK=false
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   if npm view "bladebro@$VERSION" version --prefer-online 2>/dev/null | grep -Fxq "$VERSION"; then
     echo "  bladebro@$VERSION is live after $((i*10))s"
     META_OK=true
@@ -151,9 +157,12 @@ for i in $(seq 1 30); do
   echo "  waiting... ($((i*10))s)"
 done
 if [ "$META_OK" != true ]; then
-  echo "ERROR: bladebro@$VERSION never appeared on the registry — the publish was" >&2
-  echo "       staged or failed. Approve it with: npm stage list / npm stage approve <id>" >&2
-  echo "       (an interactive 2FA challenge is required for approval)." >&2
+  echo "ERROR: bladebro@$VERSION never appeared on the registry after 10 minutes." >&2
+  echo "       If \`npm stage list\` shows an entry for this version, the publish is STAGED" >&2
+  echo "       and awaits approval: npm stage approve <id> (interactive 2FA required)." >&2
+  echo "       If it shows nothing, the publish may still be PROCESSING (re-check" >&2
+  echo "       `npm view` before doing anything) or it failed outright — never republish" >&2
+  echo "       a version the registry already accepted." >&2
   exit 1
 fi
 

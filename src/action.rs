@@ -31,13 +31,13 @@ mod perform;
 mod verdict;
 
 pub use self::find::{
-    find_by_selector, find_by_text, find_miss_diag, locate_text, read_text, MissDiag, MissExample,
-    SelectorDiag, SelectorLookup, TextLocation, TextMatch,
+    find_by_selector, find_by_text, find_label_route, find_miss_diag, locate_text, read_text,
+    LabelRoute, MissDiag, MissExample, SelectorDiag, SelectorLookup, TextLocation, TextMatch,
 };
 pub use self::perform::{perform, perform_with_network, MUT_WATCH};
-pub use self::verdict::check_condition;
 #[cfg(test)]
 pub(crate) use self::verdict::{element_condition_expr, text_condition_expr};
+pub use self::verdict::{eval_condition, CondOutcome};
 /// What the agent can do. Few verbs, full control.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -137,10 +137,11 @@ mod action_tests {
         let msg = super::verdict::no_effect_verdict(
             &["mouse", "js", "enter"],
             "button [Account menu] (topmost=true,disabled=false)",
+            None,
         );
         assert_eq!(
             msg,
-            "outcome: no-effect (click dispatched via mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - no navigation, no observable DOM or state change)"
+            "outcome: no-effect (click dispatched via mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - no navigation, no visible DOM change)"
         );
         assert!(!msg.contains('\u{2014}'), "no em-dash in public verdict");
     }
@@ -177,12 +178,28 @@ mod action_tests {
 
     #[test]
     fn no_effect_verdict_falls_back_when_target_unknown() {
-        let msg = super::verdict::no_effect_verdict(&["mouse"], "");
+        let msg = super::verdict::no_effect_verdict(&["mouse"], "", None);
         assert!(
-            msg.ends_with("- no navigation, no observable DOM or state change; the element may be disabled, hidden, or hover-gated)"),
+            msg.ends_with("- no navigation, no visible DOM change; the element may be disabled, occluded, or hover-gated)"),
             "unexpected fallback: {msg}"
         );
         assert!(!msg.contains('\u{2014}'), "no em-dash in fallback verdict");
+    }
+
+    #[test]
+    fn no_effect_verdict_carries_measured_state() {
+        // G09: when the target's toggle state was measured and did not move,
+        // the verdict says so instead of the old absolute "nothing happened".
+        let msg = super::verdict::no_effect_verdict(
+            &["mouse"],
+            "label \"Approve\" (topmost=true,disabled=false)",
+            Some("checked=false"),
+        );
+        assert!(
+            msg.contains("targeted state unchanged (checked=false)"),
+            "{msg}"
+        );
+        assert!(msg.contains("no visible DOM change"), "{msg}");
     }
 
     // Guards the leaf-targeting JS fragment: the box-mode resolver must stay
@@ -257,6 +274,7 @@ mod action_tests {
             ("read", None),
             ("hover", None),
             ("click", None),
+            ("state", None),
         ] {
             let js = super::find::find_sig_expr("0|textbox|Post text|1", mode, text, &[0])
                 .expect("find-sig expr builds");
@@ -335,6 +353,15 @@ mod action_tests {
             (
                 "bd-scrollprobe",
                 super::verdict::scroll_probe_expr(480.0, 270.0),
+            ),
+            (
+                "bd-labelroute",
+                super::find::label_route_expr("0|checkbox|Approve|1", &[0])
+                    .expect("label-route expr"),
+            ),
+            (
+                "bd-coordtoggle",
+                super::verdict::coord_toggle_expr(5.5, 6.5),
             ),
         ];
         for (name, js) in cases {

@@ -163,10 +163,21 @@ impl Browser {
         set_launched_headless(!headful);
         set_launched_no_sandbox(no_sandbox);
 
-        // M18: Proxy support via BLADE_PROXY env var.
-        let proxy = std::env::var("BLADE_PROXY").ok().filter(|p| !p.is_empty());
-        if let Some(p) = &proxy {
-            eprintln!("[bladebro] using proxy: {p}");
+        // M18: Proxy support via BLADE_PROXY env var. Validated here even
+        // when nothing logs: a malformed value fails the launch with a
+        // redacted reason instead of silently producing a broken-proxy
+        // browser. The raw value may embed credentials — only the redacted
+        // display form ever reaches stderr.
+        let proxy = match crate::browser::proxy::env_blade_proxy() {
+            Ok(p) => p,
+            Err(reason) => {
+                return Err(BladeError::Other(format!(
+                    "invalid BLADE_PROXY value: {reason} (value redacted)"
+                )));
+            }
+        };
+        if let Some(spec) = &proxy {
+            eprintln!("[bladebro] using proxy: {}", spec.display);
         }
         // Power-user escape hatch: append raw Chrome flags. Useful for
         // diagnosing GL/WebGL backend issues on odd displays and for
@@ -181,7 +192,7 @@ impl Browser {
             transport: Transport::Ws,
             port,
             user_data_dir: &user_data_dir,
-            proxy: proxy.as_deref(),
+            proxy: proxy.as_ref().map(|s| s.server.as_str()),
             extra: &extra,
         });
 
@@ -197,7 +208,18 @@ impl Browser {
 
         let mut cmd = Command::new(&chrome_path);
         browser_temp_env(&mut cmd);
-        cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
+        // G11: bounded startup-stderr capture — a failed launch must be
+        // diagnosable instead of guessed at (the runner investigation lost
+        // Chrome's stderr to /dev/null).
+        cmd.args(&args).stdout(Stdio::null());
+        match chrome_stderr_sink() {
+            Some(f) => {
+                cmd.stderr(Stdio::from(f));
+            }
+            None => {
+                cmd.stderr(Stdio::null());
+            }
+        }
 
         // Set DISPLAY env var for headful mode (Linux only).
         // CRITICAL on Wayland sessions: Chrome 110+ defaults to the
@@ -268,7 +290,8 @@ impl Browser {
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             return Err(BladeError::Other(format!(
-                                "Chrome exited during startup: {status}"
+                                "Chrome exited during startup: {status}{}",
+                                chrome_stderr_tail()
                             )));
                         }
                         Ok(None) => {}
@@ -280,9 +303,10 @@ impl Browser {
                     }
                     if Instant::now() >= deadline {
                         let _ = child.kill();
-                        return Err(BladeError::Other(
-                            "Chrome debug endpoint not responding after 20s".into(),
-                        ));
+                        return Err(BladeError::Other(format!(
+                            "Chrome debug endpoint not responding after 20s{}",
+                            chrome_stderr_tail()
+                        )));
                     }
                     // Adaptive poll: Chrome answers well under a second in the
                     // normal case, so a flat 300ms interval quantized the
@@ -347,7 +371,17 @@ impl Browser {
         set_launched_headless(headless);
         set_launched_pipe(false);
 
-        let proxy = std::env::var("BLADE_PROXY").ok().filter(|p| !p.is_empty());
+        // Real-lane proxy: validated the same way as the managed lane (a
+        // malformed value fails loudly, redacted); the real lane does not
+        // log the endpoint, so nothing here can leak credentials.
+        let proxy = match crate::browser::proxy::env_blade_proxy() {
+            Ok(p) => p,
+            Err(reason) => {
+                return Err(BladeError::Other(format!(
+                    "invalid BLADE_PROXY value: {reason} (value redacted)"
+                )));
+            }
+        };
         let extra: Vec<String> = std::env::var("BLADE_CHROME_FLAGS")
             .map(|s| s.split_whitespace().map(String::from).collect())
             .unwrap_or_default();
@@ -377,7 +411,7 @@ impl Browser {
                 port,
                 user_data_dir: &user_data_dir,
                 profile_directory,
-                proxy: proxy.as_deref(),
+                proxy: proxy.as_ref().map(|s| s.server.as_str()),
                 extra: &extra,
             });
             eprintln!(
@@ -650,4 +684,38 @@ pub(super) fn font_audit() {
         });
     }
     // macOS/Windows: system fonts are always present, no audit needed.
+}
+
+/// G11: bounded startup-stderr capture. The runner investigation could not
+/// diagnose a startup timeout because Chrome's stderr went to /dev/null;
+/// keep the LAST launch's stderr on disk (truncated per launch) and read
+/// back only a 4 KiB tail on startup failure. The file lives under the
+/// blade home's logs dir (created 0700, file 0600 on Unix).
+pub(super) fn chrome_stderr_sink() -> Option<std::fs::File> {
+    let dir = crate::platform::blade_dir().join("logs");
+    crate::platform::secure_create_dir_all(&dir).ok()?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(dir.join("chrome-last-launch.log")).ok()
+}
+
+/// Tail of the last launch's Chrome stderr ("" when nothing was captured).
+pub(super) fn chrome_stderr_tail() -> String {
+    let path = crate::platform::blade_dir()
+        .join("logs")
+        .join("chrome-last-launch.log");
+    let Ok(data) = std::fs::read(&path) else {
+        return String::new();
+    };
+    if data.is_empty() {
+        return String::new();
+    }
+    let start = data.len().saturating_sub(4096);
+    let tail = String::from_utf8_lossy(&data[start..]);
+    format!("\n--- chrome stderr (tail of last launch) ---\n{tail}")
 }

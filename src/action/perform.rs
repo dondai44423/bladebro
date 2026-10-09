@@ -98,6 +98,9 @@ pub async fn perform_with_network(
     // burst so the verdict can report what actually moved.
     let mut scroll_report: Option<ScrollReport> = None;
 
+    // G09: observable toggle state around a coordinate click (see ClickCoord).
+    let mut coord_toggle: Option<ToggleProbe> = None;
+
     // Start listening for navigation before dispatching. Eager
     // subscribe — a lazy wait_for would miss events fired synchronously
     // during dispatch (see sub_fires).
@@ -115,6 +118,13 @@ pub async fn perform_with_network(
                     })),
                 )
                 .await;
+            // G09: snapshot the toggle state under the point before/after so
+            // a click that flips a hidden control (a visible label toggling
+            // its checkbox) reads as a state change, not "no-effect".
+            coord_toggle = Some(ToggleProbe {
+                before: coord_toggle_probe(cdp, *x, *y).await,
+                after: None,
+            });
             dispatch_mouse_click(cdp, *x, *y, last_mouse).await?;
         }
         Action::Click { ref_id } => {
@@ -147,6 +157,18 @@ pub async fn perform_with_network(
             // mouse-first with Space as the last resort (it activates native
             // buttons too).
             let role = sig.split('|').nth(1).unwrap_or("");
+            // G01/G09: for toggle-like roles, snapshot the observable state
+            // before dispatch so the verdict can report "checked=false ->
+            // true" even when the DOM itself stays visually quiet.
+            let stateful = matches!(role, "checkbox" | "radio" | "switch" | "option");
+            let state_before = if stateful {
+                find_by_sig(cdp, sig, frame, "state", None)
+                    .await
+                    .ok()
+                    .and_then(|f| f.state)
+            } else {
+                None
+            };
             let strategies: &[&str] = if role == "menuitem" {
                 &["space", "js", "mouse", "enter"]
             } else if found.is_topmost == Some(true) {
@@ -241,6 +263,21 @@ pub async fn perform_with_network(
                 // Accepted dispatch is never replayed, including a no-effect verdict.
                 break;
             }
+            // G01/G09: state readback AFTER the dispatch for the toggle-like
+            // roles probed above; the verdict reports it as the effect (state
+            // changed) or as honest evidence of no change.
+            let toggle = if stateful {
+                let after = find_by_sig(cdp, sig, frame, "state", None)
+                    .await
+                    .ok()
+                    .and_then(|f| f.state);
+                Some(ToggleProbe {
+                    before: state_before,
+                    after,
+                })
+            } else {
+                None
+            };
             // Expose the resolved click target so no-effect verdicts can
             // distinguish a bad selector from a page that rejected a well-
             // aimed click (issue #15). When the target is NOT topmost, name
@@ -266,14 +303,16 @@ pub async fn perform_with_network(
                 action,
                 &delta,
                 lpm,
-                Some((via, &tried, &tgt_meta)),
-                None,
+                ClickEvidence {
+                    via: Some((via, &tried, &tgt_meta)),
+                    coord_hit: None,
+                    toggle: toggle.as_ref(),
+                },
                 None,
                 None,
             );
             if dialog_fired && !delta.navigated && delta.is_empty() && !delta.content_changed {
-                verdict =
-                    format!("outcome: dialog opened via {via} (auto-dismissed — see ambient)");
+                verdict = format!("outcome: dialog opened via {via} (handled — see ambient)");
             }
             return Ok((delta, verdict));
         }
@@ -635,15 +674,24 @@ pub async fn perform_with_network(
             text,
             timeout,
         } => {
-            // check_condition polls until the condition is met or timeout.
+            // eval_condition polls until the condition is met or timeout.
             // On timeout, error so the agent gets the current page state to
             // recover (a silent "waited" would be a lie — the condition failed).
-            let met = check_condition(cdp, condition, text, *timeout, None).await;
-            if !met {
-                return Err(BladeError::Other(format!(
-                    "wait timeout: condition '{condition}' not met within {}s",
-                    timeout.as_secs()
-                )));
+            // A deterministic evaluation failure (js syntax error / repeated
+            // throw) carries its reason instead of masquerading as a timeout.
+            match eval_condition(cdp, condition, text, *timeout, None).await? {
+                CondOutcome::Met => {}
+                CondOutcome::Timeout => {
+                    return Err(BladeError::Other(format!(
+                        "wait timeout: condition '{condition}' not met within {}s",
+                        timeout.as_secs()
+                    )));
+                }
+                CondOutcome::Error(e) => {
+                    return Err(BladeError::Other(format!(
+                        "wait condition '{condition}' failed: {e}"
+                    )));
+                }
             }
         }
         Action::Back => {
@@ -866,6 +914,9 @@ pub async fn perform_with_network(
     // element elsewhere, outside the viewport) instead of a bare fact.
     let mut coord_hit: Option<String> = None;
     if let Action::ClickCoord { x, y } = action {
+        if let Some(t) = coord_toggle.as_mut() {
+            t.after = coord_toggle_probe(cdp, *x, *y).await;
+        }
         if !delta.navigated && delta.is_empty() && !delta.content_changed {
             coord_hit = hit_probe(cdp, *x, *y).await.unwrap_or(None);
         }
@@ -874,9 +925,12 @@ pub async fn perform_with_network(
         action,
         &delta,
         lpm,
-        None,
+        ClickEvidence {
+            via: None,
+            coord_hit: coord_hit.as_deref(),
+            toggle: coord_toggle.as_ref(),
+        },
         edit_report.as_ref(),
-        coord_hit.as_deref(),
         scroll_report.as_ref(),
     );
     Ok((delta, verdict))

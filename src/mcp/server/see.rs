@@ -1,6 +1,6 @@
 //! `see` + `logs` handlers — the reading surface.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::error::{BladeError, Result};
 use crate::page::Page;
@@ -9,11 +9,53 @@ use super::artifact_hint;
 use super::extract::{handle_auto_extract, handle_template_extract};
 use super::resolve::miss_diag_note;
 
-pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
-    // Context pruning: a `see` call means the agent is re-orienting.
-    // Reset the act counter so the next `act` gets a full response.
-    page.reset_act_turn();
+/// G08: detect that the current page is a PDF document (Chrome's viewer).
+/// Three observations, so the guidance stays honest about what was seen:
+/// content type, the viewer's embed element, or a .pdf URL.
+const PDF_STATE_EXPR: &str = "(()=>{try{const ct=(document.contentType||'').toLowerCase();if(ct==='application/pdf')return 'pdf';const emb=document.querySelector('embed[type=\"application/pdf\"],embed[type*=\"pdf\" i]');if(emb)return 'pdf-embed';const u=(location.href||'').split(/[?#]/)[0].toLowerCase();if(u.endsWith('.pdf'))return 'pdf-url';return '';}catch(e){return '';}})()";
 
+/// Evaluate [`PDF_STATE_EXPR`]; best-effort (None on any hiccup).
+async fn pdf_document_state(page: &Page) -> Option<String> {
+    let res = page
+        .cdp_ref()
+        .send(
+            "Runtime.evaluate",
+            Some(json!({ "expression": PDF_STATE_EXPR, "returnByValue": true })),
+        )
+        .await
+        .ok()?;
+    let s = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// G08: the honest read contract for a PDF page. The text is not in the DOM;
+/// the supported paths are the download (an artifact the host reads with its
+/// own tools) and vision. The driver does not claim text extraction - a PDF
+/// parser is a packaging/maintenance cost that buys the host nothing over
+/// handing it the bytes.
+fn pdf_read_message(url: &str) -> String {
+    format!(
+        "this page is a PDF document: {url} is rendered by Chrome's PDF viewer and its text is NOT in the page DOM, so text reads return nothing. Supported paths: act download url=\"{url}\" saves the PDF file and returns its path for your own reader, or vision for a screenshot of the viewer. Scanned PDFs have no text layer anywhere - that is the document, not the read; a viewer load error does not affect the download path."
+    )
+}
+
+pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
+    // NOTE (4.4.0): `see` deliberately does NOT reset the act-loop counter.
+    // It used to, which kept the dominant act→see→act→see loop permanently
+    // fresh: every post-read act got the full budget and re-sent a delta the
+    // read had just delivered. A full `see` leaves the agent holding the
+    // page state, so the next act's budget-capped delta is the correct,
+    // cheap shape. Resets remain where prior context is truly invalidated:
+    // navigation and act-error recapture (both in act.rs). `state
+    // op=compress mode=off` restores always-full responses.
     let budget = args.get("budget").and_then(|b| b.as_u64()).unwrap_or(8000) as usize;
     let filter = args.get("filter").and_then(|f| f.as_str()).unwrap_or("");
     let want_content = args
@@ -72,6 +114,13 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
         }
         let md = page.markdown(budget).await?;
         if md.is_empty() {
+            // G08: a PDF page reads as empty because its text lives in the
+            // viewer plugin, not the DOM. Say exactly that and name the
+            // supported paths instead of a generic SPA suggestion.
+            if pdf_document_state(page).await.is_some() {
+                let url = page.model().url();
+                return Ok(pdf_read_message(url));
+            }
             return Ok("page has no text content (may be a SPA that hasn't rendered — try waiting, or use mode=model for interactive elements)".into());
         }
         return Ok(md);
@@ -91,7 +140,7 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // V9: template extraction — structured data in ONE call.
     if extract == "json" {
         let tpl = template.ok_or_else(|| BladeError::Other(
-            "extract=json requires 'template': {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css|css@attr\"}}}. For template-free structured extraction use extract=auto.".into()
+            "extract=json requires 'template': {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css|css@attr\"}}} (text reads are rendered - {\"sel\":\"css\",\"raw\":true} reads hidden text). For template-free structured extraction use extract=auto.".into()
         ))?;
         return handle_template_extract(page, &tpl, limit).await;
     }
@@ -345,5 +394,51 @@ pub async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
         _ => Err(BladeError::Other(format!(
             "unknown logs kind: {kind} (use 'console' or 'network')"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod pdf_read_tests {
+    use super::*;
+
+    #[test]
+    fn pdf_state_expr_detects_all_three_shapes() {
+        assert!(PDF_STATE_EXPR.contains("application/pdf"));
+        assert!(PDF_STATE_EXPR.contains(".pdf"));
+        assert!(PDF_STATE_EXPR.contains("contentType"));
+        // node --check (skipped when node is unavailable).
+        let dir = std::env::temp_dir().join("bladebro-pdf-tests");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = dir.join("pdf-state.js");
+        if std::fs::write(&path, PDF_STATE_EXPR).is_err() {
+            return;
+        }
+        let out = match std::process::Command::new("node")
+            .arg("--check")
+            .arg(&path)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return,
+        };
+        assert!(
+            out.status.success(),
+            "PDF_STATE_EXPR must parse as JS:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn pdf_read_message_names_paths_and_provenance() {
+        let m = pdf_read_message("https://shop.example/manual.pdf");
+        assert!(m.contains("https://shop.example/manual.pdf"));
+        assert!(m.contains("act download"));
+        assert!(m.contains("vision"));
+        assert!(m.contains("NOT in the page DOM"));
+        assert!(!m.contains('\u{2014}'), "no em-dash in agent-facing text");
+        // A viewer error must not invalidate the download path claim.
+        assert!(m.contains("does not affect the download path"));
     }
 }

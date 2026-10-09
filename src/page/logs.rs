@@ -67,6 +67,70 @@ impl Page {
             .unwrap_or_default()
     }
 
+    /// Arm the one-use dialog expectation (G03); returns the previous one
+    /// when it was still armed (replaced unused).
+    pub fn set_dialog_expect(&self, exp: DialogExpect) -> Option<DialogExpect> {
+        self.dialog_expect
+            .lock()
+            .ok()
+            .and_then(|mut g| g.replace(exp))
+    }
+
+    /// Disarm + return the armed expectation, if any.
+    pub fn take_dialog_expect(&self) -> Option<DialogExpect> {
+        self.dialog_expect.lock().ok().and_then(|mut g| g.take())
+    }
+
+    /// G09: one-line load-state observation for error/recovery surfaces.
+    /// Returns None when the page is settled (a quiet complete page adds
+    /// nothing); otherwise reports readyState + in-flight requests so an
+    /// agent can tell "still loading" apart from "the action did nothing".
+    /// Safe observation — never mutates the page.
+    pub async fn load_state_note(&self) -> Option<String> {
+        let res = self
+            .cdp
+            .send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": "document.readyState",
+                    "returnByValue": true,
+                })),
+            )
+            .await
+            .ok()?;
+        let rs = res
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let inflight = self.in_flight();
+        if rs == "complete" && inflight == 0 {
+            return None;
+        }
+        Some(format!(
+            "page still loading (readyState={rs}, {inflight} request(s) in flight) - recovery reads may race the load; re-read after it settles"
+        ))
+    }
+
+    /// One-shot note: an armed expectation expired without ever matching.
+    /// Drained by the MCP/CLI response path like dialogs, so an unused arm
+    /// is always reported instead of silently forgotten.
+    pub fn drain_dialog_expect_note(&self) -> Option<String> {
+        let mut g = self.dialog_expect.lock().ok()?;
+        let expired = g
+            .as_ref()
+            .is_some_and(|e| std::time::Instant::now() >= e.deadline);
+        if expired {
+            let e = g.take()?;
+            Some(format!(
+                "dialog expectation for '{}' expired unused - no matching dialog opened; default dialog handling is unchanged",
+                e.kind
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Drain ambient events (consent, block detection) for the agent.
     pub fn drain_ambient(&self) -> Vec<String> {
         self.ambient

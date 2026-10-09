@@ -414,12 +414,37 @@ impl Page {
         // confirm/prompt/beforeunload=cancel (safer — don't accidentally
         // confirm destructive actions).
         let dialogs: Arc<Mutex<Vec<DialogInfo>>> = Arc::new(Mutex::new(Vec::new()));
+        // G03: one-use dialog expectation, armed via `act dialog` and shared
+        // with the dialog task below.
+        let dialog_expect: Arc<Mutex<Option<DialogExpect>>> = Arc::new(Mutex::new(None));
         let cdp_for_dialogs = cdp.clone();
         let dq = dialogs.clone();
+        let dex = dialog_expect.clone();
         let dialog_task = tokio::spawn(async move {
             let mut rx = cdp_for_dialogs.subscribe();
+            // G03: track the main frame's last-known URL so an armed
+            // expectation can refuse dialogs on a different origin.
+            let mut last_main_url: Option<String> = None;
             loop {
                 match rx.recv().await {
+                    Ok(ev) if ev.method == "Page.frameNavigated" => {
+                        if ev
+                            .params
+                            .get("frame")
+                            .and_then(|f| f.get("parentId"))
+                            .is_none()
+                        {
+                            if let Some(url) = ev
+                                .params
+                                .get("frame")
+                                .and_then(|f| f.get("url"))
+                                .and_then(|u| u.as_str())
+                            {
+                                last_main_url = Some(url.to_string());
+                            }
+                        }
+                        continue;
+                    }
                     Ok(ev) if ev.method == "Page.javascriptDialogOpening" => {
                         let kind = ev
                             .params
@@ -442,12 +467,55 @@ impl Page {
                         // beforeunload=accept: the agent ISSUED the navigation —
                         // cancelling it would silently block every nav away
                         // from a dirty form.
-                        let accepted = kind == "alert" || kind == "beforeunload";
+                        let mut accepted = kind == "alert" || kind == "beforeunload";
+                        let mut prompt_to_send: Option<String> = None;
+                        let mut via = "default".to_string();
+                        let mut note: Option<String> = None;
+                        // G03: consult the armed one-use expectation. It is
+                        // consumed ONLY on a real match; a mismatch keeps it
+                        // armed (the right dialog may still come) and the
+                        // safe default applies to this one.
+                        if let Ok(mut slot) = dex.lock() {
+                            if let Some(exp) = slot.as_mut() {
+                                if std::time::Instant::now() >= exp.deadline {
+                                    note = Some(format!(
+                                        "armed '{}' expectation had expired; default handling applied",
+                                        exp.kind
+                                    ));
+                                    *slot = None;
+                                } else {
+                                    match super::match_dialog_expect(
+                                        exp,
+                                        &kind,
+                                        &message,
+                                        last_main_url.as_deref(),
+                                    ) {
+                                        Ok((acc, pt)) => {
+                                            accepted = acc;
+                                            prompt_to_send = pt;
+                                            via = "expectation".to_string();
+                                            note = Some(format!(
+                                                "answered via the armed '{}' expectation (one use consumed)",
+                                                exp.kind
+                                            ));
+                                            *slot = None;
+                                        }
+                                        Err(reason) => {
+                                            note = Some(format!(
+                                                "armed '{}' expectation did not match ({reason}); default handling applied",
+                                                exp.kind
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let mut params = serde_json::json!({ "accept": accepted });
+                        if let Some(pt) = &prompt_to_send {
+                            params["promptText"] = serde_json::json!(pt);
+                        }
                         let _ = cdp_for_dialogs
-                            .send(
-                                "Page.handleJavaScriptDialog",
-                                Some(serde_json::json!({ "accept": accepted })),
-                            )
+                            .send("Page.handleJavaScriptDialog", Some(params))
                             .await;
                         if let Ok(mut q) = dq.lock() {
                             q.push(DialogInfo {
@@ -455,6 +523,8 @@ impl Page {
                                 message,
                                 default_prompt,
                                 accepted,
+                                via,
+                                note,
                             });
                         }
                     }
@@ -854,6 +924,7 @@ impl Page {
             browser_client,
             lpm,
             dialogs,
+            dialog_expect,
             dialog_task: Some(dialog_task),
             in_flight,
             route,

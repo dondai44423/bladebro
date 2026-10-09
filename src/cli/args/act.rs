@@ -44,6 +44,7 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
         "open-tab",
         "close-tab",
         "switch-tab",
+        "dialog",
     ];
     let action = args[0].as_str();
     if !ACTIONS.contains(&action) {
@@ -63,13 +64,29 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             match flag {
                 "ref" | "label" | "text" | "role" | "key" | "url" | "option" | "js" | "path"
                 | "condition" | "press" | "submit" | "block" | "name" | "expect" | "steps"
-                | "fields" | "selector" => {
+                | "fields" | "selector" | "message" => {
                     let v = take_value(args, &mut i, flag)?;
                     j[flag] = json!(v);
                 }
                 "target-id" => {
                     let v = take_value(args, &mut i, flag)?;
                     j["target_id"] = json!(v);
+                }
+                "prompt-text" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    j["prompt_text"] = json!(v);
+                }
+                "accept" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    match v.as_str() {
+                        "true" | "1" | "yes" => j["accept"] = json!(true),
+                        "false" | "0" | "no" => j["accept"] = json!(false),
+                        _ => {
+                            return Err(BladeError::Usage(format!(
+                                "--accept takes true or false, got '{v}'"
+                            )))
+                        }
+                    }
                 }
                 "nth" | "timeout" | "max" => {
                     let v: u64 = take_num(args, &mut i, flag)?;
@@ -329,7 +346,18 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             if j.get("text").is_none() && pos.len() > 1 {
                 j["text"] = json!(pos[1..].join(" "));
             }
-            if cond != "settle" && j.get("text").is_none() {
+            // G02: condition=js carries its expression in js= (preferred) or
+            // the legacy text= alias (the `act wait js "expr"` positional
+            // form fills text=). The shared resolver on the dispatch side
+            // validates conflicts and empty expressions; here we only reject
+            // the clearly-missing case early.
+            if cond == "js" {
+                if j.get("js").is_none() && j.get("text").is_none() {
+                    return Err(BladeError::Usage(
+                        "wait js needs an expression — `act wait js \"window.ready\"` (or --js \"…\")".into(),
+                    ));
+                }
+            } else if cond != "settle" && j.get("text").is_none() {
                 return Err(BladeError::Usage(format!(
                     "wait {cond} needs a match value — `act wait {cond} --text \"…\"`"
                 )));

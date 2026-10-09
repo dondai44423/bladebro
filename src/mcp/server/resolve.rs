@@ -339,6 +339,25 @@ pub(super) async fn resolve_selector_target(
     let visible: Vec<&crate::action::TextMatch> = matches.iter().filter(|m| !m.hidden).collect();
     if visible.is_empty() {
         if !matches.is_empty() {
+            // G01: a single hidden checkbox/radio with ONE visible label
+            // proxy is genuinely addressable - the click lands on the label
+            // and toggles the control natively. Only this narrow shape
+            // reroutes; every other hidden match keeps the honest error.
+            if matches.len() == 1 {
+                let m = &matches[0];
+                if m.role == "checkbox" || m.role == "radio" {
+                    let route =
+                        crate::action::find_label_route(page.cdp_ref(), &m.sig, &m.frame).await?;
+                    if let Some(route) = route {
+                        return Ok(page.model_mut().adopt(
+                            &route.sig,
+                            &route.role,
+                            &route.name,
+                            &m.frame,
+                        ));
+                    }
+                }
+            }
             let ex: Vec<String> = matches
                 .iter()
                 .take(3)

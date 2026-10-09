@@ -24,4 +24,5 @@ const sr=n.shadowRoot;if(sr){const sc=sr.childNodes;for(let i=0;i<sc.length;i++)
 };
 walk(d.body);
 const t=parts.join(' ').replace(/\s+/g,' ').trim();
-return t.slice(0,__BUDGET__);})()
+if(t.length>__BUDGET__)return t.slice(0,__BUDGET__)+'\n[truncated: '+t.length+' chars total, showed '+__BUDGET__+' - raise budget= for more]';
+return t;})()

@@ -30,6 +30,7 @@ const ACT_ACTIONS: &[&str] = &[
     "navigate",
     "read",
     "wait",
+    "dialog",
     "back",
     "forward",
     "reload",
@@ -67,11 +68,11 @@ pub fn all_tools() -> Vec<ToolDef> {
             name: "act",
             description: "Do something on the page. Returns verdict + delta. navigate returns refs + content preview — usually enough to act without a separate see call.\n\
 ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > selector=\"#overflow-trigger\" (CSS; pierces open shadow roots - use when a control has no ref or label; works on click/hover/type/select/clear/read/upload/eval) > x,y. Add role= or nth= if ambiguous.\n\
-ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload.\n\
+ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload, dialog (arm a one-use response for the next matching confirm/prompt/alert/beforeunload).\n\
 url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call.\n\
 fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit dispatches once; an unobserved effect is never replayed.\n\
 EDITORS: type replaces the field (clear verified) and works on rich contenteditable editors - the verdict names where the text landed (e.g. the live editor) and catches late draft hydration; press takes key chords (Control+a).\n\n\\
-WAIT: condition=settle (default) | element | text | title | url | js — text= without a condition means \"wait for this text\" (a timeout inside run errors with page state; wait+else runs the else branch instead).\n\\
+WAIT: condition=settle (default) | element | text | title | url | js — for js, pass the expression in js= (text= also works as the legacy alias, the CLI's form). text= without a condition means \"wait for this text\". A timeout inside run errors with page state; wait+else runs the else branch instead. Timeout is integer seconds, 0-3600.\n\\
 batch: same action set as act (fill/eval/pdf/download/collect/save/load included) plus {\"action\":\"see\", mode|extract|find, budget} steps — their read lands in a --- read --- section. Use text/label/selector addressing in steps (not ref) — refs go stale after navigation; auto-settles after navigation. optional:true on a step continues past its failure.\n\
 Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
             input_schema: json!({
@@ -95,10 +96,14 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "condition": {
                         "type": "string",
                         "enum": ["element", "title", "settle", "url", "text", "js"],
-                        "description": "Wait: element (visible with text), title, url, text (page contains), settle (DOM idle), js (truthy expr)."
+                        "description": "Wait: element (visible with text), title, url, text (page contains), settle (DOM idle), js (truthy expr — pass it in js=; text= is the legacy alias). Condition=js with no expression fails immediately."
                     },
-                    "timeout": {"type": "integer", "description": "Seconds. Default 10 (wait), 30 (download/collect)."},
+                    "timeout": {"type": "integer", "description": "Seconds (integer, 0-3600). Default 10 (wait), 30 (download/collect)."},
                     "js": {"type": "string", "description": "JavaScript. If ref given, element is `el`."},
+                    "expect": {"type": "string", "description": "act dialog: alert|confirm|prompt|beforeunload|any, or 'clear'. Arms a bounded ONE-USE answer for the next matching dialog - arm it BEFORE the action that triggers it."},
+                    "accept": {"type": "boolean", "description": "act dialog: accept (default true) or cancel the matching dialog."},
+                    "prompt_text": {"type": "string", "description": "act dialog: text typed into a matching prompt() when accepting."},
+                    "message": {"type": "string", "description": "act dialog: only match dialogs whose text contains this (case-insensitive)."},
                     "option": {"type": "string", "description": "Select: option text or value."},
                     "slim": {"type": "boolean", "description": "Skip delta, return verdict only."},
                     "fields": {
@@ -163,7 +168,7 @@ Truncation: model output over budget ends with '…(N more: X link, Y button)' �
                         "enum": ["links", "forms", "json", "auto"],
                         "description": "auto (template-free, site-aware; Reddit post pages → the complete comment tree), json (needs template), links, forms."
                     },
-                    "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}."},
+                    "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}. Text reads are RENDERED - a hidden element is omitted (the item lists it in _omitted); read one explicitly with {\"sel\":\"css\",\"raw\":true}. Lookups span light DOM, open shadow roots and same-origin frames; skipped frames are reported."},
                     "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set). For artifact reads: max chars (default 20000)."},
                     "logs": {"type": "string", "enum": ["console", "network"], "description": "Console (JS errors) or network (requests)."},
                     "scope": {"type": "string", "description": "Ref id of element to view subtree text of; with mode=content, returns just that element's subtree as markdown (budget honored)."},
@@ -215,7 +220,7 @@ Steps use the same fields as act (every act action works — fill, eval, pdf, do
                             "required": ["action"],
                             "properties": {
                                 "action": {"type": "string", "description": "Action name (any act action), 'if', 'while', 'see', or 'state'."},
-                                "condition": {"type": "string", "description": "if/while: element, title, url, text, settle, js."},
+                                "condition": {"type": "string", "description": "if/while: element, title, url, text, settle, js (expression in js=; text= legacy alias)."},
                                 "then": {"type": "array", "description": "Sub-steps if condition met."},
                                 "else": {"type": "array", "description": "Sub-steps if condition times out."},
                                 "steps": {"type": "array", "description": "Body steps for while loop."},

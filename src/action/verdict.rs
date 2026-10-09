@@ -2,7 +2,7 @@
 //!
 //! `compute_verdict` classifies what an action actually did (navigation /
 //! DOM nodes / state-only / no observable change) from before/after probes;
-//! `check_condition` backs `wait`/`if`/`while`; hit probes and the absence
+//! `eval_condition` backs `wait`/`if`/`while`; hit probes and the absence
 //! confirm exist so a no-op can never be sold as success.
 
 use serde_json::json;
@@ -43,6 +43,40 @@ pub async fn hit_probe(cdp: &CdpSession, x: f64, y: f64) -> Result<Option<String
         .and_then(|r| r.get("value"))
         .and_then(|v| v.as_str())
         .map(String::from))
+}
+
+/// G09 coordinate-click toggle probe: the observable toggle state of the
+/// element under (x, y) - descending open shadow roots, then walking composed
+/// ancestors (a click on a label's inner span still flips the label's own
+/// control). Null when nothing toggle-like sits under the point.
+pub(super) fn coord_toggle_expr(x: f64, y: f64) -> String {
+    "((x,y)=>{const d=document;if(!d)return null;"
+        .to_string()
+        + &JS_PREAMBLE
+        + "let el=null;try{el=d.elementFromPoint(x,y);}catch(e){}if(!el)return null;"
+        + "while(el&&el.shadowRoot){let inner=null;try{inner=el.shadowRoot.elementFromPoint(x,y);}catch(e){}if(!inner||inner===el)break;el=inner;}"
+        + "for(let i=0;i<40&&el;i++){const st=stateOf(el);if(st)return st;el=el.parentElement||(el.getRootNode&&el.getRootNode().host)||null;}"
+        + "return null;})("
+        + &format!("{x},{y})")
+}
+
+/// Run [`coord_toggle_expr`]; best-effort (None on any hiccup or when the
+/// point carries no toggle state).
+pub(super) async fn coord_toggle_probe(cdp: &CdpSession, x: f64, y: f64) -> Option<String> {
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": coord_toggle_expr(x, y),
+                "returnByValue": true,
+            })),
+        )
+        .await
+        .ok()?;
+    res.get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 /// Summarize a delta's DOM evidence. Node changes read as `+2 \u{2212}1`
@@ -101,32 +135,82 @@ pub(super) fn scroll_probe_expr(cx: f64, cy: f64) -> String {
         .replace("__Y__", &format!("{cy}"))
 }
 
+/// G01/G09: observable toggle state (checked / aria-selected / aria-checked)
+/// sampled around a click dispatch. `changed` requires both sides; a
+/// one-sided probe still feeds the "targeted state unchanged (…)" note.
+#[derive(Debug, Clone, Default)]
+pub struct ToggleProbe {
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+impl ToggleProbe {
+    pub(super) fn changed(&self) -> bool {
+        match (&self.before, &self.after) {
+            (Some(b), Some(a)) => a != b,
+            _ => false,
+        }
+    }
+}
+
+/// Click evidence threaded into the verdict: the activation lane + attempts +
+/// resolved target (ref clicks), the element under the point (coord clicks),
+/// and the observable toggle state around the dispatch (G01/G09).
+#[derive(Default)]
+pub struct ClickEvidence<'a> {
+    pub via: Option<(&'a str, &'a [&'a str], &'a str)>,
+    pub coord_hit: Option<&'a str>,
+    pub toggle: Option<&'a ToggleProbe>,
+}
+
 /// Compute a one-line outcome verdict from the action + delta + click info.
 /// This is the M1 verdict — every act tells the agent what happened.
 pub(super) fn compute_verdict(
     action: &Action,
     delta: &PageDelta,
     lpm: &LivePageModel,
-    click_via: Option<(&str, &[&str], &str)>,
+    click: ClickEvidence<'_>,
     edit: Option<&EditReport>,
-    coord_hit: Option<&str>,
     scroll: Option<&ScrollReport>,
 ) -> String {
+    let (click_via, coord_hit, toggle) = (click.via, click.coord_hit, click.toggle);
     match action {
         Action::ClickCoord { x, y } => {
             if delta.navigated {
                 format!("outcome: navigated \u{2192} {} via coord-click({x:.0},{y:.0})", shorten_url(&delta.url))
             } else if let Some(eff) = dom_effect_summary(delta) {
-                format!("outcome: dom-changed ({eff}) via coord-click({x:.0},{y:.0})")
+                let note = match toggle.filter(|t| t.changed()) {
+                    Some(t) => format!(
+                        " - control state {} -> {}",
+                        t.before.as_deref().unwrap_or("?"),
+                        t.after.as_deref().unwrap_or("?")
+                    ),
+                    None => String::new(),
+                };
+                format!("outcome: dom-changed ({eff}) via coord-click({x:.0},{y:.0}){note}")
             } else if delta.content_changed {
                 format!("outcome: dom-changed (content-only) via coord-click({x:.0},{y:.0})")
+            } else if toggle.map(|t| t.changed()).unwrap_or(false) {
+                // G09: the click flipped a control under the point (a visible
+                // label toggling its hidden checkbox) with no visible DOM
+                // change - the measured state IS the effect.
+                let t = toggle.unwrap();
+                format!(
+                    "outcome: state changed ({} -> {}) via coord-click({x:.0},{y:.0}) - no visible DOM change",
+                    t.before.as_deref().unwrap_or("?"),
+                    t.after.as_deref().unwrap_or("?")
+                )
             } else {
+                let state_note = toggle
+                    .and_then(|t| t.after.as_deref())
+                    .map(|s| format!("; targeted state unchanged ({s})"))
+                    .unwrap_or_default();
                 match coord_hit {
                     Some(h) => format!(
-                        "outcome: no-effect (coord-click at {x:.0},{y:.0} - page did not respond; topmost there: {h})"
+                        "outcome: no-effect (coord-click at {x:.0},{y:.0} - page did not respond{state_note}; topmost there: {h})"
                     ),
                     None => format!(
-                        "outcome: no-effect (coord-click at {x:.0},{y:.0} - page did not respond)"
+                        "outcome: no-effect (coord-click at {x:.0},{y:.0} - page did not respond{state_note})"
                     ),
                 }
             }
@@ -136,18 +220,36 @@ pub(super) fn compute_verdict(
             if delta.navigated {
                 format!("outcome: navigated \u{2192} {} via {}", shorten_url(&delta.url), via)
             } else if let Some(eff) = dom_effect_summary(delta) {
-                format!("outcome: dom-changed ({eff}) via {via}")
+                let note = match toggle.filter(|t| t.changed()) {
+                    Some(t) => format!(
+                        " - control state {} -> {}",
+                        t.before.as_deref().unwrap_or("?"),
+                        t.after.as_deref().unwrap_or("?")
+                    ),
+                    None => String::new(),
+                };
+                format!("outcome: dom-changed ({eff}) via {via}{note}")
             } else if delta.content_changed {
                 // Mutation watcher saw DOM effects on non-actionable
                 // content - text swaps, counters, live regions.
                 format!("outcome: dom-changed (content-only) via {via}")
+            } else if toggle.map(|t| t.changed()).unwrap_or(false) {
+                // G09: the page showed no visible change, but the target's
+                // own state flipped (a hidden checkbox toggled through its
+                // label, a styled radio selected). That IS the effect.
+                let t = toggle.unwrap();
+                format!(
+                    "outcome: state changed ({} -> {}) via {via} - no visible DOM change",
+                    t.before.as_deref().unwrap_or("?"),
+                    t.after.as_deref().unwrap_or("?")
+                )
             } else if tgt_meta.is_empty() {
-                no_effect_verdict(tried, "")
+                no_effect_verdict(tried, "", toggle.and_then(|t| t.after.as_deref()))
             } else {
                 // The resolved click target is named so consumers can tell a
                 // wrong-target / avenue problem from a page that rejected a
                 // well-aimed click.
-                no_effect_verdict(tried, tgt_meta)
+                no_effect_verdict(tried, tgt_meta, toggle.and_then(|t| t.after.as_deref()))
             }
         }
         Action::Type { ref_id, text } => {
@@ -333,25 +435,66 @@ pub(crate) fn text_condition_expr(needle: &str) -> String {
         + "const parts=[];walkReadTree(d.body,n=>{if(n.nodeType===3)parts.push(n.textContent);});return parts.join(' ').replace(/\\s+/g,' ').toLowerCase().includes(nd.replace(/\\s+/g,' '));})()"
 }
 
-/// Check if a condition is met, optionally waiting up to `timeout`.
-/// Returns `true` if the condition was met, `false` if timed out.
-///
-/// This is the shared condition evaluator used by both the `Wait` action
-/// (which ignores the return value — it just blocks) and the `if` step in
-/// `run` (which uses the return value to choose a branch).
+/// Outcome of an [`eval_condition`] run (G02).
+#[derive(Debug)]
+pub enum CondOutcome {
+    /// The condition was met within the timeout.
+    Met,
+    /// The timeout elapsed without the condition being met.
+    Timeout,
+    /// The condition cannot be evaluated deterministically: a js expression
+    /// with a syntax error, or one that threw on every attempt. The message
+    /// carries the underlying error — callers surface it instead of letting
+    /// it masquerade as a plain timeout.
+    Error(String),
+}
+
+/// First line + syntax classification of a Runtime.evaluate exception.
+fn js_exception(details: &serde_json::Value) -> Option<(bool, String)> {
+    let class = details
+        .get("exception")
+        .and_then(|e| e.get("className"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    let desc = details
+        .get("exception")
+        .and_then(|e| e.get("description"))
+        .and_then(|d| d.as_str())
+        .or_else(|| details.get("text").and_then(|t| t.as_str()))
+        .unwrap_or("unknown js error");
+    let first = desc.lines().next().unwrap_or(desc).to_string();
+    Some((
+        class == "SyntaxError" || first.starts_with("SyntaxError"),
+        first,
+    ))
+}
+
+/// The one condition evaluator behind `wait`, `if`, `while` and `wait+else`
+/// (G02). Polls until the condition is met or `timeout` elapses.
 ///
 /// Conditions:
 /// - `"title"`: page title contains `text` (case-insensitive).
 /// - `"element"`: a visible actionable element whose role or name contains
-///   `text` (case-insensitive) exists in the DOM.
-/// - `"settle"` (or unknown): wait for DOM to settle, always returns `true`.
-pub async fn check_condition(
+///   `text` exists in the DOM.
+/// - `"url"`: current URL contains `text` (case-insensitive).
+/// - `"text"`: rendered page text contains `text` (case-insensitive).
+/// - `"js"`: `text` evaluated as an expression is truthy. A SYNTAX error can
+///   never become true and surfaces immediately ([`CondOutcome::Error`]); a
+///   runtime throw before hydration is polled through — if the wait ends
+///   with throws and no success, the last error is reported in the failure.
+/// - `"settle"` / `"network"`: wait for DOM/network quiet; always met.
+/// - anything else: not met (the agent sees an honest timeout, never a
+///   false positive).
+///
+/// `Err` carries transport failures; `Closed` propagates so the MCP
+/// self-heal can fire.
+pub async fn eval_condition(
     cdp: &CdpSession,
     condition: &str,
     text: &str,
     timeout: Duration,
     absence_probe: Option<&std::sync::atomic::AtomicUsize>,
-) -> bool {
+) -> Result<CondOutcome> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut absent_since: Option<std::time::Instant> = None;
     match condition {
@@ -368,7 +511,8 @@ pub async fn check_condition(
                     )
                     .await;
                 if matches!(res, Err(BladeError::Closed)) {
-                    return false; // browser died — bail instead of spinning the full timeout
+                    // browser died — bail instead of spinning the full timeout
+                    return Err(BladeError::Closed);
                 }
                 let title = res
                     .ok()
@@ -380,15 +524,15 @@ pub async fn check_condition(
                     })
                     .unwrap_or_default();
                 if title.to_lowercase().contains(&needle) {
-                    return true;
+                    return Ok(CondOutcome::Met);
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    return false;
+                    return Ok(CondOutcome::Timeout);
                 }
                 // v3.10: confirmed-absence fast path — `if`/`while` pass the
                 // in-flight counter as the probe; `wait` passes None.
                 if absence_confirmed(&mut absent_since, absence_probe) {
-                    return false;
+                    return Ok(CondOutcome::Timeout);
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
             }
@@ -406,7 +550,7 @@ pub async fn check_condition(
                     )
                     .await;
                 if matches!(res, Err(BladeError::Closed)) {
-                    return false;
+                    return Err(BladeError::Closed);
                 }
                 let found = res
                     .ok()
@@ -417,15 +561,15 @@ pub async fn check_condition(
                     })
                     .unwrap_or(false);
                 if found {
-                    return true;
+                    return Ok(CondOutcome::Met);
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    return false;
+                    return Ok(CondOutcome::Timeout);
                 }
                 // v3.10: confirmed-absence fast path — `if`/`while` pass the
                 // in-flight counter as the probe; `wait` passes None.
                 if absence_confirmed(&mut absent_since, absence_probe) {
-                    return false;
+                    return Ok(CondOutcome::Timeout);
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
             }
@@ -443,7 +587,7 @@ pub async fn check_condition(
                     )
                     .await;
                 if matches!(res, Err(BladeError::Closed)) {
-                    return false;
+                    return Err(BladeError::Closed);
                 }
                 let url = res
                     .ok()
@@ -455,15 +599,15 @@ pub async fn check_condition(
                     })
                     .unwrap_or_default();
                 if url.to_lowercase().contains(&needle) {
-                    return true;
+                    return Ok(CondOutcome::Met);
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    return false;
+                    return Ok(CondOutcome::Timeout);
                 }
                 // v3.10: confirmed-absence fast path — `if`/`while` pass the
                 // in-flight counter as the probe; `wait` passes None.
                 if absence_confirmed(&mut absent_since, absence_probe) {
-                    return false;
+                    return Ok(CondOutcome::Timeout);
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
             }
@@ -481,7 +625,7 @@ pub async fn check_condition(
                     )
                     .await;
                 if matches!(res, Err(BladeError::Closed)) {
-                    return false;
+                    return Err(BladeError::Closed);
                 }
                 let found = res
                     .ok()
@@ -492,21 +636,24 @@ pub async fn check_condition(
                     })
                     .unwrap_or(false);
                 if found {
-                    return true;
+                    return Ok(CondOutcome::Met);
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    return false;
+                    return Ok(CondOutcome::Timeout);
                 }
                 // v3.10: confirmed-absence fast path — `if`/`while` pass the
                 // in-flight counter as the probe; `wait` passes None.
                 if absence_confirmed(&mut absent_since, absence_probe) {
-                    return false;
+                    return Ok(CondOutcome::Timeout);
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
         "js" => {
-            // Evaluate the user's JS expression and check truthiness.
+            // A js wait ends one of four ways: truthy (met), a syntax error
+            // (deterministic — reported immediately), throws + deadline
+            // (reported WITH the last throw), or plain falsy + deadline.
+            let mut last_throw: Option<String> = None;
             loop {
                 let res = cdp
                     .send(
@@ -519,46 +666,76 @@ pub async fn check_condition(
                     )
                     .await;
                 if matches!(res, Err(BladeError::Closed)) {
-                    return false;
+                    return Err(BladeError::Closed);
                 }
-                let truthy = res
-                    .ok()
-                    .and_then(|r| {
-                        r.get("result")
-                            .and_then(|r| r.get("value"))
-                            .map(|v| match v {
-                                serde_json::Value::Bool(b) => *b,
-                                serde_json::Value::Null => false,
-                                serde_json::Value::Number(n) => {
-                                    n.as_f64().map(|f| f != 0.0).unwrap_or(false)
-                                }
-                                serde_json::Value::String(s) => !s.is_empty(),
-                                _ => true,
+                let resp = res.ok();
+                match resp
+                    .as_ref()
+                    .and_then(|r| r.get("exceptionDetails"))
+                    .and_then(js_exception)
+                {
+                    Some((true, desc)) => {
+                        // A syntax error can never become true — failing fast
+                        // with the real reason beats a timeout that teaches
+                        // nothing.
+                        return Ok(CondOutcome::Error(format!(
+                            "js expression is not valid JavaScript ({})",
+                            clip(&desc, 160)
+                        )));
+                    }
+                    Some((false, desc)) => last_throw = Some(desc),
+                    None => {
+                        let truthy = resp
+                            .and_then(|r| {
+                                r.get("result")
+                                    .and_then(|r| r.get("value"))
+                                    .map(|v| match v {
+                                        serde_json::Value::Bool(b) => *b,
+                                        serde_json::Value::Null => false,
+                                        serde_json::Value::Number(n) => {
+                                            n.as_f64().map(|f| f != 0.0).unwrap_or(false)
+                                        }
+                                        serde_json::Value::String(s) => !s.is_empty(),
+                                        _ => true,
+                                    })
                             })
-                    })
-                    .unwrap_or(false);
-                if truthy {
-                    return true;
+                            .unwrap_or(false);
+                        if truthy {
+                            return Ok(CondOutcome::Met);
+                        }
+                    }
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    return false;
+                    return Ok(match last_throw {
+                        Some(t) => CondOutcome::Error(format!(
+                            "js expression never became truthy and threw - last error: {}",
+                            clip(&t, 160)
+                        )),
+                        None => CondOutcome::Timeout,
+                    });
                 }
                 // v3.10: confirmed-absence fast path — `if`/`while` pass the
                 // in-flight counter as the probe; `wait` passes None.
                 if absence_confirmed(&mut absent_since, absence_probe) {
-                    return false;
+                    return Ok(match last_throw {
+                        Some(t) => CondOutcome::Error(format!(
+                            "js expression never became truthy and threw - last error: {}",
+                            clip(&t, 160)
+                        )),
+                        None => CondOutcome::Timeout,
+                    });
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
         "settle" | "network" => {
             let _ = wait_for_settle(cdp, timeout).await;
-            true
+            Ok(CondOutcome::Met)
         }
         _ => {
-            // Unknown condition name — return false so the agent sees
-            // the condition wasn't met instead of a false positive.
-            false
+            // Unknown condition name — not met, so the agent sees an honest
+            // timeout instead of a false positive.
+            Ok(CondOutcome::Timeout)
         }
     }
 }
@@ -578,18 +755,27 @@ pub(super) const LEAF_TARGET_JS: &str = concat!(
 
 /// Build the verdict string for a no-effect click that names the resolved
 /// click target, so consumers can tell a wrong-target/avenue problem from a
-/// page that rejected a well-aimed click. (CL3, #15.) Says what was tried
-/// and that dispatch DID happen - a plausible-looking success string on a
-/// silent no-op was the original sin here.
-pub(super) fn no_effect_verdict(tried: &[&str], target_meta: &str) -> String {
+/// page that rejected a well-aimed click. (CL3, #15; G09 rewording.)
+/// Says what was tried, that dispatch DID happen, and - when the target
+/// carries observable toggle state - whether that state actually moved;
+/// "no visible DOM change" is scoped to what was measurable instead of the
+/// old absolute "nothing happened".
+pub(super) fn no_effect_verdict(
+    tried: &[&str],
+    target_meta: &str,
+    state_after: Option<&str>,
+) -> String {
+    let state_note = state_after
+        .map(|s| format!("; targeted state unchanged ({s})"))
+        .unwrap_or_default();
     if target_meta.is_empty() {
         format!(
-            "outcome: no-effect (click dispatched via {} - no navigation, no observable DOM or state change; the element may be disabled, hidden, or hover-gated)",
+            "outcome: no-effect (click dispatched via {}{state_note} - no navigation, no visible DOM change; the element may be disabled, occluded, or hover-gated)",
             tried.join(", ")
         )
     } else {
         format!(
-            "outcome: no-effect (click dispatched via {} on {} - no navigation, no observable DOM or state change)",
+            "outcome: no-effect (click dispatched via {} on {}{state_note} - no navigation, no visible DOM change)",
             tried.join(", "),
             target_meta
         )

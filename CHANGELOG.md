@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Dialog expectations: arm a one-use `act dialog` (type, optional message match, prompt answer, expiry) before the action that triggers a confirm or prompt. Mismatches keep the safe default cancel, unused expectations are reported, and stacked dialogs stay predictable.
+- PDF pages read as an explicit explanation with the supported paths: `act download` hands over the real bytes for your own reader, or vision for the viewer, instead of a silent empty read.
+- Support matrix (`SUPPORT-MATRIX.md`): verified platforms, engines and instruments, with explicit not-verified gaps.
+
+### Fixed
+- Options (`role=option`) and hidden checkboxes/radios reachable through their visible labels are captured, addressable by selector and text, routed to the visible label for trusted clicks, and report `checked`/`aria-selected` state readbacks; ambiguous labels refuse clearly. Selecting never submits a form.
+- `act wait condition=js` takes the expression from `js=` (the `text=` field stays as the documented alias), rejects missing or conflicting expressions, returns JavaScript syntax errors immediately and surfaces runtime exceptions at the deadline; timeouts are integers 0 to 3600 seconds. Same contract across act, batch, run and the CLI.
+- Act responses keep their context-pruning tier across `see` reads, so act/see loops stop re-sending full-budget page state; content reads state their truncation explicitly (`truncated: N chars total, showed M`).
+- Template extraction: rendered text is the default with `raw=true` opt-in, `_omitted` accounts for fields skipped by policy, missing is distinguishable from empty, shadow roots and same-origin iframe rows are included, and `__blade_meta` carries provenance.
+- Product extraction binds price, seller, availability and specs to the same selected offer/variant, and reports uncertainty instead of guessing when an offer cannot be bound.
+- GL health reports main-thread and worker evidence separately, detects loss and recovery, and never claims a cause it did not verify.
+- Proxy values are validated before launch and credentials are redacted from every log path; malformed values fail with a safe message that never echoes the input.
+- Update checksum fetches retry transient transport failures with clearer diagnostics, and browser startup captures a bounded stderr tail so launch failures identify the actual cause before any fallback.
+- No-effect verdicts include measured control state (targeted state unchanged, or the state transition), with the absence of navigation and DOM change phrased honestly.
+
 ## [4.3.0] - 2026-10-09
 
 ### Added

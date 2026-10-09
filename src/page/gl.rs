@@ -1,9 +1,13 @@
 //! Browser GL health revalidation for the long-lived lanes: the launch-time
-//! GL verdict can go stale (a GPU-process crash makes Chrome restart the GPU
-//! with GL disabled — every context then returns null). Tool calls re-check
-//! GL liveness on a bounded cadence and demote the recorded state; the
-//! one-shot advisory (browser::alerts) surfaces the loss to the agent on the
-//! same response instead of the lane serving a silently broken GL profile.
+//! GL verdict can go stale in BOTH directions — a GPU-process restart makes
+//! Chrome serve null contexts (loss), and contexts can come back (recovery).
+//! Tool calls re-check GL liveness on a bounded cadence and update the
+//! recorded state; the one-shot advisory (browser::alerts) surfaces
+//! confirmed changes to the agent on the same response. Wording reports
+//! what was OBSERVED (main-thread null; worker evidence when it differs) —
+//! the cause (GPU crash, driver reset, context limit) is explicitly
+//! unconfirmed; the driver never restarts a session or fabricates GL on
+//! its own to improve a detector score.
 
 use super::*;
 use std::sync::Mutex;
@@ -16,18 +20,20 @@ const GL_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 impl Page {
     /// Cheap periodic GL liveness check (agent lane, at most once per
-    /// minute). No-op unless the recorded verdict claims GL exists.
+    /// minute). Runs while the recorded verdict claims GL (loss detection)
+    /// AND while it reads Missing (recovery detection — G04: the Missing
+    /// state used to be a dead end that could never come back; a GPU that
+    /// returns must be picked up so the mask/state stop lying in either
+    /// direction).
     pub async fn gl_health_refresh(&self) {
-        use crate::browser::{gpu_state, probe_gl_live, set_gpu_state, GlLive, GpuState};
+        use crate::browser::{
+            gpu_state, probe_gl_live, reconcile_gl, set_gpu_state, GlLive, GlReconcile, GpuState,
+            WorkerEvidence,
+        };
         if crate::realbrowser::real_lane() {
             return;
         }
-        if !matches!(
-            gpu_state(),
-            Some(GpuState::Software(_)) | Some(GpuState::Hardware(_))
-        ) {
-            return;
-        }
+        let before = gpu_state();
         {
             let Ok(mut last) = GL_RECHECK.lock() else {
                 return;
@@ -42,25 +48,43 @@ impl Page {
         }
         match probe_gl_live(&self.cdp).await {
             GlLive::Live(renderer) => {
-                if let crate::browser::GlReconcile::Live {
+                if let GlReconcile::Live {
                     state: st, changed, ..
-                } = crate::browser::reconcile_gl(gpu_state().as_ref(), Some(&renderer))
+                } = reconcile_gl(before.as_ref(), Some(&renderer))
                 {
                     if changed {
-                        eprintln!("[stealth] GL reports {renderer} — state updated");
+                        if matches!(before, Some(GpuState::Missing)) {
+                            eprintln!(
+                                "[stealth] GL recovered: a WebGL context reports {renderer} again - state updated"
+                            );
+                        } else {
+                            eprintln!("[stealth] GL reports {renderer} — state updated");
+                        }
                         set_gpu_state(Some(st));
                     }
                 }
             }
-            GlLive::NoContext => {
-                eprintln!(
-                    "[stealth] WARNING: WebGL context creation now returns null on this browser — \
-                     the GPU process degraded mid-session (Chrome restarts it with GL disabled \
-                     after a GPU crash). Pages will see no WebGL; no GL mask can apply until the \
-                     browser is relaunched."
-                );
-                set_gpu_state(Some(GpuState::Missing));
-                crate::browser::mark_gl_mid_session_loss();
+            GlLive::NoContext { worker } => {
+                if let GlReconcile::Dead { changed, .. } = reconcile_gl(before.as_ref(), None) {
+                    if changed {
+                        // Report what was OBSERVED; the cause is explicitly
+                        // unconfirmed — a GPU-process restart, a driver reset
+                        // and a context-specific limit all look like this.
+                        match &worker {
+                            WorkerEvidence::Live(r) => eprintln!(
+                                "[stealth] WARNING: main-thread WebGL now returns null on this browser, but a WORKER context still reports {r} - partial GL loss (cause unconfirmed: GPU-process restart, driver reset or context-specific limit). Main-thread pages see no WebGL and the GL mask no longer applies to them; nothing is being fabricated. A browser restart reestablishes a clean GL state."
+                            ),
+                            WorkerEvidence::Null => eprintln!(
+                                "[stealth] WARNING: WebGL context creation now returns null on this browser (main thread AND worker; cause unconfirmed - a GPU-process restart, driver reset or context limit all look like this). Pages will see no WebGL; no GL mask applies. A browser restart reestablishes a clean GL state."
+                            ),
+                            WorkerEvidence::Unavailable => eprintln!(
+                                "[stealth] WARNING: WebGL context creation now returns null on this browser (observed live; cause unconfirmed - a GPU-process restart, driver reset or context limit all look like this). Pages will see no WebGL; no GL mask applies. A browser restart reestablishes a clean GL state."
+                            ),
+                        }
+                        set_gpu_state(Some(GpuState::Missing));
+                        crate::browser::mark_gl_mid_session_loss();
+                    }
+                }
             }
             GlLive::Unknown => {}
         }

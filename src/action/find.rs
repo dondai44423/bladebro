@@ -74,6 +74,10 @@ pub(super) struct FoundElement {
     /// page (Space would scroll it and read as a phantom effect).
     #[serde(default)]
     pub(super) focused: Option<bool>,
+    /// "state" mode: the element's observable toggle state
+    /// ("checked=true", "aria-selected=true", ...); None when it carries none.
+    #[serde(default)]
+    pub(super) state: Option<String>,
 }
 
 /// Resolve a ref to its (signature, frame path) in the LPM.
@@ -485,7 +489,7 @@ pub async fn locate_text(cdp: &CdpSession, query: &str) -> Option<TextLocation> 
 /// Build the find-by-sig page script: re-locates an element by signature in
 /// the live DOM and returns its box (`box`), performs an in-page action
 /// (`prepare`/`focus`/`clear`/`type`/`select`/`click`), or reads it
-/// (`check`/`read`/`hover`). Separate from `find_by_sig` so tests can
+/// (`check`/`read`/`hover`/`state`). Separate from `find_by_sig` so tests can
 /// syntax-check it without a live browser.
 pub(super) fn find_sig_expr(
     sig: &str,
@@ -531,7 +535,7 @@ pub(super) fn find_sig_expr(
         + "const s=fps+'|'+r+'|'+nm+'|'+counts[key];"
         + "if(s==="
         + &sig_js
-        + "){if(!vis(n)){var _vd=(mode==='check'||mode==='prepare'||mode==='focus')?_hiddenHost(n):null;if(_vd){if(mode!=='check'){_vd.scrollIntoView({block:'center'});_vd.focus();}if(mode==='focus')return{ok:true};return{ok:true,text:_read(_vd),hostKind:(_ced(_vd)?'ce':((_vd.tagName)?_vd.tagName.toLowerCase():'')),hostIsTgt:false,sel:_selLen(_vd),tgtMissing:true};}return{ok:false,reason:'element hidden'};}const rect=n.getBoundingClientRect();"
+        + "){if(!vis(n)){if(mode==='state')return{ok:true,state:stateOf(n)};var _vd=(mode==='check'||mode==='prepare'||mode==='focus')?_hiddenHost(n):null;if(_vd){if(mode!=='check'){_vd.scrollIntoView({block:'center'});_vd.focus();}if(mode==='focus')return{ok:true};return{ok:true,text:_read(_vd),hostKind:(_ced(_vd)?'ce':((_vd.tagName)?_vd.tagName.toLowerCase():'')),hostIsTgt:false,sel:_selLen(_vd),tgtMissing:true};}return{ok:false,reason:'element hidden'};}if(mode==='state')return{ok:true,state:stateOf(n)};const rect=n.getBoundingClientRect();"
         + "const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;"
         + "const top=doc.elementFromPoint(cx,cy);"
         + "const isTopmost=top===n||n.contains(top);"
@@ -551,7 +555,7 @@ pub(super) fn find_sig_expr(
         + "var _cmpAnc=function(a,x){var t=x;for(var i=0;i<40&&t;i++){if(t===a)return true;t=t.parentElement||(t.getRootNode&&t.getRootNode().host)||null;}return false;};"
         + "var _ltopOk=(_lfc===n)||_cmpAnc(n,_lfc)||_cmpAnc(_lfc,n);"
         + "var _ltop=_ltopOk?null:(_lfc?_desc(_lfc):'outside the viewport');"
-        + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!n.disabled,isTopmost:_ltopOk,hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),top_desc:_ltop};}"
+        + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!((lp(n)||n).disabled),isTopmost:_ltopOk,hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),top_desc:_ltop};}"
         + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();var _ph=_hostOf(tgt);const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false};}"
         + "if(mode==='focus'){var _fc=tgt;try{if(tgt.tabIndex<0){var _cd=tgt.querySelector('[tabindex],button,a[href],input,select,textarea');if(_cd)_fc=_cd;}}catch(_e){}try{_fc.focus();}catch(_e){}var _fo=false;try{_fo=(_fc.getRootNode().activeElement===_fc)||(document.activeElement===_fc);}catch(_e){}return{ok:true,focused:_fo};}"
         + "if(mode==='clear'){var _ch=_hostOf(tgt);if(!_ch)return{ok:false,reason:'no editable host'};if(_ced(_ch)){_clr(_ch);}else if('value' in _ch){var _cpr=_ch.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _cd=Object.getOwnPropertyDescriptor(_cpr,'value');if(_cd&&_cd.set){_cd.set.call(_ch,'');}else{_ch.value='';}_ch.dispatchEvent(new Event('input',{bubbles:true}));_ch.dispatchEvent(new Event('change',{bubbles:true}));}else{return{ok:false,reason:'not an editable field'};}return{ok:true,text:_read(_ch)};}"
@@ -631,4 +635,103 @@ pub(super) async fn find_by_sig(
 
     let found: FoundElement = serde_json::from_value(value.clone())?;
     Ok(found)
+}
+/// Outcome of [`label_route_expr`] (G01): the visible label standing in for a
+/// hidden toggle control, sig-computed the same way the capture computes it.
+#[derive(Debug, Deserialize)]
+pub struct LabelRoute {
+    #[serde(default)]
+    pub sig: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub name: String,
+    /// Why no route exists (`nolabel`, `ambiguous`, `gone`, `cross-origin`);
+    /// callers keep their standard hidden-control error either way.
+    #[serde(default)]
+    pub miss: Option<String>,
+}
+
+/// Build the label-route script (G01): locate the element by sig, then its
+/// single visible label proxy - a hidden checkbox/radio toggles natively when
+/// its visible label is clicked with a real mouse. The label's sig is
+/// computed under the SAME counting scheme as the capture, so it is
+/// adoptable into the model exactly like a capture sig (ref healing and
+/// find-by-sig then work on the label).
+pub(super) fn label_route_expr(sig: &str, frame: &[usize]) -> Result<String> {
+    let sig_js = serde_json::to_string(sig)?;
+    let frame_js = serde_json::to_string(frame)?;
+    Ok("((sig,frame)=>{"
+        .to_string()
+        + "const d=document;if(!d||!d.body)return{miss:'gone'};"
+        + &JS_PREAMBLE
+        + "let doc=d;for(let i=0;i<frame.length;i++){const ifs=doc.querySelectorAll('iframe');const f=ifs[frame[i]];if(!f)return{miss:'gone'};try{doc=f.contentDocument;if(!doc)return{miss:'cross-origin'};}catch(e){return{miss:'cross-origin'};}}"
+        + "const all=deepAll(doc,sel);const fps=frame.join(',');"
+        // Pass 1: the addressed element (the hidden toggle control).
+        + "let ctl=null;const c1={};for(let i=0;i<all.length;i++){const n=all[i];const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;c1[key]=(c1[key]||0)+1;if((fps+'|'+r+'|'+nm+'|'+c1[key])==="
+        + &sig_js
+        + "){ctl=n;break;}}"
+        + "if(!ctl)return{miss:'gone'};"
+        // Exactly ONE visible label proxy may reroute the click; anything
+        // else (none, several) keeps the caller's honest hidden-control error.
+        + "let labs=null;try{labs=ctl.labels||null;}catch(e){}"
+        + "if(!labs)return{miss:'nolabel'};"
+        + "const elig=[];for(let i=0;i<labs.length;i++){try{if(vis(labs[i])&&lp(labs[i])===ctl)elig.push(labs[i]);}catch(e){}}"
+        + "if(elig.length===0)return{miss:'nolabel'};"
+        + "if(elig.length>1)return{miss:'ambiguous'};"
+        + "const L=elig[0];"
+        // Pass 2: the label's sig under the same counting scheme.
+        + "const c2={};for(let i=0;i<all.length;i++){const n=all[i];const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;c2[key]=(c2[key]||0)+1;if(n===L)return{sig:fps+'|'+r+'|'+nm+'|'+c2[key],role:r,name:name(L,true)};}"
+        + "return{miss:'gone'};})("
+        + &sig_js
+        + ","
+        + &frame_js
+        + ")")
+}
+
+/// Resolve the visible label proxy for a hidden toggle control (G01).
+/// `Ok(Some(route))` carries the label's adoptable sig; `Ok(None)` when there
+/// is no single visible eligible label (the caller keeps its honest error).
+pub async fn find_label_route(
+    cdp: &CdpSession,
+    sig: &str,
+    frame: &[usize],
+) -> Result<Option<LabelRoute>> {
+    let expression = label_route_expr(sig, frame)?;
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expression,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    if let Some(exc) = res.get("exceptionDetails") {
+        let msg = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("unknown label-route error");
+        return Err(BladeError::Other(format!("label-route failed: {msg}")));
+    }
+    let value = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or_default();
+    if !value.is_object() {
+        return Ok(None);
+    }
+    let route: LabelRoute = serde_json::from_value(value).unwrap_or(LabelRoute {
+        sig: String::new(),
+        role: String::new(),
+        name: String::new(),
+        miss: Some("unparseable".into()),
+    });
+    if route.miss.is_some() || route.sig.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(route))
 }

@@ -43,7 +43,7 @@ COMMANDS
   see [mode] [url] [flags]        read without acting: model|content|outline,
                                   extract <auto|links|forms|json>, --find, --scope, --logs
   act <action> [args]             interact: click, type, fill, select, clear, press, scroll,
-                                  hover, navigate, upload, download, wait, eval, collect,
+                                  hover, navigate, upload, download, wait, dialog, eval, collect,
                                   read, batch, pdf, back, forward, reload, save, load,
                                   open-tab, close-tab, switch-tab
   state <op> [args]               cookies, set-cookie, del-cookie, ls, ss, set-ls, set-ss,

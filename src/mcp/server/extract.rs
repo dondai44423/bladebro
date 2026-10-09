@@ -13,28 +13,39 @@ use crate::page::Page;
 
 use super::artifact_hint;
 
-/// V9: template extraction. The agent provides a declarative
-/// template; the driver runs ONE query and returns structured
-/// JSON. Zero LLM in the loop — the fastest extraction of any
-/// agent browser.
+/// V9: template extraction. The agent provides a declarative template; the
+/// driver runs ONE query and returns structured JSON. Zero LLM in the loop —
+/// the fastest extraction of any agent browser.
 ///
 /// Template shape:
 /// ```json
-/// {"items": {"container": "css", "fields": {"name": "css|css@attr"}}}
+/// {"items": {"container": "css", "fields": {"name": "css", "link": "css@attr"}}}
 /// ```
-/// Multiple top-level keys are allowed (multiple lists in one
-/// call). A field value of "" reads the container element
-/// itself. `@attr` reads an attribute; default is textContent.
-pub async fn handle_template_extract(
-    page: &mut Page,
-    template: &Value,
-    limit: usize,
-) -> Result<String> {
+/// Multiple top-level keys are allowed (multiple lists in one call). A field
+/// value of "" reads the container element itself.
+///
+/// Extraction contract (G06):
+/// - Plain text fields are RENDERED reads: an element that is not rendered
+///   (display:none / visibility:hidden anywhere on its composed chain) is
+///   OMITTED — the field key is absent and the item carries
+///   `_omitted: ["field", ...]` instead of leaking hidden text into
+///   structured evidence.
+/// - `css@attr` reads an attribute (intentionally raw by nature).
+/// - `{"sel": "css", "raw": true}` reads RAW text (`innerText || textContent`),
+///   hidden content included — the legacy behavior, now opt-in.
+/// - Containers and fields are looked up across the light DOM, open shadow
+///   roots and same-origin frames, all BOUNDED (20k-node budget, 48-frame
+///   cap); skipped cross-origin frames and budget exhaustion are reported in
+///   the output, never silent. Field states stay distinct: omitted (absent +
+///   `_omitted`), selector missed (null), genuinely empty ("").
+///
+/// The traversal/read script lives in `js/template_extract.js` (house rule:
+/// embedded JS stays in src/**/js); `__LISTS__` is substituted with the
+/// per-list code generated from the template.
+fn template_extract_expr(template: &Value, limit: usize) -> Result<String> {
     let obj = template
         .as_object()
         .ok_or_else(|| BladeError::Other("template must be a JSON object".into()))?;
-
-    // Build ONE JS expression covering all lists.
     let mut list_builders = Vec::new();
     for (list_name, spec) in obj {
         let container = spec.get("container").and_then(|c| c.as_str()).unwrap_or("");
@@ -48,28 +59,59 @@ pub async fn handle_template_extract(
             .and_then(|f| f.as_object())
             .cloned()
             .unwrap_or_default();
-        let mut field_parts = Vec::new();
+        // Field value: a string (rendered text, or css@attr) or an object
+        // {"sel": "...", "raw": true} for intentional hidden-text reads.
+        let mut field_code = Vec::new();
         for (fname, fsel) in &fields {
-            let sel = fsel.as_str().unwrap_or("");
-            field_parts.push(format!(
-                "{}:read(c,{})",
-                serde_json::to_string(fname)?,
-                serde_json::to_string(sel)?
+            let (sel, raw) = match fsel {
+                Value::String(s) => (s.clone(), false),
+                Value::Object(o) => {
+                    let sel = o
+                        .get("sel")
+                        .and_then(|s| s.as_str())
+                        .ok_or_else(|| {
+                            BladeError::Other(format!(
+                                "template field '{fname}' object needs a 'sel' selector string"
+                            ))
+                        })?
+                        .to_string();
+                    (sel, o.get("raw").and_then(|r| r.as_bool()).unwrap_or(false))
+                }
+                _ => {
+                    return Err(BladeError::Other(format!(
+                        "template field '{fname}' must be a selector string (\".css\" or \".css@attr\") or {{\"sel\": \"...\", \"raw\": true}}"
+                    )));
+                }
+            };
+            let idx = field_code.len();
+            let fname_js = serde_json::to_string(fname)?;
+            let sel_js = serde_json::to_string(&sel)?;
+            field_code.push(format!(
+                "{{const r{idx}=read(c,{sel_js},{raw});if(r{idx}.om){{om.push({fname_js});}}else{{o[{fname_js}]=r{idx}.v;}}}}",
+                raw = if raw { "true" } else { "false" },
             ));
         }
         list_builders.push(format!(
-            "{}:(()=>{{const cs=[...document.querySelectorAll({})].slice(0,{});return cs.map(c=>({{{}}}));}})()",
+            "{}:(()=>{{const cs=collect(document,{},st).slice(0,{limit});return cs.map(c=>{{const o={{}};const om=[];{}if(om.length){{o._omitted=om;st.om+=om.length;}}return o;}});}})()",
             serde_json::to_string(list_name)?,
             serde_json::to_string(container)?,
-            limit,
-            field_parts.join(","),
+            field_code.join("")
         ));
     }
+    list_builders.push("__blade_meta:{cross:st.cross,budget:st.hit,omitted:st.om}".to_string());
+    Ok(TEMPLATE_EXTRACT_EXPR.replace("__LISTS__", &list_builders.join(",")))
+}
 
-    let expr = format!(
-        "(()=>{{const read=(c,sel)=>{{let s=sel,attr=null;const ai=sel.lastIndexOf('@');if(ai>0){{attr=sel.slice(ai+1);s=sel.slice(0,ai);}}const el=s?c.querySelector(s):c;if(!el)return null;if(attr)return el.getAttribute(attr);return(el.innerText||el.textContent||'').trim();}};return {{{}}};}})()",
-        list_builders.join(",")
-    );
+/// The bounded traversal + rendered/raw read script (contract documented on
+/// [`template_extract_expr`]).
+const TEMPLATE_EXTRACT_EXPR: &str = include_str!("js/template_extract.js");
+
+pub async fn handle_template_extract(
+    page: &mut Page,
+    template: &Value,
+    limit: usize,
+) -> Result<String> {
+    let expr = template_extract_expr(template, limit)?;
 
     let res = page
         .cdp_ref()
@@ -101,7 +143,7 @@ pub async fn handle_template_extract(
         .unwrap_or(json!({}));
     let json_str = serde_json::to_string_pretty(&value)?;
 
-    // Count total items across lists.
+    // Count total items across lists (the meta key is an object; skipped).
     let total: usize = value
         .as_object()
         .map(|o| {
@@ -111,16 +153,48 @@ pub async fn handle_template_extract(
         })
         .unwrap_or(0);
 
+    // Explicit omissions: rendered-skips, unsearched frames and any budget
+    // exhaustion are reported instead of looking like clean data.
+    let meta = value.get("__blade_meta");
+    let omitted = meta
+        .and_then(|m| m.get("omitted"))
+        .and_then(|o| o.as_u64())
+        .unwrap_or(0);
+    let cross = meta
+        .and_then(|m| m.get("cross"))
+        .and_then(|c| c.as_u64())
+        .unwrap_or(0);
+    let budget = meta
+        .and_then(|m| m.get("budget"))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    let mut notes = String::new();
+    if omitted > 0 {
+        notes.push_str(&format!(
+            "\nnote: {omitted} field value(s) omitted as not rendered - read one with {{\"sel\":\"...\",\"raw\":true}}, or css@attr for attributes"
+        ));
+    }
+    if cross > 0 {
+        notes.push_str(&format!(
+            "\nnote: {cross} frame(s) not searched (cross-origin or unloaded) - results may be incomplete"
+        ));
+    }
+    if budget {
+        notes.push_str(
+            "\nnote: traversal node budget reached - results may be partial; narrow the container selector",
+        );
+    }
+
     if json_str.len() > 6000 {
         let path = crate::artifacts::write_artifact(&json_str, "json")?;
         let preview: String = json_str.chars().take(600).collect();
         return Ok(format!(
-            "extract json ({total} items, {} bytes)\npreview: {preview}…\n{}",
+            "extract json ({total} items, {} bytes){notes}\npreview: {preview}…\n{}",
             json_str.len(),
             artifact_hint(&path)
         ));
     }
-    Ok(format!("extract json ({total} items):\n{json_str}"))
+    Ok(format!("extract json ({total} items){notes}:\n{json_str}"))
 }
 /// V21: Auto-extract — deterministic structural list extraction.
 /// Finds the DOM container whose direct children are the most
@@ -523,5 +597,70 @@ mod extract_script_tests {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+    }
+
+    /// G06: the template script (assembled with a real template) must parse,
+    /// substitute every placeholder, and carry the bounded traversal + meta.
+    #[test]
+    fn template_extract_script_is_valid_js() {
+        let tpl = serde_json::json!({
+            "items": {"container": ".row", "fields": {
+                "a": ".name",
+                "b": ".link@href",
+                "c": {"sel": ".hidden", "raw": true}
+            }}
+        });
+        let js = super::template_extract_expr(&tpl, 25).expect("template expr");
+        assert!(!js.contains("__LISTS__"), "placeholder substituted");
+        assert!(js.contains("__blade_meta"), "meta block present");
+        assert!(js.contains("NODE_BUDGET"), "bounded walker present");
+        assert!(js.contains("read(c,\".hidden\",true)"), "raw flag threaded");
+        assert!(js.contains("slice(0,25)"), "item limit threaded");
+        let has_node = std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !has_node {
+            eprintln!("node not available — skipping template script syntax check");
+            return;
+        }
+        let path = std::env::temp_dir().join("bladebro-js-check-template.js");
+        std::fs::write(&path, &js).expect("write js fixture");
+        let out = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&path)
+            .output()
+            .expect("run node --check");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "node --check failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn template_field_forms_validate() {
+        // Object field without sel: loud, names the field.
+        let tpl = serde_json::json!({"l": {"container": ".x", "fields": {"f": {"raw": true}}}});
+        let err = super::template_extract_expr(&tpl, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'f'") && err.contains("'sel'"), "{err}");
+        // Wrong type: loud, names the field and the accepted forms.
+        let tpl = serde_json::json!({"l": {"container": ".x", "fields": {"f": 7}}});
+        let err = super::template_extract_expr(&tpl, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'f'") && err.contains("raw"), "{err}");
+        // Missing container stays loud.
+        let tpl = serde_json::json!({"l": {"fields": {}}});
+        let err = super::template_extract_expr(&tpl, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("container"), "{err}");
     }
 }

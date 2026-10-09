@@ -31,6 +31,7 @@ mod flags;
 mod launch;
 mod pipe;
 mod probe;
+pub mod proxy;
 
 pub use self::alerts::{
     pending_notes, reset_gl_alert, set_stealth_inject_failed, set_ua_override_failed,
@@ -44,7 +45,7 @@ pub use self::flags::{
     set_launched_no_sandbox, set_launched_pipe, GlReconcile, GlStage, GpuState, Transport,
 };
 pub use self::launch::launch_lane;
-pub use self::probe::{probe_gl_live, GlLive};
+pub use self::probe::{probe_gl_live, GlLive, WorkerEvidence};
 // Chromium appends a singleton socket name under TMPDIR. Hermes and other
 // harnesses may supply a long workspace path, exceeding even macOS's 104-byte
 // sockaddr_un limit and fatally aborting Chrome. Only the browser child uses

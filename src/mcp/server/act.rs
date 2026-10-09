@@ -10,9 +10,97 @@ use super::eval::handle_eval;
 use super::extract::handle_collect;
 use super::files::{handle_download, handle_pdf};
 use super::resolve::{resolve_selector_target, resolve_text_target};
-use super::run::wait_condition;
+use super::run::{resolve_condition_fields, resolve_wait_timeout};
 use super::see::handle_see;
 use super::state::handle_state;
+
+/// `act dialog` (G03): arm a bounded ONE-USE expectation that answers the
+/// next matching confirm()/prompt() explicitly, or clear an armed one. The
+/// safe defaults (alert/beforeunload accept; confirm/prompt cancel) apply
+/// whenever nothing is armed or nothing matches.
+fn handle_dialog_expect(args: &Value, page: &Page) -> Result<String> {
+    let expect = args
+        .get("expect")
+        .and_then(|e| e.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if expect.is_empty() {
+        return Err(BladeError::Usage(
+            "act dialog needs expect=alert|confirm|prompt|beforeunload|any — or clear to disarm"
+                .into(),
+        ));
+    }
+    if matches!(expect.as_str(), "clear" | "off" | "none") {
+        return Ok(match page.take_dialog_expect() {
+            Some(prev) => format!(
+                "dialog expectation cleared (was armed for '{}'; it had not fired)",
+                prev.kind
+            ),
+            None => "no dialog expectation was armed".to_string(),
+        });
+    }
+    if !matches!(
+        expect.as_str(),
+        "alert" | "confirm" | "prompt" | "beforeunload" | "any"
+    ) {
+        return Err(BladeError::Usage(
+            "act dialog: expect must be alert, confirm, prompt, beforeunload, any (or clear)"
+                .into(),
+        ));
+    }
+    let message = args
+        .get("message")
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.is_empty())
+        .map(String::from);
+    if message.as_ref().is_some_and(|m| m.chars().count() > 200) {
+        return Err(BladeError::Usage(
+            "act dialog: message matcher too long (max 200 chars)".into(),
+        ));
+    }
+    let prompt_text = args
+        .get("prompt_text")
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.is_empty())
+        .map(String::from);
+    if prompt_text.is_some() && expect != "prompt" && expect != "any" {
+        return Err(BladeError::Usage(
+            "act dialog: prompt_text only applies to expect=prompt (or any)".into(),
+        ));
+    }
+    let accept = args.get("accept").and_then(|a| a.as_bool()).unwrap_or(true);
+    let timeout = resolve_wait_timeout(args, 30)?;
+    if timeout.as_secs() > 300 {
+        return Err(BladeError::Usage("act dialog: timeout max is 300s".into()));
+    }
+    let origin = crate::page::origin_of(page.model().url());
+    let exp = crate::page::DialogExpect {
+        kind: expect.clone(),
+        message,
+        prompt_text,
+        accept,
+        deadline: std::time::Instant::now() + timeout,
+        origin,
+    };
+    let replaced = page.set_dialog_expect(exp);
+    let mut out = format!(
+        "dialog expectation armed: '{}' -> {}, one use, expires in {}s",
+        expect,
+        if accept { "accept" } else { "cancel" },
+        timeout.as_secs()
+    );
+    if let Some(prev) = replaced {
+        out.push_str(&format!(
+            " - replaced a previous unused '{}' expectation",
+            prev.kind
+        ));
+    }
+    out.push_str(
+        ". Trigger the dialog now; without a match the defaults apply (alert/beforeunload accept; confirm/prompt cancel).",
+    );
+    Ok(out)
+}
 
 /// `fill` — multi-field forms in ONE call (type/select/checkbox-aware, with
 /// a single submit dispatch). Shared by `act`, `act batch` steps, and `run`
@@ -411,18 +499,20 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 text_content
             ));
         }
+        "dialog" => return handle_dialog_expect(args, page),
         "fill" => return handle_fill(args, page).await,
         "wait" => {
-            let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
-            let match_text = args.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            let condition = wait_condition(
+            let timeout = resolve_wait_timeout(args, 10)?;
+            let (condition, needle) = resolve_condition_fields(
                 args.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
-                match_text,
-            );
+                args.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                args.get("js").and_then(|j| j.as_str()).unwrap_or(""),
+                "settle",
+            )?;
             Action::Wait {
                 condition,
-                text: match_text.into(),
-                timeout: std::time::Duration::from_secs(timeout_secs),
+                text: needle,
+                timeout,
             }
         }
         "back" => Action::Back,

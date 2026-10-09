@@ -205,10 +205,28 @@ impl PageCapture {
 // ---- shared JS fragments (used by both capture + find-by-sig scripts) ----
 
 /// CSS selector for all potentially-actionable elements.
-pub const JS_SELECTOR: &str = r#"a[href], button, input, select, textarea, summary, [contenteditable=""], [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [role="switch"], [role="textbox"], [role="combobox"], [onclick]"#;
+///
+/// `[role="option"]` (G01): ARIA listbox options are real click targets —
+/// omitting them made visible options unaddressable by selector/text/ref.
+/// `label` (G01): labels are counted so the proxy resolver can see them;
+/// `role()` collapses every label that does NOT proxy for a hidden
+/// checkbox/radio to `'hidden'`, so only genuine proxies survive the
+/// universe in every consumer (capture, find, sig, marks, eval-with-ref).
+pub const JS_SELECTOR: &str = r#"a[href], button, input, select, textarea, summary, [contenteditable=""], [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [role="switch"], [role="textbox"], [role="combobox"], [onclick], [role="option"], label"#;
 
 /// Visibility check: returns false for zero-size, display:none, visibility:hidden, opacity:0.
 pub const JS_VIS_FN: &str = include_str!("js/vis_fn.js");
+
+/// Label-proxy resolution (G01): `lp(n)` returns the hidden checkbox/radio a
+/// visible `<label>` stands in for, else null. Defined BEFORE role() — role()
+/// maps eligible labels to their control's role and everything else to
+/// 'hidden', which is the single filter every element universe already honors.
+pub const JS_LP_FN: &str = include_str!("js/label_proxy.js");
+
+/// Toggle-state snapshot (`stateOf`): checked / aria-selected / aria-checked
+/// for checkable controls, label proxies and ARIA options — the readback the
+/// click verdicts use. Depends on lp().
+pub const JS_STATE_FN: &str = include_str!("js/state_fn.js");
 
 /// Escapes a string for safe interpolation into a CSS attribute selector.
 pub const JS_ESC_FN: &str = include_str!("js/esc_fn.js");
@@ -256,6 +274,8 @@ pub static JS_PREAMBLE: LazyLock<String> = LazyLock::new(|| {
         + JS_SELECTOR
         + "';"
         + JS_VIS_FN
+        + JS_LP_FN
+        + JS_STATE_FN
         + JS_ESC_FN
         + JS_ROLE_FN
         + JS_LABEL_CACHE
@@ -366,8 +386,8 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "const _fp=fnv(nc(n)+','+n.tagName.toLowerCase()+','+_kids+'|'+_cust);"
         + "out.push({tag:n.tagName.toLowerCase(),role:r,name:nm,type:n.type||null,"
         + "value:n.isContentEditable?((n.innerText||n.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200)||null):(n.value&&n.value.length<=200?n.value:null),"
-        + "disabled:!!n.disabled,"
-        + "checked:(r==='checkbox'||r==='radio')?!!n.checked:null,"
+        + "disabled:!!((lp(n)||n).disabled),"
+        + "checked:(r==='checkbox'||r==='radio')?!!((lp(n)||n).checked):null,"
         + "href:(function(){var h=n.getAttribute&&n.getAttribute('href');if(h==null)return null;if(h.charAt(0)==='#')return h;return n.href||null;})(),placeholder:n.placeholder||null,"
         + "options:n.tagName==='SELECT'?{sel:n.selectedIndex,total:n.options.length,items:[...n.options].slice(0,80).map(o=>[(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦').slice(0,60),(o.value||'').split('|').join('¦').slice(0,40)]).filter(p=>p[0]||p[1])}:null,"
         + "required:!!n.required||n.getAttribute('aria-required')==='true',"
@@ -655,6 +675,69 @@ process.exit(fail);
             assert!(
                 out.status.success(),
                 "detect_block fixture failures:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// G01: lp()/role()/stateOf() decide which labels are addressable and
+    /// what their state reads as. Runs the REAL fragments against stub
+    /// elements — a regression here silently reopens the option/label
+    /// addressing gap or diverges the sig universe between scripts.
+    #[test]
+    fn label_proxy_role_and_state_semantics() {
+        let js = [
+            super::JS_VIS_FN,
+            super::JS_LP_FN,
+            super::JS_STATE_FN,
+            super::JS_ROLE_FN,
+            r#"
+const mk=(o)=>{const d={tagName:'DIV',ownerDocument:null,child:null,attrs:{},
+ getAttribute(k){return (this.attrs&&this.attrs[k]!==undefined)?this.attrs[k]:null;},
+ querySelector(s){if(this.child&&s.indexOf('input')>=0)return this.child;return null;},
+ getBoundingClientRect(){return this.box||{width:10,height:10,x:0,y:0};},
+ shadowRoot:null};return Object.assign(d,o);};
+globalThis.getComputedStyle=(e)=>({display:(e._disp==='none')?'none':'block',visibility:'visible',opacity:'1'});
+const visBoxH={width:0,height:0,x:0,y:0};
+const doc={getElementById:(id)=>(id==='c1'?ctl1:(id==='c2'?ctl2:(id==='c3'?visCtl:null))) };
+const ctl1=mk({tagName:'INPUT',type:'checkbox',checked:false,ownerDocument:doc,box:visBoxH,_disp:'none'});
+const ctl2=mk({tagName:'INPUT',type:'radio',checked:true,ownerDocument:doc,box:visBoxH,_disp:'none'});
+const visCtl=mk({tagName:'INPUT',type:'checkbox',checked:false,ownerDocument:doc});
+const L1=mk({tagName:'LABEL',attrs:{'for':'c1'},ownerDocument:doc});
+const L2=mk({tagName:'LABEL',attrs:{'for':'c2'},ownerDocument:doc});
+const L3=mk({tagName:'LABEL',attrs:{'for':'c3'},ownerDocument:doc});
+const L4=mk({tagName:'LABEL',attrs:{},ownerDocument:doc});
+const L5=mk({tagName:'LABEL',attrs:{'for':'nope'},ownerDocument:doc});
+let fail=0;const eq=(a,b,l)=>{if(a!==b){fail=1;console.log('FAIL',l,'got',a,'want',b);}};
+eq(lp(L1)===ctl1,true,'lp hidden checkbox');
+eq(lp(L3)===null,true,'lp visible control -> null');
+eq(lp(L4)===null,true,'lp no control -> null');
+eq(lp(L5)===null,true,'lp dangling for -> null');
+eq(role(L1),'checkbox','role label proxy');
+eq(role(L2),'radio','role label proxy radio');
+eq(role(L3),'hidden','role ineligible label -> hidden');
+eq(role(L4),'hidden','role inert label -> hidden');
+eq(stateOf(L1),'checked=false','state label proxy');
+eq(stateOf(ctl2),'checked=true','state checkbox input');
+const opt=mk({tagName:'LI',attrs:{'role':'option','aria-selected':'true'},ownerDocument:doc});
+eq(stateOf(opt),'aria-selected=true','state option selected');
+const opt2=mk({tagName:'LI',attrs:{'role':'option'},ownerDocument:doc});
+eq(stateOf(opt2),'selected=none','state option unset');
+eq(stateOf(mk({tagName:'DIV',ownerDocument:doc})),null,'state plain div');
+const ctlN=mk({tagName:'INPUT',type:'checkbox',checked:true,ownerDocument:doc,box:visBoxH,_disp:'none'});
+const LN=mk({tagName:'LABEL',attrs:{},child:ctlN,ownerDocument:doc});
+eq(lp(LN)===ctlN,true,'lp nested label');
+eq(stateOf(LN),'checked=true','state nested label');
+if(!fail)console.log('label proxy fixtures pass');
+process.exit(fail);
+"#,
+        ]
+        .concat();
+        if let Some(out) = node_exec("label-proxy-fixtures", &js) {
+            assert!(
+                out.status.success(),
+                "label proxy fixture failures:\nstdout: {}\nstderr: {}",
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );

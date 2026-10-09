@@ -94,9 +94,17 @@ fn check_config_consistency(old: &Value) {
     if let Some(old_proxy) = old.get("proxy").and_then(|p| p.as_str()) {
         let new_proxy = std::env::var("BLADE_PROXY").unwrap_or_default();
         if !new_proxy.is_empty() && new_proxy != old_proxy {
+            // SECURITY: the stored and live values may embed proxy
+            // credentials — the warning shows redacted endpoints only.
+            let redact = |v: &str| match crate::browser::proxy::parse_blade_proxy(v) {
+                Ok(s) => s.display,
+                Err(_) => "(unparseable, redacted)".to_string(),
+            };
             eprintln!(
-                "[stealth] WARNING: proxy changed since last session ({old_proxy} → {new_proxy}). \
-                 Sites may flag this as suspicious."
+                "[stealth] WARNING: proxy changed since last session ({} → {}). \
+                 Sites may flag this as suspicious.",
+                redact(old_proxy),
+                redact(&new_proxy)
             );
         }
     }

@@ -52,6 +52,14 @@ pub fn parse_checksum(text: &str) -> Option<String> {
 /// checksum assets — none were uploaded before this fix) simply omitted
 /// the .sha256 file, and the downloaded binary was then executed by
 /// `verify_binary_runs` regardless.
+///
+/// G11: the checksum fetch is a safe, idempotent GET observation, so
+/// TRANSPORT-level failures (send error, reset, body-read drop) get a
+/// small bounded retry with backoff — the captured 4.3.0 failure was a
+/// transient transport send error while the asset was publicly reachable.
+/// PERMANENT outcomes (404, other non-success, malformed body, hash
+/// mismatch) never retry, and nothing is ever installed on a verification
+/// failure.
 async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str) -> Result<()> {
     let checksum_url = format!("{asset_url}.sha256");
     let client = reqwest::Client::builder()
@@ -70,12 +78,50 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
         ))
     };
 
-    let resp = match client.get(&checksum_url).send().await {
-        Ok(r) => r,
-        Err(e) if required => {
-            return Err(fetch_failed(&format!("checksum file unreachable ({e})")))
+    // Bounded transport retries (3 attempts, 400/800 ms backoff). Each
+    // attempt refetches cleanly — the GET has no side effects.
+    const ATTEMPTS: u32 = 3;
+    let mut last_transport: Option<String> = None;
+    let mut attempt = 0u32;
+    let fetched: Option<(reqwest::StatusCode, std::result::Result<String, String>)> = loop {
+        attempt += 1;
+        let resp = match client.get(&checksum_url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_transport = Some(format!("{e}"));
+                if attempt >= ATTEMPTS {
+                    break None;
+                }
+                eprintln!(
+                    "  retry: checksum fetch transport error (attempt {attempt}/{ATTEMPTS}): {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(400 * attempt as u64)).await;
+                continue;
+            }
+        };
+        let status = resp.status();
+        match resp.text().await {
+            Ok(t) => break Some((status, Ok(t))),
+            Err(e) => {
+                last_transport = Some(format!("body read failed: {e}"));
+                if attempt >= ATTEMPTS {
+                    break Some((status, Err(e.to_string())));
+                }
+                eprintln!("  retry: checksum body read failed (attempt {attempt}/{ATTEMPTS}): {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(400 * attempt as u64)).await;
+            }
         }
-        Err(_) => {
+    };
+
+    let (status, body) = match fetched {
+        Some(x) => x,
+        None if required => {
+            return Err(fetch_failed(&format!(
+                "checksum file unreachable after {ATTEMPTS} attempts ({})",
+                last_transport.as_deref().unwrap_or("transport error")
+            )))
+        }
+        None => {
             eprintln!(
                 "  warn: no checksum file found, skipping SHA256 verification (legacy release)"
             );
@@ -83,19 +129,18 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
         }
     };
 
-    if resp.status() == reqwest::StatusCode::NOT_FOUND || !resp.status().is_success() {
+    if status == reqwest::StatusCode::NOT_FOUND || !status.is_success() {
         if required {
             return Err(fetch_failed(&format!(
                 "no checksum file at {} (HTTP {})",
-                checksum_url,
-                resp.status()
+                checksum_url, status
             )));
         }
         eprintln!("  warn: no checksum file found, skipping SHA256 verification (legacy release)");
         return Ok(());
     }
 
-    let checksum_text = resp.text().await.map_err(|e| {
+    let checksum_text = body.map_err(|e| {
         if required {
             fetch_failed(&format!("cannot read checksum: {e}"))
         } else {
@@ -787,6 +832,71 @@ mod tests {
         // then dl.size. The magic check reads the actual file bytes.
         // So this should pass magic (we wrote ELF header) but fail on size.
         assert!(verify_binary(&dl).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn checksum_transport_errors_retry_within_bounds_and_succeed() {
+        // G11: two connections die without a response (transport-level —
+        // the captured 4.3.0 failure class), the third serves the real
+        // checksum — the update must verify, not fail on the first hiccup.
+        let dir = std::env::temp_dir().join(format!("blade-checksum-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("bladebro");
+        std::fs::write(&bin, b"FAKE BINARY BYTES").unwrap();
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(b"FAKE BINARY BYTES")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let body = format!("{hash}  bladebro\n");
+        let (url, server) = http_fixture(vec![
+            "".into(),
+            "".into(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        ])
+        .await;
+        let res = verify_sha256(&bin, &url, "9.9.9").await;
+        assert!(res.is_ok(), "expected verified after retries: {res:?}");
+        let requests = server.await.unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "two transport failures + one good attempt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn checksum_permanent_failures_do_not_retry_and_fail_closed() {
+        // A 404 is permanent: exactly one attempt, no retry loop, no
+        // install — and the error names the next step.
+        let dir = std::env::temp_dir().join(format!("blade-checksum-404-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("bladebro");
+        std::fs::write(&bin, b"FAKE").unwrap();
+        let (url, server) = http_fixture(vec![
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        ])
+        .await;
+        let err = verify_sha256(&bin, &url, "9.9.9")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NOT installed"), "{err}");
+        assert!(
+            err.contains("404"),
+            "single-attempt 404 must be reported as-is: {err}"
+        );
+        assert!(
+            !err.contains("after 3 attempts"),
+            "permanent failures must not be retried: {err}"
+        );
+        drop(server);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

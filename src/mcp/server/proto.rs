@@ -104,22 +104,35 @@ pub async fn handle_tools_call(
 
     match result {
         Ok(mut text) => {
-            // Drain any dialogs that were auto-dismissed during this call.
+            // Drain dialogs handled during this call (default handling or
+            // an armed expectation), plus a one-shot note for an armed
+            // expectation that expired unused.
             let dialogs = page.drain_dialogs();
             if !dialogs.is_empty() {
-                text.push_str("\n\u{26a0} dialogs auto-dismissed:\n");
+                text.push_str("\n\u{26a0} dialogs handled:\n");
                 for d in &dialogs {
                     let action = if d.accepted { "accepted" } else { "cancelled" };
+                    let how = if d.via == "expectation" {
+                        " (via armed expectation)"
+                    } else {
+                        ""
+                    };
                     text.push_str(&format!(
-                        "  {} \"{}\" \u{2014} {}\n",
-                        d.kind, d.message, action
+                        "  {} \"{}\" \u{2014} {}{}\n",
+                        d.kind, d.message, action, how
                     ));
+                    if let Some(n) = &d.note {
+                        text.push_str(&format!("    ({n})\n"));
+                    }
                     if let Some(p) = &d.default_prompt {
                         if !p.is_empty() {
                             text.push_str(&format!("    (prompt default: \"{}\")\n", p));
                         }
                     }
                 }
+            }
+            if let Some(note) = page.drain_dialog_expect_note() {
+                text.push_str(&format!("\n\u{26a0} {note}\n"));
             }
             // Drain ambient events (consent, block detection).
             let ambient = page.drain_ambient();
@@ -160,17 +173,33 @@ pub async fn handle_tools_call(
                 if !view.trim().is_empty() {
                     text.push_str(&format!("\n--- current page state ---\n{view}"));
                 }
+                // G09: recovery advice distinguishes "still loading" from
+                // "the action did nothing" — one bounded, safe observation.
+                if let Some(note) = page.load_state_note().await {
+                    text.push_str(&format!("\nnote: {note}"));
+                }
             }
             let dialogs = page.drain_dialogs();
             if !dialogs.is_empty() {
-                text.push_str("\n\n\u{26a0} dialogs auto-dismissed:\n");
+                text.push_str("\n\n\u{26a0} dialogs handled:\n");
                 for d in &dialogs {
                     let action = if d.accepted { "accepted" } else { "cancelled" };
+                    let how = if d.via == "expectation" {
+                        " (via armed expectation)"
+                    } else {
+                        ""
+                    };
                     text.push_str(&format!(
-                        "  {} \"{}\" \u{2014} {}\n",
-                        d.kind, d.message, action
+                        "  {} \"{}\" \u{2014} {}{}\n",
+                        d.kind, d.message, action, how
                     ));
+                    if let Some(n) = &d.note {
+                        text.push_str(&format!("    ({n})\n"));
+                    }
                 }
+            }
+            if let Some(note) = page.drain_dialog_expect_note() {
+                text.push_str(&format!("\n\u{26a0} {note}\n"));
             }
             let ambient = page.drain_ambient();
             for a in &ambient {

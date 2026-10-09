@@ -240,7 +240,7 @@ async fn adaptive_gl_spoof(env: &EnvProbe, cdp: &CdpSession) -> bool {
     } else {
         match probe_gl_live(cdp).await {
             GlLive::Live(renderer) => live = Some(renderer),
-            GlLive::NoContext => live = None,
+            GlLive::NoContext { .. } => live = None,
             GlLive::Unknown => {
                 // Inconclusive (transport failure or a restricted origin):
                 // keep the recorded verdict; fail-safe spoof.

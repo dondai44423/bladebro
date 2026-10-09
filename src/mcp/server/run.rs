@@ -71,17 +71,86 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
     Ok(observations.join("\n"))
 }
 
-/// A `wait` with `text` but no explicit condition means "wait for this text".
-/// The old default (condition=settle with `text` silently ignored) made
-/// `wait text:"X"` a no-op that reported success without waiting for anything.
-pub(super) fn wait_condition(cond: &str, text: &str) -> String {
-    if !cond.is_empty() {
-        cond.to_string()
-    } else if !text.is_empty() {
-        "text".to_string()
-    } else {
-        "settle".to_string()
+/// Unified wait/condition field resolution (G02): ONE expression contract for
+/// `act`, nested `batch`, `run` steps and `if`/`while`.
+///
+/// - `condition:"js"` takes the expression from `js=` (preferred) or `text=`
+///   (the documented legacy alias - the CLI and older prompts put the
+///   expression there). Both set to DIFFERENT values is ambiguous and is
+///   rejected; neither set is rejected before an empty expression could be
+///   waited on (the old behavior silently timed out on it).
+/// - A non-js condition with a `js=` field is rejected: that field would be
+///   silently ignored, which is exactly the confusion this contract kills.
+/// - No condition + `text=` keeps the long-documented "wait for this text";
+///   no condition + `js=` alone means a js condition; neither → the caller's
+///   default (settle for wait/if).
+pub(super) fn resolve_condition_fields(
+    cond: &str,
+    text: &str,
+    js: &str,
+    default_cond: &str,
+) -> Result<(String, String)> {
+    let cond = cond.trim();
+    if cond.is_empty() {
+        return match (text.is_empty(), js.is_empty()) {
+            (false, false) => Err(crate::error::BladeError::Usage(
+                "wait: both 'text' and 'js' are set but condition= is empty - pass condition=\"js\" (js expression) or condition=\"text\" (page text), or drop one field".into(),
+            )),
+            (false, true) => Ok(("text".to_string(), text.to_string())),
+            (true, false) => Ok(("js".to_string(), js.to_string())),
+            (true, true) => Ok((default_cond.to_string(), String::new())),
+        };
     }
+    if cond == "js" {
+        return match (js.is_empty(), text.is_empty()) {
+            (false, true) => Ok(("js".to_string(), js.to_string())),
+            (true, false) => Ok(("js".to_string(), text.to_string())),
+            (false, false) => {
+                if js == text {
+                    Ok(("js".to_string(), js.to_string()))
+                } else {
+                    Err(crate::error::BladeError::Usage(
+                        "wait condition=js: 'js' and 'text' both carry an expression and they differ - pass the expression once (js= preferred; text= is the legacy alias)".into(),
+                    ))
+                }
+            }
+            (true, true) => Err(crate::error::BladeError::Usage(
+                "wait condition=js needs the expression in 'js' (or the legacy 'text' alias) - got neither".into(),
+            )),
+        };
+    }
+    if !js.is_empty() {
+        return Err(crate::error::BladeError::Usage(format!(
+            "wait: a 'js' field is set but condition=\"{cond}\" does not evaluate JavaScript - use condition=\"js\", or drop the js field"
+        )));
+    }
+    if matches!(cond, "element" | "title" | "url" | "text") && text.is_empty() {
+        return Err(crate::error::BladeError::Usage(format!(
+            "wait condition=\"{cond}\" needs a non-empty match value in 'text'"
+        )));
+    }
+    Ok((cond.to_string(), text.to_string()))
+}
+
+/// Timeout validation shared by wait/if/while (G02): integer seconds,
+/// 0-3600. A fractional/string/negative value is a loud usage error instead
+/// of a silent fallback to the default, and the cap stops a mistyped
+/// "60000" from pinning the server for most of a day.
+pub(super) fn resolve_wait_timeout(step: &Value, default_secs: u64) -> Result<std::time::Duration> {
+    let Some(t) = step.get("timeout") else {
+        return Ok(std::time::Duration::from_secs(default_secs));
+    };
+    let secs = t.as_u64().ok_or_else(|| {
+        crate::error::BladeError::Usage(
+            "timeout must be an integer number of seconds (0-3600)".into(),
+        )
+    })?;
+    if secs > 3600 {
+        return Err(crate::error::BladeError::Usage(format!(
+            "timeout {secs}s exceeds the 3600s cap - use shorter, iterative waits instead"
+        )));
+    }
+    Ok(std::time::Duration::from_secs(secs))
 }
 
 /// Build an Action from a step's JSON fields. Used by `execute_step` for
@@ -233,16 +302,17 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
             })
         }
         "wait" => {
-            let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
-            let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            let condition = wait_condition(
+            let timeout = resolve_wait_timeout(step, 10)?;
+            let (condition, match_text) = resolve_condition_fields(
                 step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
-                match_text,
-            );
+                step.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                step.get("js").and_then(|j| j.as_str()).unwrap_or(""),
+                "settle",
+            )?;
             Ok(Action::Wait {
                 condition,
-                text: match_text.into(),
-                timeout: std::time::Duration::from_secs(timeout_secs),
+                text: match_text,
+                timeout,
             })
         }
         "back" => Ok(Action::Back),
@@ -268,12 +338,13 @@ async fn execute_step(
 
     match action_str {
         "if" => {
-            let condition = step
-                .get("condition")
-                .and_then(|c| c.as_str())
-                .unwrap_or("settle");
-            let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(5);
-            let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            let timeout = resolve_wait_timeout(step, 5)?;
+            let (condition, match_text) = resolve_condition_fields(
+                step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
+                step.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                step.get("js").and_then(|j| j.as_str()).unwrap_or(""),
+                "settle",
+            )?;
             let then_steps = step
                 .get("then")
                 .and_then(|s| s.as_array())
@@ -285,15 +356,26 @@ async fn execute_step(
                 .cloned()
                 .unwrap_or_default();
 
-            // Evaluate the condition (waits up to timeout).
-            let met = crate::action::check_condition(
+            // Evaluate the condition (waits up to timeout). A deterministic
+            // evaluation failure (a js syntax error) fails the STEP with the
+            // reason instead of silently taking the else branch.
+            let met = match crate::action::eval_condition(
                 page.cdp_ref(),
-                condition,
-                match_text,
-                std::time::Duration::from_secs(timeout_secs),
+                &condition,
+                &match_text,
+                timeout,
                 Some(page.in_flight_ref()),
             )
-            .await;
+            .await?
+            {
+                crate::action::CondOutcome::Met => true,
+                crate::action::CondOutcome::Timeout => false,
+                crate::action::CondOutcome::Error(e) => {
+                    return Err(crate::error::BladeError::Other(format!(
+                        "step {path} if: {e}"
+                    )));
+                }
+            };
 
             let (branch, label) = if met {
                 (&then_steps, "then")
@@ -307,7 +389,10 @@ async fn execute_step(
                         "step {path}: if({condition} \"{match_text}\") → then (no steps)"
                     ));
                 } else {
-                    observations.push(format!("step {path}: if({condition} \"{match_text}\") → skipped (timeout {timeout_secs}s)"));
+                    observations.push(format!(
+                        "step {path}: if({condition} \"{match_text}\") → skipped (timeout {}s)",
+                        timeout.as_secs()
+                    ));
                 }
             } else {
                 observations.push(format!(
@@ -332,12 +417,13 @@ async fn execute_step(
             }
         }
         "while" => {
-            let condition = step
-                .get("condition")
-                .and_then(|c| c.as_str())
-                .unwrap_or("element");
-            let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(5);
+            let timeout = resolve_wait_timeout(step, 5)?;
+            let (condition, match_text) = resolve_condition_fields(
+                step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
+                step.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                step.get("js").and_then(|j| j.as_str()).unwrap_or(""),
+                "element",
+            )?;
             let max = step.get("max").and_then(|m| m.as_u64()).unwrap_or(10) as usize;
             let body = step
                 .get("steps")
@@ -345,14 +431,23 @@ async fn execute_step(
                 .cloned()
                 .unwrap_or_default();
             for i in 0..max {
-                let met = crate::action::check_condition(
+                let met = match crate::action::eval_condition(
                     page.cdp_ref(),
-                    condition,
-                    match_text,
-                    std::time::Duration::from_secs(timeout_secs),
+                    &condition,
+                    &match_text,
+                    timeout,
                     Some(page.in_flight_ref()),
                 )
-                .await;
+                .await?
+                {
+                    crate::action::CondOutcome::Met => true,
+                    crate::action::CondOutcome::Timeout => false,
+                    crate::action::CondOutcome::Error(e) => {
+                        return Err(crate::error::BladeError::Other(format!(
+                            "step {path} while: {e}"
+                        )));
+                    }
+                };
                 if !met {
                     observations.push(format!("step {path}: while({condition} \"{match_text}\") \u{2192} done after {i} iterations"));
                     break;
@@ -518,12 +613,13 @@ async fn execute_step(
             }
         },
         "wait" => {
-            let timeout_secs = step.get("timeout").and_then(|t| t.as_u64()).unwrap_or(10);
-            let match_text = step.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            let condition = wait_condition(
+            let timeout = resolve_wait_timeout(step, 10)?;
+            let (condition, match_text) = resolve_condition_fields(
                 step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
-                match_text,
-            );
+                step.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                step.get("js").and_then(|j| j.as_str()).unwrap_or(""),
+                "settle",
+            )?;
             let else_steps = step
                 .get("else")
                 .and_then(|s| s.as_array())
@@ -534,8 +630,8 @@ async fn execute_step(
                 // carries the page state, so the agent can recover.
                 let action = Action::Wait {
                     condition,
-                    text: match_text.into(),
-                    timeout: std::time::Duration::from_secs(timeout_secs),
+                    text: match_text,
+                    timeout,
                 };
                 match page.act(action).await {
                     Ok((delta, verdict)) => {
@@ -562,14 +658,23 @@ async fn execute_step(
                         "wait else: 'else' needs a real condition (element/text/title/url/js) — 'settle' always succeeds; use an 'if' step for plain branching".into(),
                     ));
                 }
-                let met = crate::action::check_condition(
+                let met = match crate::action::eval_condition(
                     page.cdp_ref(),
                     &condition,
-                    match_text,
-                    std::time::Duration::from_secs(timeout_secs),
+                    &match_text,
+                    timeout,
                     Some(page.in_flight_ref()),
                 )
-                .await;
+                .await?
+                {
+                    crate::action::CondOutcome::Met => true,
+                    crate::action::CondOutcome::Timeout => false,
+                    crate::action::CondOutcome::Error(e) => {
+                        return Err(crate::error::BladeError::Other(format!(
+                            "step {path} wait: {e}"
+                        )));
+                    }
+                };
                 if met {
                     observations.push(format!(
                         "step {path}: wait({condition} \"{match_text}\") → matched"
@@ -582,7 +687,10 @@ async fn execute_step(
                     .await;
                     let _ = page.recapture().await?;
                 } else {
-                    observations.push(format!("step {path}: wait({condition} \"{match_text}\") → timeout {timeout_secs}s → else"));
+                    observations.push(format!(
+                        "step {path}: wait({condition} \"{match_text}\") → timeout {}s → else",
+                        timeout.as_secs()
+                    ));
                     let _ = page.recapture().await?;
                     for (j, sub_step) in else_steps.iter().enumerate() {
                         let sub_path = format!("{path}.{j}");
@@ -695,4 +803,92 @@ async fn execute_step(
         }
     }
     Ok(())
+}
+#[cfg(test)]
+mod condition_contract_tests {
+    //! G02: the unified wait-expression contract. These lock the acceptance
+    //! matrix for `resolve_condition_fields` / `resolve_wait_timeout` — the
+    //! footer of every `act wait`, batch step, `run` step and if/while.
+
+    use super::{resolve_condition_fields, resolve_wait_timeout};
+    use serde_json::json;
+
+    #[test]
+    fn js_condition_accepts_js_field_and_legacy_text_alias() {
+        // The G02 defect: condition=js with the expression in `js` used to be
+        // ignored (waited on text=""), timing out. The js field is now the
+        // primary carrier; `text` remains the documented legacy alias.
+        let (c, e) = resolve_condition_fields("js", "", "true", "settle").unwrap();
+        assert_eq!((c.as_str(), e.as_str()), ("js", "true"));
+        let (c, e) = resolve_condition_fields("js", "true", "", "settle").unwrap();
+        assert_eq!((c.as_str(), e.as_str()), ("js", "true"));
+        // Both, identical: unambiguous, accepted.
+        let (c, e) = resolve_condition_fields("js", "true", "true", "settle").unwrap();
+        assert_eq!((c.as_str(), e.as_str()), ("js", "true"));
+    }
+
+    #[test]
+    fn conflicting_or_missing_expressions_fail_fast() {
+        // Both fields with different content: which one is the expression?
+        let err = resolve_condition_fields("js", "a", "b", "settle").unwrap_err();
+        assert!(err.to_string().contains("differ"), "{err}");
+        // Neither: reject before an empty expression can be waited on.
+        let err = resolve_condition_fields("js", "", "", "settle").unwrap_err();
+        assert!(err.to_string().contains("got neither"), "{err}");
+        // A js field with a non-js condition would be silently ignored: reject.
+        let err = resolve_condition_fields("text", "hello", "1+1", "settle").unwrap_err();
+        assert!(
+            err.to_string().contains("does not evaluate JavaScript"),
+            "{err}"
+        );
+        // No condition + both fields: ambiguous.
+        let err = resolve_condition_fields("", "x", "y", "settle").unwrap_err();
+        assert!(err.to_string().contains("condition="), "{err}");
+    }
+
+    #[test]
+    fn legacy_text_wait_and_defaults_survive() {
+        // text= without condition keeps the documented "wait for this text".
+        let (c, e) = resolve_condition_fields("", "Sign in", "", "settle").unwrap();
+        assert_eq!((c.as_str(), e.as_str()), ("text", "Sign in"));
+        // js= without condition means a js condition.
+        let (c, e) = resolve_condition_fields("", "", "window.ready", "settle").unwrap();
+        assert_eq!((c.as_str(), e.as_str()), ("js", "window.ready"));
+        // Neither: the caller's default (settle for wait/if, element for while).
+        let (c, _) = resolve_condition_fields("", "", "", "settle").unwrap();
+        assert_eq!(c, "settle");
+        let (c, _) = resolve_condition_fields("", "", "", "element").unwrap();
+        assert_eq!(c, "element");
+        // Explicit text condition with a needle passes through.
+        let (c, e) = resolve_condition_fields("text", "hello", "", "settle").unwrap();
+        assert_eq!((c.as_str(), e.as_str()), ("text", "hello"));
+        // Empty needle for a content condition is a loud error, not an
+        // instant "met" ('' is a substring of everything).
+        let err = resolve_condition_fields("text", "", "", "settle").unwrap_err();
+        assert!(err.to_string().contains("non-empty match value"), "{err}");
+    }
+
+    #[test]
+    fn timeout_contract_is_integer_seconds_zero_to_hour() {
+        use std::time::Duration;
+        let t = |v: serde_json::Value| resolve_wait_timeout(&json!({"timeout": v}), 10);
+        assert_eq!(t(json!(0)).unwrap(), Duration::from_secs(0));
+        assert_eq!(t(json!(45)).unwrap(), Duration::from_secs(45));
+        assert_eq!(t(json!(3600)).unwrap(), Duration::from_secs(3600));
+        // Missing → the caller's default.
+        assert_eq!(
+            resolve_wait_timeout(&json!({}), 10).unwrap(),
+            Duration::from_secs(10)
+        );
+        // Fractional / string / negative / oversized: all loud.
+        for bad in [
+            json!(1.5),
+            json!("10"),
+            json!(-3),
+            json!(3601),
+            json!(u64::MAX),
+        ] {
+            assert!(t(bad.clone()).is_err(), "timeout {bad} should be rejected");
+        }
+    }
 }

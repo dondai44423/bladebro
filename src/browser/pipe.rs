@@ -141,10 +141,18 @@ impl Browser {
         set_launched_headless(!headful);
         set_launched_no_sandbox(no_sandbox);
 
-        // M18: Proxy support via BLADE_PROXY env var.
-        let proxy = std::env::var("BLADE_PROXY").ok().filter(|p| !p.is_empty());
-        if let Some(p) = &proxy {
-            eprintln!("[bladebro] using proxy: {p}");
+        // M18: Proxy support via BLADE_PROXY env var. Validated + redacted
+        // exactly like the WS lane — same failure mode, same log guarantee.
+        let proxy = match crate::browser::proxy::env_blade_proxy() {
+            Ok(p) => p,
+            Err(reason) => {
+                return Err(BladeError::Other(format!(
+                    "invalid BLADE_PROXY value: {reason} (value redacted)"
+                )));
+            }
+        };
+        if let Some(spec) = &proxy {
+            eprintln!("[bladebro] using proxy: {}", spec.display);
         }
         // Power-user escape hatch (same as the WS path — this used to be
         // WS-only, another quiet lane divergence).
@@ -159,7 +167,7 @@ impl Browser {
             transport: Transport::Pipe,
             port: 0,
             user_data_dir: &user_data_dir,
-            proxy: proxy.as_deref(),
+            proxy: proxy.as_ref().map(|s| s.server.as_str()),
             extra: &extra,
         });
 
@@ -196,7 +204,17 @@ impl Browser {
 
         let mut cmd = Command::new(&chrome_path);
         browser_temp_env(&mut cmd);
-        cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
+        // G11: bounded startup-stderr capture (shared with the WS lane) —
+        // a failed launch must be diagnosable instead of guessed at.
+        cmd.args(&args).stdout(Stdio::null());
+        match super::launch::chrome_stderr_sink() {
+            Some(f) => {
+                cmd.stderr(Stdio::from(f));
+            }
+            None => {
+                cmd.stderr(Stdio::null());
+            }
+        }
         #[cfg(target_os = "linux")]
         if let Some(ref xvfb) = xvfb {
             apply_xvfb_env(&mut cmd, xvfb);
@@ -253,7 +271,8 @@ impl Browser {
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             return Err(BladeError::Other(format!(
-                                "Chrome exited during startup: {status}"
+                                "Chrome exited during startup: {status}{}",
+                                super::launch::chrome_stderr_tail()
                             )));
                         }
                         Ok(None) => {}
@@ -265,9 +284,10 @@ impl Browser {
                     }
                     if Instant::now() >= deadline {
                         let _ = child.kill();
-                        return Err(BladeError::Other(
-                            "Chrome pipe not responding after 20s".into(),
-                        ));
+                        return Err(BladeError::Other(format!(
+                            "Chrome pipe not responding after 20s{}",
+                            super::launch::chrome_stderr_tail()
+                        )));
                     }
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
