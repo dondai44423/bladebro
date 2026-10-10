@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.5.0] - 2026-10-10
+
 ### Added
 - `extract` works anywhere an act action does: top-level, in `batch`/`run` steps, and as a CLI command — aliasing `see extract=auto|links|forms|json` (a `url=` on the step navigates first). Composed sequences read structured data in the same call.
 - `see format=json` returns pure parseable JSON for `extract=` and `artifact=` reads — a bare payload, `{data,note}` when a caveat applies, or an `{artifact,bytes,next_offset}` envelope when oversized. Artifact paging under `format=json` returns always-valid `{path,offset,next_offset,total_chars,data}` pages, so every page parses.
@@ -1998,7 +2000,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.4.0...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.5.0...HEAD
+[4.5.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.0
 [4.4.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.4.0
 [4.3.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.3.0
 [4.2.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.2.4
