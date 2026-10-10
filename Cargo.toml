@@ -52,3 +52,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Local iteration only (never used by CI or release builds): release codegen
+# without LTO, parallel codegen units + incremental for fast rebuilds.
+# Use: capped cargo test --profile quick ...
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
