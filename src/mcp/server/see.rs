@@ -64,6 +64,15 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
         .unwrap_or(false);
     let find = args.get("find").and_then(|f| f.as_str()).unwrap_or("");
     let extract = args.get("extract").and_then(|e| e.as_str()).unwrap_or("");
+    // W2: format=json — pure parseable output for extract= and artifact=
+    // reads (the JSON.parse pain point). Every other mode stays text.
+    let format = args.get("format").and_then(|f| f.as_str()).unwrap_or("");
+    if !matches!(format, "" | "text" | "json") {
+        return Err(BladeError::Other(format!(
+            "unknown format: {format} (use 'text' or 'json')"
+        )));
+    }
+    let json_out = format == "json";
     let scope = args.get("scope").and_then(|s| s.as_str()).unwrap_or("");
     let logs = args.get("logs").and_then(|l| l.as_str()).unwrap_or("");
     let template = args.get("template").cloned();
@@ -80,7 +89,18 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     if !artifact.is_empty() {
         let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
         let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(20000) as usize;
-        return crate::artifacts::read_artifact(artifact, offset, limit);
+        return if json_out {
+            crate::artifacts::read_artifact_json(artifact, offset, limit)
+        } else {
+            crate::artifacts::read_artifact(artifact, offset, limit)
+        };
+    }
+    // format=json is only meaningful for extract=/artifact= reads; anything
+    // else is refused instead of silently returning text.
+    if json_out && extract.is_empty() {
+        return Err(BladeError::Other(
+            "format=json applies to extract= (auto/json/links/forms) and artifact= reads - this mode returns text; drop format or use an extract read".into(),
+        ));
     }
 
     // mode=content: clean markdown extraction for reading. No refs, no
@@ -142,7 +162,7 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
         let tpl = template.ok_or_else(|| BladeError::Other(
             "extract=json requires 'template': {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css|css@attr\"}}} (text reads are rendered - {\"sel\":\"css\",\"raw\":true} reads hidden text). For template-free structured extraction use extract=auto.".into()
         ))?;
-        return handle_template_extract(page, &tpl, limit).await;
+        return handle_template_extract(page, &tpl, limit, json_out).await;
     }
 
     // V21: auto-extract — deterministic structural analysis. Finds the DOM
@@ -151,7 +171,7 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // and INFERS field names by content type (title/link/image/price/date).
     // No template, no LLM.
     if extract == "auto" {
-        return handle_auto_extract(page, limit, limit_explicit).await;
+        return handle_auto_extract(page, limit, limit_explicit, json_out).await;
     }
 
     // M11: find — search all actionable elements by text, return matches with refs.
@@ -262,10 +282,29 @@ return JSON.stringify(allForms);
             .and_then(|r| r.get("value"))
             .and_then(|v| v.as_str())
             .unwrap_or("[]");
-        // V10: offload large extracts to a file.
+        // V10: offload large extracts to a file. W2: format=json returns a
+        // parseable payload (bare when it fits, an artifact envelope when
+        // not) instead of the truncating preview.
+        if json_out {
+            if json_str.len() > 6000 {
+                let path = crate::artifacts::write_artifact(json_str, "json")?;
+                return Ok(serde_json::json!({
+                    "artifact": path,
+                    "bytes": json_str.len(),
+                    "next_offset": 0,
+                })
+                .to_string());
+            }
+            return Ok(json_str.to_string());
+        }
         if json_str.len() > 6000 {
             let path = crate::artifacts::write_artifact(json_str, "json")?;
-            let count = json_str.matches("href").count();
+            // Item count from the array itself (the old href-count claimed
+            // ~0 items for form lists).
+            let count = serde_json::from_str::<Value>(json_str)
+                .ok()
+                .and_then(|v| v.as_array().map(|a| a.len()))
+                .unwrap_or(0);
             return Ok(format!(
                 "extract {extract} (~{count} items, {} bytes)\npreview: {}…\n{}",
                 json_str.len(),

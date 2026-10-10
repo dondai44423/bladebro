@@ -50,6 +50,8 @@ pub(super) struct EditReport {
     /// Exact match (type) / empty (clear) at the last readback.
     pub(super) verified: bool,
     /// A JS setter wrote the value because key events did not register.
+    /// S1: surfaced as an error with `trusted:false` (never as a typed
+    /// verdict) unless a corrective retype replaced the value.
     pub(super) set_via_js: bool,
     /// A corrective pass ran (late content / failed clear retried once).
     pub(super) corrected: bool,
@@ -373,9 +375,7 @@ pub(super) fn type_verdict_text(
         if rep.corrected {
             s.push_str(" (after a retry)");
         }
-        if rep.set_via_js {
-            s.push_str(" (set via JS - key events did not register)");
-        } else if rep.tgt_missing || !rep.host_is_tgt {
+        if rep.tgt_missing || !rep.host_is_tgt {
             match landed_ref_excluding(lpm, ref_id, &rep.final_text) {
                 Some(l) => s.push_str(&format!(" (landed in {l}: the live editor)")),
                 None => s.push_str(" (landed in the focused editor)"),

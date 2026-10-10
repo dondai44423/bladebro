@@ -133,15 +133,40 @@ mod action_tests {
     // and the em-dash-free guarantee (public-facing strings use hyphens).
 
     #[test]
-    fn no_effect_verdict_names_target_without_em_dashes() {
-        let msg = super::verdict::no_effect_verdict(
+    fn clicked_quiet_verdict_names_target_without_em_dashes() {
+        let msg = super::verdict::clicked_quiet_verdict(
             &["mouse", "js", "enter"],
             "button [Account menu] (topmost=true,disabled=false)",
             None,
         );
         assert_eq!(
             msg,
-            "outcome: no-effect (click dispatched via mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - no navigation, no visible DOM change)"
+            "outcome: clicked (no observable DOM change) via mouse, js, enter on button [Account menu] (topmost=true,disabled=false) - dispatched once; verify state before re-clicking"
+        );
+        // R2: a dispatched click must never read as a failure.
+        assert!(!msg.contains("no-effect"), "dispatch happened: {msg}");
+        assert!(!msg.contains('\u{2014}'), "no em-dash in public verdict");
+        // Empty-target variant keeps the cause hint.
+        let bare = super::verdict::clicked_quiet_verdict(&["js"], "", None);
+        assert!(
+            bare.ends_with(
+                "- dispatched once; the element may be disabled, occluded, or hover-gated"
+            ),
+            "{bare}"
+        );
+    }
+
+    #[test]
+    fn no_effect_verdict_says_nothing_was_dispatched() {
+        // R2: "no-effect" is reserved for zero dispatch (every lane skipped).
+        let msg = super::verdict::no_effect_verdict(
+            &["js", "mouse"],
+            "button [Account menu] (topmost=true,disabled=false)",
+            None,
+        );
+        assert_eq!(
+            msg,
+            "outcome: no-effect (no click was dispatched: tried js, mouse on button [Account menu] (topmost=true,disabled=false) - every activation lane was skipped)"
         );
         assert!(!msg.contains('\u{2014}'), "no em-dash in public verdict");
     }
@@ -151,7 +176,7 @@ mod action_tests {
         use super::verdict::dom_effect_summary;
         use crate::page::refs::StateChange;
         use crate::page::PageDelta;
-        // Nothing changed → None (the no-effect path).
+        // Nothing changed → None (the quiet-click path).
         assert!(dom_effect_summary(&PageDelta::default()).is_none());
         // Node change → real counts.
         let mut d = PageDelta::default();
@@ -180,17 +205,17 @@ mod action_tests {
     fn no_effect_verdict_falls_back_when_target_unknown() {
         let msg = super::verdict::no_effect_verdict(&["mouse"], "", None);
         assert!(
-            msg.ends_with("- no navigation, no visible DOM change; the element may be disabled, occluded, or hover-gated)"),
+            msg.ends_with("- every activation lane was skipped)"),
             "unexpected fallback: {msg}"
         );
         assert!(!msg.contains('\u{2014}'), "no em-dash in fallback verdict");
     }
 
     #[test]
-    fn no_effect_verdict_carries_measured_state() {
+    fn clicked_quiet_verdict_carries_measured_state() {
         // G09: when the target's toggle state was measured and did not move,
         // the verdict says so instead of the old absolute "nothing happened".
-        let msg = super::verdict::no_effect_verdict(
+        let msg = super::verdict::clicked_quiet_verdict(
             &["mouse"],
             "label \"Approve\" (topmost=true,disabled=false)",
             Some("checked=false"),
@@ -199,7 +224,7 @@ mod action_tests {
             msg.contains("targeted state unchanged (checked=false)"),
             "{msg}"
         );
-        assert!(msg.contains("no visible DOM change"), "{msg}");
+        assert!(msg.contains("no observable DOM change"), "{msg}");
     }
 
     // Guards the leaf-targeting JS fragment: the box-mode resolver must stay

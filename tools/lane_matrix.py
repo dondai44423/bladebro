@@ -17,6 +17,10 @@ touches the user's real data dir.
 Binary under test: `BLADEBRO` env -> the repo build (`target/release/bladebro`)
 -> `~/.local/bin/bladebro`; printed at startup. The real lane refuses a binary
 that predates `rb` (BLADE_LANE=real would be silently ignored).
+
+Exit 0 only when every label is clean; exit 1 when any result carries a
+BAD/FAIL/LEAKED label (each labeled line above names one); exit 2 when the
+binary lacks real-lane support.
 """
 import json, os, shutil, signal, subprocess, sys, tempfile, time
 
@@ -94,6 +98,11 @@ def classify_real(j):
     else:
         ok.append(f"WD-BAD({j.get('wd')})")
     return ok
+
+
+def _bad(res):
+    """Any defect label fails the matrix run (see __main__ exit code)."""
+    return any(tag in res for tag in ("BAD", "FAIL", "LEAKED"))
 
 
 def lane_real(rounds=5):
@@ -345,23 +354,26 @@ if __name__ == "__main__":
     print(f"bladebro under test: {BLADE}")
     if lane in ("real", "all"):
         require_real_lane_support()
+    bad = 0
+
+    def show(name, res_list):
+        global bad
+        print(f"== {name}")
+        for n, res in res_list:
+            print(f"  #{n}: {res}")
+            bad += _bad(res)
+
     if lane in ("daemon", "all"):
-        print("== daemon lane")
-        for n, res in lane_daemon(rounds):
-            print(f"  #{n}: {res}")
+        show("daemon lane", lane_daemon(rounds))
     if lane in ("oneshot", "all"):
-        print("== one-shot lane")
-        for n, res in lane_oneshot(rounds):
-            print(f"  #{n}: {res}")
+        show("one-shot lane", lane_oneshot(rounds))
     if lane in ("mcp", "all"):
-        print("== mcp (stdio, default WS) lane")
-        for n, res in lane_mcp(rounds):
-            print(f"  #{n}: {res}")
+        show("mcp (stdio, default WS) lane", lane_mcp(rounds))
     if lane in ("mcp-pipe", "all"):
-        print("== mcp (pipe opt-in) lane")
-        for n, res in lane_mcp(rounds, env_extra={"BLADE_TRANSPORT": "pipe"}):
-            print(f"  #{n}: {res}")
+        show("mcp (pipe opt-in) lane", lane_mcp(rounds, env_extra={"BLADE_TRANSPORT": "pipe"}))
     if lane in ("real", "all"):
-        print("== real lane (clone, isolated home, invisible)")
-        for n, res in lane_real(rounds):
-            print(f"  #{n}: {res}")
+        show("real lane (clone, isolated home, invisible)", lane_real(rounds))
+
+    if bad:
+        sys.stderr.write(f"LANE MATRIX: {bad} bad result(s) - the labeled lines above name each one\n")
+        sys.exit(1)

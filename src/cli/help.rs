@@ -210,12 +210,14 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--limit": "max extract items (default 50; Reddit post comments: all up to 1000 unless set)",
                 "--logs": "console | network",
                 "--template": "JSON or @file — for extract=json",
-                "--artifact": "read an offloaded payload from disk, paged: --artifact <path> [--offset N] [--limit N]"
+                "--artifact": "read an offloaded payload from disk, paged: --artifact <path> [--offset N] [--limit N]",
+                "--format": "text (default) | json — pure JSON output for extract/artifact reads ({offset,next_offset,data} pages)"
             },
             "examples": [
                 "bladebro see model",
                 "bladebro see content example.com",
                 "bladebro see extract auto --limit 20",
+                "bladebro see extract auto --format json",
                 "bladebro see --find \"Submit\"",
                 "bladebro see --logs network"
             ],
@@ -224,9 +226,9 @@ fn command_help_json(cmd: &str) -> Option<Value> {
         "act" => json!({
             "usage": "bladebro act <action> [target] [value] [--flags]",
             "tool": "act",
-            "actions": ["click","type","fill","select","clear","press","scroll","hover","navigate","upload","download","wait","eval","collect","read","batch","pdf","back","forward","reload","save","load","open-tab","close-tab","switch-tab"],
+            "actions": ["click","type","fill","select","clear","press","scroll","hover","navigate","upload","download","wait","eval","collect","extract","read","batch","pdf","back","forward","reload","save","load","open-tab","close-tab","switch-tab"],
             "universal_flags": {
-                "--ref": "element ref (self-heals)",
+                "--ref": "element ref (self-heals; page-scoped — refresh after navigation; clear/read also take labels)",
                 "--label": "field label",
                 "--selector": "CSS selector (searches open shadow roots)",
                 "--text": "value — text to type, file path (upload), wait match value",
@@ -240,7 +242,8 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--dx/--dy": "scroll distance",
                 "--js": "eval expression (@file or - for scripts)",
                 "--submit": "fill: submit button ref or text",
-                "--slim": "skip the delta"
+                "--slim": "skip the delta",
+                "--format": "extract: text (default) | json — pure JSON output"
             },
             "examples": [
                 "bladebro act click e5",
@@ -250,13 +253,14 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro act click Submit --url example.com/login",
                 "bladebro act upload e5 /tmp/file.pdf",
                 "bladebro act batch @steps.json",
+                "bladebro act extract --format json",
                 "bladebro act wait settle",
                 "bladebro act eval \"document.title\""
             ],
             "notes": [
                 "unquoted multi-word values join: act click Sign in == act click \"Sign in\"",
                 "big JSON payloads: @file or - (stdin)",
-                "batch steps may include {\"action\":\"see\",...} to read inline"
+                "batch steps may include {\"action\":\"see\"|\"extract\",...} to read inline; url= on any step navigates first"
             ]
         }),
         "state" => json!({
@@ -541,12 +545,15 @@ FLAGS
   --budget <N>        max response chars (default 8000)
   --limit <N>         max extract items (default 50; Reddit comments: all ≤1000)
   --logs console|network
+  --artifact <path>   paged read of an offloaded payload (--offset/--limit)
+  --format text|json  json: pure JSON out for extract/artifact reads
   --url <url>         navigate first (or pass the URL positionally)
 
 EXAMPLES
   bladebro see                            interactive elements
   bladebro see content                    page as markdown
   bladebro see extract auto --limit 20    structured items
+  bladebro see extract auto --format json  pure JSON output
   bladebro see example.com content        navigate + read in one call
   bladebro see --find "Submit"            refs by text
   bladebro see --logs network             recent requests
@@ -560,17 +567,18 @@ USAGE
 
 ACTIONS
   click <ref|label>        type <target> <text>      fill <fields> [--submit]
-  select <target> <option> clear <ref>               press <key|chord>
+  select <target> <option> clear <ref|label>         press <key|chord>
   scroll <dx> <dy>         hover <target>            navigate <url> [--block]
   upload <target> <path>   download <url> [--path]  wait <condition> [value]
-  eval <js> [--ref]        collect <url> [--max N]   read <ref>
+  eval <js> [--ref]        collect <url> [--max N]   read <ref|label>
+  extract [auto|links|forms|json]   structured data (same as 'see extract …')
   batch <steps|@file|->    pdf [--path] [--landscape]
   back / forward / reload  save <name> / load <name>
   open-tab [url] / switch-tab <id> / close-tab <id>
 
 UNIVERSAL FLAGS (mirror the MCP schema — accepted on every action)
   --ref --label --text --selector --role --nth --key --url --option --condition --timeout
-  --dx --dy --js --submit --block --slim   (per-action: --path, --max, --x/--y…)
+  --dx --dy --js --submit --block --slim --format  (per-action: --path, --max, --x/--y…)
 
 Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
 payloads: @file or - (stdin). Unknown flags fail loudly (exit 2). Key chords: 'act press Control+a'.
@@ -588,6 +596,7 @@ EXAMPLES
   bladebro act eval "document.title"             evaluate JS
   bladebro act batch '[{"action":"reload"}]'     sequential steps in ONE call
   bladebro act collect https://x.com/list --max 100   infinite-scroll collect
+  bladebro act extract --format json             structured data as JSON
 "#
         }
         "state" => {

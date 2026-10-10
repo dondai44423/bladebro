@@ -87,6 +87,15 @@ pub fn has_full_script() -> bool {
     FULL_SCRIPT.read().map(|s| !s.is_empty()).unwrap_or(false)
 }
 
+/// The GL-spoof decision baked into the most recently registered injection.
+/// Read by the mid-session GL reconciler (`Page::gl_health_refresh`): when a
+/// transition flips the decision (a crashed hardware GPU coming back
+/// software, or a GL-less launch that recovers), the injection must be
+/// rebuilt so the mask matches the live backend - without a restart.
+pub fn gl_spoofed() -> bool {
+    GL_SPOOFED.load(Ordering::Relaxed)
+}
+
 pub type ScriptId = String;
 
 /// Core block (always applied): seed, proxy-mask helpers (PROXY_HELPERS),
@@ -299,8 +308,9 @@ async fn adaptive_gl_spoof(env: &EnvProbe, cdp: &CdpSession) -> bool {
                     eprintln!(
                         "[stealth] WARNING: WebGL context creation now returns null on this \
                          browser — the GPU process degraded mid-session (Chrome restarts it \
-                         with GL disabled after a GPU crash). Pages will see no WebGL; no GL \
-                         mask can apply until the browser is relaunched."
+                         with GL disabled after a GPU crash). Pages see no WebGL while it \
+                         lasts; the driver keeps re-probing and re-arms the mask \
+                         automatically if GL returns."
                     );
                     set_gpu_state(Some(st));
                     mark_gl_mid_session_loss();

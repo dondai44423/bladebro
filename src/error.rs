@@ -14,11 +14,18 @@ pub enum BladeError {
     Cdp { code: i64, message: String },
 
     /// The WebSocket transport to the browser failed or was closed.
-    #[error("CDP transport closed: {0}")]
+    /// Client-side by nature: the browser connection broke, the page did
+    /// not reject anything. `degraded:true` is the machine-readable tag
+    /// agents branch on (S3) — a client-side failure must not read as a
+    /// page verdict.
+    #[error("CDP transport closed: {0} - degraded:true (client-side connection failure; the page itself did not fail)")]
     Transport(String),
 
     /// A CDP command did not receive a response within the timeout.
-    #[error("CDP command timed out after {0:?}")]
+    /// `degraded:true` tag (S3): an unanswered command is a browser-health
+    /// signal (GPU/renderer stall, overloaded main thread, wedged
+    /// process) - not a page-side error an agent should retry blindly.
+    #[error("CDP command timed out after {0:?} - degraded:true (client-side: the browser did not answer within the deadline)")]
     Timeout(std::time::Duration),
 
     /// The browser connection is no longer usable (process gone / dropped).

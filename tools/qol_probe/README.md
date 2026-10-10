@@ -14,7 +14,7 @@ BLADEBRO=/path/to/bladebro python3 tools/qol_probe/run.py
 ```
 
 Own fixture server (port 8794), own `BLADE_HOME` (`/tmp/qol_probe_home`),
-no display leakage. Exit 0 = all 117 assertions passed.
+no display leakage. Exit 0 = all 122 assertions passed.
 
 ## What it proves
 
@@ -57,6 +57,12 @@ no display leakage. Exit 0 = all 117 assertions passed.
     its subtree; markdown excludes stylesheet-hidden text; outlines and
     element/text branches include visible same-origin frames and shadows,
     excluding hidden frames, inaccessible frames and shadow script text.
+
+14. **tool-surface parity (4.5.0)**: `clear` takes label addressing like
+    type/click/fill; `extract` works as a `batch`/`run` step alias (it used
+    to die as "unknown action"); `see extract … --format json` returns pure
+    parseable JSON (zero preamble); a zero-match selector miss reports
+    `0 raw matches, 0 actionable` with a spelling hint.
 
 ## The fixture models
 

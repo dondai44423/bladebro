@@ -155,12 +155,15 @@ impl ToggleProbe {
 
 /// Click evidence threaded into the verdict: the activation lane + attempts +
 /// resolved target (ref clicks), the element under the point (coord clicks),
-/// and the observable toggle state around the dispatch (G01/G09).
+/// whether any lane actually dispatched (R2), and the observable toggle state
+/// around the dispatch (G01/G09).
 #[derive(Default)]
 pub struct ClickEvidence<'a> {
     pub via: Option<(&'a str, &'a [&'a str], &'a str)>,
     pub coord_hit: Option<&'a str>,
     pub toggle: Option<&'a ToggleProbe>,
+    /// True when a click was actually dispatched (mouse/js/enter/space/coord).
+    pub dispatched: bool,
 }
 
 /// Compute a one-line outcome verdict from the action + delta + click info.
@@ -173,7 +176,8 @@ pub(super) fn compute_verdict(
     edit: Option<&EditReport>,
     scroll: Option<&ScrollReport>,
 ) -> String {
-    let (click_via, coord_hit, toggle) = (click.via, click.coord_hit, click.toggle);
+    let (click_via, coord_hit, toggle, dispatched) =
+        (click.via, click.coord_hit, click.toggle, click.dispatched);
     match action {
         Action::ClickCoord { x, y } => {
             if delta.navigated {
@@ -207,10 +211,10 @@ pub(super) fn compute_verdict(
                     .unwrap_or_default();
                 match coord_hit {
                     Some(h) => format!(
-                        "outcome: no-effect (coord-click at {x:.0},{y:.0} - page did not respond{state_note}; topmost there: {h})"
+                        "outcome: clicked (no observable DOM change) via coord-click at {x:.0},{y:.0}{state_note}; topmost there: {h}"
                     ),
                     None => format!(
-                        "outcome: no-effect (coord-click at {x:.0},{y:.0} - page did not respond{state_note})"
+                        "outcome: clicked (no observable DOM change) via coord-click at {x:.0},{y:.0}{state_note}"
                     ),
                 }
             }
@@ -243,13 +247,18 @@ pub(super) fn compute_verdict(
                     t.before.as_deref().unwrap_or("?"),
                     t.after.as_deref().unwrap_or("?")
                 )
+            } else if !dispatched {
+                // R2: nothing was dispatched at all (every lane skipped: no
+                // box, no verified focus) - the one case that earns the word
+                // "no-effect". A retry is safe and may be the right move.
+                no_effect_verdict(tried, tgt_meta, toggle.and_then(|t| t.after.as_deref()))
             } else if tgt_meta.is_empty() {
-                no_effect_verdict(tried, "", toggle.and_then(|t| t.after.as_deref()))
+                clicked_quiet_verdict(tried, "", toggle.and_then(|t| t.after.as_deref()))
             } else {
                 // The resolved click target is named so consumers can tell a
                 // wrong-target / avenue problem from a page that rejected a
                 // well-aimed click.
-                no_effect_verdict(tried, tgt_meta, toggle.and_then(|t| t.after.as_deref()))
+                clicked_quiet_verdict(tried, tgt_meta, toggle.and_then(|t| t.after.as_deref()))
             }
         }
         Action::Type { ref_id, text } => {
@@ -753,13 +762,11 @@ pub(super) const LEAF_TARGET_JS: &str = concat!(
     "if(_lbest){_lClick=_lbx(_lbest);_lht=(_lbest.getAttribute&&(_lbest.getAttribute('aria-label')||_lbest.textContent||_lbest.getAttribute('title')))||'';_lhr=(_lbest.getAttribute&&_lbest.getAttribute('role'))||_lbest.tagName.toLowerCase();}}",
 );
 
-/// Build the verdict string for a no-effect click that names the resolved
-/// click target, so consumers can tell a wrong-target/avenue problem from a
-/// page that rejected a well-aimed click. (CL3, #15; G09 rewording.)
-/// Says what was tried, that dispatch DID happen, and - when the target
-/// carries observable toggle state - whether that state actually moved;
-/// "no visible DOM change" is scoped to what was measurable instead of the
-/// old absolute "nothing happened".
+/// Build the verdict for a click where NO activation lane dispatched (every
+/// lane was skipped: no box, no verified focus). "no-effect" is reserved for
+/// exactly this case (R2) - the dispatch never happened, so a retry is safe.
+/// Names the resolved click target so consumers can tell a wrong-target /
+/// avenue problem from a page that rejected a well-aimed click.
 pub(super) fn no_effect_verdict(
     tried: &[&str],
     target_meta: &str,
@@ -770,12 +777,39 @@ pub(super) fn no_effect_verdict(
         .unwrap_or_default();
     if target_meta.is_empty() {
         format!(
-            "outcome: no-effect (click dispatched via {}{state_note} - no navigation, no visible DOM change; the element may be disabled, occluded, or hover-gated)",
+            "outcome: no-effect (no click was dispatched: tried {}{state_note} - every activation lane was skipped)",
             tried.join(", ")
         )
     } else {
         format!(
-            "outcome: no-effect (click dispatched via {} on {}{state_note} - no navigation, no visible DOM change)",
+            "outcome: no-effect (no click was dispatched: tried {} on {}{state_note} - every activation lane was skipped)",
+            tried.join(", "),
+            target_meta
+        )
+    }
+}
+
+/// Build the verdict for a click that DID dispatch but produced no observable
+/// DOM change (R2). The dispatch is a fact, so the verdict says "clicked" -
+/// the quiet DOM is reported as such instead of reading like the click
+/// failed. Carries the dispatch-once caution: a blind re-click may be a
+/// duplicate submit. The target meta doubles as the occlusion diagnostic.
+pub(super) fn clicked_quiet_verdict(
+    tried: &[&str],
+    target_meta: &str,
+    state_after: Option<&str>,
+) -> String {
+    let state_note = state_after
+        .map(|s| format!("; targeted state unchanged ({s})"))
+        .unwrap_or_default();
+    if target_meta.is_empty() {
+        format!(
+            "outcome: clicked (no observable DOM change) via {}{state_note} - dispatched once; the element may be disabled, occluded, or hover-gated",
+            tried.join(", ")
+        )
+    } else {
+        format!(
+            "outcome: clicked (no observable DOM change) via {} on {}{state_note} - dispatched once; verify state before re-clicking",
             tried.join(", "),
             target_meta
         )

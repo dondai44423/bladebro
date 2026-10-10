@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `extract` works anywhere an act action does: top-level, in `batch`/`run` steps, and as a CLI command — aliasing `see extract=auto|links|forms|json` (a `url=` on the step navigates first). Composed sequences read structured data in the same call.
+- `see format=json` returns pure parseable JSON for `extract=` and `artifact=` reads — a bare payload, `{data,note}` when a caveat applies, or an `{artifact,bytes,next_offset}` envelope when oversized. Artifact paging under `format=json` returns always-valid `{path,offset,next_offset,total_chars,data}` pages, so every page parses.
+- `clear` and `read` accept label addressing like click/type/fill.
+
+### Fixed
+- Non-page URL schemes (`ftp:`, `javascript:`, …) are rejected immediately with a clear error instead of hanging for ~10 seconds and then reporting a false "already here". Navigation attempts that Chrome fails to load now return the load error (with a download hint for aborted file downloads) instead of a false verdict.
+- A dispatched click whose DOM stays quiet now reads `outcome: clicked (no observable DOM change)` — the dispatch happened once, and the verdict says so instead of reading like a failure; `no-effect` is reserved for clicks where no activation lane dispatched at all. Coordinate clicks name the element that actually receives the click.
+- `type` falling back to a JavaScript value setter (key events did not register) is now a loud error tagged `trusted:false` — never a normal-looking verdict — with retry/restart guidance.
+- CDP timeouts and transport failures are tagged `degraded:true` (client-side), so they cannot be mistaken for page-side outcomes.
+- Mid-session WebGL loss is a transient advisory: the driver keeps re-probing the GPU and restores the GL mask automatically when the backend reports software again (no client restart; an existing mask is never removed automatically).
+- A selector miss with zero raw matches now reports `0 raw matches, 0 actionable` with a spelling hint; a label miss on a localized page names the page's language.
+- `run` step failures return as a structured result — `run stopped at step N of M (K ok)` plus the failure and every prior step observation — instead of an error that discards the collected context. `see`/`extract` steps honor `url=` and `optional:true` like every other step.
+
 ## [4.4.0] - 2026-10-10
 
 ### Added

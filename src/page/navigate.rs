@@ -25,6 +25,12 @@ impl Page {
     }
 
     async fn navigate_inner(&mut self, url: &str) -> Result<PageDelta> {
+        // R1: reject schemes that cannot load a page BEFORE any CDP work.
+        // ftp://, javascript:, chrome:// etc. used to sail into
+        // Page.navigate, where the browser silently refused: the driver
+        // paid the full 10s frameNavigated wait and then reported the
+        // unchanged page as "already here". The gate answers instantly.
+        validate_nav_url(url)?;
         // M16: Idempotent navigate \u{2014} if already on this URL, skip reload.
         if !self.lpm.url().is_empty() && normalize_url(url) == normalize_url(self.lpm.url()) {
             let cap = capture(&self.cdp).await?;
@@ -72,12 +78,41 @@ impl Page {
             .cdp
             .wait_for("Page.frameNavigated", Duration::from_secs(10));
         let target = with_scheme(url);
-        self.cdp
-            .send("Page.navigate", Some(serde_json::json!({ "url": target })))
+        let nav_res = self
+            .cdp
+            .send("Page.navigate", Some(serde_json::json!({ "url": &target })))
             .await?;
+        let nav_error: Option<String> = nav_res
+            .get("errorText")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
         _t("sent");
-        let _ = tokio::time::timeout(Duration::from_secs(10), wait).await;
+        // R1: when the browser reports WHY it refused the navigation, give a
+        // superseded page-side navigation a short grace to fire its own
+        // frameNavigated. If nothing navigated, surface the browser's reason
+        // instead of waiting the full 10s and then reporting the unchanged
+        // page as "already here" - a confident lie that branch-switched
+        // agents into wrong work.
+        let grace = if nav_error.is_some() {
+            Duration::from_millis(1500)
+        } else {
+            Duration::from_secs(10)
+        };
+        let nav_event = tokio::time::timeout(grace, wait).await;
         _t("frameNavigated");
+        if nav_event.is_err() {
+            if let Some(err) = nav_error {
+                let hint = if err.contains("ERR_ABORTED") {
+                    " (the URL may be a file download - try act download url=...)"
+                } else {
+                    ""
+                };
+                return Err(crate::error::BladeError::Other(format!(
+                    "navigation to {target} failed: {err}{hint}"
+                )));
+            }
+        }
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
         _t("load");
         let _settle_t = std::time::Instant::now();
@@ -636,6 +671,94 @@ pub(crate) fn with_scheme(url: &str) -> String {
     }
 }
 
+/// R1: reject a navigation target whose scheme cannot produce a page, before
+/// any browser work. `ftp://`, `javascript:`, `mailto:` etc. used to reach
+/// `Page.navigate`, where Chrome refused silently: the driver then burned
+/// the full 10s frameNavigated wait and reported the unchanged page as
+/// "already here" (10.3s + a false verdict, reproduced twice). The gate
+/// answers in microseconds with the supported set.
+///
+/// Allowed: http(s) (and about/data/file/blob, which can load documents).
+/// A bare host or `host:port` (all-digit port) is not a scheme - it passes
+/// through for [`with_scheme`]. The scheme names that conflict with the
+/// `host:port` shape (javascript:1, ftp:...) are rejected by name so a
+/// digit-only tail cannot smuggle them through.
+pub(crate) fn validate_nav_url(url: &str) -> Result<()> {
+    let u = url.trim();
+    if u.is_empty() {
+        return Err(crate::error::BladeError::Other(
+            "navigate: empty URL - pass the page to open".into(),
+        ));
+    }
+    let Some(scheme) = scheme_prefix(u) else {
+        return Ok(()); // bare host or path form - with_scheme handles it
+    };
+    let s = scheme.to_ascii_lowercase();
+    const NAVIGABLE: &[&str] = &["http", "https", "about", "data", "file", "blob"];
+    if NAVIGABLE.contains(&s.as_str()) {
+        return Ok(());
+    }
+    // Known non-page schemes must be rejected even when their tail looks
+    // like a port (`javascript:1`, `tel:555`). Everything else that is not
+    // host:port falls through to the same explicit error.
+    let rest = &u[scheme.len() + 1..];
+    let portish = !rest.is_empty()
+        && rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .bytes()
+            .all(|b| b.is_ascii_digit());
+    if portish && !is_known_scheme_name(&s) {
+        return Ok(()); // `localhost:3000`, `example.com:8080/x`
+    }
+    Err(crate::error::BladeError::Other(format!(
+        "unsupported URL scheme \"{s}:\" - navigable schemes are http(s), about, data, file and blob (this target was rejected before any browser work)"
+    )))
+}
+
+/// The scheme prefix of a URL (`scheme:` before any `/`, `?`, `#`), or None.
+/// Scheme grammar: ASCII alpha, then alnum/`+`/`-`/`.`, then `:`.
+fn scheme_prefix(url: &str) -> Option<&str> {
+    let bytes = url.as_bytes();
+    if !bytes.first().is_some_and(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    for (i, &b) in bytes.iter().enumerate().skip(1) {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'-' | b'.' => {}
+            b':' => return Some(&url[..i]),
+            _ => return None, // '/' '?' '#' or invalid scheme byte
+        }
+    }
+    None
+}
+
+/// Scheme names that look like they could be `host:port` but are schemes.
+fn is_known_scheme_name(s: &str) -> bool {
+    matches!(
+        s,
+        "javascript"
+            | "ftp"
+            | "ftps"
+            | "ws"
+            | "wss"
+            | "mailto"
+            | "tel"
+            | "sms"
+            | "callto"
+            | "chrome"
+            | "chrome-extension"
+            | "devtools"
+            | "edge"
+            | "view-source"
+            | "magnet"
+            | "intent"
+            | "market"
+            | "itms-apps"
+    )
+}
+
 /// Normalize a URL for comparison: strip scheme, fragment, trailing slash.
 fn normalize_url(url: &str) -> String {
     let (s, https) = url
@@ -658,7 +781,7 @@ fn normalize_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_domain, normalize_url};
+    use super::{extract_domain, normalize_url, validate_nav_url};
 
     #[test]
     fn extract_domain_strips_scheme_port_and_www() {
@@ -682,5 +805,55 @@ mod tests {
             normalize_url("http://example.com:8080/x/"),
             "example.com:8080/x"
         );
+    }
+
+    /// R1: the scheme gate. The rejected set is exactly the class that used
+    /// to burn 10s and then report "already here" (ftp/javascript/mailto);
+    /// host:port forms and the document-capable schemes must pass through.
+    #[test]
+    fn nav_scheme_gate_rejects_non_page_schemes() {
+        for bad in [
+            "ftp://example.com/",
+            "javascript:1",
+            "javascript:alert(1)",
+            "mailto:user@example.com",
+            "tel:5551234",
+            "chrome://settings",
+            "view-source:https://example.com",
+            "ws://example.com/socket",
+        ] {
+            let err = validate_nav_url(bad).unwrap_err().to_string();
+            assert!(err.contains("unsupported URL scheme"), "{bad}: {err}");
+        }
+        assert!(validate_nav_url("").is_err());
+        assert!(validate_nav_url("   ").is_err());
+        // Accepted: page-capable schemes, bare hosts, host:port forms.
+        for ok in [
+            "https://example.com",
+            "http://127.0.0.1:8080/fixture.html",
+            "example.com/path?q=1",
+            "localhost:3000",
+            "127.0.0.1:9222",
+            "about:blank",
+            "data:text/html,<b>hi</b>",
+            "file:///tmp/page.html",
+        ] {
+            assert!(validate_nav_url(ok).is_ok(), "{ok} must pass the gate");
+        }
+    }
+
+    /// The scheme grammar splitter: only a real `scheme:` prefix counts;
+    /// `host:port`, paths with colons and fragments must not be misread.
+    #[test]
+    fn scheme_prefix_reads_only_a_real_scheme() {
+        use super::scheme_prefix;
+        assert_eq!(scheme_prefix("https://x"), Some("https"));
+        assert_eq!(scheme_prefix("javascript:1"), Some("javascript"));
+        assert_eq!(scheme_prefix("localhost:3000/x"), Some("localhost"));
+        assert_eq!(scheme_prefix("example.com:8080"), Some("example.com"));
+        assert_eq!(scheme_prefix("/path:with:colons"), None);
+        assert_eq!(scheme_prefix("example.com/path"), None);
+        assert_eq!(scheme_prefix("sub/path:1"), None);
+        assert_eq!(scheme_prefix(""), None);
     }
 }

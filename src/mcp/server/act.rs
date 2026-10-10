@@ -356,13 +356,22 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             }
         }
         "clear" => {
+            // R3: label addressing works wherever click/type/fill accept it -
+            // the asymmetry (label rejected here) forced an extra see call.
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
+                resolve_text_target(page, label, rf, nth).await?
             } else {
                 return Err(BladeError::Other(
-                    "clear requires 'ref' or 'selector'".into(),
+                    "clear requires 'ref', 'label', or 'selector'".into(),
                 ));
             };
             Action::Clear { ref_id: resolved }
@@ -428,6 +437,21 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             // V22: auto-extract + scroll + dedupe loop. Infinite-scroll collection.
             return handle_collect(page, args).await;
         }
+        "extract" => {
+            // W1: `extract` is a see read, not an act mutation - accepted
+            // here as an alias because the docs promise every act action
+            // works in run/batch steps, and that is exactly where agents
+            // wrote {"action":"extract"} (it used to die as "unknown
+            // action", silently consuming an optional:true step). url= was
+            // honored by the generic pre-navigation above.
+            let mut see_args = args.clone();
+            if see_args.get("extract").is_none() {
+                if let Some(obj) = see_args.as_object_mut() {
+                    obj.insert("extract".into(), serde_json::json!("auto"));
+                }
+            }
+            return handle_see(&see_args, page).await;
+        }
         "hover" => {
             let resolved = if !ref_id.is_empty() {
                 ref_id.to_string()
@@ -474,9 +498,17 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 ref_id.to_string()
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
+                resolve_text_target(page, label, rf, nth).await?
             } else {
                 return Err(BladeError::Other(
-                    "read requires 'ref' (an element id like e5 from see) or 'selector'".into(),
+                    "read requires 'ref' (an element id like e5 from see), 'label', or 'selector'"
+                        .into(),
                 ));
             };
             // Self-heal: the ref may have died since the agent saw it.
@@ -543,26 +575,78 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     .get("action")
                     .and_then(|a| a.as_str())
                     .unwrap_or("unknown");
-                if step_action == "see" {
+                if step_action == "see" || step_action == "extract" {
                     let mut see_args = step.clone();
+                    if step_action == "extract" && see_args.get("extract").is_none() {
+                        if let Some(obj) = see_args.as_object_mut() {
+                            obj.insert("extract".into(), serde_json::json!("auto"));
+                        }
+                    }
                     if see_args.get("budget").is_none() {
                         if let Some(obj) = see_args.as_object_mut() {
                             obj.insert("budget".into(), serde_json::json!(3000));
                         }
                     }
-                    match Box::pin(handle_see(&see_args, page)).await {
+                    // url= navigates first - the documented contract for every
+                    // act action; see/extract steps used to ignore it silently.
+                    let step_url = step
+                        .get("url")
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let out_res: Result<String> = if step_url.is_empty() {
+                        Box::pin(handle_see(&see_args, page)).await
+                    } else if crate::realbrowser::input_paused() {
+                        Err(crate::realbrowser::paused_error())
+                    } else {
+                        match page.navigate(&step_url).await {
+                            Ok(_) => {
+                                let _ = crate::page::wait_for_settle_with_network(
+                                    page.cdp_ref(),
+                                    std::time::Duration::from_millis(1200),
+                                    Some(page.in_flight_ref()),
+                                )
+                                .await;
+                                Box::pin(handle_see(&see_args, page)).await
+                            }
+                            Err(e) => Err(e),
+                        }
+                    };
+                    match out_res {
                         Ok(out) => {
                             ok_count += 1;
                             let chars = out.chars().count();
-                            reads.push(format!("=== see (step {}) ===\n{out}", i + 1));
-                            verdicts.push(format!("step{}[see]: {} chars", i + 1, chars));
+                            reads.push(format!("=== {step_action} (step {}) ===\n{out}", i + 1));
+                            verdicts.push(format!(
+                                "step{}[{}]: {} chars",
+                                i + 1,
+                                step_action,
+                                chars
+                            ));
                         }
                         Err(e) => {
+                            // optional:true continues past a failed read step
+                            // like it does for every other step.
+                            if step
+                                .get("optional")
+                                .and_then(|o| o.as_bool())
+                                .unwrap_or(false)
+                            {
+                                verdicts.push(format!(
+                                    "step{}[{}]: failed (optional): {}",
+                                    i + 1,
+                                    step_action,
+                                    e
+                                ));
+                                prev_url = page.model().url().to_string();
+                                continue;
+                            }
                             halted = Some(i + 1);
-                            verdicts.push(format!("step{}[see]: HALT: {e}", i + 1));
+                            verdicts.push(format!("step{}[{}]: HALT: {}", i + 1, step_action, e));
                             break;
                         }
                     }
+                    prev_url = page.model().url().to_string();
                     continue;
                 }
                 match Box::pin(handle_act(step, page)).await {

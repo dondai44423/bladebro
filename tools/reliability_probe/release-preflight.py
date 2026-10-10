@@ -82,9 +82,11 @@ with tempfile.TemporaryDirectory(prefix='blade-release-test-') as tmp:
     lines = calls.read_text().splitlines()
     assert sum(' publish ' in line for line in lines) == 5, lines
     assert not any('/npm/bladebro publish ' in line for line in lines), lines
-    # 30 platform-propagation iterations × 5 packages (the deadline was
-    # widened 12→30 in the 4.2.0 post-ship fix; the fixture never propagates).
-    assert sum(' view ' in line for line in lines) == 150, 'propagation deadline not reached'
+    # 60 platform-propagation iterations × 5 packages (the deadline was
+    # widened 12→30 in the 4.2.0 post-ship fix and 30→60 for the 10-minute
+    # window; the fixture never propagates).
+    views = sum(' view ' in line for line in lines)
+    assert views == 300, f'propagation deadline not reached (views={views})'
     print('PASS exact-version mismatch reaches propagation deadline and prevents meta publish')
     # Exercise the real CI block against command receipts, never a publisher.
     text = (root / 'release.sh').read_text()

@@ -32,7 +32,7 @@ pub(super) struct FoundElement {
     /// Short accessible description (role "name") of the resolved click
     /// target. When leaf-targeting redirects a container-center click to
     /// the nearest exposed native control, this names the control actually
-    /// clicked, so `no-effect` verdicts expose the real target.
+    /// clicked, so quiet-click verdicts expose the real target.
     #[serde(default, rename = "hit_tgt")]
     pub(super) hit_tgt: Option<String>,
     /// When the element is NOT topmost at its click point: a description of

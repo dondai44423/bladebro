@@ -120,7 +120,8 @@ pub async fn perform_with_network(
                 .await;
             // G09: snapshot the toggle state under the point before/after so
             // a click that flips a hidden control (a visible label toggling
-            // its checkbox) reads as a state change, not "no-effect".
+            // its checkbox) reads as a state change, not "no observable
+            // DOM change".
             coord_toggle = Some(ToggleProbe {
                 before: coord_toggle_probe(cdp, *x, *y).await,
                 after: None,
@@ -178,6 +179,9 @@ pub async fn perform_with_network(
             };
             let mut tried: Vec<&str> = Vec::new();
             let mut via = "";
+            // R2: did any lane actually DISPATCH a click? "no-effect" is
+            // reserved for the case where none did (every lane skipped).
+            let mut dispatched = false;
             let mut delta = PageDelta::default();
             let mut dialog_fired = false;
             for &strategy in strategies {
@@ -197,12 +201,13 @@ pub async fn perform_with_network(
                             let cx = box_[0] + box_[2] / 2.0;
                             let cy = box_[1] + box_[3] / 2.0;
                             dispatch_mouse_click(cdp, cx, cy, last_mouse).await?;
+                            dispatched = true;
                         } else {
                             continue;
                         }
                     }
                     "js" => match find_by_sig(cdp, sig, frame, "click", None).await {
-                        Ok(f) if f.ok => {}
+                        Ok(f) if f.ok => dispatched = true,
                         Ok(_) => continue,
                         Err(e) => return Err(e),
                     },
@@ -215,6 +220,7 @@ pub async fn perform_with_network(
                             continue;
                         }
                         dispatch_key(cdp, "Enter").await?;
+                        dispatched = true;
                     }
                     "space" => {
                         // Space over the focused element - the activation key
@@ -231,6 +237,7 @@ pub async fn perform_with_network(
                             continue;
                         }
                         dispatch_key(cdp, "Space").await?;
+                        dispatched = true;
                     }
                     _ => {}
                 }
@@ -260,7 +267,8 @@ pub async fn perform_with_network(
                 let cap = capture(cdp).await?;
                 delta = lpm.ingest(cap);
 
-                // Accepted dispatch is never replayed, including a no-effect verdict.
+                // Accepted dispatch is never replayed, including a quiet
+                // (clicked, no observable change) verdict.
                 break;
             }
             // G01/G09: state readback AFTER the dispatch for the toggle-like
@@ -278,10 +286,11 @@ pub async fn perform_with_network(
             } else {
                 None
             };
-            // Expose the resolved click target so no-effect verdicts can
-            // distinguish a bad selector from a page that rejected a well-
-            // aimed click (issue #15). When the target is NOT topmost, name
-            // what actually receives the click there (occlusion diagnostic).
+            // Expose the resolved click target so quiet-click and no-
+            // dispatch verdicts can distinguish a bad selector from a page
+            // that rejected a well-aimed click (issue #15). When the target
+            // is NOT topmost, name what actually receives the click there
+            // (occlusion diagnostic).
             let mut tgt_meta = found.hit_tgt.as_deref().unwrap_or("").to_string();
             if !tgt_meta.is_empty() {
                 if found.is_topmost == Some(false) {
@@ -307,6 +316,7 @@ pub async fn perform_with_network(
                     via: Some((via, &tried, &tgt_meta)),
                     coord_hit: None,
                     toggle: toggle.as_ref(),
+                    dispatched,
                 },
                 None,
                 None,
@@ -903,6 +913,18 @@ pub async fn perform_with_network(
     // whose content was restored after the action returned.
     if let (Some(mut rep), Some((sig, frame))) = (edit_report.take(), sig_frame.as_ref()) {
         finalize_edit(&mut rep, cdp, sig, frame).await?;
+        // S1: a JS-setter fallback is an untrusted input path, not a typed
+        // result - surface it as an error so no caller mistakes it for
+        // keystroke input (event-trust detectors can see the difference).
+        // Exception: a corrective pass that replaced the value via trusted
+        // keys (corrected + verified) - the final value is key-typed then.
+        if rep.set_via_js && !(rep.corrected && rep.verified) {
+            return Err(crate::error::BladeError::Other(format!(
+                "typed via JS setter on {}: key events did not register (untrusted input; trusted:false, degraded:true). The value \"{}\" was set programmatically - no keystrokes fired for it. Retry the type, or restart the browser for a fresh input path.",
+                action.ref_id().unwrap_or(""),
+                clip(&rep.final_text, 40)
+            )));
+        }
         edit_report = Some(rep);
     }
 
@@ -929,6 +951,9 @@ pub async fn perform_with_network(
             via: None,
             coord_hit: coord_hit.as_deref(),
             toggle: coord_toggle.as_ref(),
+            // A coord click always dispatches (the click above is
+            // unconditional); only ref clicks can end without a dispatch.
+            dispatched: true,
         },
         edit_report.as_ref(),
         scroll_report.as_ref(),

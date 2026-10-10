@@ -42,6 +42,7 @@ const ACT_ACTIONS: &[&str] = &[
     "pdf",
     "download",
     "collect",
+    "extract",
     "open-tab",
     "close-tab",
     "switch-tab",
@@ -67,14 +68,15 @@ pub fn all_tools() -> Vec<ToolDef> {
         ToolDef {
             name: "act",
             description: "Do something on the page. Returns verdict + delta. navigate returns refs + content preview — usually enough to act without a separate see call.\n\
-ADDRESSING (priority): text=\"Sign in\" (fastest, no see needed) > ref=\"e5\" (from a prior response, self-heals) > label=\"Email\" (for click/type/fill/hover) > selector=\"#overflow-trigger\" (CSS; pierces open shadow roots - use when a control has no ref or label; works on click/hover/type/select/clear/read/upload/eval) > x,y. Add role= or nth= if ambiguous.\n\
-ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), pdf, batch(steps, continues through navigation, stops on error only), back/forward/reload, dialog (arm a one-use response for the next matching confirm/prompt/alert/beforeunload).\n\
-url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call.\n\
+ADDRESSING (checked in order): ref=\"e5\" (from a prior response on THIS page — refs are page-scoped and short-lived: after a navigation or tab switch use fresh refs from the new response; within the page they self-heal) > text=\"Sign in\" (fastest, no see needed) > label=\"Email\" (click/type/fill/select/clear/read/hover) > selector=\"#overflow-trigger\" (CSS; pierces open shadow roots — use when a control has no ref or label; click/hover/type/select/clear/read/upload/eval) > x,y. Add role= or nth= if ambiguous.\n\
+ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), extract(alias for see extract=auto|links|forms|json — a structured READ, mainly for run/batch sequences), pdf, batch(steps, sequential in ONE call — navigation doesn't halt it; stops at the first non-optional failure), back/forward/reload, dialog (arm a one-use response for the next matching confirm/prompt/alert/beforeunload).\n\
+url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call; see/extract steps inside batch/run take it too.\n\
 fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit dispatches once; an unobserved effect is never replayed.\n\
-EDITORS: type replaces the field (clear verified) and works on rich contenteditable editors - the verdict names where the text landed (e.g. the live editor) and catches late draft hydration; press takes key chords (Control+a).\n\n\\
-WAIT: condition=settle (default) | element | text | title | url | js — for js, pass the expression in js= (text= also works as the legacy alias, the CLI's form). text= without a condition means \"wait for this text\". A timeout inside run errors with page state; wait+else runs the else branch instead. Timeout is integer seconds, 0-3600.\n\\
-batch: same action set as act (fill/eval/pdf/download/collect/save/load included) plus {\"action\":\"see\", mode|extract|find, budget} steps — their read lands in a --- read --- section. Use text/label/selector addressing in steps (not ref) — refs go stale after navigation; auto-settles after navigation. optional:true on a step continues past its failure.\n\
-Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors include page state for recovery.",
+EDITORS: type replaces the field (clear verified) and works on rich contenteditable editors - the verdict names where the text landed (e.g. the live editor) and catches late draft hydration; press takes key chords (Control+a).\n\
+CLICKS: a dispatched click with no visible change still reads \"outcome: clicked (no observable DOM change)\" — it fired once; verify state before re-clicking (never blind-retry a submit). \"no-effect\" means nothing was dispatched (every lane was skipped) — a retry is safe there.\n\
+WAIT: condition=settle (default) | element | text | title | url | js — for js, pass the expression in js= (text= also works as the legacy alias, the CLI's form). text= without a condition means \"wait for this text\". A timeout inside run errors with page state; wait+else runs the else branch instead. Timeout is integer seconds, 0-3600.\n\
+batch: same action set as act (fill/eval/pdf/download/collect/extract/save/load included) plus {\"action\":\"see\"|\"extract\", mode, extract, find, budget, format} steps — their read lands in a --- read --- section. Use text/label/selector addressing in steps (not ref) — refs go stale after navigation; auto-settles after navigation. optional:true on a step continues past its failure (see/extract steps included); url= on any step navigates first.\n\
+Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors carry page state for recovery; trusted:false = untrusted input fallback (never treat as typed); degraded:true = client-side failure (the browser is unhealthy — retry or restart, it is not a page problem).",
             input_schema: json!({
                 "type": "object",
                 "required": ["action"],
@@ -83,9 +85,9 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                         "type": "string",
                         "enum": ACT_ACTIONS,
                     },
-                    "ref": {"type": "string", "description": "Element ref id (e.g. 'e5'). Self-heals."},
+                    "ref": {"type": "string", "description": "Element ref id (e.g. 'e5') from a prior response. Page-scoped and short-lived: valid across re-renders, but after a navigation or tab switch use the fresh refs in the new response (text/label/selector addressing needs none)."},
                     "text": {"type": "string", "description": "Visible text, value to type, file path, or URL (action-dependent)."},
-                    "label": {"type": "string", "description": "Field label for click/type/fill/hover."},
+                    "label": {"type": "string", "description": "Field label for click/type/fill/select/clear/read/hover."},
                     "selector": {"type": "string", "description": "CSS selector addressing for click/hover/type/select/clear/read/upload/eval (searches light DOM + open shadow roots). Use when a control has no usable ref or label, e.g. '#overflow-trigger', '[role=menuitem]'. nth= picks among matches; a hidden-only match errors with the reason instead of clicking nothing."},
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches. An out-of-range nth errors with the real match count instead of falling back to the first match."},
@@ -106,6 +108,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "message": {"type": "string", "description": "act dialog: only match dialogs whose text contains this (case-insensitive)."},
                     "option": {"type": "string", "description": "Select: option text or value."},
                     "slim": {"type": "boolean", "description": "Skip delta, return verdict only."},
+                    "format": {"type": "string", "enum": ["text", "json"], "description": "extract: json returns pure parseable output (bare payload; {data,note} when a caveat rides along; oversized → an {artifact,bytes,next_offset} envelope — page it with see artifact=… format=json instead of receiving truncated JSON)."},
                     "fields": {
                         "type": "array",
                         "description": "Fill: REQUIRED. [{ref|label, text|option, check}]. Auto-detects field type (text, checkbox, select).",
@@ -124,7 +127,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "submit": {"type": "string", "description": "Fill: ref or text of submit button. Dispatched once; inspect the verdict before repeating."},
                     "steps": {
                         "type": "array",
-                        "description": "Batch: sequential steps — every act action (fill, eval, pdf, download, collect, save, load all work) plus see steps ({action:'see', mode, extract, find, budget}) that read inline. Navigation doesn't halt — subsequent steps act on the new page. A step with optional:true continues past its own failure; otherwise the batch stops at the first error and says so.",
+                        "description": "Batch: sequential steps — every act action (fill, eval, pdf, download, collect, extract, save, load all work) plus see/extract steps ({action:'see'|'extract', mode, extract, find, budget, format}) that read inline (output lands in a --- read --- section). url= on a step navigates first, see/extract included. Navigation doesn't halt — subsequent steps act on the new page. A step with optional:true continues past its own failure; otherwise the batch stops at the first error and says so (a structured result, not an exception).",
                         "items": {
                             "type": "object",
                             "required": ["action"],
@@ -150,6 +153,7 @@ mode=model (default): interactive elements with refs. Use when you need to ACT.\
 For structured list data (products, posts, search results, listings): use extract=auto FIRST — extracts all items with fields (title, url, price, score) in ONE call, plus site-specific extras (Reddit posts/comments, GitHub repos/issues) when detected. On Reddit POST pages it returns the FULL comment tree in ONE call — every reply (collapsed included), thread order with depth, author/score/date and full text, plus a complete flag. Cheaper than clicking into each item.\n\
 eval (act eval) is for custom JS extraction when extract=auto does not cover your use case. Runs like the DevTools console: statements allowed, the LAST expression's value is returned (e.g. 'var x=5; x+7' -> 12), IIFEs work. Variables are scoped per call (no leakage or collisions between calls).\n\
 Other params: filter (zoom by role), find (search by text → refs), extract=json+template (custom), extract=links|forms, logs=console|network.\n\
+format=json (with extract= or artifact= reads): pure parseable output — a bare payload, {data,note} when a caveat rides along, or an {artifact,bytes,next_offset} envelope when oversized (truncated JSON is never emitted as a page). Artifact pages are {path,offset,next_offset,total_chars,data}; next_offset null at the end — JSON.parse every page.\n\
 Big data (>12KB) goes to a file path with inline preview; read the full payload back in pages with artifact=\"<path>\" (+offset/limit) — no filesystem access needed.\n\
 Truncation: model output over budget ends with '…(N more: X link, Y button)' — roles sorted by count desc, then alphabetically (deterministic).",
             input_schema: json!({
@@ -173,8 +177,9 @@ Truncation: model output over budget ends with '…(N more: X link, Y button)' �
                     "logs": {"type": "string", "enum": ["console", "network"], "description": "Console (JS errors) or network (requests)."},
                     "scope": {"type": "string", "description": "Ref id of element to view subtree text of; with mode=content, returns just that element's subtree as markdown (budget honored)."},
                     "budget": {"type": "integer", "description": "Max chars in response. Default 8000."},
-                    "artifact": {"type": "string", "description": "Read a previously offloaded payload from disk, paged. Pass the full payload path from a previous response; offset/limit are char-based (defaults 0 and 20000)."},
-                    "offset": {"type": "integer", "description": "Artifact read: start char. Default 0."}
+                    "artifact": {"type": "string", "description": "Read a previously offloaded payload from disk, paged. Pass the full payload path from a previous response; offset/limit are char-based (defaults 0 and 20000). With format=json each page is {path,offset,next_offset,total_chars,data} — always valid JSON."},
+                    "offset": {"type": "integer", "description": "Artifact read: start char. Default 0."},
+                    "format": {"type": "string", "enum": ["text", "json"], "description": "text (default) | json — pure JSON output for extract= and artifact= reads (zero preamble; never truncated JSON)."}
                 }
             }),
         },
@@ -207,19 +212,19 @@ State ops (open-tab, save, load, etc.) also work as steps in batch and run.",
         ToolDef {
             name: "run",
             description: "Batch actions with branching and loops. Use instead of `act batch` when you need: if/else ({action:\"if\",condition,text,then:[...],else:[...]}), while loops ({action:\"while\",condition,text,steps:[...],max:5}), a wait with a fallback branch ({action:\"wait\",condition,text,timeout,else:[...]}), or state ops that change tabs (open-tab halts batch but works in run).\n\
-Steps use the same fields as act (every act action works — fill, eval, pdf, download, collect, save, load included), plus {\"action\":\"see\",...} to READ inline (see fields: mode, extract, find, budget; default budget 3000). while+see reads across pages in ONE call. if/while: a false condition on a quiet page exits in ~0.8s (timeout = max wait; use a wait step for time-based waiting). Any step may set optional:true to continue past its failure; a wait step's outcome says matched / timeout→else. Stops on first error, returns step number + page state — and if the page navigated mid-run, the error names that navigation.",
+Steps use the same fields as act (every act action works — fill, eval, pdf, download, collect, extract, save, load included), plus {\"action\":\"see\"|\"extract\",...} to READ inline (see fields: mode, extract, find, budget, format; default budget 3000); url= on any step navigates first. while+see reads across pages in ONE call. if/while: a false condition on a quiet page exits in ~0.8s (timeout = max wait; use a wait step for time-based waiting). Any step may set optional:true to continue past its failure; a wait step's outcome says matched / timeout→else. A step failure stops the run and COMES BACK AS A STRUCTURED RESULT, not an exception: \"run stopped at step N of M (K ok): step N failed: …\" plus every prior step observation — nothing is discarded. If the page navigated mid-run, the failure names that navigation.",
             input_schema: json!({
                 "type": "object",
                 "required": ["steps"],
                 "properties": {
                     "steps": {
                         "type": "array",
-                        "description": "Action objects. action='if' for branching, 'while' for loops, 'see' to read inline; any act action (fill/eval/pdf/download/collect included) + state ops work. Per-step optional:true continues past a failure; a wait step may carry else:[...].",
+                        "description": "Action objects. action='if' for branching, 'while' for loops, 'see'/'extract' to read inline; any act action (fill/eval/pdf/download/collect/extract included) + state ops work. Per-step optional:true continues past a failure; a wait step may carry else:[...]; url= navigates first.",
                         "items": {
                             "type": "object",
                             "required": ["action"],
                             "properties": {
-                                "action": {"type": "string", "description": "Action name (any act action), 'if', 'while', 'see', or 'state'."},
+                                "action": {"type": "string", "description": "Action name (any act action), 'if', 'while', 'see'/'extract', or 'state'."},
                                 "condition": {"type": "string", "description": "if/while: element, title, url, text, settle, js (expression in js=; text= legacy alias)."},
                                 "then": {"type": "array", "description": "Sub-steps if condition met."},
                                 "else": {"type": "array", "description": "Sub-steps if condition times out."},

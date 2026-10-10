@@ -55,7 +55,7 @@ pub fn pending_notes() -> Vec<String> {
         if let Some(crate::browser::GpuState::Missing) = crate::browser::gpu_state() {
             if claim(&GL_NOTE) {
                 notes.push(if crate::browser::gl_mid_session_loss() {
-                    "note: this browser LOST WebGL mid-session (the GPU process degraded — getContext('webgl') now returns null on every page). The GL mask no longer applies; restart the client (or `bladebro stop`) for a fresh browser.".into()
+                    "note: this browser LOST WebGL mid-session (the GPU process degraded — getContext('webgl') returns null on every page right now). This is often transient: the driver keeps re-probing and restores the GL state (and its mask) automatically when contexts return. While it lasts, pages see no WebGL.".into()
                 } else {
                     "note: this browser has no WebGL (getContext('webgl') returns null — the same as stock Chrome on this host); no GL mask is applied.".into()
                 });

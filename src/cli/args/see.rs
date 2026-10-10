@@ -30,6 +30,15 @@ pub(crate) fn parse_see_args(args: &[String]) -> Result<Value> {
                     let v = take_value(args, &mut i, flag)?;
                     j[flag] = json!(v);
                 }
+                "format" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    if !matches!(v.as_str(), "text" | "json") {
+                        return Err(BladeError::Usage(format!(
+                            "--format must be text|json, got '{v}'"
+                        )));
+                    }
+                    j["format"] = json!(v);
+                }
                 "budget" | "limit" | "offset" => {
                     let v: u64 = take_num(args, &mut i, flag)?;
                     j[flag] = json!(v);

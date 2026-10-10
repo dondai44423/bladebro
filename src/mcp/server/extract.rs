@@ -110,6 +110,7 @@ pub async fn handle_template_extract(
     page: &mut Page,
     template: &Value,
     limit: usize,
+    json_mode: bool,
 ) -> Result<String> {
     let expr = template_extract_expr(template, limit)?;
 
@@ -142,6 +143,22 @@ pub async fn handle_template_extract(
         .cloned()
         .unwrap_or(json!({}));
     let json_str = serde_json::to_string_pretty(&value)?;
+
+    // W2: JSON mode returns a parseable payload only — caveats live in
+    // __blade_meta, and an oversized payload is an artifact envelope, not
+    // a truncated page.
+    if json_mode {
+        if json_str.len() > 6000 {
+            let path = crate::artifacts::write_artifact(&json_str, "json")?;
+            return Ok(json!({
+                "artifact": path,
+                "bytes": json_str.len(),
+                "next_offset": 0,
+            })
+            .to_string());
+        }
+        return Ok(json_str);
+    }
 
     // Count total items across lists (the meta key is an object; skipped).
     let total: usize = value
@@ -279,18 +296,49 @@ async fn auto_extract_eval(page: &Page, expr: &str) -> Result<serde_json::Value>
     Ok(serde_json::from_str(json_str)
         .unwrap_or_else(|_| serde_json::json!({"error": "parse failed", "items": []})))
 }
-/// Offload big extract payloads to an artifact; render inline otherwise.
-fn auto_extract_output(json_str: &str) -> Result<String> {
-    if json_str.len() > 12000 {
-        let path = crate::artifacts::write_artifact(json_str, "json")?;
+/// Render an auto-extract payload. Text mode: header + inline JSON, big
+/// payloads offloaded with a preview. JSON mode (W2): a bare parseable
+/// payload; a caveat note wraps it as {"data":...,"note":...}; oversized
+/// payloads hand back an {"artifact","bytes","next_offset"} envelope
+/// instead of a truncated preview — every response is valid JSON.
+fn auto_extract_output<T: serde::Serialize>(
+    val: &T,
+    json_mode: bool,
+    note: &str,
+) -> Result<String> {
+    let json_str = serde_json::to_string(val)?;
+    if json_mode {
+        let payload = if note.trim().is_empty() {
+            json_str
+        } else {
+            json!({ "data": val, "note": note.trim() }).to_string()
+        };
+        if payload.len() > 12000 {
+            let path = crate::artifacts::write_artifact(&payload, "json")?;
+            return Ok(json!({
+                "artifact": path,
+                "bytes": payload.len(),
+                "next_offset": 0,
+            })
+            .to_string());
+        }
+        return Ok(payload);
+    }
+    let mut out = if json_str.len() > 12000 {
+        let path = crate::artifacts::write_artifact(&json_str, "json")?;
         let preview: String = json_str.chars().take(1000).collect();
-        return Ok(format!(
+        format!(
             "extract auto ({} bytes)\npreview: {preview}…\n{}",
             json_str.len(),
             artifact_hint(&path)
-        ));
+        )
+    } else {
+        format!("extract auto:\n{json_str}")
+    };
+    if !note.is_empty() {
+        out.push_str(note);
     }
-    Ok(format!("extract auto:\n{json_str}"))
+    Ok(out)
 }
 /// Honest note when the read raced a client-side route transition — the page
 /// was still rendering the new route while the DOM was read.
@@ -306,6 +354,7 @@ pub async fn handle_auto_extract(
     page: &mut Page,
     limit: usize,
     limit_explicit: bool,
+    json_mode: bool,
 ) -> Result<String> {
     let val = run_auto_extract(page, limit, true).await?;
 
@@ -331,9 +380,8 @@ pub async fn handle_auto_extract(
             };
             match crate::reddit::fetch_comments(page.cdp_ref(), &permalink, &sort, cap).await {
                 Ok(payload) => {
-                    let json_str = serde_json::to_string(&payload)?;
                     let _ = page.take_route_unsettled();
-                    return auto_extract_output(&json_str);
+                    return auto_extract_output(&payload, json_mode, "");
                 }
                 Err(e) => {
                     // API route failed (exotic host, blocked page): fall back to
@@ -342,18 +390,16 @@ pub async fn handle_auto_extract(
                     // a retry hint: it clears in seconds, and the DOM fallback
                     // is genuinely partial.
                     let val = run_auto_extract(page, limit, false).await?;
-                    let json_str = serde_json::to_string(&val)?;
-                    let mut out = auto_extract_output(&json_str)?;
                     let hint = if crate::reddit::is_security_block(&e) {
                         " (reddit's network-security wall is transient — retrying the extract in a few seconds usually returns the full thread)"
                     } else {
                         ""
                     };
-                    out.push_str(&format!(
-                        "\nnote: full-thread fetch failed ({e}); items above are a DOM fallback and may miss collapsed replies{hint}"
-                    ));
-                    out.push_str(route_note(page));
-                    return Ok(out);
+                    let note = format!(
+                        "\nnote: full-thread fetch failed ({e}); items above are a DOM fallback and may miss collapsed replies{hint}{}",
+                        route_note(page)
+                    );
+                    return auto_extract_output(&val, json_mode, &note);
                 }
             }
         }
@@ -376,26 +422,23 @@ pub async fn handle_auto_extract(
             };
             match crate::reddit::fetch_search(page.cdp_ref(), &path, &query, cap).await {
                 Ok(payload) => {
-                    let json_str = serde_json::to_string(&payload)?;
                     let _ = page.take_route_unsettled();
-                    return auto_extract_output(&json_str);
+                    return auto_extract_output(&payload, json_mode, "");
                 }
                 Err(e) => {
                     // Wall / cold profile: fall back to the mounted DOM, and
                     // say so — the DOM cannot prove which query it shows.
                     let val = run_auto_extract(page, limit, false).await?;
-                    let json_str = serde_json::to_string(&val)?;
-                    let mut out = auto_extract_output(&json_str)?;
                     let hint = if crate::reddit::is_security_block(&e) {
                         " (reddit's network-security wall is transient — retrying the extract in a few seconds usually returns the full listing)"
                     } else {
                         ""
                     };
-                    out.push_str(&format!(
-                        "\nnote: reddit search listing fetch failed ({e}); items above are a DOM fallback{hint}"
-                    ));
-                    out.push_str(route_note(page));
-                    return Ok(out);
+                    let note = format!(
+                        "\nnote: reddit search listing fetch failed ({e}); items above are a DOM fallback{hint}{}",
+                        route_note(page)
+                    );
+                    return auto_extract_output(&val, json_mode, &note);
                 }
             }
         }
@@ -413,29 +456,23 @@ pub async fn handle_auto_extract(
         };
         match crate::x::extract(page, kind, cap).await {
             Ok(payload) => {
-                let json_str = serde_json::to_string(&payload)?;
                 let _ = page.take_route_unsettled();
-                return auto_extract_output(&json_str);
+                return auto_extract_output(&payload, json_mode, "");
             }
             Err(e) => {
                 // Capture/fetch failed (no API traffic seen, exotic page):
                 // fall back to the DOM listing and say so.
                 let val = run_auto_extract(page, limit, false).await?;
-                let json_str = serde_json::to_string(&val)?;
-                let mut out = auto_extract_output(&json_str)?;
-                out.push_str(&format!(
-                    "\nnote: x.com fast path failed ({e}); items above are a DOM fallback"
-                ));
-                out.push_str(route_note(page));
-                return Ok(out);
+                let note = format!(
+                    "\nnote: x.com fast path failed ({e}); items above are a DOM fallback{}",
+                    route_note(page)
+                );
+                return auto_extract_output(&val, json_mode, &note);
             }
         }
     }
 
-    let json_str = serde_json::to_string(&val)?;
-    let mut out = auto_extract_output(&json_str)?;
-    out.push_str(route_note(page));
-    Ok(out)
+    auto_extract_output(&val, json_mode, route_note(page))
 }
 /// V22: collect — auto-extract + scroll + dedupe loop. ONE call collects
 /// an entire infinite-scroll feed into a single artifact. The result names

@@ -464,7 +464,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         // The refresh demotes the state so the advisory below
                         // fires on THIS result instead of the lane silently
                         // serving a broken GL profile.
-                        if let Some(p) = page.as_ref() {
+                        if let Some(p) = page.as_mut() {
                             p.gl_health_refresh().await;
                         }
                         let mut resp = resp;
@@ -563,6 +563,18 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         }).await;
                     }
                     last_sync = std::time::Instant::now();
+                }
+                // Proactive GL re-probe between tool calls (S2): a degraded
+                // GPU usually recovers on its own, and the refresh re-arms
+                // the mask on a verdict transition before the agent's next
+                // call. Internally rate-limited to once a minute; skips the
+                // real lane.
+                if browser.is_some() {
+                    if let Some(p) = page.as_mut() {
+                        if !p.cdp_ref().is_closed() {
+                            p.gl_health_refresh().await;
+                        }
+                    }
                 }
                 if idle_secs > 0
                     && browser.is_some()

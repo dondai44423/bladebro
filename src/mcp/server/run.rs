@@ -25,6 +25,8 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
         .ok_or_else(|| crate::error::BladeError::Other("run requires 'steps' array".into()))?;
 
     let mut observations = Vec::new();
+    let mut ok_count = 0usize;
+    let total = steps.len();
     // Track page moves: a navigation mid-run can consume a later step's
     // target (an auto-applying filter click, an SPA route change). The
     // failing step's error names the navigation so the agent can tell
@@ -40,6 +42,7 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
             .unwrap_or(false);
         match execute_step(page, step, &step_num.to_string(), &mut observations).await {
             Ok(()) => {
+                ok_count += 1;
                 let curr_url = page.model().url().to_string();
                 if curr_url != prev_url {
                     last_nav = Some((step_num, curr_url.clone()));
@@ -62,9 +65,19 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
                     ),
                     _ => String::new(),
                 };
-                return Err(crate::error::BladeError::Other(format!(
-                    "step {step_num} failed: {e}{nav_ctx}"
-                )));
+                // W5: a page-step failure is a structured result, not an
+                // exception — the run stops at the step and the result still
+                // carries every prior observation, so a surrounding pipeline
+                // keeps the context an exception would have thrown away.
+                // (Closed stays unwrapped above so serve() can self-heal.)
+                let mut out = format!(
+                    "run stopped at step {step_num} of {total} ({ok_count} ok): step {step_num} failed: {e}{nav_ctx}"
+                );
+                if !observations.is_empty() {
+                    out.push_str("\n--- steps before the stop ---\n");
+                    out.push_str(&observations.join("\n"));
+                }
+                return Ok(out);
             }
         }
     }
@@ -222,9 +235,16 @@ async fn build_action(step: &Value, page: &mut Page) -> Result<Action> {
                 ref_id.to_string()
             } else if !selector.is_empty() {
                 resolve_selector_target(page, selector, nth).await?
+            } else if !label.is_empty() {
+                let rf = if !role_str.is_empty() {
+                    Some(role_str)
+                } else {
+                    None
+                };
+                resolve_text_target(page, label, rf, nth).await?
             } else {
                 return Err(crate::error::BladeError::Other(
-                    "clear step requires 'ref' or 'selector'".into(),
+                    "clear step requires 'ref', 'label', or 'selector'".into(),
                 ));
             };
             Ok(Action::Clear { ref_id: resolved })
@@ -493,17 +513,25 @@ async fn execute_step(
                 .unwrap_or("")
                 .to_string();
             if ref_id.is_empty() {
-                // Parity with `act read`: a run step must accept selector
-                // addressing too (it used to ignore selector= and fail on
-                // the empty ref with "stale ref: ").
+                // Parity with `act read`: a run step must accept selector and
+                // label addressing too (it used to ignore selector= and fail
+                // on the empty ref with "stale ref: ").
                 let selector = step.get("selector").and_then(|s| s.as_str()).unwrap_or("");
-                if selector.is_empty() {
+                let label = step.get("label").and_then(|l| l.as_str()).unwrap_or("");
+                let nth = step.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
+                if !selector.is_empty() {
+                    ref_id = resolve_selector_target(page, selector, nth).await?;
+                } else if !label.is_empty() {
+                    let rf = step
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        .filter(|s| !s.is_empty());
+                    ref_id = resolve_text_target(page, label, rf, nth).await?;
+                } else {
                     return Err(crate::error::BladeError::Other(
-                        "read step requires 'ref' or 'selector'".into(),
+                        "read step requires 'ref', 'label', or 'selector'".into(),
                     ));
                 }
-                let nth = step.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
-                ref_id = resolve_selector_target(page, selector, nth).await?;
             }
             let text_content =
                 crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
@@ -557,19 +585,42 @@ async fn execute_step(
                 }
             }
         }
-        "see" => {
+        "see" | "extract" => {
             // v3.10: read steps — `run` can navigate, interact, and extract in
             // ONE call; with while-loops this turns multi-page scraping into a
-            // single tool call.
+            // single tool call. W1: `extract` is accepted as an alias (the
+            // docs promise every act action works in run steps; agents wrote
+            // {"action":"extract"} and got "unknown action" — silently, under
+            // optional:true).
             let mut see_args = step.clone();
+            if action_str == "extract" && see_args.get("extract").is_none() {
+                if let Some(obj) = see_args.as_object_mut() {
+                    obj.insert("extract".into(), serde_json::json!("auto"));
+                }
+            }
             if see_args.get("budget").is_none() {
                 if let Some(obj) = see_args.as_object_mut() {
                     obj.insert("budget".into(), serde_json::json!(3000));
                 }
             }
+            // url= navigates first — the documented contract for every act
+            // action; see/extract steps used to ignore it silently.
+            let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if !step_url.is_empty() {
+                if crate::realbrowser::input_paused() {
+                    return Err(crate::realbrowser::paused_error());
+                }
+                page.navigate(step_url).await?;
+                let _ = crate::page::wait_for_settle_with_network(
+                    page.cdp_ref(),
+                    std::time::Duration::from_millis(1200),
+                    Some(page.in_flight_ref()),
+                )
+                .await;
+            }
             let out = handle_see(&see_args, page).await?;
             let chars = out.chars().count();
-            observations.push(format!("step {path}: see ({chars} chars):\n{out}"));
+            observations.push(format!("step {path}: {action_str} ({chars} chars):\n{out}"));
         }
         "state" | "open-tab" | "close-tab" | "switch-tab" | "save" | "load" | "cookies"
         | "set-cookie" => {

@@ -44,6 +44,9 @@ Asserted behaviors (the contract):
       text-present names the container + nearby actionables; '#' hrefs
       render honestly; scroll verdicts come from MEASURED movement
       (bottom boundary / nested scroller honesty).
+ 13. tool-surface parity (4.5.0): clear takes label addressing; `extract`
+      works as a batch/run step alias; see --format json is pure parseable
+      JSON (zero preamble); a zero-match selector miss reports raw counts.
 
 Environment is isolated (own BLADE_HOME, own fixture port, no display leak).
 Run:  python3 tools/qol_probe/run.py            (uses target/release/bladebro)
@@ -216,6 +219,13 @@ def main():
         check("plain input type verified", 'value="plain"' in v1, v1)
         check("plain input clear verified", "(verified empty)" in v2 and val == "", f"{v2} | {val!r}")
 
+        # R3 (4.5.0): clear accepts label addressing like type/click/fill.
+        cli("act", "type", plain_ref, "to-clear")
+        out = cli("act", "clear", "Plain text input")
+        v = first_line(out)
+        val = ev('(document.getElementById("plain-text")||{}).value||""')
+        check("clear by label verified", "(verified empty)" in v and val == "", f"{v} | {val!r}")
+
         # Native Unicode commits must preserve complete values and trusted
         # input events. Searching the verdict for the requested text is NOT a
         # readback: mismatches contain that text too.
@@ -261,6 +271,26 @@ def main():
         out = cli("see", "extract", "auto")
         check("extract picks the listing cards",
               '"price":' in out and '"url":' in out and "units" not in out, first_line(out))
+
+        # W1 (4.5.0): `extract` is a batch/run step alias (it used to die as
+        # "unknown action" — silently under optional:true).
+        out = cli("act", "batch", '[{"action":"extract"}]')
+        check("extract works as a batch step",
+              '"price":' in out and "HALT" not in out and "[extract]" in out, first_line(out))
+        out = cli("run", '[{"action":"extract"}]')
+        check("run accepts an extract alias step",
+              '"price":' in out and "unknown action" not in out, first_line(out))
+
+        # W2 (4.5.0): format=json is pure parseable JSON — zero preamble.
+        out = cli("see", "extract", "auto", "--format", "json")
+        parsed = None
+        try:
+            parsed = json.loads(out)
+        except ValueError:
+            pass
+        check("see format=json is pure parseable JSON (zero preamble)",
+              parsed is not None and '"price"' in out and "extract auto" not in out,
+              first_line(out) if parsed is None else f"parsed {type(parsed).__name__}")
 
         # S13: the pause contract — `rb pause` refuses every disruptive path,
         # keeps reads alive, and `rb resume` restores navigation. (url=
@@ -341,6 +371,11 @@ def main():
               rc != 0 and "none is visible" in out and "display:none" in out,
               f"rc={rc} {first_line(out)}")
 
+        rc, out = cli_rc("act", "click", "--selector", "#no-such-thing-xyz")
+        check("zero-match selector miss shows raw counts",
+              rc != 0 and "0 raw matches" in out and "0 actionable" in out,
+              f"rc={rc} {first_line(out)}")
+
         rc, out = cli_rc("act", "click", "--text", "Ghost action")
         check("text-addressing miss carries the same explainer",
               rc != 0 and "were not addressable" in out, f"rc={rc} {first_line(out)}")
@@ -349,7 +384,7 @@ def main():
         out = cli("act", "click", "--x", str(center[0]), "--y", str(center[1]))
         v = first_line(out)
         check("coord click names what actually received it",
-              "no-effect" in v and "topmost there" in v and "overlay-cover" in v, v)
+              "clicked (no observable DOM change)" in v and "topmost there" in v and "overlay-cover" in v, v)
 
         covered_ref = see_ref_any("Covered button")
         out = cli("act", "click", covered_ref)
@@ -362,7 +397,7 @@ def main():
         out = cli("act", "click", inert_ref)
         v = first_line(out)
         check("occluded inert click says where clicks land",
-              "no-effect" in v and "clicks land on div#overlay-cover" in v, v)
+              "no observable DOM change" in v and "clicks land on div#overlay-cover" in v, v)
 
         out = cli("act", "type", "--selector", "[contenteditable]", "shadow hello")
         v = first_line(out)

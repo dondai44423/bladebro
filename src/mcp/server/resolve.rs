@@ -233,10 +233,14 @@ pub(super) async fn resolve_text_target(
                 .await
                 .ok(),
         );
+        // W4: a miss on a localized UI (the Google-Nepali case) otherwise
+        // reads as "blocked" or "gone"; one extra evaluate names the page
+        // language so the fix is one step (localized label / selector=).
+        let lang = page_lang_note(page.cdp_ref()).await;
         let view = page.view(2000);
         return Err(BladeError::Other(format!(
-            "no element matching \"{}\" found{}\n\n--- current page ---\n{}",
-            query, note, view
+            "no element matching \"{}\" found{}{}\n\n--- current page ---\n{}",
+            query, note, lang, view
         )));
     }
     if let Some(n) = nth {
@@ -289,6 +293,36 @@ pub(super) fn miss_diag_note(diag: Option<crate::action::MissDiag>) -> String {
     }
 }
 
+/// W4: page-language hint for a text/label miss. A miss on a localized UI
+/// (the Google-served-Nepali case) reads as "blocked" or "gone" without
+/// this; the page's own `lang` names the real problem in one line. Quiet on
+/// English/absent-lang pages - the common case adds no tokens.
+pub(super) async fn page_lang_note(cdp: &crate::cdp::CdpSession) -> String {
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": "document.documentElement.lang||''",
+                "returnByValue": true
+            })),
+        )
+        .await;
+    let lang = res
+        .ok()
+        .and_then(|r| {
+            r.get("result")
+                .and_then(|x| x.get("value"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let lang = lang.trim().to_ascii_lowercase();
+    if lang.is_empty() || lang.starts_with("en") {
+        return String::new();
+    }
+    format!(" (page lang=\"{lang}\" - the UI may be localized; try the page's own wording, selector=, or a locale override)")
+}
+
 /// Format the near-miss diagnostic for a selector that matched nothing
 /// actionable: the raw light-DOM count, or the closest live matches for the
 /// looser suffix that DID match - one-step recovery instead of a dead end.
@@ -319,7 +353,10 @@ fn selector_diag_note(diag: Option<&crate::action::SelectorDiag>) -> String {
             d.sub, d.sub_count
         );
     }
-    String::new()
+    // W3: the selector matched nothing anywhere - say the counts outright so
+    // "the selector is wrong" and "bladebro cannot match" are distinguishable
+    // (the HN `a.titleline` detour: only a manual querySelectorAll proved 0).
+    " - 0 raw matches, 0 actionable: the selector matched nothing - check its spelling against the live page (see mode=model lists the real tags/classes)".to_string()
 }
 
 /// Resolve a CSS selector to a ref. Mirrors [`resolve_text_target`]: match

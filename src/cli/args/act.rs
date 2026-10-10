@@ -12,8 +12,8 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
     if args.is_empty() {
         return Err(BladeError::Usage(
             "act needs an action — click, type, fill, select, clear, press, scroll, hover, \
-             navigate, upload, download, wait, eval, collect, read, batch, pdf, back, forward, \
-             reload, save, load, open-tab, close-tab, switch-tab (see 'bladebro help act')"
+             navigate, upload, download, wait, eval, collect, extract, read, batch, pdf, back, \
+             forward, reload, save, load, open-tab, close-tab, switch-tab (see 'bladebro help act')"
                 .into(),
         ));
     }
@@ -33,6 +33,7 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
         "wait",
         "eval",
         "collect",
+        "extract",
         "read",
         "batch",
         "pdf",
@@ -64,9 +65,16 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             match flag {
                 "ref" | "label" | "text" | "role" | "key" | "url" | "option" | "js" | "path"
                 | "condition" | "press" | "submit" | "block" | "name" | "expect" | "steps"
-                | "fields" | "selector" | "message" => {
+                | "fields" | "selector" | "message" | "format" => {
                     let v = take_value(args, &mut i, flag)?;
                     j[flag] = json!(v);
+                }
+                "template" => {
+                    let raw = resolve_payload(&take_value(args, &mut i, flag)?)?;
+                    let tpl: Value = serde_json::from_str(&raw).map_err(|e| {
+                        BladeError::Usage(format!("--template must be valid JSON: {e}"))
+                    })?;
+                    j["template"] = tpl;
                 }
                 "target-id" => {
                     let v = take_value(args, &mut i, flag)?;
@@ -215,12 +223,21 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             }
         }
         "clear" | "read" => {
-            if j.get("ref").is_none() && j.get("selector").is_none() && !pos.is_empty() {
-                j["ref"] = json!(pos[0].clone());
+            // R3: non-ref positionals are labels, exactly like click/type
+            // (the old arm forced every positional into ref= and died
+            // "stale ref: Search box").
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
+                if let Some(t) = pos.first() {
+                    if is_ref(t) {
+                        j["ref"] = json!(t);
+                    } else {
+                        j["label"] = json!(pos.join(" "));
+                    }
+                }
             }
-            if j.get("ref").is_none() && j.get("selector").is_none() {
+            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
                 return Err(BladeError::Usage(format!(
-                    "{action} needs a ref or --selector — `act {action} e5` (refs come from see model / nav)"
+                    "{action} needs a ref, label or --selector — `act {action} e5` or `act {action} \"Search\"` (refs come from see model / nav)"
                 )));
             }
         }
@@ -384,6 +401,28 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             if j.get("url").is_none() {
                 return Err(BladeError::Usage(
                     "collect needs a URL — `act collect <url> [--max N]`".into(),
+                ));
+            }
+        }
+        "extract" => {
+            // W1: mirrors `see extract <type>` — the type is the first
+            // positional (default auto); json needs --template. Output shape:
+            // --format json is accepted like see's.
+            if j.get("extract").is_none() && !pos.is_empty() {
+                let t = pos[0].clone();
+                if !matches!(t.as_str(), "auto" | "links" | "forms" | "json") {
+                    return Err(BladeError::Usage(format!(
+                        "extract type must be auto|links|forms|json, got '{t}'"
+                    )));
+                }
+                j["extract"] = json!(t);
+            }
+            if j.get("extract").is_none() {
+                j["extract"] = json!("auto");
+            }
+            if j["extract"].as_str() == Some("json") && j.get("template").is_none() {
+                return Err(BladeError::Usage(
+                    "extract json needs --template '<json>' (or use `extract auto`)".into(),
                 ));
             }
         }

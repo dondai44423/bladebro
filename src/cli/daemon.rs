@@ -309,7 +309,7 @@ pub async fn run_daemon() -> Result<()> {
                 // demote a stale GL verdict before the advisories below so a
                 // mid-session loss surfaces on this response instead of the
                 // lane silently serving a broken GL profile.
-                if let Some(p) = page.as_ref() {
+                if let Some(p) = page.as_mut() {
                     p.gl_health_refresh().await;
                 }
 
