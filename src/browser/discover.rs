@@ -4,7 +4,7 @@
 use super::*;
 
 /// Find the Xvfb binary on this system. Linux-only.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(super) fn find_xvfb() -> Option<String> {
     // Common locations (NixOS system profile, standard paths).
     let candidates: &[&str] = &[

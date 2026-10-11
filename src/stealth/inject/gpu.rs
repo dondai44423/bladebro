@@ -156,7 +156,7 @@ fn detect_gpu() -> GpuProfile {
             }
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         if let Some(p) = detect_gpu_lspci() {
             eprintln!("[stealth] detected GPU: {}", p.gl_renderer);
@@ -179,7 +179,7 @@ fn detect_gpu() -> GpuProfile {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn detect_gpu_lspci() -> Option<GpuProfile> {
     let output = std::process::Command::new("lspci")
         .arg("-nn")

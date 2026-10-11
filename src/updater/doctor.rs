@@ -54,7 +54,7 @@ pub async fn run() -> Result<()> {
     }
 
     // 4. Xvfb (Linux only)
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     checks.push(check_xvfb());
 
     // 5. Profile directory
@@ -283,7 +283,7 @@ async fn check_chrome_version() -> Check {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn check_xvfb() -> Check {
     let candidates = [
         "/usr/bin/Xvfb",

@@ -6,7 +6,7 @@ use super::*;
 
 /// A virtual X display managed by Xvfb. Killed + cleaned up on Drop.
 /// Linux-only: macOS and Windows have native window servers.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub struct VirtualDisplay {
     child: Child,
     /// Window manager on the virtual display, when available: real window
@@ -23,7 +23,7 @@ pub struct VirtualDisplay {
     auth_file: std::path::PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl VirtualDisplay {
     /// Start an Xvfb virtual display on a free display number.
     ///
@@ -166,7 +166,7 @@ impl VirtualDisplay {
 /// strut from it, while the property belongs to no one once the WM is up.
 /// Degrades silently when the tools are missing — the JS geometry masks are
 /// then the fallback.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Child> {
     fn find_bin(name: &str, extra: &[&str]) -> Option<String> {
         for path in extra {
@@ -217,7 +217,7 @@ fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Chi
 /// True once a window manager owns the root window (`_NET_SUPPORTING_WM_CHECK`
 /// resolves to a window). True when `xprop` is unavailable — `set_work_area`'s
 /// own read-back is then the fallback instrument, as before.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn wm_ready(display_num: u16, xauth: &std::path::Path) -> bool {
     match Command::new("xprop")
         .args(["-root", "-notype", "_NET_SUPPORTING_WM_CHECK"])
@@ -239,7 +239,7 @@ fn wm_ready(display_num: u16, xauth: &std::path::Path) -> bool {
 /// expected height, or when `xprop` is unavailable (the JS mask's own
 /// self-correcting guard is then the fallback — never spin without an
 /// instrument).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn set_work_area(display_num: u16, xauth: &std::path::Path) -> bool {
     let disp = format!(":{display_num}");
     let want = XVFB_SCREEN_HEIGHT - 40;
@@ -286,7 +286,7 @@ fn set_work_area(display_num: u16, xauth: &std::path::Path) -> bool {
 /// tries FIRST) must either be absent or served by our child too. This is
 /// the ownership proof the readiness gate needs: ANY listener in the
 /// world-writable /tmp/.X11-unix makes a bare connect() succeed.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn xvfb_socket_owned_by(child_pid: u32, display_num: u16) -> bool {
     let path_owned =
         std::os::unix::net::UnixStream::connect(format!("/tmp/.X11-unix/X{display_num}"))
@@ -307,7 +307,7 @@ fn xvfb_socket_owned_by(child_pid: u32, display_num: u16) -> bool {
 /// credentials of the process that created the listening socket — the only
 /// trustworthy answer to "is this display ours?" in a world-writable
 /// directory.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn socket_peer_pid(sock: &std::os::unix::net::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd;
     let mut creds = libc::ucred {
@@ -336,7 +336,7 @@ fn socket_peer_pid(sock: &std::os::unix::net::UnixStream) -> Option<u32> {
 /// NUL selects the abstract namespace, which has no filesystem permission
 /// checks). std's `UnixStream::connect` needs a real path, so this builds
 /// the sockaddr directly.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn connect_abstract(name: &[u8]) -> std::io::Result<std::os::unix::net::UnixStream> {
     use std::os::fd::FromRawFd;
     unsafe {
@@ -375,7 +375,7 @@ fn connect_abstract(name: &[u8]) -> std::io::Result<std::os::unix::net::UnixStre
 /// processes of this uid (handed the cookie via XAUTHORITY) can open the
 /// display; a local co-user connecting to the unix or abstract socket is
 /// rejected by the X server's access control.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn write_xvfb_auth_file(display_num: u16) -> Option<std::path::PathBuf> {
     use std::io::{Read, Write};
     use std::os::unix::fs::OpenOptionsExt;
@@ -386,6 +386,7 @@ fn write_xvfb_auth_file(display_num: u16) -> Option<std::path::PathBuf> {
     let mut host_buf = [0 as libc::c_char; 256];
     let host = match unsafe { libc::gethostname(host_buf.as_mut_ptr(), host_buf.len()) } {
         0 => {
+            #[cfg_attr(target_os = "android", allow(clippy::unnecessary_cast))]
             let bytes: Vec<u8> = host_buf
                 .iter()
                 .take_while(|c| **c != 0)
@@ -433,14 +434,14 @@ fn write_xvfb_auth_file(display_num: u16) -> Option<std::path::PathBuf> {
 
 /// The virtual display's geometry (one source for the Xvfb args and the
 /// work-area check).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const XVFB_SCREEN_WIDTH: u64 = 1920;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const XVFB_SCREEN_HEIGHT: u64 = 1080;
 
 /// Atomically claim a free display number via O_EXCL file
 /// creation. Returns None when 99..200 are all claimed.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn claim_display_num() -> Option<u16> {
     for n in 99..200 {
         // Skip displays with a live foreign X server lock.
@@ -464,12 +465,12 @@ fn claim_display_num() -> Option<u16> {
     None
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn release_display_claim(display_num: u16) {
     let _ = std::fs::remove_file(format!("/tmp/.blade-x{display_num}-claim"));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl Drop for VirtualDisplay {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -489,7 +490,7 @@ impl Drop for VirtualDisplay {
 /// Point a Chrome child command at the Xvfb display and pin it
 /// to X11. On Wayland sessions, Chrome would otherwise inherit
 /// WAYLAND_DISPLAY and open on the user's real screen.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(super) fn apply_xvfb_env(cmd: &mut Command, xvfb: &VirtualDisplay) {
     cmd.env("DISPLAY", xvfb.display_env());
     // The display is cookie-authorized (`-auth`, never `-ac`): Chrome

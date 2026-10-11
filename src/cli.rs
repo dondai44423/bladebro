@@ -89,7 +89,7 @@ fn socket_dir_trusted_at(path: &std::path::Path) -> bool {
 /// passed on a loosened tree.
 #[cfg(unix)]
 fn peer_uid_matches_self(fd: std::os::fd::RawFd) -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         let mut creds = libc::ucred {
             pid: 0,
@@ -115,7 +115,7 @@ fn peer_uid_matches_self(fd: std::os::fd::RawFd) -> bool {
         let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
         rc == 0 && uid == unsafe { libc::geteuid() }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "android")))]
     {
         let _ = fd;
         true

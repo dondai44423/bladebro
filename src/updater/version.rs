@@ -203,7 +203,7 @@ fn legacy_platform_asset_name() -> String {
 }
 
 fn platform_os_name() -> &'static str {
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "android")) {
         "linux"
     } else if cfg!(target_os = "macos") {
         "darwin"
@@ -227,7 +227,7 @@ fn platform_arch_name() -> &'static str {
 /// Keyword sets for fuzzy asset matching.
 /// Handles naming variations: x64/x86_64, arm64/aarch64, darwin/macos.
 fn platform_keywords() -> (Vec<&'static str>, Vec<&'static str>) {
-    let os = if cfg!(target_os = "linux") {
+    let os = if cfg!(any(target_os = "linux", target_os = "android")) {
         vec!["linux"]
     } else if cfg!(target_os = "macos") {
         vec!["darwin", "macos"]

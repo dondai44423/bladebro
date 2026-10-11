@@ -519,7 +519,7 @@ pub(crate) fn macho_magic_ok(data: &[u8]) -> bool {
 /// shared by `verify_binary` and the rollback's `verify_backup` — the two
 /// used to carry duplicated (and equally wrong) copies.
 pub(crate) fn binary_magic_ok(data: &[u8]) -> bool {
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "android")) {
         data.len() >= 4 && data[..4] == [0x7F, b'E', b'L', b'F']
     } else if cfg!(target_os = "macos") {
         macho_magic_ok(data)
@@ -814,9 +814,9 @@ mod tests {
         // Write a file with correct magic but fake size > 500MB
         let mut f = std::fs::File::create(&path).unwrap();
         // Linux ELF magic
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         f.write_all(&[0x7F, b'E', b'L', b'F']).unwrap();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         f.write_all(&[0x7F, b'E', b'L', b'F']).unwrap();
         // Write enough to pass the size check (> 500MB)
         // Actually we can't write 500MB in a test. Just test the size check directly.
@@ -935,7 +935,7 @@ mod magic_tests {
     /// target-specific arm must accept the same bytes the release assets use.
     #[test]
     fn binary_magic_matches_the_platform() {
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", target_os = "android")) {
             assert!(binary_magic_ok(&[
                 0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00
             ]));

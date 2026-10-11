@@ -287,7 +287,7 @@ pub(super) fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
     // and contexts are null. The override turns a dead GL stack into a
     // working, mask-normalized one. BOTH transports must carry it.
     args.push("--ignore-gpu-blocklist".into());
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     if cfg.headful {
         // Pin the window to the Xvfb display (the caller strips Wayland env
         // first). Explicit so Chrome can never drift onto the user's real
@@ -297,7 +297,7 @@ pub(super) fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
     match cfg.stage {
         GlStage::NativeGl =>
         {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             if cfg.headful {
                 args.push("--use-angle=gl".into());
             }
@@ -448,7 +448,7 @@ mod launch_flag_tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn linux_headful_pins_x11_and_the_stage_backend() {
         let native = launch_args(&cfg(GlStage::NativeGl, true, Transport::Pipe));
@@ -460,7 +460,7 @@ mod launch_flag_tests {
         assert!(!sw.iter().any(|f| f == "--use-angle=gl"));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn headless_never_pins_a_display_or_native_angle() {
         let a = launch_args(&cfg(GlStage::NativeGl, false, Transport::Ws));

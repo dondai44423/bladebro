@@ -3,7 +3,7 @@
 
 #[cfg(unix)]
 use super::discover::find_chrome;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use super::display::{apply_xvfb_env, VirtualDisplay};
 #[cfg(unix)]
 use super::flags::{classify_gl, gl_stages, launch_args, stage_label, LaunchCfg};
@@ -123,18 +123,18 @@ impl Browser {
         let user_data_dir = profile.dir().to_path_buf();
         font_audit();
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let xvfb = VirtualDisplay::start().ok();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         if xvfb.is_none() {
             eprintln!(
                 "[bladebro] WARNING: Xvfb unavailable — falling back to headless mode (reduced stealth). Install xvfb for headful-on-virtual-display."
             );
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let headful = xvfb.is_some();
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let headful = true; // macOS/Windows have native window servers
 
         // After both bindings: the recording must compile on every target.
@@ -192,13 +192,13 @@ impl Browser {
             ));
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let mode_str = if headful {
             "headful (Xvfb)"
         } else {
             "headless"
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let mode_str = "headful";
         eprintln!("[bladebro] launching Chrome from {chrome_path} on CDP pipe ({mode_str})");
 
@@ -215,7 +215,7 @@ impl Browser {
                 cmd.stderr(Stdio::null());
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         if let Some(ref xvfb) = xvfb {
             apply_xvfb_env(&mut cmd, xvfb);
         }
@@ -258,7 +258,7 @@ impl Browser {
                     return Ok((
                         Self {
                             child,
-                            #[cfg(target_os = "linux")]
+                            #[cfg(any(target_os = "linux", target_os = "android"))]
                             xvfb,
                             port: 0,
                             profile,
