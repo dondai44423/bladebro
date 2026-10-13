@@ -30,6 +30,24 @@ if(tn){const match=lnks.find(a=>{const an=norm(txt(a));return an&&tn.includes(an
 }
 return lnks.reduce((best,a)=>{const at=txt(a).length,bt=txt(best).length;return at>bt?a:best;},lnks[0]);
 }
+// Redirect/tracking wrappers (Amazon /sspa/click?url=, Google /url?q=,
+// eBay /clk, ad /aclk, ...): the real destination is recoverable, and an
+// agent can do nothing with a wrapper URL — it is an interstitial, not the
+// item. Unwrap up to 2 hops; shapes we don't recognise pass through intact.
+const REDIRECT_PATH=/\/(?:sspa|gp)\/click|\/aclk\/?$|\/clk\/?$|\/url\/?$|\/redirect(?:or)?\/?$|\/linkout|\/l\.php$|\/away\/?$|\/out\/?$|\/go\/?$|servlet\/redirect/i;
+const REDIRECT_PARAMS=['url','u','q','target','to','redirect','redirect_uri','link','dest','destination','href'];
+function canonicalURL(href){try{let u=new URL(href,location.href);for(let i=0;i<2&&REDIRECT_PATH.test(u.pathname);i++){let next=null;for(const p of REDIRECT_PARAMS){const v=u.searchParams.get(p);if(!v)continue;let d=v;try{d=decodeURIComponent(v);}catch(e){}
+if(/^https?:\/\//i.test(d)){next=d;break;}if(d.charAt(0)==='/'){next=location.origin+d;break;}}
+if(!next)break;try{u=new URL(next);}catch(e){break;}}
+return u.href;}catch(e){return href;}}
+// How many results the page TEXT claims vs. how many are in the DOM. This is
+// the lazy-load/pagination tell: a page that says 3,412 with 24 items loaded
+// answers a "show me the results" question with a fraction of them. Advisory
+// only — it never invents items, it reports what the page itself states.
+function pageClaim(){const t=(document.body&&document.body.innerText?document.body.innerText:'').slice(0,60000);
+const pats=[[/showing\s+[\d.,]+\s*[-\u2013\u2014]\s*[\d.,]+\s+of\s+([\d.,]+)/i,true],[/[\d.,]+\s+of\s+([\d.,]+)\s+(?:results?|items?|listings|products|entries|matches|hits)/i,true],[/(?:about|over|more than)\s+([\d.,]+)\s+(?:results?|items?|listings|products|entries|matches|hits)/i,false],[/([\d.,]+)\s+(?:results?|listings|products|entries|matches|hits)\b/i,false]];
+for(const pp of pats){const m=t.match(pp[0]);if(m){const v=parseInt(m[1].replace(/[.,]/g,''),10);if(v>=20&&v<1e9)return {total:v,paged:pp[1]};}}
+return null;}
 // Shopping field extraction (universal e-commerce enhancement).
 function rating(el){const a=el.querySelector('[aria-label*="star"],[aria-label*="rating"]');if(a){const al=a.getAttribute('aria-label')||'';const m=al.match(/(\d+\.?\d*)\s*out of\s*\d+/i)||al.match(/(\d+\.?\d*)/);if(m)return parseFloat(m[1]);}const r=el.querySelector('[data-testid*="rating"],[class*="rating"],[class*="star"],[data-hook*="rating"],i[class*="a-icon-star"],span[class*="a-icon-alt"]');if(r){const m=(r.innerText||'').match(/(\d+\.?\d*)/);if(m)return parseFloat(m[1]);}const t=txt(el);const tm=t.match(/(\d+\.?\d*)\s*(?:out of\s*5|\/5|stars?)/i);if(tm)return parseFloat(tm[1]);return null;}
 function reviews(el){const t=txt(el);let m=t.match(/(\d[\d,]*)\s*(?:global\s+)?(?:ratings?|reviews?)/i);if(m)return parseInt(m[1].replace(/,/g,''),10);m=t.match(/(\d[\d,]*)\s*(?:ratings?|reviews?)/i);if(m)return parseInt(m[1].replace(/,/g,''),10);m=t.match(/(\d[\d,]*)\+?\s*(?:bought|purchased|sold)/i);if(m)return parseInt(m[1].replace(/,/g,''),10);return null;}
@@ -178,6 +196,9 @@ if(score>bestScore){bestScore=score;best=c;bestSig=s;}
 }
 if(!best){if(IS_GITHUB&&isRepoPage()){const r=extractRepo();if(Object.keys(r).length>1)return JSON.stringify({container:'github-repo',count:1,items:[r]});}return JSON.stringify({error:'no repeated list found',items:[]});}
 // Field extraction: clean, typed, deduplicated. No 'text' field.
+// P1 counters: redirect unwraps and paid placements are reported in the
+// envelope instead of silently reshaping the payload.
+let unwrapped=0,sponsored=0;
 const items=[...best.children].filter(k=>k.nodeType===1&&sig(k)===bestSig).map(item=>{
 if(item.tagName==='SHREDDIT-AD-POST'||item.querySelector('shreddit-ad-post'))return {};
 const fullText=vtxt(item);const o={};
@@ -192,7 +213,7 @@ if(title&&/^\s*[\d.,]+\s*(units?|beds?|baths?|ba|bd|mi|miles?|sq\.?\s?ft|sqft|ac
 // A price glued into the title (listing-card text) is a field, not a name.
 if(title){const pi=title.search(PRICE);if(pi>=10)title=title.slice(0,pi).trim();}
 if(title)o.title=title.slice(0,200);
-if(link)o.url=link.href;
+if(link){const cu=canonicalURL(link.href);if(cu!==link.href)unwrapped++;o.url=cu;}
 // Image.
 const img=item.querySelector('img[src]');
 if(img){o.image=img.src;if(img.alt)o.image_alt=img.alt.slice(0,100);}
@@ -214,9 +235,21 @@ if(desc&&desc.length>15){const dn=norm(desc),tn=norm(title||'');if(dn&&!tn.inclu
 // Site-specific fields.
 if(IS_REDDIT){var sp=item.tagName==='SHREDDIT-POST'?item:item.querySelector('shreddit-post');var sc0=item.tagName==='SHREDDIT-COMMENT'?item:item.querySelector('shreddit-comment');if(sp){var sps=sp.getAttribute('score');if(sps)o.fuzzed_score=parseInt(sps,10);var spc=sp.getAttribute('comment-count');if(spc)o.comments=parseInt(spc,10);var spa=sp.getAttribute('author');if(spa)o.author='u/'+spa;var spsub=sp.getAttribute('subreddit-prefixed-name');if(spsub)o.subreddit=spsub;var spt=sp.getAttribute('post-title');if(spt)o.title=spt.slice(0,200);var spl=sp.getAttribute('permalink');if(spl)o.url='https://www.reddit.com'+(spl.charAt(0)==='/'?spl:'/'+spl);var spts=sp.getAttribute('created-timestamp');if(spts)o.date=spts.slice(0,16).replace('T',' ');}else if(sc0){var sca=sc0.getAttribute('author');if(sca)o.author='u/'+sca;var scs=sc0.getAttribute('score');if(scs!=='')o.fuzzed_score=parseInt(scs,10);var scd=sc0.getAttribute('depth');if(scd!=='')o.depth=parseInt(scd,10);var scb=sc0.querySelector('[slot="comment"]');var sct=scb?vtxt(scb).slice(0,400):'';if(sct)o.text=sct;}else if(item.classList&&item.classList.contains('thing')){var g2=n=>item.getAttribute(n)||'';var gs2=g2('data-score');if(gs2)o.score=parseInt(gs2,10);var gc2=g2('data-comments-count');if(gc2)o.comments=parseInt(gc2,10);var ga2=g2('data-author');if(ga2)o.author='u/'+ga2;var gsb2=g2('data-subreddit');if(gsb2)o.subreddit='r/'+gsb2;var gp2=g2('data-permalink');if(gp2)o.url='https://www.reddit.com'+gp2;var gtl=item.querySelector('a.title');if(gtl)o.title=vtxt(gtl).slice(0,200);}else{var rsc=rdScore(item);if(rsc!==null)o.fuzzed_score=rsc;var rcm=rdComments(item);if(rcm!==null)o.comments=rcm;var rau=rdAuthor(item);if(rau)o.author=rau;var rsu=rdSub(item);if(rsu)o.subreddit=rsu;var rcl=item.querySelector('a[href*="/comments/"]');if(rcl){o.url=rcl.href;var rclt=vtxt(rcl);if(rclt&&rclt.length>5&&rclt.length<300)o.title=rclt.slice(0,200);}}}
 else if(IS_GITHUB){const st=ghStars(item);if(st!==null)o.stars=st;const fk=ghForks(item);if(fk!==null)o.forks=fk;const sd=ghStarsToday(item);if(sd!==null)o.stars_today=sd;const lb=ghLabels(item);if(lb.length>0)o.labels=lb;const nm=ghNumber(item);if(nm!==null)o.number=nm;const gs=ghStatus(item);if(gs)o.status=gs;}
-else{const rt=rating(item);if(rt!==null)o.rating=rt;const rv=reviews(item);if(rv!==null)o.reviews=rv;const av=avail(item);if(av)o.availability=av;const op=origPrice(item);if(op)o.original_price=op;if(isSponsored(item))o.sponsored=true;}
+else{const rt=rating(item);if(rt!==null)o.rating=rt;const rv=reviews(item);if(rv!==null)o.reviews=rv;const av=avail(item);if(av)o.availability=av;const op=origPrice(item);if(op)o.original_price=op;if(isSponsored(item)){o.sponsored=true;sponsored++;}}
 return o;
 }).filter(o=>Object.keys(o).length>0).slice(0,__LIMIT__);
-const lowConf=items.length>0&&items.every(o=>!o.url)&&(items.reduce((a,o)=>a+(o.title||'').length,0)/items.length)<25;
-return JSON.stringify(lowConf?{container:best.tagName.toLowerCase(),count:items.length,items,confidence:'low',note:'no clear list found — items may be page fragments; verify before relying on them'}:{container:best.tagName.toLowerCase(),count:items.length,items});
+// Dedupe: the same item is common on listing pages (variant cards, an ad
+// resurfacing an organic result). Key by canonical URL, else by normalized
+// title; keyless items stay (they have nothing to collide with).
+const uniq=[];const seen=new Set();let dupes=0;
+for(const it of items){const key=it.url?it.url.split('#')[0]:(it.title?'t:'+norm(it.title):'i:'+uniq.length);if(key&&seen.has(key)){dupes++;continue;}if(key)seen.add(key);uniq.push(it);}
+const lowConf=uniq.length>0&&uniq.every(o=>!o.url)&&(uniq.reduce((a,o)=>a+(o.title||'').length,0)/uniq.length)<25;
+const out={container:best.tagName.toLowerCase(),count:uniq.length,items:uniq};
+if(sponsored>0)out.sponsored=sponsored;
+if(dupes>0)out.duplicates_removed=dupes;
+if(unwrapped>0)out.redirects_unwrapped=unwrapped;
+const claim=pageClaim();
+if(claim){out.page_total=claim.total;if(claim.total>uniq.length){out.partial=true;if(claim.paged)out.paged=true;}}
+if(lowConf){out.confidence='low';out.note='no clear list found — items may be page fragments; verify before relying on them';}
+return JSON.stringify(out);
 })()

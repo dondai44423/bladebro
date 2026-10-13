@@ -1,6 +1,6 @@
 {
   "name": "bladebro",
-  "version": "4.5.0",
+  "version": "4.5.1",
   "description": "Stealthy and efficient agentic browser driver for AI agents. Few tools, full control, real stealth, max token efficiency.",
   "license": "Apache-2.0",
   "repository": {
@@ -29,13 +29,13 @@
   "pi": {
     "extensions": [
       "./pi-extension.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
-      "optional": true
-    },
-    "typebox": {
       "optional": true
     }
   },
@@ -48,15 +48,16 @@
     "dsh-plugin.mjs",
     "cordis.patch.yml",
     "pi-extension.ts",
+    "skills",
     "README.md",
     "LICENSE"
   ],
   "optionalDependencies": {
-    "bladebro-linux-x64": "4.5.0",
-    "bladebro-linux-arm64": "4.5.0",
-    "bladebro-darwin-x64": "4.5.0",
-    "bladebro-darwin-arm64": "4.5.0",
-    "bladebro-windows-x64": "4.5.0"
+    "bladebro-linux-x64": "4.5.1",
+    "bladebro-linux-arm64": "4.5.1",
+    "bladebro-darwin-x64": "4.5.1",
+    "bladebro-darwin-arm64": "4.5.1",
+    "bladebro-windows-x64": "4.5.1"
   },
   "engines": {
     "node": ">=14"

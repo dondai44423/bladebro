@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.5.1] - 2026-10-13
+
+### Added
+- `act eval` has a stated result contract. Text mode answers ONE line, `result: <compact JSON of the returned value>` — parse that line and you have the value; a returned string that itself contains JSON is called out in a note (parse it once more, do not throw it away), a DOM node/Window says what to return instead, and `undefined` is stated in words. `format:"json"` returns the bare value, `{data,note}` when a note rides along, or an `{artifact,bytes,next_offset}` envelope when oversized.
+- `extract auto` states what the DOM actually holds: `page_total` with `partial`/`paged` when the page claims more results than are loaded (lazy load or pagination), `sponsored` counts for paid placements (still flagged per item, still in page order), `duplicates_removed`, and `redirects_unwrapped` — redirect/tracking wrappers (Amazon `/sspa/click`, Google `/url?q=`, ad `/aclk`, …) resolve to their canonical destination instead of an interstitial.
+- An unknown `act` action answers with the full vocabulary, the correct step when the word is really a step field (`{"action":"url"}` gets the navigate step verbatim), and a `did you mean` for typos. The vocabulary now lives next to the `Action` enum, so the schema, the CLI parser and the error cannot drift apart again.
+- The MCP `initialize` instructions carry the working loop, not just the tool names (extract-first on list pages, page-scoped refs, observations after every action, what each honesty signal means) — every client gets it at connect. The npm package ships the same guidance as a bundled pi skill (`pi.skills` → `skills/bladebro/SKILL.md`).
+
+### Fixed
+- A range filter the site ignores is now visible: when a URL carries a `min-max` filter and every readable item price falls outside it, `extract auto` states both numbers, so unfiltered results cannot be mistaken for filtered ones.
+- Navigation reports requested query parameters that the final URL dropped or rewrote — a filter is never silently assumed applied.
+- Oversized `extract auto` payloads trim optional fields (description → image_alt → image) and keep the full untruncated payload in an artifact file, instead of dumping everything inline or cutting it without a signal.
+- `run`-step eval output is capped with an explicit `… (+N chars truncated)` marker; it used to cut JSON mid-value with no signal, which reads as a complete value.
+- The Xvfb reaper recognizes orphans on systemd hosts, where an adopted process's parent is `systemd --user` rather than PID 1. Previously the `ppid == 1` test never matched there, so abandoned virtual displays were never reaped; the dead-claim plus exact-cmdline ownership contract is unchanged.
+
 ## [4.5.0] - 2026-10-10
 
 ### Added
@@ -2000,7 +2015,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.5.0...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.5.1...HEAD
+[4.5.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.1
 [4.5.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.0
 [4.4.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.4.0
 [4.3.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.3.0

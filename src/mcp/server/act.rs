@@ -256,6 +256,9 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
     let press = args.get("press").and_then(|p| p.as_str()).unwrap_or("");
     let nth = args.get("nth").and_then(|n| n.as_u64()).map(|n| n as usize);
     let selector = args.get("selector").and_then(|s| s.as_str()).unwrap_or("");
+    // P1: `format:"json"` applies to eval too (it already applied to the
+    // extract alias) — the eval result contract is documented on handle_eval.
+    let eval_json = args.get("format").and_then(|f| f.as_str()) == Some("json");
 
     // Navigate first if url is given for a non-navigate action.
     // Previously url was silently ignored for fill/type/click etc.
@@ -423,7 +426,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             } else {
                 String::new()
             };
-            return handle_eval(page, js, &eval_ref).await;
+            return handle_eval(page, js, &eval_ref, eval_json).await;
         }
         "pdf" => {
             // V20: export the current page as a PDF artifact.
@@ -769,9 +772,9 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             return handle_state(&state_args, page).await;
         }
         _ => {
-            return Err(crate::error::BladeError::Other(format!(
-                "unknown action: {action_str}"
-            )))
+            return Err(crate::error::BladeError::Other(
+                crate::action::unknown_action_message(action_str),
+            ))
         }
     };
 

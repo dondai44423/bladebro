@@ -390,6 +390,20 @@ impl Page {
         _t("consent/block");
         let r = self.recapture().await;
         _t("recapture");
+        // P1: query parameters the caller asked for that the final URL does not
+        // carry. Sites silently rewrite their own URLs (Amazon drops rh=p_36,
+        // search engines strip filters); the page then renders happily and the
+        // agent trusts results that never had the filter applied. Observation
+        // only — it names what is missing, never why.
+        if let Ok(delta) = &r {
+            if delta.navigated {
+                if let Some(note) = nav_params_note(url, self.lpm.url()) {
+                    if let Ok(mut a) = self.ambient.lock() {
+                        a.push(note);
+                    }
+                }
+            }
+        }
         r
     }
 
@@ -759,6 +773,90 @@ fn is_known_scheme_name(s: &str) -> bool {
     )
 }
 
+pub(crate) fn query_params(url: &str) -> Option<Vec<(String, String)>> {
+    let q = url.split_once('?')?.1.split('#').next().unwrap_or("");
+    if q.is_empty() {
+        return None;
+    }
+    Some(
+        q.split('&')
+            .filter(|p| !p.is_empty())
+            .map(|p| match p.split_once('=') {
+                Some((k, v)) => (k.to_string(), v.to_string()),
+                None => (p.to_string(), String::new()),
+            })
+            .collect(),
+    )
+}
+
+/// Query parameters that exist for ATTRIBUTION only. A site dropping these is
+/// not a lost filter, and reporting them would train the caller to ignore the
+/// real signal.
+const TRACKING_PARAMS: &[&str] = &[
+    "gclid",
+    "fbclid",
+    "msclkid",
+    "yclid",
+    "twclid",
+    "srsltid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "_ga",
+    "ref",
+    "ref_",
+    "referrer",
+    "source",
+    "spm",
+    "psc",
+    "th",
+    "ascsubtag",
+    "linkcode",
+    "creative",
+    "si",
+];
+
+fn is_tracking_param(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.starts_with("utm_") || TRACKING_PARAMS.contains(&n.as_str())
+}
+
+/// The note for requested query parameters the final URL does not carry, or
+/// None when every meaningful parameter survived.
+fn nav_params_note(requested: &str, final_url: &str) -> Option<String> {
+    let req = query_params(requested)?;
+    let fin = query_params(final_url).unwrap_or_default();
+    let mut missing: Vec<String> = Vec::new();
+    let mut rewritten: Vec<String> = Vec::new();
+    for (k, v) in &req {
+        if is_tracking_param(k) {
+            continue;
+        }
+        match fin.iter().find(|(fk, _)| fk == k) {
+            None => missing.push(k.clone()),
+            Some((_, fv)) => {
+                if !v.is_empty() && fv != v {
+                    rewritten.push(k.clone());
+                }
+            }
+        }
+    }
+    if missing.is_empty() && rewritten.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!("dropped: {}", missing.join(", ")));
+    }
+    if !rewritten.is_empty() {
+        parts.push(format!("value changed: {}", rewritten.join(", ")));
+    }
+    Some(format!(
+        "url params: the final URL does not carry the requested query parameter(s) ({}) — the site rewrote the request, so do not assume those filters or options were applied",
+        parts.join("; ")
+    ))
+}
+
 /// Normalize a URL for comparison: strip scheme, fragment, trailing slash.
 fn normalize_url(url: &str) -> String {
     let (s, https) = url
@@ -781,7 +879,7 @@ fn normalize_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_domain, normalize_url, validate_nav_url};
+    use super::{extract_domain, nav_params_note, normalize_url, query_params, validate_nav_url};
 
     #[test]
     fn extract_domain_strips_scheme_port_and_www() {
@@ -791,6 +889,54 @@ mod tests {
         );
         assert_eq!(extract_domain("http://localhost:3000/x"), "localhost");
         assert_eq!(extract_domain("example.com/path"), "example.com");
+    }
+
+    #[test]
+    fn dropped_query_params_are_reported_and_tracking_noise_is_not() {
+        // The Amazon case: the site rewrote the URL without the price filter.
+        let note = nav_params_note(
+            "https://www.amazon.in/s?k=ssd&rh=p_36%3A35000-45000",
+            "https://www.amazon.in/s?k=ssd",
+        )
+        .expect("a dropped filter must be reported");
+        assert!(note.contains("rh"), "{note}");
+        assert!(note.contains("dropped"), "{note}");
+        // Surviving params stay quiet — no news is the normal case.
+        assert!(nav_params_note(
+            "https://example.com/s?q=x&page=2",
+            "https://example.com/s?q=x&page=2"
+        )
+        .is_none());
+        // A rewritten value is named as such, not as a drop.
+        let note = nav_params_note("https://e.com/s?page=2", "https://e.com/s?page=1")
+            .expect("rewritten value must be reported");
+        assert!(
+            note.contains("value changed") && note.contains("page"),
+            "{note}"
+        );
+        // Attribution-only params never fire (that noise trains callers to
+        // ignore the real signal).
+        assert!(nav_params_note(
+            "https://e.com/s?q=x&utm_source=nl&gclid=1",
+            "https://e.com/s?q=x"
+        )
+        .is_none());
+        // No query at all → nothing to compare.
+        assert!(nav_params_note("https://e.com/", "https://e.com/").is_none());
+    }
+
+    #[test]
+    fn query_params_parses_valueless_and_fragmented_forms() {
+        let p = query_params("https://e.com/s?flag&x=1#frag").expect("parse");
+        assert_eq!(
+            p,
+            vec![
+                ("flag".to_string(), String::new()),
+                ("x".to_string(), "1".to_string())
+            ]
+        );
+        assert!(query_params("https://e.com/s").is_none());
+        assert!(query_params("https://e.com/s?").is_none());
     }
 
     #[test]

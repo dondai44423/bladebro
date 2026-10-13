@@ -569,9 +569,18 @@ async fn execute_step(
             } else {
                 String::new()
             };
-            match handle_eval(page, js_code, &eval_ref).await {
+            match handle_eval(page, js_code, &eval_ref, false).await {
                 Ok(result) => {
-                    let capped: String = result.chars().take(500).collect();
+                    // P1: the 500-char cap is real (a step observation is not a
+                    // payload channel) but it must never be SILENT - a cut
+                    // mid-JSON used to read as a complete value, which is
+                    // exactly how a loop returns TOTAL=0 with data on screen.
+                    let capped: String = if result.chars().count() > 500 {
+                        let head: String = result.chars().take(500).collect();
+                        format!("{head}… (+{} chars truncated - use a `see`/`act eval` step for the full value)", result.chars().count() - 500)
+                    } else {
+                        result.clone()
+                    };
                     observations.push(format!("step {path}: js → {capped}"));
                 }
                 // Closed propagates unwrapped so serve() self-heals.

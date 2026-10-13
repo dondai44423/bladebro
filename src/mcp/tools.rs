@@ -19,36 +19,9 @@ pub struct ToolDef {
 /// the `act` schema AND the batch-step vocabulary. These two lists drifted
 /// once (batch/run knew about only half of act's actions), so `fill` inside a
 /// batch was a confusing schema rejection and inside `run` an "unknown
-/// action". Keep this list in lockstep with `handle_act`'s match arms.
-const ACT_ACTIONS: &[&str] = &[
-    "click",
-    "type",
-    "clear",
-    "select",
-    "press",
-    "scroll",
-    "navigate",
-    "read",
-    "wait",
-    "dialog",
-    "back",
-    "forward",
-    "reload",
-    "hover",
-    "upload",
-    "fill",
-    "batch",
-    "eval",
-    "pdf",
-    "download",
-    "collect",
-    "extract",
-    "open-tab",
-    "close-tab",
-    "switch-tab",
-    "save",
-    "load",
-];
+/// action". It now lives in [`crate::action`] next to the `Action` enum, so
+/// the schema, the CLI parser and the unknown-action error cannot drift apart.
+use crate::action::ACT_ACTIONS;
 
 /// Batch steps: everything act accepts except `batch` itself (no nesting),
 /// plus the read step (`see`) and the generic state op. Derived — never
