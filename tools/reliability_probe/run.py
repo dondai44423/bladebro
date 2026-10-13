@@ -72,8 +72,11 @@ with tempfile.TemporaryDirectory(prefix='blade-reliability-') as root:
 
         def evaluate(js):
             text, _ = cli('act', 'eval', js)
-            assert text.startswith('result: '), text
-            return json.loads(text[len('result: '):])
+            # The value is the rest of the `result:` line — a `note:` line may
+            # follow it (a returned string containing JSON gets one).
+            line = next((l for l in text.splitlines() if l.startswith('result: ')), None)
+            assert line is not None, text
+            return json.loads(line[len('result: '):])
 
         origin = 'http://127.0.0.1:' + str(server.server_port)
         foreign = 'http://localhost:' + str(server.server_port)

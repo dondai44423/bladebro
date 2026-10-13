@@ -47,13 +47,17 @@ PROBE = ("(function(){var o={};try{var c=document.createElement('canvas');var g=
 
 
 def parse_result(payload):
-    """`result: "{...}"` — the CLI/MCP wraps the eval value in a JSON
-    string, so unwrap twice."""
-    val = payload.split("result: ", 1)[1]
-    j = json.loads(val)
-    if isinstance(j, str):
-        j = json.loads(j)
-    return j
+    """`result: <compact JSON>` — the value is the rest of that ONE line.
+    The driver may append `note:` lines (a returned string containing JSON
+    gets one), and they are not part of the value; the next line is not
+    JSON. A value that is itself a JSON string is unwrapped once more."""
+    for line in payload.splitlines():
+        if line.startswith("result: "):
+            j = json.loads(line[len("result: "):])
+            if isinstance(j, str):
+                j = json.loads(j)
+            return j
+    raise ValueError(f"no result line in payload: {payload[:120]!r}")
 
 
 def classify(j):
