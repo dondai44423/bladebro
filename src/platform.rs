@@ -752,10 +752,15 @@ pub fn validate_dir_ancestors(path: &std::path::Path) -> Result<(), String> {
                 ));
             }
             let mode = md.permissions().mode();
-            // On Android the OS-owned chain is 0770/0755 (system group is
-            // OS machinery, not a co-user; untrusted app uids fall under
-            // "other", which holds no write bit there).
-            let group_ok = cfg!(target_os = "android") && mode & 0o022 == 0o020;
+            // On Android the OS-owned chain is 0770/0771 (system:system), and
+            // the system group is OS machinery, not a co-user: untrusted app
+            // uids are neither that uid nor that group and fall under "other",
+            // which holds no write bit there. Pinned to AID_SYSTEM both ways so
+            // the relaxation can never cover some other group with real members.
+            let group_ok = cfg!(target_os = "android")
+                && md.uid() == 1000
+                && md.gid() == 1000
+                && mode & 0o022 == 0o020;
             if mode & 0o022 != 0 && mode & 0o1000 == 0 && !group_ok {
                 return Err(format!(
                     "{} is group/other-writable and not sticky — refusing it",
