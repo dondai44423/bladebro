@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The pi extension is now one call: it resolves the bladebro binary and registers it with `pi.registerMcpServer()` — pi's own MCP client runs the protocol. The hand-rolled client (spawn, framing, handshake, tool-call proxy, restart logic, TUI formatters) is gone: the file goes from 521 lines to 63, and the five tools, their schemas and the `initialize` instructions all come from the binary, so there is nothing left to drift. Exposure is `direct` (tools declared to the model; the first prompt waits for the connection) and the request timeout is 180s to cover `run`/`batch`/`collect`. A missing binary registers nothing and says exactly why at session start.
+- The bundled pi skill is now the empty, user-editable template its name implies: bladebro needs no skill — guidance rides the MCP handshake — so `skills/bladebro/SKILL.md` exists only for a user who wants their own house rules for the agent.
+
+### Added
+- Source-level Android support: the Linux gates this driver leans on (Xvfb display, `/proc` reads, `SO_PEERCRED` peer checks, ancestor validation, updater magic bytes) now compile for `target_os = "android"`, and a CI job checks `aarch64-linux-android` on every push so the port cannot rot. No Android artifact is published — see the updater note below.
+
+### Fixed
+- `bladebro -u` on Android refuses before downloading and names the real update path, instead of fetching a glibc-linked Linux binary that can never run on bionic and then failing the run check with a message that blamed corruption or the wrong architecture. `bladebro -v` says the same instead of suggesting `-u` where it cannot work.
+- The Android ancestor-validation relaxation is pinned to the system identity (uid 1000 **and** gid 1000): group-write is forgiven only for that group, never for a group ordinary app uids belong to.
+
 ## [4.5.1] - 2026-10-13
 
 ### Added
