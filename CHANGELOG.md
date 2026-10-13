@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.5.2] - 2026-10-13
+
 ### Changed
 - The pi extension is now one call: it resolves the bladebro binary and registers it with `pi.registerMcpServer()` — pi's own MCP client runs the protocol. The hand-rolled client (spawn, framing, handshake, tool-call proxy, restart logic, TUI formatters) is gone: the file goes from 521 lines to 63, and the five tools, their schemas and the `initialize` instructions all come from the binary, so there is nothing left to drift. Exposure is `direct` (tools declared to the model; the first prompt waits for the connection) and the request timeout is 180s to cover `run`/`batch`/`collect`. A missing binary registers nothing and says exactly why at session start.
 - The bundled pi skill is now the empty, user-editable template its name implies: bladebro needs no skill — guidance rides the MCP handshake — so `skills/bladebro/SKILL.md` exists only for a user who wants their own house rules for the agent.
@@ -2026,7 +2028,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.5.1...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.5.2...HEAD
+[4.5.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.2
 [4.5.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.1
 [4.5.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.0
 [4.4.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.4.0
