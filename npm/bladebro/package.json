@@ -29,6 +29,9 @@
   "pi": {
     "extensions": [
       "./pi-extension.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependenciesMeta": {
@@ -48,6 +51,7 @@
     "dsh-plugin.mjs",
     "cordis.patch.yml",
     "pi-extension.ts",
+    "skills",
     "README.md",
     "LICENSE"
   ],
