@@ -225,8 +225,9 @@ fn process_uses_dir(pid: u32, dir: &Path) -> bool {
     }
 }
 
-/// Only a dead Bladebro display claim authorizes cleanup. PID 1 also
-/// parents system services, so an orphaned Xvfb alone proves no ownership.
+/// Only a dead Bladebro display claim authorizes cleanup. Orphanhood alone
+/// proves no ownership, and neither does the executable: the claim, the exact
+/// Xvfb cmdline and the display number must all agree.
 #[cfg(target_os = "linux")]
 fn reap_xvfb() {
     reap_xvfb_at(Path::new("/tmp"));
@@ -264,9 +265,9 @@ fn reap_xvfb_at(tmp: &Path) {
             Err(_) => continue,
         };
         if platform::process_alive(pid) {
-            // Alive — but orphaned? ppid 1 means the owning
-            // bladebro died and init adopted it.
-            if proc_ppid(pid) == 1 && proc_is_xvfb_on_display(pid, n) {
+            // Alive — but orphaned? The owner died and the system manager
+            // adopted it (see `is_orphaned`).
+            if is_orphaned(pid) && proc_is_xvfb_on_display(pid, n) {
                 platform::kill_process_force(pid);
                 let _ = std::fs::remove_file(&lock);
                 eprintln!("[bladebro] reaped orphaned Xvfb :{n} (pid {pid})");
@@ -283,6 +284,35 @@ fn reap_xvfb_at(tmp: &Path) {
         let _ = std::fs::remove_file(&claim);
         eprintln!("[bladebro] reaped stale Xvfb display :{n}");
     }
+}
+
+/// Is this process an orphan — adopted by the system manager because the
+/// process that owned it died?
+///
+/// On a systemd host an orphan is reparented to the *user* manager
+/// (`systemd --user`), NOT to PID 1, so a bare `ppid == 1` test misses every
+/// orphan on Arch/Ubuntu/Fedora-class systems. Found live 2026-10-13 on Arch:
+/// a deliberately orphaned Xvfb had PPID 1080 = `/usr/lib/systemd/systemd
+/// --user`, so `reap_xvfb` removed the claim and left the display running
+/// forever (the unit test failed on the same assumption).
+///
+/// Conservative by construction: `1` (classic init adoption) or a parent whose
+/// comm is `systemd` (the manager). A live owner is named `bladebro`,
+/// `chromium` or `Xvfb` — never the manager — and an unreadable parent means
+/// NOT orphaned.
+#[cfg(target_os = "linux")]
+fn is_orphaned(pid: u32) -> bool {
+    let ppid = proc_ppid(pid);
+    if ppid == 1 {
+        return true;
+    }
+    if ppid <= 1 {
+        // Unreadable / unparseable / self-parented: never authorize a kill.
+        return false;
+    }
+    std::fs::read_to_string(format!("/proc/{ppid}/comm"))
+        .map(|c| c.trim() == "systemd")
+        .unwrap_or(false)
 }
 
 /// Parent pid of a process (0/1 = orphaned or init).
@@ -335,7 +365,7 @@ fn kill_xvfb_on_display(display: u16) {
         if !xvfb_cmdline_matches(&cmdline, display) {
             continue;
         }
-        if proc_ppid(pid) == 1 {
+        if is_orphaned(pid) {
             platform::kill_process_force(pid);
         }
     }
@@ -391,10 +421,10 @@ mod xvfb_tests {
         std::fs::create_dir_all(&root).unwrap();
         let display = OrphanDisplay { pid, number, root };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !Path::new(&format!("/tmp/.X11-unix/X{number}")).exists() || proc_ppid(pid) != 1 {
+        while !Path::new(&format!("/tmp/.X11-unix/X{number}")).exists() || !is_orphaned(pid) {
             assert!(
                 Instant::now() < deadline,
-                "test Xvfb must start and be adopted by PID 1"
+                "test Xvfb must start and be adopted by the system manager"
             );
             std::thread::sleep(Duration::from_millis(25));
         }

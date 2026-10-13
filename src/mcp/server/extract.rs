@@ -350,6 +350,179 @@ fn route_note(page: &Page) -> &'static str {
     }
 }
 
+/// Plain-language notes for the generic auto-extract envelope (P1). Each one
+/// answers a question the payload raises but does not answer: why fewer rows
+/// came back than the page claims, why some rows are marked sponsored, where
+/// duplicates went, and what happened to wrapper links. Advisory wording only
+/// — never a cause claim the driver cannot prove.
+fn auto_extract_notes(val: &serde_json::Value, limit: usize) -> String {
+    let num = |k: &str| val.get(k).and_then(|v| v.as_u64());
+    let count = num("count").unwrap_or(0);
+    let mut notes = String::new();
+    if val.get("partial").and_then(|p| p.as_bool()) == Some(true) {
+        if let Some(total) = num("page_total") {
+            if val.get("paged").and_then(|p| p.as_bool()) == Some(true) {
+                notes.push_str(&format!(
+                    "\nnote: the page states {total} results and this is ONE page of them — only the {count} on this page were in the DOM; follow the pagination links, or act collect url=<next page> for the rest"
+                ));
+            } else {
+                notes.push_str(&format!(
+                    "\nnote: the page states {total} results but only {count} were in the DOM — the rest are not loaded yet (lazy load or pagination); act collect scrolls + dedupes the whole feed, or follow the next-page link"
+                ));
+            }
+        }
+    }
+    if count > 0 && count >= limit as u64 {
+        notes.push_str(&format!(
+            "\nnote: the item cap was reached (limit={limit}) — raise limit for more items"
+        ));
+    }
+    if let Some(sp) = num("sponsored") {
+        notes.push_str(&format!(
+            "\nnote: {sp} of {count} items are paid placements (sponsored:true, left in page order) — filter them out for organic results only"
+        ));
+    }
+    if let Some(d) = num("duplicates_removed") {
+        notes.push_str(&format!(
+            "\nnote: {d} duplicate item(s) removed (same canonical url or title)"
+        ));
+    }
+    if let Some(u) = num("redirects_unwrapped") {
+        notes.push_str(&format!(
+            "\nnote: {u} redirect/tracking wrapper link(s) unwrapped to the real destination (item urls are canonical)"
+        ));
+    }
+    notes
+}
+
+/// Trim optional per-item fields when the payload would blow the inline
+/// budget. `description` goes first (longest, least load-bearing on a
+/// listing), then `image_alt`, then `image` — items and their core fields are
+/// never dropped, and the FULL untrimmed payload is written to an artifact
+/// first so nothing is lost. Returns the artifact path + what was dropped.
+fn trim_for_inline(val: &mut serde_json::Value) -> Option<(String, Vec<&'static str>)> {
+    const CAP: usize = 12_000;
+    let size = serde_json::to_string(val).map(|s| s.len()).unwrap_or(0);
+    if size <= CAP {
+        return None;
+    }
+    let full = serde_json::to_string(val).ok()?;
+    let path = crate::artifacts::write_artifact(&full, "json").ok()?;
+    let mut dropped: Vec<&'static str> = Vec::new();
+    for field in ["description", "image_alt", "image"] {
+        let mut changed = false;
+        if let Some(items) = val.get_mut("items").and_then(|i| i.as_array_mut()) {
+            for it in items.iter_mut() {
+                if let Some(obj) = it.as_object_mut() {
+                    if obj.remove(field).is_some() {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            dropped.push(field);
+            if serde_json::to_string(val).map(|s| s.len()).unwrap_or(0) <= CAP {
+                break;
+            }
+        }
+    }
+    Some((path, dropped))
+}
+
+/// A `min-max` range filter carried in the URL (Amazon's `rh=p_36:35000-45000`,
+/// `price=100-200`, …) versus the prices the page ITSELF shows. When every
+/// readable price sits outside the requested range, the results are not what
+/// was asked for — the site ignored its own filter. Both sides are stated as
+/// numbers the caller can check; nothing is inferred about intent.
+fn range_filter_note(url: &str, val: &serde_json::Value) -> Option<String> {
+    let (min, max, raw) = url_range_filter(url)?;
+    let items = val.get("items")?.as_array()?;
+    let mut prices: Vec<(String, f64)> = Vec::new();
+    for it in items {
+        if let Some(p) = it.get("price").and_then(|p| p.as_str()) {
+            if let Some(v) = parse_price(p) {
+                prices.push((p.to_string(), v));
+            }
+        }
+    }
+    if prices.len() < 3 {
+        return None;
+    }
+    if prices.iter().any(|(_, v)| *v >= min && *v <= max) {
+        return None; // the page honors the filter — no news
+    }
+    let lo = prices
+        .iter()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(s, _)| s.clone())?;
+    let hi = prices
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(s, _)| s.clone())?;
+    Some(format!(
+        "\nnote: the URL carries a range filter ({raw}), but every readable item price on this page is outside it ({lo}–{hi}, {n} of {n} items) — the site may not have applied that filter; verify with the site's own filter UI before trusting these results",
+        raw = raw,
+        lo = lo,
+        hi = hi,
+        n = prices.len()
+    ))
+}
+
+/// Pull a `min-max` range out of the URL's query parameters. Only shapes that
+/// are unambiguously a numeric range count, and only when min < max.
+fn url_range_filter(url: &str) -> Option<(f64, f64, String)> {
+    let params = crate::page::navigate::query_params(url)?;
+    for (k, v) in &params {
+        let decoded = v.replace("%3A", ":").replace("%3a", ":");
+        let candidate = if let Some((_, tail)) = decoded.split_once(':') {
+            // `p_36:35000-45000` — the range follows the colon.
+            let key = k.to_ascii_lowercase();
+            if key.contains("p_36")
+                || key.contains("price")
+                || key.contains("filter")
+                || key == "rh"
+            {
+                tail.to_string()
+            } else {
+                continue;
+            }
+        } else {
+            let key = k.to_ascii_lowercase();
+            if key.contains("price") || key.contains("range") || key.contains("filter") {
+                decoded.clone()
+            } else {
+                continue;
+            }
+        };
+        let mut parts = candidate.split('-');
+        let (Some(a), Some(b)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(min), Ok(max)) = (a.trim().parse::<f64>(), b.trim().parse::<f64>()) else {
+            continue;
+        };
+        if min > 0.0 && max > min {
+            return Some((min, max, format!("{k}={v}")));
+        }
+    }
+    None
+}
+
+/// The first number-shaped token in a displayed price, thousands separators
+/// removed. `₹1,299` → 1299, `$49.99` → 49.99. Deliberately dumb: a heuristic
+/// that feeds a note, never a value anything else depends on.
+fn parse_price(shown: &str) -> Option<f64> {
+    let start = shown.find(|c: char| c.is_ascii_digit())?;
+    let rest = &shown[start..];
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',' || *c == '.')
+        .collect();
+    let cleaned = token.replace(',', "");
+    cleaned.parse::<f64>().ok()
+}
+
 pub async fn handle_auto_extract(
     page: &mut Page,
     limit: usize,
@@ -472,7 +645,19 @@ pub async fn handle_auto_extract(
         }
     }
 
-    auto_extract_output(&val, json_mode, route_note(page))
+    let mut val = val;
+    let mut note = auto_extract_notes(&val, limit);
+    if let Some(range_note) = range_filter_note(page.model().url(), &val) {
+        note.push_str(&range_note);
+    }
+    if let Some((path, dropped)) = trim_for_inline(&mut val) {
+        note.push_str(&format!(
+            "\nnote: optional fields trimmed to fit (dropped: {}) — items and core fields are complete; full untrimmed payload: {path}",
+            dropped.join(", ")
+        ));
+    }
+    note.push_str(route_note(page));
+    auto_extract_output(&val, json_mode, &note)
 }
 /// V22: collect — auto-extract + scroll + dedupe loop. ONE call collects
 /// an entire infinite-scroll feed into a single artifact. The result names
@@ -699,5 +884,63 @@ mod extract_script_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("container"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod range_filter_tests {
+    //! P1: the "the site ignored its own filter" note. The rule is deliberately
+    //! conservative — it fires only when EVERY readable price is outside the
+    //! requested range, and it is never a claim about intent.
+
+    use super::*;
+
+    fn items_with_prices(prices: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "items": prices.iter().map(|p| serde_json::json!({"price": p})).collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn range_is_read_from_the_url_shapes_that_mean_one() {
+        // Amazon's refinement: rh=p_36%3A35000-45000
+        let (min, max, raw) =
+            url_range_filter("https://www.amazon.in/s?k=ssd&rh=p_36%3A35000-45000")
+                .expect("amazon range");
+        assert_eq!((min, max), (35000.0, 45000.0));
+        assert!(raw.contains("35000-45000"), "{raw}");
+        // A bare price range parameter.
+        assert!(url_range_filter("https://e.com/s?price=100-200").is_some());
+        // Not a range: inverted, non-numeric, or an unrelated param.
+        assert!(url_range_filter("https://e.com/s?sr=8-1").is_none());
+        assert!(url_range_filter("https://e.com/s?q=ssd").is_none());
+        assert!(url_range_filter("https://e.com/s?page=2").is_none());
+    }
+
+    #[test]
+    fn the_note_fires_only_when_every_price_is_outside() {
+        let url = "https://www.amazon.in/s?k=ssd&rh=p_36%3A35000-45000";
+        // The live defect: a ₹35k–₹45k filter answering with ₹399 enclosures.
+        let note = range_filter_note(url, &items_with_prices(&["₹399", "₹426", "₹350", "₹1,299"]))
+            .expect("all prices outside the range");
+        assert!(note.contains("35000-45000"), "{note}");
+        assert!(note.contains("₹350"), "cheapest price named: {note}");
+        assert!(note.contains("₹1,299"), "dearest price named: {note}");
+        // One price inside → the filter is plausibly working, stay quiet.
+        assert!(range_filter_note(url, &items_with_prices(&["₹399", "₹426", "₹40,000"])).is_none());
+        // Too few prices to say anything.
+        assert!(range_filter_note(url, &items_with_prices(&["₹399", "₹426"])).is_none());
+        // No range in the URL → nothing to compare.
+        assert!(
+            range_filter_note("https://e.com/s?q=ssd", &items_with_prices(&["₹399"; 4])).is_none()
+        );
+    }
+
+    #[test]
+    fn prices_parse_through_separators_and_currency() {
+        assert_eq!(parse_price("₹1,299"), Some(1299.0));
+        assert_eq!(parse_price("$49.99"), Some(49.99));
+        assert_eq!(parse_price("399"), Some(399.0));
+        assert_eq!(parse_price("no price here"), None);
     }
 }

@@ -18,40 +18,11 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
         ));
     }
 
-    const ACTIONS: &[&str] = &[
-        "click",
-        "type",
-        "fill",
-        "select",
-        "clear",
-        "press",
-        "scroll",
-        "hover",
-        "navigate",
-        "upload",
-        "download",
-        "wait",
-        "eval",
-        "collect",
-        "extract",
-        "read",
-        "batch",
-        "pdf",
-        "back",
-        "forward",
-        "reload",
-        "save",
-        "load",
-        "open-tab",
-        "close-tab",
-        "switch-tab",
-        "dialog",
-    ];
     let action = args[0].as_str();
-    if !ACTIONS.contains(&action) {
+    if !crate::action::ACT_ACTIONS.contains(&action) {
         return Err(BladeError::Usage(format!(
-            "unknown act action '{action}' — available: {} (see 'bladebro help act')",
-            ACTIONS.join(", ")
+            "{} (see 'bladebro help act')",
+            crate::action::unknown_action_message(action)
         )));
     }
 

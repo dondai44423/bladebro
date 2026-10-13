@@ -9,9 +9,27 @@ use super::artifact_hint;
 
 /// V7: evaluate JS in the page. If `ref_id` is non-empty, the
 /// element is resolved and exposed to the script as `el`.
-/// Result is JSON-stringified, capped at 4KB inline; bigger
-/// payloads go to an artifact file (V10).
-pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<String> {
+///
+/// RESULT CONTRACT (P1, 2026-10-13) — the whole point is that a fresh agent
+/// never has to guess how to read this back:
+/// - text mode: ONE line `result: <compact JSON of the returned value>`, so
+///   `read the rest of that line, json.loads it` always works. Pretty-printing
+///   is gone (a multi-line payload used to break line-anchored parsing).
+/// - a returned value that is *itself* a string containing JSON gets a
+///   `note:` line saying so (the silent double-encode trap), and the exact
+///   recovery move; so does a DOM node/Window (which cannot be serialized).
+/// - `undefined` reads `result: undefined`, and is `null` in json mode.
+/// - `format:"json"` (json mode): the tool result IS the value — bare JSON,
+///   `{"data":…,"note":…}` when a note rides along, or the
+///   `{"artifact":…,"bytes":…,"next_offset":0}` envelope when oversized.
+/// - oversized text mode: `result: artifact (<shape>, N bytes JSON)` + preview
+///   + the artifact hint (never a silently truncated payload).
+pub async fn handle_eval(
+    page: &mut Page,
+    js: &str,
+    ref_id: &str,
+    json_out: bool,
+) -> Result<String> {
     // Two-phase completion-value evaluation, no fragile heuristics:
     // 1. Expression wrapper (no eval at all): `return (<js>);` — covers
     //    single expressions AND IIFEs, works on CSP pages (no eval used),
@@ -155,17 +173,16 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
             }
             if !ref_id.is_empty() {
                 if let Some(inner) = v.get("__blade_result") {
-                    let json_str = serde_json::to_string_pretty(inner)?;
-                    return format_eval_result(&json_str).await;
+                    let inner = inner.clone();
+                    return format_eval_value(&inner, json_out).await;
                 }
             }
         }
 
-        let json_str = match &value {
-            Some(v) => serde_json::to_string_pretty(v)?,
-            None => "undefined".to_string(),
+        let result = match &value {
+            Some(v) => format_eval_value(v, json_out).await?,
+            None => format_eval_undefined(json_out)?,
         };
-        let result = format_eval_result(&json_str).await?;
 
         // Bug 3: Detect window.open popups. After eval, if the expression
         // contained window.open, check for new page targets and report them.
@@ -209,17 +226,167 @@ pub async fn handle_eval(page: &mut Page, js: &str, ref_id: &str) -> Result<Stri
     unreachable!("at least one expression candidate is always provided");
 }
 
-async fn format_eval_result(json_str: &str) -> Result<String> {
+/// One-word shape of a returned value — used where the payload moves out of
+/// line (artifact header) and in notes, never as a required preamble line.
+fn shape_of(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Array(a) => format!("array[{}]", a.len()),
+        serde_json::Value::Object(o) => format!("object{{{}}}", o.len()),
+        serde_json::Value::String(s) => format!("string[{}]", s.chars().count()),
+        serde_json::Value::Number(_) => "number".to_string(),
+        serde_json::Value::Bool(_) => "boolean".to_string(),
+        serde_json::Value::Null => "null".to_string(),
+    }
+}
+
+/// The note the caller MUST see, or "" when the value speaks for itself.
+/// Both cases here are silent traps that cost agents real work: a string whose
+/// content is JSON (parsed twice or thrown away), and a DOM node/Window that
+/// came back as a placeholder string.
+fn eval_note(value: &serde_json::Value) -> String {
+    let serde_json::Value::String(s) = value else {
+        return String::new();
+    };
+    if s.starts_with("unserializable object") {
+        return "the script returned a DOM node/Window, which cannot be serialized - return a property instead (el.href, el.innerText, Object.keys(el))".to_string();
+    }
+    let t = s.trim_start();
+    if t.starts_with('{') || t.starts_with('[') {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(t) {
+            return format!(
+                "the script returned a STRING containing JSON (parses as {}) - parse the value once more, or return the object directly from the script",
+                shape_of(&parsed)
+            );
+        }
+    }
+    String::new()
+}
+
+/// `undefined` in text mode is stated in words; in json mode it is `null`
+/// (documented in the tool schema) because JSON has no undefined.
+fn format_eval_undefined(json_out: bool) -> Result<String> {
+    if json_out {
+        return Ok("null".to_string());
+    }
+    Ok("result: undefined\nnote: the script returned undefined (no value) - check the property name, or return a value (return document.title)".to_string())
+}
+
+async fn format_eval_value(value: &serde_json::Value, json_out: bool) -> Result<String> {
     const INLINE_CAP: usize = 8000;
-    if json_str.len() <= INLINE_CAP {
-        Ok(format!("result: {json_str}"))
-    } else {
-        let path = crate::artifacts::write_artifact(json_str, "json")?;
-        let preview: String = json_str.chars().take(1000).collect();
-        Ok(format!(
-            "result ({} bytes)\npreview: {preview}…\n{}",
-            json_str.len(),
+    let compact = serde_json::to_string(value)?;
+    let note = eval_note(value);
+    if json_out {
+        if compact.len() > INLINE_CAP {
+            let path = crate::artifacts::write_artifact(&compact, "json")?;
+            return Ok(serde_json::json!({
+                "artifact": path,
+                "bytes": compact.len(),
+                "next_offset": 0,
+            })
+            .to_string());
+        }
+        if note.is_empty() {
+            return Ok(compact);
+        }
+        return Ok(serde_json::json!({ "data": value, "note": note }).to_string());
+    }
+    if compact.len() > INLINE_CAP {
+        let path = crate::artifacts::write_artifact(&compact, "json")?;
+        let preview: String = compact.chars().take(600).collect();
+        return Ok(format!(
+            "result: artifact ({}, {} bytes JSON)\npreview: {preview}…\n{}",
+            shape_of(value),
+            compact.len(),
             artifact_hint(&path)
-        ))
+        ));
+    }
+    if note.is_empty() {
+        return Ok(format!("result: {compact}"));
+    }
+    Ok(format!("result: {compact}\nnote: {note}"))
+}
+
+#[cfg(test)]
+mod eval_contract_tests {
+    //! P1: the eval result contract is the thing agents parse. These tests pin
+    //! the exact shapes that were ambiguous before: compact single-line values,
+    //! the string-containing-JSON note, undefined, and json mode. Everything
+    //! here stays under the artifact cap, so no test writes to disk.
+
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn text_mode_is_one_compact_line_of_json() {
+        // The old format pretty-printed and prefixed, so a line-anchored
+        // parser saw a truncated value. Now the whole value is one line.
+        let out = format_eval_value(&json!([{"a": 1}, {"b": "x"}]), false)
+            .await
+            .unwrap();
+        assert_eq!(out, "result: [{\"a\":1},{\"b\":\"x\"}]");
+        assert!(!out.contains('\n'), "result line must not wrap: {out}");
+        // Scalars keep their JSON type explicitly.
+        assert_eq!(
+            format_eval_value(&json!(12), false).await.unwrap(),
+            "result: 12"
+        );
+        assert_eq!(
+            format_eval_value(&json!(true), false).await.unwrap(),
+            "result: true"
+        );
+        assert_eq!(
+            format_eval_value(&json!(null), false).await.unwrap(),
+            "result: null"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_string_containing_json_says_so() {
+        // The agent's real bug: the script returned a JSON STRING, the caller's
+        // parser expected a bare array, and the data was thrown away silently.
+        let out = format_eval_value(&json!("[{\"total\":0}]"), false)
+            .await
+            .unwrap();
+        assert!(out.starts_with("result: \"[{\\\"total\\\":0}]\""), "{out}");
+        assert!(out.contains("STRING containing JSON"), "{out}");
+        assert!(out.contains("array[1]"), "shape of the parsed value: {out}");
+        // A plain string needs no note — the quotes speak.
+        let out = format_eval_value(&json!("hello"), false).await.unwrap();
+        assert_eq!(out, "result: \"hello\"");
+        // A DOM node comes back as a placeholder: say what to do instead.
+        let out = format_eval_value(&json!("unserializable object (Window/DOM node)"), false)
+            .await
+            .unwrap();
+        assert!(out.contains("return a property instead"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn undefined_is_stated_in_words_and_null_in_json_mode() {
+        let out = format_eval_undefined(false).unwrap();
+        assert!(out.starts_with("result: undefined"), "{out}");
+        assert!(out.contains("note:"), "{out}");
+        assert_eq!(format_eval_undefined(true).unwrap(), "null");
+    }
+
+    #[tokio::test]
+    async fn json_mode_returns_bare_json_or_a_documented_envelope() {
+        // Bare: the whole tool result IS the value.
+        assert_eq!(
+            format_eval_value(&json!({"n": 3, "ok": true}), true)
+                .await
+                .unwrap(),
+            "{\"n\":3,\"ok\":true}"
+        );
+        // A note wraps the payload as {data, note} — still valid JSON.
+        let out = format_eval_value(&json!("[1,2]"), true).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON envelope");
+        assert!(v.get("data").is_some() && v.get("note").is_some(), "{out}");
+        // Shape labels are what the artifact header and notes use.
+        assert_eq!(shape_of(&json!([1, 2, 3])), "array[3]");
+        assert_eq!(shape_of(&json!({"a": 1})), "object{1}");
+        assert_eq!(shape_of(&json!("abc")), "string[3]");
+        assert_eq!(shape_of(&json!(1.5)), "number");
+        assert_eq!(shape_of(&json!(false)), "boolean");
+        assert_eq!(shape_of(&json!(null)), "null");
     }
 }

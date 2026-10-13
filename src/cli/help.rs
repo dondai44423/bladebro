@@ -221,7 +221,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro see --find \"Submit\"",
                 "bladebro see --logs network"
             ],
-            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it returns the full comment tree (every reply, complete flag)"]
+            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it returns the full comment tree (every reply, complete flag)", "extract=auto envelope: container,count,items + page_total/partial/paged when the page claims more results than the DOM holds, sponsored (paid placements), duplicates_removed, redirects_unwrapped — each explained by a note line"]
         }),
         "act" => json!({
             "usage": "bladebro act <action> [target] [value] [--flags]",
@@ -243,7 +243,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--js": "eval expression (@file or - for scripts)",
                 "--submit": "fill: submit button ref or text",
                 "--slim": "skip the delta",
-                "--format": "extract: text (default) | json — pure JSON output"
+                "--format": "extract/eval: text (default) | json — pure JSON output (for eval: the bare returned value; {data,note} when a note rides along; an {artifact,bytes} envelope when oversized)"
             },
             "examples": [
                 "bladebro act click e5",
@@ -260,6 +260,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             "notes": [
                 "unquoted multi-word values join: act click Sign in == act click \"Sign in\"",
                 "big JSON payloads: @file or - (stdin)",
+                "eval result contract: `result: <compact JSON>` on ONE line — json.loads that line; a returned JSON string is flagged in a note; --format json returns the value itself",
                 "batch steps may include {\"action\":\"see\"|\"extract\",...} to read inline; url= on any step navigates first"
             ]
         }),
@@ -533,6 +534,10 @@ EXTRACTION
                     products, posts. Site-aware: Reddit POST pages → the
                     full comment tree (every reply incl. collapsed, thread
                     order, complete flag); feeds/GitHub/products get fields.
+                    Envelope: {container,count,items,…} + page_total/partial/paged
+                    when the page claims more results than the DOM holds,
+                    sponsored (paid placements), duplicates_removed,
+                    redirects_unwrapped — each with a `note:` line.
   extract links     all links
   extract forms     all forms with fields
   extract json      custom template (--template '{"items":{…}}' or @file)
@@ -546,7 +551,7 @@ FLAGS
   --limit <N>         max extract items (default 50; Reddit comments: all ≤1000)
   --logs console|network
   --artifact <path>   paged read of an offloaded payload (--offset/--limit)
-  --format text|json  json: pure JSON out for extract/artifact reads
+  --format text|json  json: pure JSON out for extract/artifact/eval reads
   --url <url>         navigate first (or pass the URL positionally)
 
 EXAMPLES
@@ -582,6 +587,20 @@ UNIVERSAL FLAGS (mirror the MCP schema — accepted on every action)
 
 Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
 payloads: @file or - (stdin). Unknown flags fail loudly (exit 2). Key chords: 'act press Control+a'.
+
+RESULT SHAPES (stable — parse them without guessing)
+  eval          one line: `result: <compact JSON of the returned value>` — read
+                that line, json.loads it. A returned string that CONTAINS JSON is
+                called out in a `note:` line (parse the value once more — do not
+                discard it); a DOM node/Window says what to return instead;
+                undefined reads `result: undefined`. `--format json` returns the
+                bare value, `{"data":…,"note":…}` when a note rides along, or an
+                `{"artifact":…,"bytes":…}` envelope when oversized.
+  extract auto  envelope {container,count,items,…} plus, when they apply:
+                page_total/partial/paged (the page claims more results than the
+                DOM holds), sponsored (paid placements — flagged per item, left in
+                page order), duplicates_removed, redirects_unwrapped. Each has a
+                `note:` line explaining what to do about it.
 
 EXAMPLES
   bladebro act click e5                          click a ref

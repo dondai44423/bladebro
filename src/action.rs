@@ -38,6 +38,197 @@ pub use self::perform::{perform, perform_with_network, MUT_WATCH};
 #[cfg(test)]
 pub(crate) use self::verdict::{element_condition_expr, text_condition_expr};
 pub use self::verdict::{eval_condition, CondOutcome};
+/// The act vocabulary — the SINGLE source of truth for the MCP schema enum,
+/// the batch-step vocabulary, the CLI parser AND the unknown-action error.
+/// It has drifted twice before (batch/run knew only half of act's actions;
+/// the CLI carried a private copy), so every consumer reads THIS list.
+pub const ACT_ACTIONS: &[&str] = &[
+    "click",
+    "type",
+    "clear",
+    "select",
+    "press",
+    "scroll",
+    "navigate",
+    "read",
+    "wait",
+    "dialog",
+    "back",
+    "forward",
+    "reload",
+    "hover",
+    "upload",
+    "fill",
+    "batch",
+    "eval",
+    "pdf",
+    "download",
+    "collect",
+    "extract",
+    "open-tab",
+    "close-tab",
+    "switch-tab",
+    "save",
+    "load",
+];
+
+/// The mistake a fresh agent actually makes: `{"action":"url"}` — a step
+/// FIELD used as an action name. Each hint spells the correct step verbatim,
+/// because "read the docs harder" is not a fix.
+const ACTION_FIELD_HINTS: &[(&str, &str)] = &[
+    (
+        "url",
+        "use {\"action\":\"navigate\",\"url\":\"https://…\"} — or pass url= ON another action to navigate first",
+    ),
+    ("js", "use {\"action\":\"eval\",\"js\":\"document.title\"}"),
+    (
+        "text",
+        "use it ON an action: {\"action\":\"click\",\"text\":\"Sign in\"}",
+    ),
+    (
+        "selector",
+        "CSS addressing belongs ON an action: {\"action\":\"click\",\"selector\":\"#submit\"}",
+    ),
+    (
+        "label",
+        "use {\"action\":\"fill\",\"fields\":[{\"label\":\"Email\",\"text\":\"…\"}]}",
+    ),
+    ("key", "use {\"action\":\"press\",\"key\":\"Enter\"}"),
+    (
+        "option",
+        "use {\"action\":\"select\",\"text\":\"Size\",\"option\":\"M\"}",
+    ),
+    (
+        "fields",
+        "use {\"action\":\"fill\",\"fields\":[{\"ref\":\"e3\",\"text\":\"…\"}]}",
+    ),
+    (
+        "steps",
+        "use {\"action\":\"batch\",\"steps\":[{\"action\":…}]}",
+    ),
+    (
+        "timeout",
+        "timeout is a parameter of wait/download/collect, not an action",
+    ),
+];
+
+/// Build the "unknown action" error: the full vocabulary, the field hint when
+/// the word is really a step field, else the nearest action name. A caller
+/// that guessed wrong should be able to fix it from the error alone.
+pub fn unknown_action_message(name: &str) -> String {
+    let mut msg = format!(
+        "unknown action: \"{name}\"\nvalid actions: {}",
+        ACT_ACTIONS.join(", ")
+    );
+    let key = name.trim().to_lowercase();
+    if let Some((_, how)) = ACTION_FIELD_HINTS.iter().find(|(f, _)| *f == key) {
+        msg.push_str(&format!(
+            "\nnote: \"{name}\" is a step FIELD, not an action — {how}"
+        ));
+        return msg;
+    }
+    if let Some(near) = nearest_action(&key) {
+        msg.push_str(&format!("\ndid you mean \"{near}\"?"));
+    }
+    msg
+}
+
+/// Exact after `_`→`-` normalization, else the closest action within edit
+/// distance 2 ("clcik"→click, "navigate_to"→navigate, "open tab"→open-tab).
+fn nearest_action(name: &str) -> Option<&'static str> {
+    let norm = name.replace('_', "-");
+    if let Some(exact) = ACT_ACTIONS.iter().copied().find(|a| *a == norm) {
+        return Some(exact);
+    }
+    let collapsed: String = norm.chars().filter(|c| c.is_alphanumeric()).collect();
+    ACT_ACTIONS
+        .iter()
+        .copied()
+        .map(|a| {
+            let ac: String = a.chars().filter(|c| c.is_alphanumeric()).collect();
+            (
+                edit_distance(&norm, a).min(edit_distance(&collapsed, &ac)),
+                a,
+            )
+        })
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, a)| a)
+}
+
+/// Two-row Levenshtein — small enough to live here rather than pull a crate
+/// for a typo suggestion.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+#[cfg(test)]
+mod action_vocabulary_tests {
+    use super::*;
+
+    #[test]
+    fn vocabulary_is_clean_and_never_collides_with_its_field_hints() {
+        let mut seen = std::collections::HashSet::new();
+        for a in ACT_ACTIONS {
+            assert!(!a.is_empty());
+            assert!(seen.insert(*a), "duplicate action in the vocabulary: {a}");
+        }
+        // A field hint must point at a word that is NOT an action — otherwise
+        // the field hint shadows a real action and the advice would be wrong.
+        for (field, _) in ACTION_FIELD_HINTS {
+            assert!(
+                !ACT_ACTIONS.contains(field),
+                "field hint '{field}' collides with a real action"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_action_error_teaches_the_field_mistake() {
+        let msg = unknown_action_message("url");
+        assert!(msg.contains("unknown action"), "{msg}");
+        assert!(msg.contains("valid actions:"), "{msg}");
+        assert!(
+            msg.contains("step FIELD") && msg.contains("navigate"),
+            "the url mistake must name the correct step: {msg}"
+        );
+        // Every action is listed, so the caller can pick one.
+        for a in ACT_ACTIONS {
+            assert!(msg.contains(a), "missing action in the list: {a}");
+        }
+    }
+
+    #[test]
+    fn unknown_action_error_suggests_near_misses() {
+        assert!(unknown_action_message("clcik").contains("did you mean \"click\""));
+        assert!(unknown_action_message("navigate_to").contains("did you mean \"navigate\""));
+        assert!(unknown_action_message("open tab").contains("did you mean \"open-tab\""));
+        assert!(unknown_action_message("NAVIGATE").contains("did you mean \"navigate\""));
+        // Nothing close: no invented suggestion.
+        assert!(!unknown_action_message("zzzzq").contains("did you mean"));
+    }
+
+    #[test]
+    fn edit_distance_basics() {
+        assert_eq!(edit_distance("click", "click"), 0);
+        assert_eq!(edit_distance("clcik", "click"), 2);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("abc", ""), 3);
+    }
+}
+
 /// What the agent can do. Few verbs, full control.
 #[derive(Debug, Clone)]
 pub enum Action {
