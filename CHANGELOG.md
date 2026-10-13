@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.5.1] - 2026-10-13
+
 ### Added
 - `act eval` has a stated result contract. Text mode answers ONE line, `result: <compact JSON of the returned value>` — parse that line and you have the value; a returned string that itself contains JSON is called out in a note (parse it once more, do not throw it away), a DOM node/Window says what to return instead, and `undefined` is stated in words. `format:"json"` returns the bare value, `{data,note}` when a note rides along, or an `{artifact,bytes,next_offset}` envelope when oversized.
 - `extract auto` states what the DOM actually holds: `page_total` with `partial`/`paged` when the page claims more results than are loaded (lazy load or pagination), `sponsored` counts for paid placements (still flagged per item, still in page order), `duplicates_removed`, and `redirects_unwrapped` — redirect/tracking wrappers (Amazon `/sspa/click`, Google `/url?q=`, ad `/aclk`, …) resolve to their canonical destination instead of an interstitial.
@@ -2013,7 +2015,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.5.0...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.5.1...HEAD
+[4.5.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.1
 [4.5.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.0
 [4.4.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.4.0
 [4.3.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.3.0
