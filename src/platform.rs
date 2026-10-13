@@ -698,9 +698,12 @@ pub fn read_file_nofollow(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
 }
 
 /// Walk a directory's ancestors (root → parent): every existing component
-/// must be a real directory — or a root-owned symlink, which only the OS
+/// must be a real directory — or an OS-owned symlink, which only the OS
 /// itself can place (macOS /var → private/var, /tmp → private/tmp) — owned
-/// by this uid or root, and not group/other-writable unless sticky (the
+/// by this uid or the OS (root on Linux/macOS; on Android there is no root
+/// in the app-visible chain: the system UID 1000 owns /data and the
+/// /system links, and no co-resident app uid can write a 0770/0755
+/// system-owned component), and not group/other-writable unless sticky (the
 /// /tmp case — /tmp is root-owned 1777, and stickiness is what makes
 /// creation inside it safe; a non-sticky world-writable ancestor lets any
 /// local user replace this process's freshly created directory with a
@@ -729,7 +732,8 @@ pub fn validate_dir_ancestors(path: &std::path::Path) -> Result<(), String> {
                 // /bin → usr/bin. A local co-user cannot create a
                 // root-owned entry, so these are trusted; any other
                 // symlink is an attacker-plantable redirect and refuses.
-                if md.uid() != 0 {
+                let os_owned = md.uid() == 0 || (cfg!(target_os = "android") && md.uid() == 1000);
+                if !os_owned {
                     return Err(format!(
                         "{} resolves through a symlink — refusing it",
                         cur.display()
@@ -740,14 +744,24 @@ pub fn validate_dir_ancestors(path: &std::path::Path) -> Result<(), String> {
             if !md.is_dir() {
                 return Err(format!("{} is not a directory", cur.display()));
             }
-            if md.uid() != uid && md.uid() != 0 {
+            let os_owned = md.uid() == 0 || (cfg!(target_os = "android") && md.uid() == 1000);
+            if !os_owned && md.uid() != uid {
                 return Err(format!(
                     "{} is owned by another user — refusing it",
                     cur.display()
                 ));
             }
             let mode = md.permissions().mode();
-            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+            // On Android the OS-owned chain is 0770/0771 (system:system), and
+            // the system group is OS machinery, not a co-user: untrusted app
+            // uids are neither that uid nor that group and fall under "other",
+            // which holds no write bit there. Pinned to AID_SYSTEM both ways so
+            // the relaxation can never cover some other group with real members.
+            let group_ok = cfg!(target_os = "android")
+                && md.uid() == 1000
+                && md.gid() == 1000
+                && mode & 0o022 == 0o020;
+            if mode & 0o022 != 0 && mode & 0o1000 == 0 && !group_ok {
                 return Err(format!(
                     "{} is group/other-writable and not sticky — refusing it",
                     cur.display()
@@ -815,7 +829,7 @@ pub fn process_alive(pid: u32) -> bool {
 
 /// Is this process a Chrome/Chromium process?
 pub fn process_is_chrome(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         std::fs::read(format!("/proc/{pid}/cmdline"))
             .ok()
@@ -949,7 +963,7 @@ pub fn shutdown_child(child: &mut Child) {
 /// Both sides must resolve for the second check; otherwise stay quiet rather
 /// than guess. Elsewhere there is no portable signal and this answers false.
 pub fn stale_binary() -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::path::{Path, PathBuf};
         let exe = match std::fs::read_link("/proc/self/exe") {
@@ -981,7 +995,7 @@ pub fn stale_binary() -> bool {
             _ => false,
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         false
     }
@@ -1324,7 +1338,10 @@ mod security_hardening_tests {
             let path = std::path::Path::new(probe);
             let is_root_symlink = path
                 .symlink_metadata()
-                .map(|m| m.file_type().is_symlink() && m.uid() == 0)
+                .map(|m| {
+                    m.file_type().is_symlink()
+                        && (m.uid() == 0 || (cfg!(target_os = "android") && m.uid() == 1000))
+                })
                 .unwrap_or(false);
             if is_root_symlink {
                 assert!(

@@ -112,3 +112,29 @@ jobs:
         run: |
           rustc --version | grep -E '^rustc 1[.]86[.]0 '
           cargo check --locked --all-targets
+
+  # The android cfg gates are source-level support (no Android artifact is
+  # published), so the guard is compilation: the runner's NDK provides the
+  # bionic sysroot that ring's C needs.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+          targets: "aarch64-linux-android"
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: android-aarch64-registry-${{ hashFiles('Cargo.lock') }}
+      - name: Point cc-rs at the NDK toolchain
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* | sort -V | tail -1)}"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cc="$(ls "$bin" | grep -E '^aarch64-linux-android[0-9]+-clang$' | sort -V | tail -1)"
+          test -n "$cc"
+          echo "CC_aarch64-linux-android=$bin/$cc" >> "$GITHUB_ENV"
+          echo "AR_aarch64-linux-android=$bin/llvm-ar" >> "$GITHUB_ENV"
+      - name: Check the android target
+        run: cargo check --locked --target aarch64-linux-android

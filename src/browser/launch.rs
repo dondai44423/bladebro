@@ -2,7 +2,7 @@
 //! the lane dispatcher and the font audit.
 
 use super::discover::{endpoint_owned_by_pid, find_chrome, free_port};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use super::display::{apply_xvfb_env, VirtualDisplay};
 use super::flags::{
     classify_gl, gl_stages, launch_args, launch_args_real, stage_label, LaunchCfg, RealLaunchCfg,
@@ -139,9 +139,9 @@ impl Browser {
         let user_data_dir = profile.dir().to_path_buf();
         font_audit();
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let xvfb = VirtualDisplay::start().ok();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         if xvfb.is_none() {
             // Stealth downgrade: headless=new carries real detection
             // surface. Never fail silently — the operator should know.
@@ -149,14 +149,14 @@ impl Browser {
                 "[bladebro] WARNING: Xvfb unavailable — falling back to headless mode (reduced stealth). Install xvfb for headful-on-virtual-display."
             );
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         if timing {
             eprintln!("[launch-timing] display: {:?}", t0.elapsed());
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let headful = xvfb.is_some();
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let headful = true; // macOS/Windows have native window servers
 
         // After both bindings: the recording must compile on every target.
@@ -196,13 +196,13 @@ impl Browser {
             extra: &extra,
         });
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let mode_str = if headful {
             "headful (Xvfb)"
         } else {
             "headless"
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let mode_str = "headful";
         eprintln!("[bladebro] launching Chrome from {chrome_path} on port {port} ({mode_str})");
 
@@ -227,7 +227,7 @@ impl Browser {
         // from the user's session — it opens on the USER'S real
         // screen, ignoring the Xvfb DISPLAY. Strip Wayland env and
         // force X11 so Chrome stays invisible on the virtual display.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         if let Some(ref xvfb) = xvfb {
             apply_xvfb_env(&mut cmd, xvfb);
         }
@@ -278,7 +278,7 @@ impl Browser {
                     return Ok((
                         Self {
                             child,
-                            #[cfg(target_os = "linux")]
+                            #[cfg(any(target_os = "linux", target_os = "android"))]
                             xvfb,
                             port,
                             profile,
@@ -344,7 +344,7 @@ impl Browser {
         let mut headless = !visible;
         #[allow(unused_mut)]
         let mut ozone_x11 = false;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             let has_wayland = std::env::var_os("WAYLAND_DISPLAY")
                 .map(|v| !v.is_empty())
@@ -434,7 +434,7 @@ impl Browser {
                 Stdio::null()
             };
             cmd.args(&args).stdout(Stdio::null()).stderr(child_stderr);
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             if ozone_x11 {
                 // Belt and braces with --ozone-platform=x11: drop a possibly
                 // stale session-type claim from the child env.
@@ -469,7 +469,7 @@ impl Browser {
                         );
                         return Ok(Self {
                             child,
-                            #[cfg(target_os = "linux")]
+                            #[cfg(any(target_os = "linux", target_os = "android"))]
                             xvfb: None,
                             port,
                             profile,
@@ -654,7 +654,7 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
 /// hidden canvases and hash the pixels; a missing emoji font produces a hash
 /// no real browser generates. Linux-only (fc-list). Best-effort, never fatal.
 pub(super) fn font_audit() {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {

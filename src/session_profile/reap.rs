@@ -21,7 +21,7 @@ pub fn reap_orphans() {
     reap_orphans_at(&platform::blade_dir());
 
     // Stale Xvfb locks + orphan Xvfb processes (Linux).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         reap_xvfb();
     }
@@ -200,7 +200,7 @@ fn read_singleton_pid(dir: &Path) -> Option<u32> {
 /// Does process `pid` have `dir` in its command line?
 /// Guards against killing a recycled pid.
 fn process_uses_dir(pid: u32, dir: &Path) -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
             .map(|c| c.contains(&dir.display().to_string()))
@@ -228,12 +228,12 @@ fn process_uses_dir(pid: u32, dir: &Path) -> bool {
 /// Only a dead Bladebro display claim authorizes cleanup. Orphanhood alone
 /// proves no ownership, and neither does the executable: the claim, the exact
 /// Xvfb cmdline and the display number must all agree.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn reap_xvfb() {
     reap_xvfb_at(Path::new("/tmp"));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn reap_xvfb_at(tmp: &Path) {
     for n in 99..200 {
         let claim = tmp.join(format!(".blade-x{n}-claim"));
@@ -300,7 +300,7 @@ fn reap_xvfb_at(tmp: &Path) {
 /// comm is `systemd` (the manager). A live owner is named `bladebro`,
 /// `chromium` or `Xvfb` — never the manager — and an unreadable parent means
 /// NOT orphaned.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn is_orphaned(pid: u32) -> bool {
     let ppid = proc_ppid(pid);
     if ppid == 1 {
@@ -316,7 +316,7 @@ fn is_orphaned(pid: u32) -> bool {
 }
 
 /// Parent pid of a process (0/1 = orphaned or init).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn proc_ppid(pid: u32) -> u32 {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
     // Format: pid (comm) state ppid ... — comm can contain
@@ -329,14 +329,14 @@ fn proc_ppid(pid: u32) -> u32 {
 }
 
 /// Is this pid an Xvfb process?
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn proc_is_xvfb_on_display(pid: u32, display: u16) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
         .map(|c| xvfb_cmdline_matches(&c, display))
         .unwrap_or(false)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn xvfb_cmdline_matches(cmdline: &str, display: u16) -> bool {
     let mut args = cmdline.split('\0');
     args.next()
@@ -347,7 +347,7 @@ fn xvfb_cmdline_matches(cmdline: &str, display: u16) -> bool {
 
 /// Kill any Xvfb process serving display `:<n>` whose parent
 /// is dead (orphaned). Identified via /proc cmdline scan.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn kill_xvfb_on_display(display: u16) {
     let procs = match std::fs::read_dir("/proc") {
         Ok(d) => d,

@@ -25,7 +25,7 @@ use crate::platform;
 
 mod alerts;
 mod discover;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod display;
 mod flags;
 mod launch;
@@ -37,7 +37,7 @@ pub use self::alerts::{
     pending_notes, reset_gl_alert, set_stealth_inject_failed, set_ua_override_failed,
 };
 pub(crate) use self::discover::endpoint_owned_by_own_browser;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub use self::display::VirtualDisplay;
 pub use self::flags::{
     gl_mid_session_loss, gpu_state, is_software_renderer, launched_headless, launched_no_sandbox,
@@ -66,7 +66,7 @@ fn browser_temp_env(cmd: &mut Command) {
 /// orphan reaper (ungraceful death).
 pub struct Browser {
     child: Child,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[allow(dead_code)]
     xvfb: Option<VirtualDisplay>,
     port: u16,

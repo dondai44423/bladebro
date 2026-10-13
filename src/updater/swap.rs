@@ -423,7 +423,7 @@ mod backup_verify_tests {
     /// The magic bytes of this platform's real release artifacts (must
     /// agree with `download::binary_magic_ok`).
     fn platform_magic(data: &mut [u8]) {
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", target_os = "android")) {
             data[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
         } else if cfg!(target_os = "macos") {
             // Real darwin artifact header: MH_CIGAM_64.

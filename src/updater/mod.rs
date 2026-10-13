@@ -102,6 +102,18 @@ async fn update(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    // Android publishes no builds: the released Linux binaries are glibc-linked
+    // and cannot run on bionic, so a self-update here would download an asset
+    // that can never start — and fail the run check with a misleading message.
+    // Refuse before the download and name the actual update path.
+    if cfg!(target_os = "android") {
+        return Err(BladeError::Other(
+            "self-update is not available on Android: the published Linux binaries are glibc builds and cannot run on Android.\n  \
+             Update from wherever this install came from (package manager, npm, or your own build)."
+                .to_string(),
+        ));
+    }
+
     // Step 2: download the binary.
     let asset_name = version::platform_asset_name();
     let asset_size = version::find_asset(&latest).map(|a| a.size).unwrap_or(0);
@@ -173,19 +185,25 @@ async fn show_version() -> Result<()> {
     }
 
     match version::fetch_latest_tag().await {
-        Ok(latest_tag) => match version::compare_versions(&latest_tag, CURRENT_VERSION) {
-            std::cmp::Ordering::Greater => {
-                println!("  update available: {latest_tag}");
-                println!("  run: bladebro -u");
+        Ok(latest_tag) => {
+            match version::compare_versions(&latest_tag, CURRENT_VERSION) {
+                std::cmp::Ordering::Greater => {
+                    println!("  update available: {latest_tag}");
+                    if cfg!(target_os = "android") {
+                        println!("  (no Android builds are published — update from your package manager)");
+                    } else {
+                        println!("  run: bladebro -u");
+                    }
+                }
+                std::cmp::Ordering::Equal => {
+                    println!("  on the latest release");
+                }
+                std::cmp::Ordering::Less => {
+                    println!("  ahead of the latest release ({latest_tag})");
+                    println!("  (local build is newer — dev build or pending release)");
+                }
             }
-            std::cmp::Ordering::Equal => {
-                println!("  on the latest release");
-            }
-            std::cmp::Ordering::Less => {
-                println!("  ahead of the latest release ({latest_tag})");
-                println!("  (local build is newer — dev build or pending release)");
-            }
-        },
+        }
         Err(_) => {
             println!("  (could not check for updates)");
         }

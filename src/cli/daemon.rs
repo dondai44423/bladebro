@@ -529,12 +529,12 @@ fn process_alive(pid: i32) -> bool {
 /// ps executable identity; an unreadable identity never authorizes a kill.
 #[cfg(unix)]
 fn looks_like_bladebro(pid: i32) -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         std::fs::read_to_string(format!("/proc/{pid}/comm"))
             .is_ok_and(|comm| comm.trim() == "bladebro")
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "comm="])

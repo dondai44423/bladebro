@@ -89,7 +89,7 @@ fn candidates() -> Vec<(
 )> {
     // Used by the Linux + macOS candidate tables; Windows builds its paths
     // from LOCALAPPDATA/APPDATA/PROGRAMFILES instead.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "android"))]
     let home = crate::platform::home_dir();
     let mut out: Vec<(
         &'static str,
@@ -99,7 +99,7 @@ fn candidates() -> Vec<(
         Vec<PathBuf>,
     )> = Vec::new();
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         let xdg = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
