@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.0] - 2026-10-14
+
 ### Changed
 - **The agent lane renders WebGL on the real GPU under Xvfb.** The GL ladder's first stage is now `--use-angle=gl-egl`: on this machine it reports `ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)` — the exact string the machine's own session reports — so the adaptive WebGL mask never installs on hardware hosts (zero GL wrappers, no worker spoof script). 600 fill frames at 1600×1200: 130 ms on the lane vs 122 ms stock gl-egl vs 2904 ms on the old llvmpipe path; creepjs's main page went 1538 → 698 ms and its font battery 17.1 → 6.7 s. The classic `gl` stage stays as the EGL-less fallback (live software context, mask normalizes), SwiftShader last.
 - **Every mask shell now reproduces the native cyclic-prototype refusal.** A callable Proxy could not: V8's cycle check on `Object.setPrototypeOf(fn, Object.create(fn))` compares against the proxy's target, so the assignment succeeded and the follow-up coercion recursed (`RangeError`) where a native function throws `TypeError: Cyclic __proto__ value` — precisely the tell creepjs's prototype lie engine reads (`failed at too much recursion error`). The shared mask helpers now install a `setPrototypeOf` trap that throws the engine's own cycle TypeError when the requested chain runs back through the proxy, and forwards every other assignment untouched. The trap fires only on explicit `setPrototypeOf` calls — never on the call path — so masked calls keep native speed. The SharedWorker constructor wrapper carries the same shield.
@@ -2040,7 +2042,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.5.2...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.0...HEAD
+[4.6.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.0
 [4.5.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.2
 [4.5.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.1
 [4.5.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.0
