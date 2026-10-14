@@ -587,7 +587,7 @@ Honest boundaries: what surprises people, and what Bladebro deliberately does no
 | **Browser extensions** | Not supported — CDP cannot load them, and they would break the stealth profile. |
 | **Session video recording** | Not supported. Use `vision` screenshots. |
 | **Firefox / Gecko** | Not supported — the driver speaks CDP, which is Chromium-only. |
-| **macOS binaries** | Cross-compiled from Linux via cargo-zigbuild; CI builds and tests macOS natively on every release, but the released binary is not live-driven on macOS hardware yet. File an issue if something breaks. |
+| **macOS binaries** | Cross-compiled from Linux via cargo-zigbuild; CI builds and tests macOS natively on every release, and since 4.6.1 the CI stealth audit drives the released binary through a real browser on macOS (and Windows) per release — runtime-verified in CI, not yet on local hardware. File an issue if something breaks. |
 | **Linux ARM64** | Cross-compiled; not live-verified on ARM hardware yet. Community reports welcome. |
 | **`BLADE_NOISE=1`** | Canvas/audio noise can *hurt* — FingerprintJS ML reads it as tampering. Off by default; enable only if you know why. |
 

@@ -10,13 +10,16 @@ No perfect claims. Last full local floor: 2026-10-14, bladebro 4.6.1
 | Platform | Build | Unit tests | Browser lifecycle | Stealth floor | Status |
 |---|---|---|---|---|---|
 | Linux x86_64 | local + CI (ubuntu) | local + CI | CI (dsh probe x2) + local lanes | audit 63/63, QoL 122/122, reliability 36/36, oracle, lanes 5x5 | full |
-| macOS (arm64/x86_64) | CI (macos) | CI | CI (dsh probe x2) | not run locally | CI-verified |
-| Windows x86_64 | CI (windows) | CI | CI (dsh probe x2) | not run locally | CI-verified |
+| macOS (arm64/x86_64) | CI (macos) | CI | CI (dsh probe x2) | audit 52/52 (CI, 4.6.1); full local floor not run | CI-verified |
+| Windows x86_64 | CI (windows) | CI | CI (dsh probe x2) | audit 52/52 (CI, 4.6.1); full local floor not run | CI-verified |
 
 CI (`.github/workflows/ci.yml`) per OS: `cargo fmt --check`,
 `cargo clippy --release -- -D warnings`, `cargo test --release`,
 `cargo build --release`, then the DSH npm-package integration twice with the
-real native binary driving a browser (Node 24). Linux CI installs Google
+real native binary driving a browser (Node 24), and — since 4.6.1 —
+`bladebro audit`: the stealth vector suite through a real browser, exit-code
+gated (any FAIL fails the job; 4.6.1: ubuntu 55/55, macOS 52/52, Windows
+52/52). Linux CI installs Google
 Chrome stable + xvfb; macOS/Windows use the runner's Chrome. A separate msrv
 job checks Rust 1.86.0 (`cargo check --locked --all-targets`).
 
@@ -51,7 +54,9 @@ job checks Rust 1.86.0 (`cargo check --locked --all-targets`).
 
 ## Not verified (gaps)
 
-- Stealth floor on macOS/Windows: CI runs tests and lifecycle, not the audit.
+- Stealth floor on macOS/Windows: the CI audit step (since 4.6.1) runs the
+  full vector suite through a real browser on each — but the larger local
+  floor (QoL, reliability, lanes, oracle) still runs on Linux only.
 - Real-network proxies and proxy chains: G10 evidence uses a local forward
   proxy; behavior behind commercial proxies is untested.
 - Other Chromium forks (Helium and friends): untested, not claimed.
