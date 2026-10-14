@@ -358,6 +358,12 @@ pub(super) fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
     if let Some(proxy) = cfg.proxy {
         args.push(format!("--proxy-server={proxy}"));
     }
+    // The virtual display is OURS (Xvfb 1920x1080): pin the window so the
+    // geometry is deterministic. On macOS/Windows the window opens on the
+    // user's real desktop — the forced 1920x1080 produced an inner size wider
+    // than a 1024x768 CI screen (inner-within-screen FAIL, caught by the
+    // Windows audit); the native default window is the honest one there.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     if cfg.headful {
         args.push("--window-size=1920,1080".into());
     }
@@ -581,9 +587,15 @@ mod launch_flag_tests {
     }
 
     #[test]
-    fn window_size_and_user_data_are_shared() {
+    fn window_size_is_pinned_only_where_the_display_is_ours() {
         let a = launch_args(&cfg(GlStage::NativeGl, true, Transport::Ws));
-        assert!(a.iter().any(|f| f == "--window-size=1920,1080"));
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            assert!(a.iter().any(|f| f == "--window-size=1920,1080"));
+        } else {
+            // macOS/Windows: the native default window on the real desktop —
+            // a forced size can exceed a small screen and read as incoherent.
+            assert!(!a.iter().any(|f| f.starts_with("--window-size")));
+        }
         assert!(a.iter().any(|f| f.starts_with("--user-data-dir=")));
         let h = launch_args(&cfg(GlStage::NativeGl, false, Transport::Ws));
         assert!(!h.iter().any(|f| f == "--window-size=1920,1080"));
