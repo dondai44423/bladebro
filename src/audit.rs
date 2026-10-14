@@ -31,10 +31,7 @@ pub async fn run_audit(base: &str) -> Result<()> {
         let path = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
             BladeError::Other("vectors.html not found. Run from project root.".into())
         })?;
-        format!(
-            "file://{}",
-            path.canonicalize().unwrap_or(path.clone()).display()
-        )
+        file_url(path)
     };
 
     if crate::realbrowser::real_lane() {
@@ -222,5 +219,58 @@ return JSON.stringify(out);
             failures.len(),
             failures.join(" | ")
         )))
+    }
+}
+
+/// Build a `file://` URL from a path. Windows paths need forward slashes and
+/// a drive-rooted slash (`file:///D:/a/b.html`); a raw `file://D:\a\b.html`
+/// is not a valid URL and Chrome refuses it (caught by the first CI run on
+/// Windows). The `\\?\` prefix canonicalize() adds on Windows is stripped.
+fn file_url(path: &std::path::Path) -> String {
+    let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    file_url_from_str(&p.display().to_string(), cfg!(windows))
+}
+
+fn file_url_from_str(s: &str, windows: bool) -> String {
+    if windows {
+        let mut t = s.replace('\\', "/");
+        if let Some(rest) = t.strip_prefix("//?/") {
+            t = rest.to_string();
+        }
+        if !t.starts_with('/') {
+            t = format!("/{t}");
+        }
+        format!("file://{t}")
+    } else {
+        format!("file://{s}")
+    }
+}
+
+#[cfg(test)]
+mod file_url_tests {
+    use super::file_url_from_str;
+
+    #[test]
+    fn windows_paths_become_valid_file_urls() {
+        assert_eq!(
+            file_url_from_str(r"D:\a\bladebro\tests\vectors.html", true),
+            "file:///D:/a/bladebro/tests/vectors.html"
+        );
+        assert_eq!(
+            file_url_from_str(r"\\?\D:\a\b.html", true),
+            "file:///D:/a/b.html"
+        );
+        assert_eq!(
+            file_url_from_str("C:/x y/v.html", true),
+            "file:///C:/x y/v.html"
+        );
+    }
+
+    #[test]
+    fn unix_paths_keep_the_three_slash_form() {
+        assert_eq!(
+            file_url_from_str("/home/x/tests/vectors.html", false),
+            "file:///home/x/tests/vectors.html"
+        );
     }
 }

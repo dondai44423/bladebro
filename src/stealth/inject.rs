@@ -119,10 +119,11 @@ const STEALTH_CORE: &str = include_str!("js/stealth_core.js");
 /// Tail: cdc_ watcher + IIFE close. GL_SPOOF / NOISE assemble between HEAD and TAIL.
 const STEALTH_TAIL: &str = include_str!("js/stealth_tail.js");
 
-/// Media devices patch — applied ONLY when the real machine reports zero
-/// devices (a server tell; real desktops always have audio in/out). Returns
-/// the exact pre-permission shape of real Chrome: devices present, ids and
-/// labels empty. Passthrough whenever real devices exist.
+/// Media devices patch — hides the one server tell: a machine with zero
+/// audio/video devices. Installed when the attach-time count is zero or
+/// unreadable (see `apply`); the page-side gate is the real one: real devices
+/// pass through untouched, and only a page that itself sees none gets the
+/// exact pre-permission shape (devices present, ids and labels empty).
 const MEDIA_PATCH: &str = include_str!("js/media_patch.js");
 
 /// permissions.query('notifications') rewrite — always installed; the
@@ -368,11 +369,18 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         "real" => false,
         _ => adaptive_gl_spoof(&env, cdp).await,
     };
-    // S15: mediaDevices patch only when the machine reports zero devices.
+    // S15: mediaDevices patch — install when the attach-time count is zero OR
+    // unreadable. The probe reads about:blank, a non-secure context where
+    // `navigator.mediaDevices` is `undefined` on every machine, so `== 0`
+    // made this gate dead code: device-less hosts (CI runners exposed it)
+    // skipped the patch that exists precisely for them. The patch's own
+    // page-side gate passes real devices through untouched, so installing it
+    // when the count is unreadable is behavior-neutral on machines that have
+    // devices.
     let patch_media = match std::env::var("BLADE_MEDIA").as_deref() {
         Ok("patch") => true,
         Ok("real") => false,
-        _ => env.media_devices == 0,
+        _ => env.media_devices <= 0,
     };
     if patch_media {
         eprintln!("[stealth] registering mediaDevices patch");

@@ -8,8 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.1] - 2026-10-14
-
 ### Changed
 - **Cross-platform stealth parity: one ladder, per-platform backends, no foreign strings.** The GL ladder is now explicit per OS — Linux/Android keep `--use-angle=gl-egl` as stage 1 (retried), and it reaches hardware *headless* too (measured: no X display needed — the machine's own GPU is reported, so the mask never installs and headless rendering is hardware-fast); macOS and Windows get an explicit fallback backend behind the platform default (`--use-angle=metal` / `--use-angle=d3d11`); `--disable-gpu` is gone from headless launches. Previously, a software-GL host on Mac or Windows had its mask replay a *Linux Mesa* string (Windows x86) or a *phone GPU* (Apple Silicon) — the identity mismatch this release removes.
 - **WebGL masking detects the machine's GPU on every OS.** `lspci` (Linux/Android, output byte-identical to 4.6.0), `Win32_VideoController` via PowerShell CIM with a `wmic` fallback (Windows), `system_profiler` (macOS) — and the renderer string is built in the detected OS's own ANGLE shape: Direct3D-11 strings on Windows (`ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)`), Metal strings on macOS (`ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)`), Mesa strings on Linux. D3D11 WARP counts as software (the mask engages instead of reporting WARP); Microsoft's no-driver adapters (Basic Display/Render, Remote Display, Hyper-V) are never claimed. `BLADE_GPU` overrides remain (`intel|amd|nvidia|apple|mali|adreno`).
@@ -28,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Masked functions answer the function-proto cyclic torture with the engine's own `TypeError` (was `RangeError`; residual: the `Reflect`-return channel, advanced-branch only).
 - Windows/macOS fallback profiles can no longer name a different OS's GPU class (the Linux-Mesa-on-Windows / Mali-on-Apple-Silicon mismatch).
 - The battery-API shim (installs only where the engine lacks `getBattery`) returns an EventTarget with the BatteryManager property shape instead of a plain object.
+- Windows CI caught `bladebro audit` building `file://D:\...` from `path.display()` — not a valid URL, and Chrome refuses it (`Cannot navigate to invalid URL`). File URLs are platform-correct now (`file:///D:/...`; the `\\?\` canonicalize prefix is stripped) with unit tests.
+- The zero-device `mediaDevices` gate never fired: the attach-time probe reads `navigator.mediaDevices` on about:blank — a non-secure context where Chrome exposes nothing on any machine — so device-less hosts (the CI runners; invisible on dev machines, which have devices) skipped the patch that exists precisely for them. The patch now installs when the count is zero **or unreadable**; its page-side gate keeps passing real devices through untouched.
 
 ## [4.6.0] - 2026-10-14
 
@@ -2063,8 +2063,7 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.1...HEAD
-[4.6.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.1
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.0...HEAD
 [4.6.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.0
 [4.5.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.2
 [4.5.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.1
