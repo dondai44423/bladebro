@@ -45,8 +45,17 @@ const HEADLESS_FLAGS: &[&str] = &["--headless=new", "--disable-gpu"];
 /// up without one is shut down and the next is tried (bounded).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GlStage {
-    /// Native-GL ANGLE backend. Under Xvfb this lands on Mesa (llvmpipe —
-    /// software, but a live context) which the stealth GL mask normalizes.
+    /// Native-GL ANGLE backend through EGL. The classic `gl` path under Xvfb
+    /// lands on Mesa's llvmpipe (no DRI3 on Xvfb, so the GLX/EGL default is
+    /// the software rasterizer); EGL reaches the real device directly —
+    /// measured 2026-10-14, `--use-angle=gl-egl` under Xvfb reports
+    /// `ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)`,
+    /// the exact string the machine's real session reports, so the GL mask
+    /// never installs and the lane renders on hardware.
+    NativeGlEgl,
+    /// Native-GL ANGLE backend (classic). Fallback for stacks where EGL cannot
+    /// initialize; under Xvfb it lands on Mesa (llvmpipe — software, but a
+    /// live context) which the stealth GL mask normalizes.
     NativeGl,
     /// SwiftShader ANGLE backend — last resort for stacks where the
     /// native-GL backend cannot initialize (observed live: SwANGLE
@@ -238,18 +247,27 @@ pub fn reconcile_gl(state: Option<&GpuState>, live: Option<&str>) -> GlReconcile
 /// Human label for a ladder stage (logs).
 pub(super) fn stage_label(stage: GlStage) -> &'static str {
     match stage {
+        GlStage::NativeGlEgl => "native-gl-egl",
         GlStage::NativeGl => "native-gl",
         GlStage::SwiftShader => "swiftshader",
     }
 }
 
 /// The GL ladder, in attempt order. Both transports walk the same list.
-/// NativeGl is retried once: a first-launch GL miss is usually a transient
-/// init race under load (observed live), while the SwiftShader stage is a
-/// dead end on boxes whose Vulkan init is broken — retrying the real backend
-/// beats escalating straight into a known-broken one.
+/// NativeGlEgl first (hardware through EGL under Xvfb — the mask never
+/// installs there) and retried once: a first-launch GL miss is usually a
+/// transient init race under load (observed live on the classic stage), and
+/// the retry keeps the lane on hardware instead of silently dropping it to
+/// the software fallback. Then the classic NativeGl for EGL-less stacks
+/// (live software context, mask normalizes), SwiftShader last (a dead end on
+/// boxes whose Vulkan init is broken, so it stays the final option).
 pub(super) fn gl_stages() -> &'static [GlStage] {
-    &[GlStage::NativeGl, GlStage::NativeGl, GlStage::SwiftShader]
+    &[
+        GlStage::NativeGlEgl,
+        GlStage::NativeGlEgl,
+        GlStage::NativeGl,
+        GlStage::SwiftShader,
+    ]
 }
 
 /// Everything a Chrome command line depends on. Both transports build from
@@ -295,6 +313,13 @@ pub(super) fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
         args.push("--ozone-platform=x11".into());
     }
     match cfg.stage {
+        GlStage::NativeGlEgl =>
+        {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            if cfg.headful {
+                args.push("--use-angle=gl-egl".into());
+            }
+        }
         GlStage::NativeGl =>
         {
             #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -451,6 +476,10 @@ mod launch_flag_tests {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn linux_headful_pins_x11_and_the_stage_backend() {
+        let egl = launch_args(&cfg(GlStage::NativeGlEgl, true, Transport::Pipe));
+        assert!(egl.iter().any(|f| f == "--ozone-platform=x11"));
+        assert!(egl.iter().any(|f| f == "--use-angle=gl-egl"));
+        assert!(!egl.iter().any(|f| f == "--use-angle=gl"));
         let native = launch_args(&cfg(GlStage::NativeGl, true, Transport::Pipe));
         assert!(native.iter().any(|f| f == "--ozone-platform=x11"));
         assert!(native.iter().any(|f| f == "--use-angle=gl"));
@@ -463,19 +492,24 @@ mod launch_flag_tests {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn headless_never_pins_a_display_or_native_angle() {
-        let a = launch_args(&cfg(GlStage::NativeGl, false, Transport::Ws));
-        assert!(!a.iter().any(|f| f == "--ozone-platform=x11"));
-        assert!(!a.iter().any(|f| f == "--use-angle=gl"));
-        assert!(a.iter().any(|f| f == "--headless=new"));
+        for stage in [GlStage::NativeGl, GlStage::NativeGlEgl] {
+            let a = launch_args(&cfg(stage, false, Transport::Ws));
+            assert!(!a.iter().any(|f| f == "--ozone-platform=x11"));
+            assert!(!a.iter().any(|f| f == "--use-angle=gl"));
+            assert!(!a.iter().any(|f| f == "--use-angle=gl-egl"));
+            assert!(a.iter().any(|f| f == "--headless=new"));
+        }
     }
 
     #[test]
     fn ladder_order_is_native_first() {
-        assert_eq!(gl_stages()[0], GlStage::NativeGl);
-        // NativeGl is retried once before the SwiftShader escalation.
-        assert_eq!(gl_stages()[1], GlStage::NativeGl);
+        // Hardware-through-EGL first and retried once (transient init races),
+        // classic GL as the fallback, SwiftShader last.
+        assert_eq!(gl_stages()[0], GlStage::NativeGlEgl);
+        assert_eq!(gl_stages()[1], GlStage::NativeGlEgl);
+        assert_eq!(gl_stages()[2], GlStage::NativeGl);
         assert_eq!(*gl_stages().last().unwrap(), GlStage::SwiftShader);
-        assert!(gl_stages().len() >= 3);
+        assert!(gl_stages().len() >= 4);
     }
 
     #[test]

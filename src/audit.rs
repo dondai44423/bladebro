@@ -1,7 +1,9 @@
 //! `bladebro audit` — runs the S13 stealth audit for the CLI.
 //!
 //! Executed by main.rs with an owned, guarded browser. The vector suite and
-//! the injection-lint fixtures live in `tests/vectors.html`; 61/61 is the bar.
+//! the injection-lint fixtures live in `tests/vectors.html`; the bar is the
+//! suite's own total (62/62 after the 4.6.0 shell-torture + platform-truth
+//! checks were added to the 61-check set).
 
 use crate::action::Action;
 use crate::cdp;

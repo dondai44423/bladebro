@@ -10,9 +10,13 @@ use super::*;
 pub struct VirtualDisplay {
     child: Child,
     /// Window manager on the virtual display, when available: real window
-    /// decorations (`outerWidth > innerWidth`) and a declared work area
-    /// (`availHeight < height`) so the JS geometry masks stay off. Absent when
-    /// no WM binary is installed — the JS masks are then the fallback.
+    /// decorations (`outerWidth > innerWidth`, coherent outer/inner geometry)
+    /// and a real desktop feel. 4.6.0 removed the JS geometry masks entirely:
+    /// the native values are reported as-is (xfwm4 re-publishes the full
+    /// screen as the work area on a panel-less display — measured 2026-10-14
+    /// — and that is exactly what stock Chromium reports there too). Absent
+    /// when no WM binary is installed: the outerWidth fallback mask then
+    /// covers the window-chrome tell.
     wm: Option<Child>,
     display_num: u16,
     /// Per-session Xauthority file (0600, O_EXCL). Xvfb runs with
@@ -153,19 +157,21 @@ impl VirtualDisplay {
     }
 }
 
-/// Start a window manager on the virtual display and give the screen an
-/// honest work area. An X screen with no WM has no work area at all:
-/// `screen.availHeight` equals `screen.height`, `outerWidth` equals
-/// `innerWidth` and windows carry no decorations — an Xvfb signature that
-/// would otherwise have to be masked in JS (and every JS mask is a patched
-/// function a lie engine can inspect). With a WM the decorations are real and
-/// `_NET_WORKAREA` — which Chromium reads for `screen.availHeight`, the
-/// `avail*` family and window maximization — declares a plausible 40px bottom
-/// taskbar. No panel process is spawned: xfce4-panel is a per-user singleton
-/// ("There is already a running instance") so a second lane cannot get a
-/// strut from it, while the property belongs to no one once the WM is up.
-/// Degrades silently when the tools are missing — the JS geometry masks are
-/// then the fallback.
+/// Start a window manager on the virtual display. An X screen with no WM has
+/// no work area at all: `screen.availHeight` equals `screen.height`,
+/// `outerWidth` equals `innerWidth` and windows carry no decorations — an
+/// Xvfb signature that would otherwise have to be masked in JS (and every JS
+/// mask is a patched function a lie engine can inspect). With a WM the
+/// decorations are real and the geometry is coherent (outer > inner, a real
+/// frame extent). The best-effort `_NET_WORKAREA` declaration below survives
+/// only on WMs that do not recompute it: xfwm4 re-publishes the full screen
+/// on a panel-less display (measured 2026-10-14 — the live lane reads
+/// `0,0,1920,1080`), and 4.6.0 removed the JS availHeight shell, so the
+/// native, honest value is what pages see (the same value stock Chromium
+/// reports on this display). No panel process is spawned: xfce4-panel is a
+/// per-user singleton ("There is already a running instance") so a second
+/// lane cannot get a strut from it.
+/// Degrades silently when the tools are missing.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Child> {
     fn find_bin(name: &str, extra: &[&str]) -> Option<String> {
@@ -187,10 +193,10 @@ fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Chi
             .stderr(Stdio::null());
         cmd.spawn().ok()
     });
-    // xfwm4 publishes the full screen first, then stops touching the property
-    // (there are no struts to react to) — so declare the taskbar after a short
-    // settle and verify the read-back before the caller launches Chrome, whose
-    // window caches this geometry at creation time.
+    // Declare the taskbar after the WM owns the root and verify the read-back.
+    // xfwm4 may still re-publish the full-screen area later (measured: it does
+    // — see the fn docs), so this is a best-effort declaration, never a
+    // contract the JS layer hides.
     if wm.is_some() {
         // Wait for the WM to own the root instead of a blind 400ms sleep,
         // then set the taskbar property and verify the read-back. xfwm4

@@ -4,7 +4,11 @@
 Lanes: daemon (persistent, WS), one-shot (--no-daemon, WS, own Xvfb+WM),
 MCP (stdio; WebSocket by default, zero-port pipe via BLADE_TRANSPORT=pipe).
 The probe checks the two things the whole stealth layer depends on: a live
-WebGL context with the coherent mask, and a display with an honest work area.
+WebGL context whose identity matches the machine's GPU profile (hardware
+through EGL on 4.6.0 lanes, the adaptive mask on software boxes — both report
+the same coherent surface), and a coherent display geometry (real decorations;
+the JS geometry shells are gone in 4.6.0, so a panel-less WM truthfully reads
+availHeight == height, exactly like the machine's own session).
 
 Real lane: real-clone (isolated BLADE_HOME, BLADE_LANE=real, invisible) —
 the probe checks the REAL-lane contract instead of the mask: navigator.webdriver
@@ -63,14 +67,25 @@ def parse_result(payload):
 def classify(j):
     ok = []
     gl = j.get("gl", "")
+    # Identity: the machine's Intel GPU profile (36 extensions, maxc 64).
+    # 4.6.0 lanes reach it through hardware EGL (`--use-angle=gl-egl`);
+    # software boxes reach it through the adaptive mask. The label names the
+    # identity, not the mechanism.
     if gl.startswith("ANGLE (Intel") and j.get("exts") == 36 and j.get("maxc") == 64:
-        ok.append("gl-mask")
+        ok.append("gl-intel")
     else:
         ok.append(f"GL-BAD({gl[:40]},exts={j.get('exts')},maxc={j.get('maxc')})")
-    if j.get("h", 0) - j.get("ah", 0) >= 16:
+    # Work area: after the 4.6.0 removal of the availHeight shell, the honest
+    # value on a panel-less WM is availHeight == height (measured: stock
+    # Chromium on the same Xvfb and the machine's real niri session both read
+    # 1080/1080 — xfwm4 re-publishes the full-screen area). The old `>= 16`
+    # assertion was only satisfiable by the removed mask. A real panel
+    # reservation (>= 16px) stays valid; slivers and impossible values stay bad.
+    h, ah = j.get("h", 0), j.get("ah", 0)
+    if 0 < ah <= h and (ah == h or h - ah >= 16):
         ok.append("workarea")
     else:
-        ok.append(f"WORKAREA-BAD({j.get('ah')}/{j.get('h')})")
+        ok.append(f"WORKAREA-BAD({ah}/{h})")
     if j.get("ow", 0) > j.get("iw", 0):
         ok.append("decorations")
     else:

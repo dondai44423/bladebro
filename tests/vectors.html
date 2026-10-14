@@ -72,6 +72,39 @@ async function run() {
   check("tostring-toDataURL", /\[native code\]/.test(HTMLCanvasElement.prototype.toDataURL.toString()), HTMLCanvasElement.prototype.toDataURL.toString().slice(0, 60));
   if (g2) check("tostring-gl2-getParameter", /\[native code\]/.test(WebGL2RenderingContext.prototype.getParameter.toString()), "checked");
 
+  // --- 4.6.0: shell torture — the creepjs 'failed at too much recursion error'
+  // class. A masked function must reproduce the native cyclic-proto refusal
+  // (TypeError 'Cyclic __proto__ value'); a bare Proxy recurses (RangeError)
+  // and a lie engine reads that as a mask. Any future mask that skips the
+  // shared helpers fails here.
+  {
+    function cycleVerdict(fn) {
+      const np = Object.getPrototypeOf(fn);
+      try { Object.setPrototypeOf(fn, Object.create(fn)) + ""; return "no-throw"; }
+      catch (e) { return e.name + ":" + e.message; }
+      finally { try { Object.setPrototypeOf(fn, np); } catch (e) {} }
+    }
+    const shellTargets = [];
+    const addT = (name, get) => { try { const f = get(); if (typeof f === "function") shellTargets.push([name, f]); } catch (e) {} };
+    addT("nav.sendBeacon", () => navigator.sendBeacon);
+    addT("nav.getBattery", () => navigator.getBattery);
+    addT("nav.permissions.query", () => navigator.permissions.query);
+    addT("screen.availHeight", () => Object.getOwnPropertyDescriptor(Screen.prototype, "availHeight").get);
+    addT("gl.getParameter", () => WebGLRenderingContext.prototype.getParameter);
+    addT("gl.getShaderPrecisionFormat", () => WebGLRenderingContext.prototype.getShaderPrecisionFormat);
+    addT("gl2.getParameter", () => WebGL2RenderingContext.prototype.getParameter);
+    addT("canvas.toDataURL", () => HTMLCanvasElement.prototype.toDataURL);
+    addT("console.log", () => console.log);
+    addT("el.getBoundingClientRect", () => Element.prototype.getBoundingClientRect);
+    const shellBad = [];
+    for (const [name, fn] of shellTargets) {
+      const v = cycleVerdict(fn);
+      if (v !== "TypeError:Cyclic __proto__ value") shellBad.push(name + "=" + v);
+    }
+    check("shell-torture", shellBad.length === 0,
+          shellBad.length ? shellBad.join(" ") : shellTargets.length + " functions native-shaped");
+  }
+
   // Console trap (Runtime.enable detector)
   let trapped = false;
   try {
@@ -130,12 +163,17 @@ async function run() {
   // Connection API
   const con = navigator.connection;
   check("connection-api", !!con && typeof con.effectiveType === "string",
-        con ? con.effectiveType + " rtt=" + con.rtt + " downlink=" + con.downlink + " max=" + con.downlinkMax : "missing");
+        con ? con.effectiveType + " rtt=" + con.rtt + " downlink=" + con.downlink : "missing");
 
-  // Polyfilled APIs
-  check("webshare", "share" in navigator && "canShare" in navigator, String("share" in navigator));
-  check("contentindex", "ContentIndex" in window, String("ContentIndex" in window));
-  check("contactsmanager", "ContactsManager" in window, String("ContactsManager" in window));
+  // Platform truth (4.6.0 removed the Linux polyfills: stock Chromium 154 —
+  // headful on Xvfb AND on the real Wayland session, and the rb-on lane —
+  // exposes none of these; fabricating them was a divergence a differential
+  // detector can read). Linux-gated so the macOS/Windows suites keep their shape.
+  if (/Linux/.test(navigator.platform)) {
+    check("webshare-absent", !("share" in navigator) && !("canShare" in navigator), "share=" + ("share" in navigator));
+    check("contentindex-absent", !("ContentIndex" in window), String("ContentIndex" in window));
+    check("contactsmanager-absent", !("ContactsManager" in window), String("ContactsManager" in window));
+  }
 
   // userAgentData coherence
   if (navigator.userAgentData) {

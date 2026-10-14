@@ -145,12 +145,13 @@ const PERMISSIONS_PATCH: &str = include_str!("js/permissions_patch.js");
 /// skews innerHeight (measured: 932 vs 988) — so the value is masked instead,
 /// exactly like every other environment override: a proxy over the native
 /// getter that delegates first (receiver validation stays byte-native) and
-/// returns `false`. Residual: the proxy shape is lie-engine-visible (measured:
-/// CreepJS `webDriverIsOn: true` → 33% headless), and
-/// `Emulation.setAutomationOverride{enabled:false}` does NOT clear the flag
-/// (accepted, no effect — measured 2026-09-26, page- and browser-level). That
-/// is why the MCP now defaults to WS; this patch serves only the explicit
-/// `BLADE_TRANSPORT=pipe` opt-in.
+/// returns `false`. The getter runs through the shared mask helpers, so the
+/// 4.6.0 cyclic-prototype shield covers it — the old residual (proxy shape
+/// lie-engine-visible; measured on Chrome 151: CreepJS `webDriverIsOn: true`
+/// → 33% headless) is superseded. `Emulation.setAutomationOverride{enabled:false}`
+/// does NOT clear the flag (accepted, no effect — measured 2026-09-26, page-
+/// and browser-level), and that is why the MCP still defaults to WS: this
+/// patch serves only the explicit `BLADE_TRANSPORT=pipe` opt-in.
 const WEBDRIVER_PATCH: &str = include_str!("js/webdriver_patch.js");
 
 /// Locale override — navigator.language/languages must match BLADE_LOCALE.
@@ -581,7 +582,7 @@ try{{
   var _swCode='{escaped}';
   var _OrigSW=window.SharedWorker;
   if(_OrigSW){{
-    var _SWProxy=new Proxy(_OrigSW,{{construct:function(t,a,nt){{
+    var _swh={{construct:function(t,a,nt){{
       try{{
         var url=a[0],options=a[1];
         try{{url=new URL(url, document.baseURI).href;}}catch(e){{}}
@@ -594,7 +595,19 @@ try{{
       }}catch(e){{
         return Reflect.construct(t,a,nt);
       }}
-    }}}});
+    }}}};
+    var _SWProxy=new Proxy(_OrigSW,_swh);
+    // 4.6.0 shield: a bare callable proxy fails the cyclic-prototype torture
+    // (RangeError where a native constructor throws
+    // TypeError('Cyclic __proto__ value') at setPrototypeOf); refuse the cycle
+    // explicitly, exactly like the shared mask helpers do.
+    _swh.setPrototypeOf=function(t,p){{
+      if(p!==null&&typeof p==='object'){{
+        var q=p,i=0;
+        while(q&&i++<256){{if(q===_SWProxy)throw new TypeError('Cyclic __proto__ value');q=Object.getPrototypeOf(q);}}
+      }}
+      return Reflect.setPrototypeOf(t,p);
+    }};
     Object.defineProperty(window,'SharedWorker',{{value:_SWProxy,writable:true,configurable:true,enumerable:false}});
   }}
 }}catch(e){{}}

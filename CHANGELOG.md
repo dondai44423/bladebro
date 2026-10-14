@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The agent lane renders WebGL on the real GPU under Xvfb.** The GL ladder's first stage is now `--use-angle=gl-egl`: on this machine it reports `ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)` — the exact string the machine's own session reports — so the adaptive WebGL mask never installs on hardware hosts (zero GL wrappers, no worker spoof script). 600 fill frames at 1600×1200: 130 ms on the lane vs 122 ms stock gl-egl vs 2904 ms on the old llvmpipe path; creepjs's main page went 1538 → 698 ms and its font battery 17.1 → 6.7 s. The classic `gl` stage stays as the EGL-less fallback (live software context, mask normalizes), SwiftShader last.
+- **Every mask shell now reproduces the native cyclic-prototype refusal.** A callable Proxy could not: V8's cycle check on `Object.setPrototypeOf(fn, Object.create(fn))` compares against the proxy's target, so the assignment succeeded and the follow-up coercion recursed (`RangeError`) where a native function throws `TypeError: Cyclic __proto__ value` — precisely the tell creepjs's prototype lie engine reads (`failed at too much recursion error`). The shared mask helpers now install a `setPrototypeOf` trap that throws the engine's own cycle TypeError when the requested chain runs back through the proxy, and forwards every other assignment untouched. The trap fires only on explicit `setPrototypeOf` calls — never on the call path — so masked calls keep native speed. The SharedWorker constructor wrapper carries the same shield.
+- **The Linux API fabrications are gone** — `navigator.share`, `navigator.canShare`, `window.ContentIndex`, `window.ContactsManager`, `connection.downlinkMax`. Stock headful Chromium 154 on this platform (Xvfb and the real session alike, and the rb-on real lane) exposes none of them, so fabricating their presence was a divergence a differential detector — or a dump like BrowserScan's own Navigator table — can read. Pages now see the platform's real surface.
+- **`screen.availHeight` is native again.** The old shell installed at injection time and manufactured `height - 40`; the display's real work area is what it is (xfwm4 re-publishes the full-screen area after any external set, so a panel-less desktop reads `availHeight == height` — the same value stock Chromium and the real lane report on this machine). No geometry getter is patched.
+
+### Added
+- `shell-torture` in the stealth vector suite: ten masked-or-native API functions (navigator, WebGL1/2, canvas, console, Element) must each answer the cyclic-prototype torture with `TypeError:Cyclic __proto__ value`. A future mask that skips the shared helpers fails the audit. The suite's Linux-polyfill checks became platform-truth checks (`webshare-absent`, `contentindex-absent`, `contactsmanager-absent`). Bar: 62/62.
+
+### Fixed
+- creepjs `tests/prototype.html`: 11 lies / 2369 properties → **0 lies / 2367** (3/3 runs, identical hash), and 0 lies with the GL mask forced on (`BLADE_WEBGL=spoof`) as well. The independent detectability census over 18 interfaces (`work/stealth452/probe_census.py`): 12 → 0. The agent lane's creepjs identity now converges on the rb-on real lane (`extension: unknown`; same `0% headless` / `0% stealth` lines; `38% like-headless` — the value the machine's own browser reads; the old 6% was measured with the mask active).
+
 ## [4.5.2] - 2026-10-13
 
 ### Changed

@@ -27,36 +27,32 @@ else{var _wp=(typeof Window!=='undefined'&&Window.prototype)?Window.prototype:Ob
 }
 }catch(e){}
 
-// Screen geometry on Screen.prototype (real location, not the instance).
-// Only the *incoherent* case is corrected: a window manager gives the screen
-// a real work area (availHeight < height) and that native value then stays
-// untouched (D14 — coherence over noise). availWidth is left native always:
-// a horizontal panel keeps it equal to width, and a narrow one is an honest
-// side dock — masking it would hide a real desk, not a tell.
-try{
-var _sp=(typeof Screen!=='undefined'&&Screen.prototype)?Screen.prototype:Object.getPrototypeOf(screen);
-if(screen.height-screen.availHeight<16){_defGet(_sp,'availHeight',_ogs(_sp,'availHeight'),function(th,a,og){var v=og.apply(th,a);return (screen.height-v<16)?(screen.height-40):v;});}
-}catch(e){}
+// Screen geometry: fully native (4.6.0 removed the availHeight shell). The
+// old shell installed whenever the work area looked incoherent at injection
+// time and then manufactured `height-40` — but the lane's WM (xfwm4)
+// re-publishes the full-screen work area after our xprop set (measured
+// 2026-10-14 on a live lane: _NET_WORKAREA = 0,0,1920,1080), so the truthful
+// value is availHeight == height — exactly what stock Chromium on the same
+// display and the rb-on real lane report. A fabricated 1040 was a divergence
+// from both AND a bare-Proxy lie surface (creepjs flagged it). Coherence over
+// noise, D14: report what the display actually says. availWidth was always
+// native and stays that way (a horizontal panel keeps it equal to width; a
+// narrow one is an honest side dock).
 
 // permissions.query rewrite lives in PERMISSIONS_PATCH (apply()): a
 // perfect native relay; only a real-origin 'denied' notifications result
 // is rewritten (the headless tell). Opaque origins keep native results.
 
-// Web API polyfills (Linux-headless absence signals). Polyfill targets use
-// the shared bound placeholder, so a polyfilled method is shaped exactly
-// like a native one (no 'prototype', {length,name}, native toString).
-try{
-var _np=(typeof Navigator!=='undefined'&&Navigator.prototype)?Navigator.prototype:Object.getPrototypeOf(navigator);
-if(!('share' in navigator)){_defFnN(_np,'share',function(){return Promise.reject(new TypeError('Not supported'));},1);}
-if(!('canShare' in navigator)){_defFnN(_np,'canShare',function(){return false;},1);}
-if(!('ContentIndex' in window)){_defCtor('ContentIndex',function(){throw new TypeError('Illegal constructor');});}
-if(!('ContactsManager' in window)){_defCtor('ContactsManager',function(){throw new TypeError('Illegal constructor');});}
-if(navigator.connection){
-  var _pr=Object.getPrototypeOf(navigator.connection);
-  if(_pr&&!('downlinkMax' in _pr)){_defGetN(_pr,'downlinkMax',function(){return Infinity;});}
-  if(typeof window.NetworkInformation==='undefined'){try{Object.defineProperty(window,'NetworkInformation',{value:navigator.connection.constructor,writable:true,configurable:true,enumerable:false});}catch(e){}}
-}
-}catch(e){}
+// Web API polyfills: REMOVED in 4.6.0 (share, canShare, ContentIndex,
+// ContactsManager, connection.downlinkMax, NetworkInformation). The old
+// comment called their absence a "Linux-headless signal" — measured false for
+// this engine on this platform: stock Chromium 154 headful (on Xvfb AND on the
+// real Wayland session, and the rb-on real lane) exposes NONE of them, so
+// fabricating them was a divergence from the platform truth that a
+// differential detector (or a dump like BrowserScan's own Navigator table)
+// can read — and every fabricated function was one more shell. The platform's
+// honest surface wins; when a future engine really ships these, pages will see
+// them natively.
 
 // ── Additional stealth layers ───────────────────────────────
 
