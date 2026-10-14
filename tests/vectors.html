@@ -84,6 +84,20 @@ async function run() {
       catch (e) { return e.name + ":" + e.message; }
       finally { try { Object.setPrototypeOf(fn, np); } catch (e) {} }
     }
+    // 4.6.1: the same torture with a FUNCTION-typed proto (q's chain runs back
+    // through fn). An object-only cycle guard escaped this case and recursed
+    // (measured in work/stealth461) — a masked function must refuse it with
+    // the engine's own TypeError, exactly like a native one.
+    function fnProtoVerdict(fn) {
+      const np = Object.getPrototypeOf(fn);
+      const q = function () {};
+      try { Object.setPrototypeOf(q, fn); Object.setPrototypeOf(fn, q); String(fn); return "no-throw"; }
+      catch (e) { return e.name + ":" + e.message; }
+      finally {
+        try { Object.setPrototypeOf(q, Function.prototype); } catch (e) {}
+        try { Object.setPrototypeOf(fn, np); } catch (e) {}
+      }
+    }
     const shellTargets = [];
     const addT = (name, get) => { try { const f = get(); if (typeof f === "function") shellTargets.push([name, f]); } catch (e) {} };
     addT("nav.sendBeacon", () => navigator.sendBeacon);
@@ -100,6 +114,8 @@ async function run() {
     for (const [name, fn] of shellTargets) {
       const v = cycleVerdict(fn);
       if (v !== "TypeError:Cyclic __proto__ value") shellBad.push(name + "=" + v);
+      const v2 = fnProtoVerdict(fn);
+      if (v2 !== "TypeError:Cyclic __proto__ value") shellBad.push(name + "(fnproto)=" + v2);
     }
     check("shell-torture", shellBad.length === 0,
           shellBad.length ? shellBad.join(" ") : shellTargets.length + " functions native-shaped");
@@ -175,10 +191,16 @@ async function run() {
     check("contactsmanager-absent", !("ContactsManager" in window), String("ContactsManager" in window));
   }
 
-  // userAgentData coherence
+  // userAgentData coherence — the platform token must match the platform the
+  // browser actually runs on. (This check used to hard-require Linux, which
+  // made the audit FAIL on macOS/Windows for a perfectly coherent browser.)
   if (navigator.userAgentData) {
     const uad = navigator.userAgentData;
-    check("uad-platform", /Linux/.test(uad.platform || ""), uad.platform + " brands=" + uad.brands.map(b => b.brand + "/" + b.version).join(","));
+    const plat = navigator.platform;
+    const expected = plat.indexOf("Win") === 0 ? "Windows"
+      : plat === "MacIntel" ? "macOS"
+      : /Android/.test(navigator.userAgent) ? "Android" : "Linux";
+    check("uad-platform", uad.platform === expected, uad.platform + " expected=" + expected + " brands=" + uad.brands.map(b => b.brand + "/" + b.version).join(","));
     check("uad-mobile-false", uad.mobile === false, String(uad.mobile));
   } else { check("uad-platform", false, "userAgentData missing"); }
 
@@ -261,12 +283,17 @@ async function run() {
     const g2c = document.createElement("canvas").getContext("webgl2");
     check("gl-never-null", !!g1c && !!g2c, "webgl=" + !!g1c + " webgl2=" + !!g2c);
     let masked = false;
+    let intelCaptured = false;
     if (g1c) {
       const e = g1c.getExtension("WEBGL_debug_renderer_info");
       mainRenderer = e ? String(g1c.getParameter(e.UNMASKED_RENDERER_WEBGL)) : "";
       check("gl-renderer-not-software", !!mainRenderer && !/llvmpipe|swiftshader|softpipe|software/i.test(mainRenderer), mainRenderer);
-      masked = /Intel\(R\) Graphics \(ADL GT2\)/.test(mainRenderer);
-      if (masked) {
+      intelCaptured = /Intel\(R\) Graphics \(ADL GT2\)/.test(mainRenderer);
+      // Any known profile shape means a mask may be active — on non-Intel
+      // profiles only the profile-agnostic coherence checks can run (the
+      // captured numbers are Intel/i915 specifics).
+      masked = /^ANGLE \((Intel|NVIDIA|AMD|Apple|ARM|Qualcomm)/.test(mainRenderer);
+      if (intelCaptured) {
         const ex = g1c.getSupportedExtensions();
         check("gl-ext-count", ex.length === 36, String(ex.length));
         check("gl-ext-filtered", ex.indexOf("EXT_shader_texture_lod") === -1 && ex.indexOf("WEBGL_polygon_mode") === -1,
@@ -283,15 +310,27 @@ async function run() {
               [lf.rangeMin, lf.rangeMax, lf.precision].join(",") === [hf.rangeMin, hf.rangeMax, hf.precision].join(","),
               "H=" + hf.precision + " M=" + mf.precision + " L=" + lf.precision);
         check("gl-precision-genuine", mf instanceof WebGLShaderPrecisionFormat, "genuine=" + (mf instanceof WebGLShaderPrecisionFormat));
+      } else if (masked) {
+        const ex = g1c.getSupportedExtensions();
+        const ex2 = g1c.getSupportedExtensions();
+        check("gl-ext-fresh-array", ex !== ex2 && ex.join(",") === ex2.join(","), "fresh=" + (ex !== ex2));
+        const mc = g1c.getParameter(35661);
+        check("gl-max-combined", Number.isInteger(mc) && mc > 0, String(mc));
+        info("gl-mask-checks", "generic profile shape (" + mainRenderer.slice(0, 60) + ") — capture-specific checks skipped");
       } else {
         info("gl-mask-checks", "skipped (mask not active: " + mainRenderer + ")");
       }
     }
     if (g2c && masked) {
-      check("gl2-max-samples", g2c.getParameter(36183) === 16, String(g2c.getParameter(36183)));
-      const e2 = g2c.getSupportedExtensions();
-      check("gl2-ext-count", e2.length === 32 && e2.indexOf("OVR_multiview2") === -1 && g2c.getExtension("OVR_multiview2") === null,
-            "n=" + e2.length + " ovr=" + e2.indexOf("OVR_multiview2"));
+      if (intelCaptured) {
+        check("gl2-max-samples", g2c.getParameter(36183) === 16, String(g2c.getParameter(36183)));
+        const e2 = g2c.getSupportedExtensions();
+        check("gl2-ext-count", e2.length === 32 && e2.indexOf("OVR_multiview2") === -1 && g2c.getExtension("OVR_multiview2") === null,
+              "n=" + e2.length + " ovr=" + e2.indexOf("OVR_multiview2"));
+      } else {
+        const ms = g2c.getParameter(36183);
+        check("gl2-max-samples", Number.isInteger(ms) && ms > 0, String(ms));
+      }
     }
   }
 
@@ -300,13 +339,14 @@ async function run() {
   try {
     workerMask = await new Promise((resolve) => {
       const code = `onmessage = () => {
-        let out = { extN: -1, maxc: -1, tsr: null };
+        let out = { extN: -1, maxc: -1, tsr: null, renderer: "" };
         try {
           const g = new OffscreenCanvas(8, 8).getContext("webgl");
           if (g) {
             out.extN = g.getSupportedExtensions().length;
             out.maxc = g.getParameter(35661);
             out.tsr = Function.prototype.toString.call(WebGLRenderingContext.prototype.getParameter).indexOf("native code") !== -1;
+            try { const e = g.getExtension("WEBGL_debug_renderer_info"); out.renderer = e ? String(g.getParameter(e.UNMASKED_RENDERER_WEBGL)) : ""; } catch (e2) { out.renderer = "err"; }
           }
         } catch (e) { out.err = String(e); }
         postMessage(out);
@@ -318,6 +358,12 @@ async function run() {
     });
   } catch (e) { workerMask = { err: String(e) }; }
   if (workerMask) {
+    if (workerMask.extN !== -1) {
+      check("worker-gl-renderer-match", !!mainRenderer && workerMask.renderer === mainRenderer,
+            String(workerMask.renderer).slice(0, 90));
+    } else {
+      info("worker-gl-renderer-match", "worker had no GL context");
+    }
     if (/Intel\(R\) Graphics \(ADL GT2\)/.test(mainRenderer)) {
       check("worker-ext-count", workerMask.extN === 36, String(workerMask.extN));
       check("worker-max-combined", workerMask.maxc === 64, String(workerMask.maxc));

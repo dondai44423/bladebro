@@ -96,6 +96,19 @@ jobs:
           node tools/dsh_probe/run.mjs
           node tools/dsh_probe/run.mjs
 
+      # 4.6.1: real runtime stealth validation on every OS — the built binary
+      # drives its own vectors page through a real browser and exits non-zero
+      # on any FAIL (the audit is a gate since 4.6.1). Kills the class of
+      # "green CI, broken lane on macOS/Windows".
+      - name: Stealth audit — real browser, all OSes
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          binary="./target/release/bladebro"
+          if [ "${RUNNER_OS}" = "Windows" ]; then binary="$binary.exe"; fi
+          export BLADE_HOME="${RUNNER_TEMP:-/tmp}/bb-audit"
+          export BLADE_NO_WARMING=1
+          "$binary" audit
   msrv:
     runs-on: ubuntu-latest
     steps:

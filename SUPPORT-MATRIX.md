@@ -2,14 +2,14 @@
 
 What is verified, on which platform, by which instrument. Every claim below
 points at a re-runnable instrument; everything not verified is listed as a gap.
-No perfect claims. Last full local floor: 2026-10-09, bladebro 4.4.0
-(Chromium/Chrome 154.0.8037.57).
+No perfect claims. Last full local floor: 2026-10-14, bladebro 4.6.1
+(Chromium 154.0.8037.97; receipts `work/floor461/`).
 
 ## Platforms
 
 | Platform | Build | Unit tests | Browser lifecycle | Stealth floor | Status |
 |---|---|---|---|---|---|
-| Linux x86_64 | local + CI (ubuntu) | local + CI | CI (dsh probe x2) + local lanes | audit 61/61, QoL 117/117, oracle, lanes 5x5 | full |
+| Linux x86_64 | local + CI (ubuntu) | local + CI | CI (dsh probe x2) + local lanes | audit 63/63, QoL 122/122, reliability 36/36, oracle, lanes 5x5 | full |
 | macOS (arm64/x86_64) | CI (macos) | CI | CI (dsh probe x2) | not run locally | CI-verified |
 | Windows x86_64 | CI (windows) | CI | CI (dsh probe x2) | not run locally | CI-verified |
 
@@ -43,7 +43,7 @@ job checks Rust 1.86.0 (`cargo check --locked --all-targets`).
 | Geometry coherence, WebRTC under proxy | `tools/gap44/webrtc_proxy.py` |
 | Proxy credential redaction | `cargo test --release` (`browser/proxy` tests) + G13 in `tools/gap44/probe.py` |
 | Updater retries, install integrity | `cargo test --release` (`updater` tests) |
-| Stealth posture | `bladebro audit` (61 vectors, stable across runs) |
+| Stealth posture | `bladebro audit` (63 vectors, stable across runs, exits non-zero on any FAIL since 4.6.1) |
 | Stock-parity (page-visible differences) | `tools/diff_oracle/oracle.py` |
 | Cold start, all 5 lanes, owned-process hygiene | `tools/lane_matrix.py all 5` |
 | Real-browser lane attachment | `tools/rb_live/attach_drift.py` (run when the lane changes) |

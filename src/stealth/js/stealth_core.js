@@ -74,10 +74,22 @@ if(!window.chrome.loadTimes){window.chrome.loadTimes=_fix(_mkN(function(){return
 // with it) is coherent and unremarkable — the differential oracle shows
 // stock Chrome on the same box reports 0.
 
-// Battery API: headless may not have navigator.getBattery.
+// Battery API: stock Chrome exposes navigator.getBattery on every desktop
+// platform, so this shape only installs where the engine genuinely lacks it.
+// 4.6.1: the returned object is an EventTarget carrying the BatteryManager
+// property shape (getter-backed state + on* handler slots + toStringTag) —
+// the old plain object lacked addEventListener and stringified as
+// [object Object], both readable.
 try{
 if(!navigator.getBattery){
-  _defFnN(Navigator.prototype,'getBattery',function(){return Promise.resolve({charging:true,chargingTime:0,dischargingTime:Infinity,level:1,onchargingchange:null,onchargingtimechange:null,ondischargingtimechange:null,onlevelchange:null});},0);
+  _defFnN(Navigator.prototype,'getBattery',function(){
+    var b=new EventTarget();
+    try{Object.defineProperty(b,Symbol.toStringTag,{value:'BatteryManager',configurable:true});}catch(e){}
+    var st={charging:true,chargingTime:0,dischargingTime:Infinity,level:1};
+    for(var k in st){(function(kk){try{Object.defineProperty(b,kk,{get:function(){return st[kk];},configurable:true});}catch(e){}})(k);}
+    ['onchargingchange','onchargingtimechange','ondischargingtimechange','onlevelchange'].forEach(function(n){try{Object.defineProperty(b,n,{value:null,writable:true,configurable:true});}catch(e){}});
+    return Promise.resolve(b);
+  },0);
 }
 }catch(e){}
 
@@ -200,16 +212,22 @@ try{Object.defineProperty(window,_uk,{value:_uxa,writable:true,configurable:true
 // page CSS but not installed. We inject a stylesheet that defines
 // @font-face aliases mapping these font names to system fonts that are
 // always available. This intercepts the font request before it reaches
-// macOS's CoreText download system. --disable-remote-fonts (launch flag)
-// handles the web-font side; this handles the CSS font-family side.
+// macOS's CoreText download system. (4.6.1: --disable-remote-fonts was
+// REMOVED — it blocked legitimate @font-face loads everywhere, measured in
+// work/stealth461 — and this block is macOS-gated: elsewhere the aliases are
+// pointless AND the injected stylesheet is page-visible
+// (document.styleSheets, querySelectorAll('style')) — an extra sheet no
+// stock browser has.)
 // Note: addScriptToEvaluateOnNewDocument runs before HTML parsing, so
 // documentElement/head may be null. Create the element now, append when
 // the DOM is ready.
 try{
+if(navigator.platform.indexOf('Mac')===0){
 var _fs=document.createElement('style');
 _fs.textContent="@font-face{font-family:'Osaka';src:local('Helvetica'),local('Arial'),local('sans-serif');}@font-face{font-family:'STHeiti';src:local('Helvetica'),local('Arial'),local('sans-serif');}@font-face{font-family:'STHeiti Light';src:local('Helvetica'),local('Arial'),local('sans-serif');}@font-face{font-family:'Hiragino Sans';src:local('Helvetica'),local('Arial'),local('sans-serif');}@font-face{font-family:'Hiragino Mincho ProN';src:local('Times New Roman'),local('serif');}";
 if(document.documentElement){(document.head||document.documentElement).appendChild(_fs);}
 else{document.addEventListener('DOMContentLoaded',function(){try{(document.head||document.documentElement).appendChild(_fs);}catch(e){}});}
+}
 }catch(e){}
 }catch(e){}
 

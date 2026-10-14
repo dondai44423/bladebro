@@ -64,7 +64,7 @@ impl Browser {
     /// Launch with the GL ladder: walk `gl_stages()`, keep the first stage
     /// that yields a live WebGL context, and record the result for the
     /// stealth layer. A stage that comes up without GL is shut down and the
-    /// next stage is tried (bounded — the ladder has two stages) so a
+    /// next stage is tried (bounded — the ladder has four stages) so a
     /// GL-less browser is never what pages see.
     async fn launch_inner(port: u16, no_sandbox: bool) -> Result<Self> {
         let stages = gl_stages();

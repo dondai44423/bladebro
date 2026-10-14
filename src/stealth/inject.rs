@@ -602,7 +602,7 @@ try{{
     // TypeError('Cyclic __proto__ value') at setPrototypeOf); refuse the cycle
     // explicitly, exactly like the shared mask helpers do.
     _swh.setPrototypeOf=function(t,p){{
-      if(p!==null&&typeof p==='object'){{
+      if(p!==null&&(typeof p==='object'||typeof p==='function')){{
         var q=p,i=0;
         while(q&&i++<256){{if(q===_SWProxy)throw new TypeError('Cyclic __proto__ value');q=Object.getPrototypeOf(q);}}
       }}

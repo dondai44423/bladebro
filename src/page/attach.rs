@@ -72,28 +72,15 @@ impl Page {
         // honestly reports HeadlessChrome. Masks are exactly what this lane
         // deletes.
         if need_override && !crate::realbrowser::real_lane() {
-            let real_ua = ua_info.as_ref()
+            let real_ua = ua_info
+                .as_ref()
                 .and_then(|v| v.get("ua").and_then(|u| u.as_str()))
-                .unwrap_or({
-                    #[cfg(target_arch = "aarch64")]
-                    { "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36" }
-                    #[cfg(not(target_arch = "aarch64"))]
-                    { "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36" }
-                });
+                .unwrap_or(fallback_ua());
             let fixed_ua = real_ua.replace("HeadlessChrome", "Chrome");
             let real_platform = ua_info
                 .as_ref()
                 .and_then(|v| v.get("plt").and_then(|p| p.as_str()))
-                .unwrap_or({
-                    #[cfg(target_arch = "aarch64")]
-                    {
-                        "Linux aarch64"
-                    }
-                    #[cfg(not(target_arch = "aarch64"))]
-                    {
-                        "Linux x86_64"
-                    }
-                });
+                .unwrap_or(fallback_platform());
 
             // Override ONLY userAgent + platform. The previous version also
             // sent a hand-built userAgentMetadata with a hardcoded GREASE
@@ -955,5 +942,55 @@ impl Page {
         let cap = capture(&page.cdp).await?;
         page.lpm.ingest(cap);
         Ok(page)
+    }
+}
+
+/// Per-OS fallback UA for the rare case the version endpoint carried none.
+/// Must name the platform the browser actually runs on — a Linux UA string
+/// injected on macOS/Windows is a first-order tell. (Apple Silicon Macs
+/// report the Intel token in Chrome's UA, exactly like Intel Macs.)
+fn fallback_ua() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        #[cfg(target_arch = "aarch64")]
+        {
+            "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+        }
+    }
+}
+
+/// Per-OS `navigator.platform` fallback (must match the UA above — Chrome on
+/// macOS reports `MacIntel` on Intel and Apple Silicon alike).
+fn fallback_platform() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "MacIntel"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Win32"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        #[cfg(target_arch = "aarch64")]
+        {
+            "Linux aarch64"
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            "Linux x86_64"
+        }
     }
 }

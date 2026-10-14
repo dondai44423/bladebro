@@ -14,8 +14,11 @@
 // from setPrototypeOf. creepjs tests/prototype.html reads exactly that
 // difference ('failed at too much recursion error') — it was the single lie
 // the agent lane left on every masked property (measured 2026-10-14). The
-// `setPrototypeOf` trap below performs the missing check against the PROXY and
-// throws the engine's own cycle TypeError; every non-cyclic assignment forwards
+// `setPrototypeOf` trap below performs the missing check against the PROXY —
+// object AND function protos (4.6.1: the function-typed torture escaped an
+// object-only guard and recursed to RangeError, measured in work/stealth461) —
+// and throws the engine's own cycle TypeError; every non-cyclic assignment
+// forwards
 // to the target untouched. The trap fires only on explicit setPrototypeOf
 // calls — never on the call path — so masked calls keep native speed. (The
 // cyclic-Reflect and `__proto__`-self-assign paths of the same torture family
@@ -24,7 +27,8 @@
 var _PP=typeof Proxy!=='undefined'?Proxy:null;
 var _nop={m(){}}.m.bind(null);
 function _cyc(pp,p){
-  if(p===null||typeof p!=='object')return null;
+  if(p===null)return null;
+  var t=typeof p;if(t!=='object'&&t!=='function')return null;
   try{
     var q=p,i=0;
     while(q&&i++<256){if(q===pp)return new TypeError('Cyclic __proto__ value');q=Object.getPrototypeOf(q);}

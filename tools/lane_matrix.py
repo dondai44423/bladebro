@@ -67,12 +67,19 @@ def parse_result(payload):
 def classify(j):
     ok = []
     gl = j.get("gl", "")
-    # Identity: the machine's Intel GPU profile (36 extensions, maxc 64).
-    # 4.6.0 lanes reach it through hardware EGL (`--use-angle=gl-egl`);
-    # software boxes reach it through the adaptive mask. The label names the
-    # identity, not the mechanism.
-    if gl.startswith("ANGLE (Intel") and j.get("exts") == 36 and j.get("maxc") == 64:
+    # Identity: the lane must never end up on a software renderer, and it must
+    # report a real renderer. On this machine (the captured Intel profile) the
+    # strict 36-extension / maxc-64 assertions apply; on another vendor's box
+    # the lane reports that vendor's real renderer — hardware through EGL
+    # (4.6.0) or the adaptive mask replaying the *detected* profile — so the
+    # gate there is "not software, real renderer string".
+    lowered = gl.lower()
+    if any(s in lowered for s in ("llvmpipe", "swiftshader", "softpipe", "software")):
+        ok.append(f"GL-BAD({gl[:40]},exts={j.get('exts')},maxc={j.get('maxc')})")
+    elif gl.startswith("ANGLE (Intel") and j.get("exts") == 36 and j.get("maxc") == 64:
         ok.append("gl-intel")
+    elif gl.startswith("ANGLE (") and (j.get("exts") or 0) > 0:
+        ok.append(f"gl-hw({gl[:26]})")
     else:
         ok.append(f"GL-BAD({gl[:40]},exts={j.get('exts')},maxc={j.get('maxc')})")
     # Work area: after the 4.6.0 removal of the availHeight shell, the honest

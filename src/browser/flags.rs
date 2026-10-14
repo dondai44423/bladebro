@@ -29,16 +29,25 @@ const STEALTH_FLAGS: &[&str] = &[
     // S17: force WebRTC to only use proxied UDP — prevents ICE candidate
     // leaks of the real IP when a proxy is active. No effect without proxy.
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-    // Issue #9: macOS shows a system dialog "Chrome Helper needs to download
-    // the font 'Osaka'/'STHeiti'" when on-demand CJK fonts are requested by
-    // page CSS but not installed. --disable-remote-fonts prevents Chrome from
-    // requesting non-local fonts, using fallbacks instead. Also applies to
-    // worker contexts per Chromium docs.
-    "--disable-remote-fonts",
+    // (v4.6.1) --disable-remote-fonts REMOVED. Measured 2026-10-14 (stock
+    // Chromium 154, local HTTP font): with the flag a page's @font-face fetch
+    // never happens (0 requests, NetworkError, fallback text metrics);
+    // without it the font loads everywhere. No real Chrome refuses webfonts —
+    // that divergence is readable by any page that loads its own fonts, on
+    // every platform. The macOS on-demand-font dialog (issue #9) is handled
+    // by the CSS alias block in stealth_core.js (macOS-gated), not by
+    // blocking the fetch layer.
 ];
 
-/// Additional flags for headless mode only.
-const HEADLESS_FLAGS: &[&str] = &["--headless=new", "--disable-gpu"];
+/// Additional flags for headless mode only. No `--disable-gpu` (v4.6.1):
+/// with it Chrome never brings up the real GPU in headless and every WebGL
+/// context is software. Without it the ladder's ANGLE stages reach the real
+/// device even headless — measured 2026-10-14: `--headless=new
+/// --use-angle=gl-egl` (and `=gl`) report the machine's own GPU with no X
+/// display at all — and GPU-less hosts still land on SwiftShader through
+/// the ladder (or Chrome's own software fallback with
+/// --enable-unsafe-swiftshader).
+const HEADLESS_FLAGS: &[&str] = &["--headless=new"];
 
 /// GL backend ladder stage. The launch healthcheck walks these in order and
 /// keeps the first stage that yields a live WebGL context; a stage that comes
@@ -51,11 +60,14 @@ pub enum GlStage {
     /// measured 2026-10-14, `--use-angle=gl-egl` under Xvfb reports
     /// `ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)`,
     /// the exact string the machine's real session reports, so the GL mask
-    /// never installs and the lane renders on hardware.
+    /// never installs and the lane renders on hardware — headless included
+    /// (no X display needed at all).
     NativeGlEgl,
-    /// Native-GL ANGLE backend (classic). Fallback for stacks where EGL cannot
-    /// initialize; under Xvfb it lands on Mesa (llvmpipe — software, but a
-    /// live context) which the stealth GL mask normalizes.
+    /// Platform fallback backend, explicit: Linux/Android classic native-GL
+    /// ANGLE (`--use-angle=gl`; under Xvfb it can land on Mesa llvmpipe —
+    /// software, but a live context the GL mask normalizes), macOS Metal,
+    /// Windows D3D11. A genuinely different driver path from the silent
+    /// default, tried only after the default stage failed.
     NativeGl,
     /// SwiftShader ANGLE backend — last resort for stacks where the
     /// native-GL backend cannot initialize (observed live: SwANGLE
@@ -182,14 +194,18 @@ pub fn launched_no_sandbox() -> bool {
 }
 
 /// True for software/headless renderer artifacts (llvmpipe, SwiftShader,
-/// softpipe). Single definition shared with `stealth::inject` so the launch
-/// healthcheck and the spoof decision can never disagree.
+/// softpipe, D3D11 WARP / Microsoft Basic Render). Single definition shared
+/// with `stealth::inject` so the launch healthcheck and the spoof decision
+/// can never disagree.
 pub fn is_software_renderer(renderer: &str) -> bool {
     let r = renderer.to_lowercase();
     r.contains("swiftshader")
         || r.contains("llvmpipe")
         || r.contains("softpipe")
         || r.contains("software")
+        // Windows software paths: D3D11 WARP and the no-driver fallbacks.
+        || r.contains("warp")
+        || r.contains("basic render")
 }
 
 /// Classify a live renderer string into the launch-time [`GpuState`].
@@ -254,13 +270,14 @@ pub(super) fn stage_label(stage: GlStage) -> &'static str {
 }
 
 /// The GL ladder, in attempt order. Both transports walk the same list.
-/// NativeGlEgl first (hardware through EGL under Xvfb — the mask never
-/// installs there) and retried once: a first-launch GL miss is usually a
-/// transient init race under load (observed live on the classic stage), and
-/// the retry keeps the lane on hardware instead of silently dropping it to
-/// the software fallback. Then the classic NativeGl for EGL-less stacks
-/// (live software context, mask normalizes), SwiftShader last (a dead end on
-/// boxes whose Vulkan init is broken, so it stays the final option).
+/// NativeGlEgl first (hardware through EGL — the mask never installs there)
+/// and retried once: a first-launch GL miss is usually a transient init race
+/// under load (observed live on the classic stage), and the retry keeps the
+/// lane on hardware instead of silently dropping it to the software
+/// fallback. Then NativeGl — the platform's explicit fallback backend
+/// (Linux/Android classic GL, macOS Metal, Windows D3D11; a live software
+/// context is mask-normalized). SwiftShader last (a dead end on boxes whose
+/// Vulkan init is broken, so it stays the final option).
 pub(super) fn gl_stages() -> &'static [GlStage] {
     &[
         GlStage::NativeGlEgl,
@@ -313,19 +330,21 @@ pub(super) fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
         args.push("--ozone-platform=x11".into());
     }
     match cfg.stage {
-        GlStage::NativeGlEgl =>
-        {
+        GlStage::NativeGlEgl => {
+            // Linux/Android: hardware through ANGLE's EGL backend — measured
+            // to reach the real device headful AND headless (no X display).
+            // macOS/Windows: no flag — the platform default already picks the
+            // real GPU (Metal / D3D11).
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            if cfg.headful {
-                args.push("--use-angle=gl-egl".into());
-            }
+            args.push("--use-angle=gl-egl".into());
         }
-        GlStage::NativeGl =>
-        {
+        GlStage::NativeGl => {
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            if cfg.headful {
-                args.push("--use-angle=gl".into());
-            }
+            args.push("--use-angle=gl".into());
+            #[cfg(target_os = "macos")]
+            args.push("--use-angle=metal".into());
+            #[cfg(target_os = "windows")]
+            args.push("--use-angle=d3d11".into());
         }
         GlStage::SwiftShader => {
             args.push("--use-angle=swiftshader".into());
@@ -489,14 +508,39 @@ mod launch_flag_tests {
         assert!(!sw.iter().any(|f| f == "--use-angle=gl"));
     }
 
+    /// The NativeGl stage must mean "the platform's explicit fallback
+    /// backend": classic GL on Linux/Android, Metal on macOS, D3D11 on
+    /// Windows. The EGL stage carries no flag off Linux/Android (the default
+    /// backend is already the real GPU there). CI runs this on all three OSes.
+    #[test]
+    fn stage_backend_flags_are_platform_pinned() {
+        let egl = launch_args(&cfg(GlStage::NativeGlEgl, true, Transport::Pipe));
+        let native = launch_args(&cfg(GlStage::NativeGl, true, Transport::Pipe));
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            assert!(egl.iter().any(|f| f == "--use-angle=gl-egl"));
+            assert!(native.iter().any(|f| f == "--use-angle=gl"));
+        } else if cfg!(target_os = "macos") {
+            assert!(!egl.iter().any(|f| f.starts_with("--use-angle")));
+            assert!(native.iter().any(|f| f == "--use-angle=metal"));
+        } else if cfg!(target_os = "windows") {
+            assert!(!egl.iter().any(|f| f.starts_with("--use-angle")));
+            assert!(native.iter().any(|f| f == "--use-angle=d3d11"));
+        }
+    }
+
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
-    fn headless_never_pins_a_display_or_native_angle() {
-        for stage in [GlStage::NativeGl, GlStage::NativeGlEgl] {
+    fn headless_pins_no_display_but_keeps_the_stage_backend() {
+        // The ANGLE stage flag reaches the real GPU in headless too (measured
+        // 2026-10-14) — it must be present with and without a display; the
+        // display pin stays headful-only.
+        for (stage, flag) in [
+            (GlStage::NativeGlEgl, "--use-angle=gl-egl"),
+            (GlStage::NativeGl, "--use-angle=gl"),
+        ] {
             let a = launch_args(&cfg(stage, false, Transport::Ws));
             assert!(!a.iter().any(|f| f == "--ozone-platform=x11"));
-            assert!(!a.iter().any(|f| f == "--use-angle=gl"));
-            assert!(!a.iter().any(|f| f == "--use-angle=gl-egl"));
+            assert!(a.iter().any(|f| f == flag));
             assert!(a.iter().any(|f| f == "--headless=new"));
         }
     }
@@ -519,6 +563,9 @@ mod launch_flag_tests {
         ));
         assert!(is_software_renderer(
             "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)"
+        ));
+        assert!(is_software_renderer(
+            "ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11 vs_5_0 ps_5_0, D3D11)"
         ));
         assert!(!is_software_renderer(
             "ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)"

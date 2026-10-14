@@ -2,8 +2,11 @@
 //!
 //! Executed by main.rs with an owned, guarded browser. The vector suite and
 //! the injection-lint fixtures live in `tests/vectors.html`; the bar is the
-//! suite's own total (62/62 after the 4.6.0 shell-torture + platform-truth
-//! checks were added to the 61-check set).
+//! suite's own total (63/63 on the reference machine after the 4.6.0
+//! shell-torture + platform-truth checks and the 4.6.1 worker-renderer /
+//! fn-proto additions — the total is platform- and profile-dependent and
+//! prints itself). Any FAIL line — vector, self-check, or consistency drift —
+//! exits non-zero (4.6.1): the command is a gate, not a printout.
 
 use crate::action::Action;
 use crate::cdp;
@@ -51,7 +54,10 @@ pub async fn run_audit(base: &str) -> Result<()> {
         })
         .await;
 
-    let content = page.content(2000).await?;
+    // The rendered report is ONE flattened text blob (and a tight budget
+    // truncated it mid-check — 2000 chars cut the tail). 16k fits the whole
+    // suite output with room to spare.
+    let content = page.content(16000).await?;
 
     // S2: boot self-check — verify key stealth properties.
     let session = page.cdp_ref();
@@ -72,9 +78,35 @@ pub async fn run_audit(base: &str) -> Result<()> {
     println!("  BLADEBRO STEALTH AUDIT");
     println!("{bar}");
 
+    // The audit is a gate, not a printout (4.6.1): any vector FAIL,
+    // self-check failure, or consistency drift makes the command exit
+    // non-zero, so CI and scripts can trust the exit code. The rendered
+    // report arrives as one flattened text blob, so vector failures are
+    // gated by the SCORE footer (pass == total) — the "FAIL " marker scan
+    // names them; it never gates on its own.
+    let mut failures: Vec<String> = Vec::new();
     for line in content.lines() {
-        if line.contains("SCORE:") || line.starts_with("FAIL ") {
+        if line.contains("SCORE:") {
             println!("  {line}");
+        }
+    }
+    if let Some(at) = content.find("SCORE: ") {
+        let mut nums = content[at + 7..].split_whitespace();
+        if let Some((pass, total)) = nums.next().and_then(|s| s.split_once('/')) {
+            let (pass, total) = (
+                pass.parse::<u32>().unwrap_or(0),
+                total.parse::<u32>().unwrap_or(u32::MAX),
+            );
+            if pass < total {
+                failures.push(format!("vectors: {pass}/{total} passed"));
+            }
+        }
+    }
+    for seg in content.split("FAIL ").skip(1) {
+        let detail: String = seg.chars().take(140).collect();
+        let detail = detail.trim();
+        if !detail.is_empty() {
+            failures.push(format!("vector FAIL: {detail}"));
         }
     }
 
@@ -89,11 +121,17 @@ pub async fn run_audit(base: &str) -> Result<()> {
             "    navigator.webdriver: {}",
             if wd { "FAIL (true)" } else { "OK (false)" }
         );
+        if wd {
+            failures.push("self-check: navigator.webdriver is true".into());
+        }
         println!(
             "    window.cdc_:         {} ({})",
             if cdc == "undefined" { "OK" } else { "FAIL" },
             cdc
         );
+        if cdc != "undefined" {
+            failures.push(format!("self-check: cdc_ residue ({cdc})"));
+        }
         println!(
             "    navigator.plugins:   {} ({} plugins)",
             if plugins > 0 { "OK" } else { "WARN" },
@@ -103,6 +141,12 @@ pub async fn run_audit(base: &str) -> Result<()> {
             "    toString integrity:  {}",
             if native { "OK (native)" } else { "FAIL" }
         );
+        if !native {
+            failures.push("self-check: toString integrity lost".into());
+        }
+    } else {
+        println!("\n  Self-check: FAIL (evaluate returned nothing)");
+        failures.push("self-check: evaluate returned nothing".into());
     }
 
     // v3.9.12: cross-restart consistency stamp — the fingerprint that must
@@ -160,6 +204,7 @@ return JSON.stringify(out);
                             println!("    {f:<6} PASS stable ({b})");
                         } else {
                             println!("    {f:<6} FAIL drift — now {b} (was {a})");
+                            failures.push(format!("consistency drift: {f}"));
                         }
                     }
                 }
@@ -168,5 +213,14 @@ return JSON.stringify(out);
         let _ = std::fs::write(&stamp_path, s);
     }
     println!("{bar}");
-    Ok(())
+    if failures.is_empty() {
+        println!("  VERDICT: PASS");
+        Ok(())
+    } else {
+        Err(BladeError::Other(format!(
+            "stealth audit FAILED ({} issue(s)): {}",
+            failures.len(),
+            failures.join(" | ")
+        )))
+    }
 }

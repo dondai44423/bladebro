@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Cross-platform stealth parity: one ladder, per-platform backends, no foreign strings.** The GL ladder is now explicit per OS — Linux/Android keep `--use-angle=gl-egl` as stage 1 (retried), and it reaches hardware *headless* too (measured: no X display needed — the machine's own GPU is reported, so the mask never installs and headless rendering is hardware-fast); macOS and Windows get an explicit fallback backend behind the platform default (`--use-angle=metal` / `--use-angle=d3d11`); `--disable-gpu` is gone from headless launches. Previously, a software-GL host on Mac or Windows had its mask replay a *Linux Mesa* string (Windows x86) or a *phone GPU* (Apple Silicon) — the identity mismatch this release removes.
+- **WebGL masking detects the machine's GPU on every OS.** `lspci` (Linux/Android, output byte-identical to 4.6.0), `Win32_VideoController` via PowerShell CIM with a `wmic` fallback (Windows), `system_profiler` (macOS) — and the renderer string is built in the detected OS's own ANGLE shape: Direct3D-11 strings on Windows (`ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)`), Metal strings on macOS (`ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)`), Mesa strings on Linux. D3D11 WARP counts as software (the mask engages instead of reporting WARP); Microsoft's no-driver adapters (Basic Display/Render, Remote Display, Hyper-V) are never claimed. `BLADE_GPU` overrides remain (`intel|amd|nvidia|apple|mali|adreno`).
+- **`--disable-remote-fonts` removed.** Measured on stock Chromium 154: with the flag a page's own `@font-face` fetch never happens (0 requests, `NetworkError`, fallback text metrics) — no real Chrome refuses webfonts, and any page loading its own fonts can read the difference, on every platform. The macOS on-demand-font dialog that motivated it (issue #9) is handled by the CSS alias block, now macOS-gated (elsewhere it was a page-visible extra stylesheet no stock browser has).
+- **The cyclic-prototype shield covers function-typed prototypes.** `Object.setPrototypeOf(maskedFn, someFn)` whose chain runs back through the mask is the same creepjs torture with a function as the new proto; an object-only guard let it through to the old `RangeError` recursion (measured in `work/stealth461`). The shared `_cyc` walk — page masks and the SharedWorker wrapper — now walks functions too: native `TypeError: Cyclic __proto__ value` in both shapes.
+- **`bladebro audit` is a gate, not a printout.** Any vector FAIL (parsed from the SCORE footer), failed self-check, or consistency-stamp drift exits non-zero; the report read was also too tight (2000 chars truncated the suite's flattened output — the full report is read now).
+- **CI drives the real audit on every OS.** The built binary runs its own vector suite through a browser on ubuntu, macOS and Windows on each release push and the exit code gates — the "green CI, broken lane on macOS/Windows" class is structurally dead.
+
+### Added
+- `worker-gl-renderer-match`: the worker realm's WebGL renderer must equal the page realm's — the mask's two realms can never drift.
+- `shell-torture` now runs both torture shapes per target (object-proto and function-proto): ten masked-or-native API functions must answer each with the engine's own `TypeError: Cyclic __proto__ value`.
+- `uad-platform` is OS-coherent (it previously hard-required `Linux` — the audit *failed on macOS/Windows* for a perfectly coherent browser).
+- Per-OS UA-override fallback strings (the rare no-UA case used to inject a Linux UA on any OS).
+
+### Fixed
+- Masked functions answer the function-proto cyclic torture with the engine's own `TypeError` (was `RangeError`; residual: the `Reflect`-return channel, advanced-branch only).
+- Windows/macOS fallback profiles can no longer name a different OS's GPU class (the Linux-Mesa-on-Windows / Mali-on-Apple-Silicon mismatch).
+- The battery-API shim (installs only where the engine lacks `getBattery`) returns an EventTarget with the BatteryManager property shape instead of a plain object.
+
 ## [4.6.0] - 2026-10-14
 
 ### Changed

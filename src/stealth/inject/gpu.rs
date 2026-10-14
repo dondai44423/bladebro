@@ -1,7 +1,9 @@
-//! GPU detection and the WebGL spoof builders: the per-vendor profile
-//! tables (Intel / AMD / NVIDIA / Mali / Adreno), `lspci` + env detection,
-//! and the page/worker GL spoof script assembly. Split from the `inject`
-//! core.
+//! GPU detection and the WebGL spoof builders: hardware detection per OS
+//! (Linux/Android `lspci`, Windows `Win32_VideoController` via PowerShell/CIM
+//! with a `wmic` fallback, macOS `system_profiler`), the per-vendor profile
+//! tables (Intel / AMD / NVIDIA / Apple / Mali / Adreno) with OS-correct
+//! ANGLE renderer strings, and the page/worker GL spoof script assembly.
+//! Split from the `inject` core.
 
 use std::sync::OnceLock;
 
@@ -88,10 +90,13 @@ const INTEL_EXT2_NOMINAL: &[&str] = &[
     "WEBGL_stencil_texturing",
 ];
 
-/// GPU profile for WebGL spoofing — detected from host hardware (lspci on
-/// Linux) so the spoofed renderer string and GL capability limits match the
-/// real GPU. Falls back to Intel UHD 630 when detection fails (Docker without
-/// pciutils, macOS, Windows). Override: BLADE_GPU=intel|amd|nvidia.
+/// GPU profile for WebGL spoofing — detected from the host's own hardware,
+/// per OS: `lspci` (Linux/Android), `Win32_VideoController` (Windows),
+/// `system_profiler` (macOS). The renderer string is built in the detected
+/// OS's own ANGLE shape (Mesa/ES, Direct3D 11, Metal) so a mask never names
+/// a foreign platform — a Linux Mesa string on Windows or a phone GPU on a
+/// Mac was the pre-4.6.1 fallback class. Falls back per OS/arch when
+/// detection fails. Override: BLADE_GPU=intel|amd|nvidia|apple|mali|adreno.
 #[derive(Clone)]
 pub(super) struct GpuProfile {
     gl_vendor: String,
@@ -123,15 +128,20 @@ pub(super) fn get_gpu_profile() -> GpuProfile {
 }
 
 fn detect_gpu() -> GpuProfile {
+    let style = os_style();
     if let Ok(gpu) = std::env::var("BLADE_GPU") {
         match gpu.as_str() {
             "amd" => {
                 eprintln!("[stealth] BLADE_GPU=amd — using AMD Radeon profile");
-                return amd_profile();
+                return amd_profile(None, style);
             }
             "nvidia" => {
                 eprintln!("[stealth] BLADE_GPU=nvidia — using NVIDIA GeForce profile");
-                return nvidia_profile();
+                return nvidia_profile(None, style);
+            }
+            "apple" => {
+                eprintln!("[stealth] BLADE_GPU=apple — using Apple Silicon profile");
+                return apple_profile("Apple M1");
             }
             "mali" => {
                 eprintln!("[stealth] BLADE_GPU=mali — using Mali-G78 profile");
@@ -151,32 +161,214 @@ fn detect_gpu() -> GpuProfile {
                 #[cfg(not(target_arch = "aarch64"))]
                 {
                     eprintln!("[stealth] BLADE_GPU={gpu} — using Intel UHD 630 profile");
-                    return intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)");
+                    return intel_profile(intel_fallback_name(style), style);
                 }
             }
         }
     }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
+    // Per-OS hardware detection — the mask may only claim the machine's own
+    // GPU class in its own platform's string shape.
+    if cfg!(target_os = "windows") {
+        match detect_gpu_windows() {
+            Some(name) => match profile_for_name(&name, style) {
+                Some(p) => {
+                    eprintln!("[stealth] detected GPU: {}", p.gl_renderer);
+                    return p;
+                }
+                None => eprintln!(
+                    "[stealth] detected video controller is not a usable GPU ({name}) — using fallback profile"
+                ),
+            },
+            None => eprintln!("[stealth] GPU detection failed (no Win32_VideoController answer)"),
+        }
+    } else if cfg!(target_os = "macos") {
+        match detect_gpu_macos() {
+            Some(name) => match profile_for_name(&name, style) {
+                Some(p) => {
+                    eprintln!("[stealth] detected GPU: {}", p.gl_renderer);
+                    return p;
+                }
+                None => eprintln!(
+                    "[stealth] detected chipset is not a usable GPU ({name}) — using fallback profile"
+                ),
+            },
+            None => eprintln!("[stealth] GPU detection failed (system_profiler gave no chipset)"),
+        }
+    } else {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         if let Some(p) = detect_gpu_lspci() {
             eprintln!("[stealth] detected GPU: {}", p.gl_renderer);
             return p;
         }
     }
-    // Architecture-aware fallback: Mali on ARM, Intel on x86
-    #[cfg(target_arch = "aarch64")]
-    eprintln!("[stealth] GPU detection failed — using Mali-G78 fallback (aarch64)");
-    #[cfg(not(target_arch = "aarch64"))]
-    eprintln!("[stealth] GPU detection failed — using Intel UHD 630 fallback");
+    let p = fallback_profile();
+    eprintln!(
+        "[stealth] GPU detection failed — using fallback profile: {}",
+        p.gl_renderer
+    );
+    p
+}
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        mali_profile()
+/// The ANGLE backend style a platform's Chrome reports in renderer strings.
+/// Chrome renders through ANGLE everywhere; the *string shape* differs per
+/// OS: Linux/Android name the Mesa/ES stack, Windows names the Direct3D 11
+/// feature level, macOS names the Metal renderer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OsStyle {
+    LinuxMesa,
+    WindowsD3d11,
+    MacMetal,
+}
+
+fn os_style() -> OsStyle {
+    if cfg!(target_os = "windows") {
+        OsStyle::WindowsD3d11
+    } else if cfg!(target_os = "macos") {
+        OsStyle::MacMetal
+    } else {
+        OsStyle::LinuxMesa
     }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)")
+}
+
+/// Build an ANGLE renderer string in the requested platform's shape.
+fn renderer(style: OsStyle, vendor: &str, name: &str) -> String {
+    match style {
+        OsStyle::LinuxMesa => format!("ANGLE ({vendor}, {name}, OpenGL ES 3.2)"),
+        OsStyle::WindowsD3d11 => {
+            format!("ANGLE ({vendor}, {name} Direct3D11 vs_5_0 ps_5_0, D3D11)")
+        }
+        OsStyle::MacMetal => {
+            format!("ANGLE ({vendor}, ANGLE Metal Renderer: {name}, Unspecified Version)")
+        }
     }
+}
+
+/// The x86 Intel name used by the per-OS fallback profile.
+fn intel_fallback_name(style: OsStyle) -> &'static str {
+    match style {
+        OsStyle::LinuxMesa => "Mesa Intel(R) UHD Graphics 630 (CFL GT2)",
+        OsStyle::WindowsD3d11 => "Intel(R) UHD Graphics 630",
+        OsStyle::MacMetal => "Intel(R) Iris(TM) Plus Graphics 640",
+    }
+}
+
+/// OS/arch fallback when detection fails — a plausible default for the
+/// platform, never a foreign one. (Windows x86 default: the most common
+/// desktop GPU class; BLADE_GPU overrides remain for other classes.)
+fn fallback_profile() -> GpuProfile {
+    if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            return apple_profile("Apple M1");
+        }
+        return intel_profile("Intel(R) Iris(TM) Plus Graphics 640", OsStyle::MacMetal);
+    }
+    if cfg!(target_os = "windows") {
+        return intel_profile("Intel(R) UHD Graphics 630", OsStyle::WindowsD3d11);
+    }
+    if cfg!(target_arch = "aarch64") {
+        return mali_profile();
+    }
+    intel_profile(intel_fallback_name(OsStyle::LinuxMesa), OsStyle::LinuxMesa)
+}
+
+/// Run a detection command, capturing stdout on success.
+fn run_capture(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(cmd).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// First usable video controller name from `Win32_VideoController` output.
+/// Skips the wmic header and the no-driver adapters (Microsoft Basic
+/// Display/Render, Remote Display, Hyper-V) — none of those is a GPU to
+/// claim.
+fn first_usable_controller(out: &str) -> Option<String> {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .find(|l| {
+            let lo = l.to_lowercase();
+            !(lo == "name"
+                || lo.contains("basic display")
+                || lo.contains("basic render")
+                || lo.contains("remote display")
+                || lo.contains("hyper-v"))
+        })
+        .map(str::to_string)
+}
+
+/// Windows GPU detection: PowerShell CIM first (wmic is deprecated and
+/// absent on current Windows), wmic as the fallback.
+fn detect_gpu_windows() -> Option<String> {
+    let ps = run_capture(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+        ],
+    );
+    if let Some(name) = ps.as_deref().and_then(first_usable_controller) {
+        return Some(name);
+    }
+    run_capture("wmic", &["path", "win32_VideoController", "get", "name"])
+        .as_deref()
+        .and_then(first_usable_controller)
+}
+
+/// \"Chipset Model:\" lines from `system_profiler SPDisplaysDataType`.
+fn parse_macos_chipsets(out: &str) -> Vec<String> {
+    out.lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("Chipset Model:"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// macOS GPU detection via system_profiler.
+fn detect_gpu_macos() -> Option<String> {
+    run_capture("system_profiler", &["SPDisplaysDataType"])
+        .as_deref()
+        .and_then(|out| parse_macos_chipsets(out).into_iter().next())
+}
+
+/// Build a profile from a detected controller/chipset name. Pure — unit
+/// tested with captured fixtures for all three OS shapes.
+fn profile_for_name(name: &str, style: OsStyle) -> Option<GpuProfile> {
+    let lo = name.to_lowercase();
+    // No usable GPU driver — never claim one of these as the machine's GPU.
+    if lo.contains("basic display")
+        || lo.contains("basic render")
+        || lo.contains("remote display")
+        || lo.contains("hyper-v")
+        || lo.contains("llvmpipe")
+        || lo.contains("swiftshader")
+    {
+        return None;
+    }
+    if lo.contains("nvidia") || lo.contains("geforce") || lo.contains("quadro") {
+        return Some(nvidia_profile(Some(name), style));
+    }
+    if lo.contains("apple") {
+        return Some(apple_profile(name));
+    }
+    if lo.contains("intel") {
+        return Some(intel_profile(name, style));
+    }
+    if lo.contains("amd") || lo.contains("ati") || lo.contains("radeon") {
+        return Some(amd_profile(Some(name), style));
+    }
+    if lo.contains("qualcomm") || lo.contains("adreno") {
+        return Some(adreno_profile());
+    }
+    if lo.contains("mali") || (lo.contains("arm") && lo.contains("gpu")) {
+        return Some(mali_profile());
+    }
+    None
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -194,35 +386,56 @@ fn detect_gpu_lspci() -> Option<GpuProfile> {
         // Intel
         if lower.contains("intel") {
             if lower.contains("alder lake-p") || lower.contains("adl-p") {
-                return Some(intel_profile("Mesa Intel(R) Graphics (ADL GT2)"));
+                return Some(intel_profile(
+                    "Mesa Intel(R) Graphics (ADL GT2)",
+                    OsStyle::LinuxMesa,
+                ));
             }
             if lower.contains("alder lake-s")
                 || lower.contains("adl-s")
                 || lower.contains("uhd 770")
             {
-                return Some(intel_profile("Mesa Intel(R) Graphics (ADL-S GT1)"));
+                return Some(intel_profile(
+                    "Mesa Intel(R) Graphics (ADL-S GT1)",
+                    OsStyle::LinuxMesa,
+                ));
             }
             if lower.contains("tiger lake") || lower.contains("tgl") {
-                return Some(intel_profile("Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2)"));
+                return Some(intel_profile(
+                    "Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2)",
+                    OsStyle::LinuxMesa,
+                ));
             }
             if lower.contains("coffee lake") || lower.contains("uhd 630") || lower.contains("cfl") {
-                return Some(intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)"));
+                return Some(intel_profile(
+                    "Mesa Intel(R) UHD Graphics 630 (CFL GT2)",
+                    OsStyle::LinuxMesa,
+                ));
             }
             if lower.contains("skylake") || lower.contains("hd 530") || lower.contains("skl") {
-                return Some(intel_profile("Mesa Intel(R) HD Graphics 530 (SKL GT2)"));
+                return Some(intel_profile(
+                    "Mesa Intel(R) HD Graphics 530 (SKL GT2)",
+                    OsStyle::LinuxMesa,
+                ));
             }
             if lower.contains("haswell") || lower.contains("hsw") {
-                return Some(intel_profile("Mesa Intel(R) HD Graphics 4600 (HSW GT2)"));
+                return Some(intel_profile(
+                    "Mesa Intel(R) HD Graphics 4600 (HSW GT2)",
+                    OsStyle::LinuxMesa,
+                ));
             }
-            return Some(intel_profile("Mesa Intel(R) UHD Graphics 630 (CFL GT2)"));
+            return Some(intel_profile(
+                "Mesa Intel(R) UHD Graphics 630 (CFL GT2)",
+                OsStyle::LinuxMesa,
+            ));
         }
         // AMD/ATI
         if lower.contains("amd") || lower.contains("ati") || lower.contains("radeon") {
-            return Some(amd_profile());
+            return Some(amd_profile(None, OsStyle::LinuxMesa));
         }
         // NVIDIA
         if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("quadro") {
-            return Some(nvidia_profile());
+            return Some(nvidia_profile(None, OsStyle::LinuxMesa));
         }
         // ARM Mali (common on ARM SoCs with PCI)
         if lower.contains("mali") || lower.contains("arm") && lower.contains("gpu") {
@@ -236,11 +449,15 @@ fn detect_gpu_lspci() -> Option<GpuProfile> {
     None
 }
 
-#[allow(dead_code)]
-fn intel_profile(mesa_name: &str) -> GpuProfile {
+/// Intel profile. The captured i915/Mesa extension lists and the
+/// precision-for-all-levels behavior are Linux/ANGLE captures — they apply
+/// to the LinuxMesa style only; other OS shapes keep honest defaults (no
+/// extension filter, no precision remap) because no capture for them exists.
+fn intel_profile(name: &str, style: OsStyle) -> GpuProfile {
+    let captured = style == OsStyle::LinuxMesa;
     GpuProfile {
         gl_vendor: "Google Inc. (Intel)".into(),
-        gl_renderer: format!("ANGLE (Intel, {mesa_name}, OpenGL ES 3.2)"),
+        gl_renderer: renderer(style, "Intel", name),
         max_texture_size: 16384,
         max_renderbuffer_size: 16384,
         max_cube_map_size: 16384,
@@ -249,17 +466,29 @@ fn intel_profile(mesa_name: &str) -> GpuProfile {
         max_viewport_dims: [16384, 16384],
         point_size_range: [1.0, 255.0],
         line_width_range: [1.0, 1024.0],
-        precision_full: true,
-        ext1_nominal: Some(INTEL_EXT1_NOMINAL),
-        ext2_nominal: Some(INTEL_EXT2_NOMINAL),
+        precision_full: captured,
+        ext1_nominal: if captured {
+            Some(INTEL_EXT1_NOMINAL)
+        } else {
+            None
+        },
+        ext2_nominal: if captured {
+            Some(INTEL_EXT2_NOMINAL)
+        } else {
+            None
+        },
     }
 }
 
-fn amd_profile() -> GpuProfile {
+fn amd_profile(name: Option<&str>, style: OsStyle) -> GpuProfile {
+    let default = match style {
+        OsStyle::LinuxMesa => "Mesa AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7)",
+        OsStyle::WindowsD3d11 => "AMD Radeon RX 6700 XT",
+        OsStyle::MacMetal => "AMD Radeon Pro 5500M",
+    };
     GpuProfile {
         gl_vendor: "Google Inc. (AMD)".into(),
-        gl_renderer: "ANGLE (AMD, Mesa AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7), OpenGL ES 3.2)"
-            .into(),
+        gl_renderer: renderer(style, "AMD", name.unwrap_or(default)),
         max_texture_size: 16384,
         max_renderbuffer_size: 16384,
         max_cube_map_size: 16384,
@@ -274,10 +503,10 @@ fn amd_profile() -> GpuProfile {
     }
 }
 
-fn nvidia_profile() -> GpuProfile {
+fn nvidia_profile(name: Option<&str>, style: OsStyle) -> GpuProfile {
     GpuProfile {
         gl_vendor: "Google Inc. (NVIDIA)".into(),
-        gl_renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060, OpenGL ES 3.2)".into(),
+        gl_renderer: renderer(style, "NVIDIA", name.unwrap_or("NVIDIA GeForce RTX 3060")),
         max_texture_size: 32768,
         max_renderbuffer_size: 32768,
         max_cube_map_size: 32768,
@@ -286,6 +515,28 @@ fn nvidia_profile() -> GpuProfile {
         max_viewport_dims: [32768, 32768],
         point_size_range: [1.0, 2048.0],
         line_width_range: [1.0, 10.0],
+        precision_full: false,
+        ext1_nominal: None,
+        ext2_nominal: None,
+    }
+}
+
+/// Apple Silicon profile (macOS). Limits are plausible Metal-class values
+/// (uncaptured); the extension filter is None — no capture exists, so the
+/// mask never over-claims a specific list. Line width [1,1] is the Metal
+/// core-profile semantic.
+fn apple_profile(name: &str) -> GpuProfile {
+    GpuProfile {
+        gl_vendor: "Google Inc. (Apple)".into(),
+        gl_renderer: renderer(OsStyle::MacMetal, "Apple", name),
+        max_texture_size: 16384,
+        max_renderbuffer_size: 16384,
+        max_cube_map_size: 16384,
+        max_combined_tex_units: 32,
+        max_samples: 4,
+        max_viewport_dims: [16384, 16384],
+        point_size_range: [1.0, 511.0],
+        line_width_range: [1.0, 1.0],
         precision_full: false,
         ext1_nominal: None,
         ext2_nominal: None,
@@ -543,4 +794,127 @@ if(typeof WebGL2RenderingContext!=='undefined')_mkGP(WebGL2RenderingContext.prot
         ext_patch = ext_patch,
         locale_patch = locale_patch,
     )
+}
+
+#[cfg(test)]
+mod gpu_detect_tests {
+    use super::*;
+
+    #[test]
+    fn windows_profiles_use_d3d11_strings() {
+        let p = profile_for_name("NVIDIA GeForce RTX 3060", OsStyle::WindowsD3d11).unwrap();
+        assert_eq!(
+            p.gl_renderer,
+            "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+        );
+        assert_eq!(p.gl_vendor, "Google Inc. (NVIDIA)");
+        let i = profile_for_name("Intel(R) UHD Graphics 630", OsStyle::WindowsD3d11).unwrap();
+        assert_eq!(
+            i.gl_renderer,
+            "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+        );
+        let a = profile_for_name("AMD Radeon RX 6700 XT", OsStyle::WindowsD3d11).unwrap();
+        assert_eq!(
+            a.gl_renderer,
+            "ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)"
+        );
+    }
+
+    #[test]
+    fn mac_profiles_use_metal_strings() {
+        let p = profile_for_name("Apple M2 Pro", OsStyle::MacMetal).unwrap();
+        assert_eq!(
+            p.gl_renderer,
+            "ANGLE (Apple, ANGLE Metal Renderer: Apple M2 Pro, Unspecified Version)"
+        );
+        assert_eq!(p.gl_vendor, "Google Inc. (Apple)");
+        let a = profile_for_name("AMD Radeon Pro 5500M", OsStyle::MacMetal).unwrap();
+        assert_eq!(
+            a.gl_renderer,
+            "ANGLE (AMD, ANGLE Metal Renderer: AMD Radeon Pro 5500M, Unspecified Version)"
+        );
+    }
+
+    #[test]
+    fn linux_strings_are_unchanged() {
+        let i = intel_profile("Mesa Intel(R) Graphics (ADL GT2)", OsStyle::LinuxMesa);
+        assert_eq!(
+            i.gl_renderer,
+            "ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL ES 3.2)"
+        );
+        assert!(i.precision_full && i.ext1_nominal.is_some());
+        let n = nvidia_profile(None, OsStyle::LinuxMesa);
+        assert_eq!(
+            n.gl_renderer,
+            "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060, OpenGL ES 3.2)"
+        );
+        let a = amd_profile(None, OsStyle::LinuxMesa);
+        assert_eq!(
+            a.gl_renderer,
+            "ANGLE (AMD, Mesa AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7), OpenGL ES 3.2)"
+        );
+        // Non-captured styles must not carry the i915-only filter/remap.
+        let w = intel_profile("Intel(R) UHD Graphics 630", OsStyle::WindowsD3d11);
+        assert!(!w.precision_full && w.ext1_nominal.is_none());
+    }
+
+    #[test]
+    fn no_driver_adapters_are_never_claimed() {
+        for name in [
+            "Microsoft Basic Display Adapter",
+            "Microsoft Basic Render Driver",
+            "Microsoft Remote Display Adapter",
+            "Microsoft Hyper-V Video",
+            "llvmpipe (LLVM 21.1.7, 256 bits)",
+        ] {
+            assert!(
+                profile_for_name(name, OsStyle::WindowsD3d11).is_none(),
+                "{name}"
+            );
+        }
+        assert!(profile_for_name("NVIDIA GeForce GTX 1050 Ti", OsStyle::WindowsD3d11).is_some());
+    }
+
+    #[test]
+    fn windows_controller_output_parses() {
+        // PowerShell: one name per line, no header.
+        assert_eq!(
+            first_usable_controller("NVIDIA GeForce RTX 3060\n"),
+            Some("NVIDIA GeForce RTX 3060".to_string())
+        );
+        // wmic: header + blank lines + CR noise.
+        assert_eq!(
+            first_usable_controller("Name  \r\n\r\nNVIDIA GeForce RTX 3060  \r\n\r\n"),
+            Some("NVIDIA GeForce RTX 3060".to_string())
+        );
+        assert_eq!(
+            first_usable_controller("Name\nMicrosoft Basic Display Adapter\n"),
+            None
+        );
+        assert_eq!(first_usable_controller(""), None);
+    }
+
+    #[test]
+    fn mac_chipset_output_parses() {
+        let out = "Graphics/Displays:\n\n    Apple M2:\n\n      Chipset Model: Apple M2\n\
+                   \n      Type: GPU\n      Bus: Built-In\n";
+        assert_eq!(parse_macos_chipsets(out), vec!["Apple M2".to_string()]);
+        let intel = "      Chipset Model: Intel Iris Plus Graphics 640\n";
+        assert_eq!(
+            parse_macos_chipsets(intel),
+            vec!["Intel Iris Plus Graphics 640".to_string()]
+        );
+    }
+
+    #[test]
+    fn os_style_matches_the_target() {
+        let s = os_style();
+        if cfg!(target_os = "windows") {
+            assert_eq!(s, OsStyle::WindowsD3d11);
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(s, OsStyle::MacMetal);
+        } else {
+            assert_eq!(s, OsStyle::LinuxMesa);
+        }
+    }
 }
