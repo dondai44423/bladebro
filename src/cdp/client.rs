@@ -342,22 +342,32 @@ impl CdpClient {
     /// Wait for the next event whose method equals `method`, up to `deadline`.
     ///
     /// Other events are skipped. A lagged bus is recovered transparently.
-    pub async fn wait_for(&self, method: &str, deadline: Duration) -> Result<CdpEvent> {
+    pub fn wait_for(
+        &self,
+        method: &str,
+        deadline: Duration,
+    ) -> impl std::future::Future<Output = Result<CdpEvent>> {
+        // Subscribe NOW, before the caller dispatches the triggering command.
+        // An async fn subscribes only when polled, losing events that precede
+        // the command's response (cached navigation, downloads, fast pages).
         let mut rx = self.subscribe();
-        match timeout(deadline, async {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) if ev.method == method => return Ok(ev),
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return Err(BladeError::Closed),
+        let method = method.to_string();
+        async move {
+            match timeout(deadline, async {
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) if ev.method == method => return Ok(ev),
+                        Ok(_) => continue,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => return Err(BladeError::Closed),
+                    }
                 }
+            })
+            .await
+            {
+                Ok(inner) => inner,
+                Err(_) => Err(BladeError::Timeout(deadline)),
             }
-        })
-        .await
-        {
-            Ok(inner) => inner,
-            Err(_) => Err(BladeError::Timeout(deadline)),
         }
     }
 

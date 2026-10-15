@@ -25,6 +25,7 @@ const TMP_PREFIX: &str = ".bladebro-update";
 /// them would become impossible.
 const FIRST_CHECKSUMMED_TAG: &str = "3.3.0";
 const MAX_BINARY_SIZE: u64 = 500_000_000;
+const MAX_CHECKSUM_BYTES: usize = 16 * 1024;
 
 /// Is checksum verification mandatory for this target tag?
 pub fn checksum_required(tag: &str) -> bool {
@@ -85,7 +86,7 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
     let mut attempt = 0u32;
     let fetched: Option<(reqwest::StatusCode, std::result::Result<String, String>)> = loop {
         attempt += 1;
-        let resp = match client.get(&checksum_url).send().await {
+        let mut resp = match client.get(&checksum_url).send().await {
             Ok(r) => r,
             Err(e) => {
                 last_transport = Some(format!("{e}"));
@@ -100,7 +101,28 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
             }
         };
         let status = resp.status();
-        match resp.text().await {
+        // Sidecars are ~100 bytes. Enforce the bound while reading, including
+        // chunked bodies without Content-Length, before parse/allocation.
+        if resp
+            .content_length()
+            .is_some_and(|n| n > MAX_CHECKSUM_BYTES as u64)
+        {
+            return Err(fetch_failed("checksum response exceeds 16 KiB"));
+        }
+        let mut bytes = Vec::new();
+        let body = loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    if chunk.len() > MAX_CHECKSUM_BYTES.saturating_sub(bytes.len()) {
+                        return Err(fetch_failed("checksum response exceeds 16 KiB"));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break Ok(String::from_utf8_lossy(&bytes).into_owned()),
+                Err(error) => break Err(error),
+            }
+        };
+        match body {
             Ok(t) => break Some((status, Ok(t))),
             Err(e) => {
                 last_transport = Some(format!("body read failed: {e}"));
@@ -161,12 +183,21 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
 
     // Compute SHA256 of the downloaded binary.
     use sha2::{Digest, Sha256};
-    let data = std::fs::read(binary_path)
+    let mut file = std::fs::File::open(binary_path)
         .map_err(|e| BladeError::Other(format!("cannot read binary for hash: {e}")))?;
-    let actual_hash: String = Sha256::digest(&data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let mut hash = Sha256::new();
+    use std::io::Read;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|e| BladeError::Other(format!("cannot hash binary: {e}")))?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    let actual_hash: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
 
     if actual_hash != expected_hash {
         return Err(BladeError::Other(format!(
@@ -536,14 +567,22 @@ pub(crate) fn binary_magic_ok(data: &[u8]) -> bool {
 /// 3. On Unix: set executable permissions
 /// 4. Try executing the binary with `--version` to confirm it runs
 pub fn verify_binary(dl: &DownloadedBinary) -> Result<()> {
-    let data = std::fs::read(&dl.path)
+    use std::io::Read;
+    let mut file = std::fs::File::open(&dl.path)
         .map_err(|e| BladeError::Other(format!("cannot read downloaded file: {e}")))?;
-
-    if data.len() < 4 {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != dl.size {
+        return Err(BladeError::Other(
+            "downloaded file size changed after download — refusing verification".into(),
+        ));
+    }
+    if metadata.len() < 4 {
         return Err(BladeError::Other("downloaded file too small".into()));
     }
 
-    let magic_ok = binary_magic_ok(&data);
+    let mut magic = [0; 4];
+    file.read_exact(&mut magic)?;
+    let magic_ok = binary_magic_ok(&magic);
 
     if !magic_ok {
         return Err(BladeError::Other(
@@ -582,56 +621,82 @@ pub fn verify_binary(dl: &DownloadedBinary) -> Result<()> {
 /// - Corrupted binary that passes magic check but won't execute
 ///
 /// Runs `binary --version` and checks for a successful exit.
-pub fn verify_binary_runs(dl: &DownloadedBinary) -> Result<()> {
-    let output = std::process::Command::new(&dl.path)
+pub async fn verify_binary_runs(dl: &DownloadedBinary) -> Result<()> {
+    let mut child = tokio::process::Command::new(&dl.path)
         .arg("--version")
+        // Startup verification must not wait for GitHub/npm connectivity.
+        .env("BLADE_NO_UPDATE_CHECK", "1")
+        .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output();
-
-    match output {
-        Ok(o) => {
-            if !o.status.success() {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                return Err(BladeError::Other(format!(
-                    "downloaded binary failed to start (exit {:?})\n  stdout: {}\n  stderr: {}",
-                    o.status.code(),
-                    stdout.trim(),
-                    stderr.trim(),
-                )));
-            }
-            // Check the output mentions "bladebro" to confirm it's our binary.
-            let combined = format!(
-                "{} {}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            );
-            if !combined.to_lowercase().contains("bladebro") {
-                return Err(BladeError::Other(
-                    "downloaded binary ran but doesn't identify as bladebro".into(),
-                ));
-            }
-            Ok(())
+        .spawn()
+        .map_err(|e| BladeError::Other(format!("cannot execute downloaded binary: {e}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| BladeError::Other("missing version stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| BladeError::Other("missing version stderr".into()))?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (stdout, stderr, status) = tokio::try_join!(
+            read_version_output(stdout),
+            read_version_output(stderr),
+            child.wait(),
+        )?;
+        Ok::<_, std::io::Error>(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    })
+    .await;
+    let output = match output {
+        Ok(Ok(output)) => output,
+        error => {
+            let _ = child.kill().await;
+            return Err(BladeError::Other(match error {
+                Ok(Err(error)) => format!("downloaded binary version probe failed: {error}"),
+                _ => "downloaded binary --version did not finish within 5s".into(),
+            }));
         }
-        Err(e) => {
-            // On Unix, this can happen if exec permissions aren't set.
-            #[cfg(unix)]
-            {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    return Err(BladeError::Other(
-                        "cannot execute downloaded binary (permission denied). \
-                         Run: chmod +x the binary path"
-                            .into(),
-                    ));
-                }
-            }
-            Err(BladeError::Other(format!(
-                "cannot execute downloaded binary: {e}\n\
-                 This may be a wrong architecture or missing libraries."
-            )))
-        }
+    };
+    if !output.status.success() {
+        return Err(BladeError::Other(format!(
+            "downloaded binary failed to start (exit {:?})\n  stdout: {}\n  stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
     }
+    let combined = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !combined.to_lowercase().contains("bladebro") {
+        return Err(BladeError::Other(
+            "downloaded binary ran but doesn't identify as bladebro".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn read_version_output(
+    reader: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    const LIMIT: usize = 64 * 1024;
+    let mut bytes = Vec::new();
+    reader
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() > LIMIT {
+        return Err(std::io::Error::other("version output exceeds 64 KiB"));
+    }
+    Ok(bytes)
 }
 
 /// Clean up the temp file (call on success or failure).
@@ -645,6 +710,116 @@ pub fn cleanup_tmp(path: &std::path::Path) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn binary_startup_verification_has_a_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        let marker = std::path::PathBuf::from(format!("{}.waiting", path.display()));
+        std::fs::write(&marker, b"owned").unwrap();
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nwhile [ -e \"$0.waiting\" ]; do :; done\nprintf 'bladebro fixture\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let dl = DownloadedBinary {
+            path: path.clone(),
+            size: 0,
+            asset_name: "fixture".into(),
+        };
+        let mut task = tokio::spawn(async move { verify_binary_runs(&dl).await });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(6), &mut task).await;
+        // Release the fixture even on the pre-fix path: no leaked shell.
+        std::fs::remove_file(marker).unwrap();
+        let outcome = match result {
+            Ok(outcome) => outcome.unwrap(),
+            Err(_) => task.await.unwrap(),
+        };
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            outcome.is_err(),
+            "a wedged version probe must fail within its own deadline"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn binary_probe_checks_exit_identity_output_bound_and_offline_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        for (body, accepted) in [
+            (
+                "[ \"$BLADE_NO_UPDATE_CHECK\" = 1 ] || exit 7\nprintf 'bladebro fixture\\n'"
+                    .to_string(),
+                true,
+            ),
+            ("printf 'bladebro fixture\\n'\nexit 9".to_string(), false),
+            ("printf 'different program\\n'".to_string(), false),
+            (format!("printf '{}'", "bladebro".repeat(9000)), false),
+        ] {
+            let path = create_secure_tmp(&std::env::temp_dir()).unwrap();
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let dl = DownloadedBinary {
+                path: path.clone(),
+                size: 0,
+                asset_name: "fixture".into(),
+            };
+            let result = verify_binary_runs(&dl).await;
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(result.is_ok(), accepted, "{result:?}");
+        }
+    }
+
+    #[test]
+    fn truncated_binary_cannot_pass_a_stale_download_size() {
+        let path = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        let magic: &[u8] = if cfg!(windows) {
+            b"MZxx"
+        } else if cfg!(target_os = "macos") {
+            &[0xcf, 0xfa, 0xed, 0xfe]
+        } else {
+            &[0x7f, b'E', b'L', b'F']
+        };
+        std::fs::write(&path, magic).unwrap();
+        let dl = DownloadedBinary {
+            path: path.clone(),
+            size: 1_000_000,
+            asset_name: "fixture".into(),
+        };
+        let result = verify_binary(&dl);
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            result.is_err(),
+            "a four-byte file must not pass because its recorded size was 1MB"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_checksum_is_refused_with_and_without_content_length() {
+        use sha2::{Digest, Sha256};
+        let path = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        std::fs::write(&path, b"fixture").unwrap();
+        let hash: String = Sha256::digest(b"fixture")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let body = format!("{hash}  {}", "x".repeat(32 * 1024));
+        for head in [format!("Content-Length: {}\r\n", body.len()), String::new()] {
+            let (url, server) = http_fixture(vec![format!(
+                "HTTP/1.1 200 OK\r\n{head}Connection: close\r\n\r\n{body}"
+            )])
+            .await;
+            let result = verify_sha256(&path, &url, "9.9.9").await;
+            assert_eq!(server.await.unwrap().len(), 1);
+            assert!(
+                result.is_err(),
+                "a checksum response must be bounded before allocation/parse"
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
     async fn http_fixture(
         responses: Vec<String>,

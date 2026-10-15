@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Raspberry Pi OS trixie arm64 agent sessions automatically use a scoped incognito compatibility path for the Chromium network-service hang reported in #45. Other hosts retain persistent profiles; explicit profile overrides and real/external browsers retain their mode. `BLADE_INCOGNITO=auto|0|1` provides an override, with the storage tradeoff disclosed at launch and in `doctor`.
+- Incognito tabs stay in one managed browser context. Browser-wide cookie snapshots and readback use that same context, preserving login restart, explicit logout and named-session restoration instead of silently reading the regular profile's cookie jar.
+- CDP event waits subscribe before the triggering command, so an event arriving before its response cannot disappear. Navigation preserves scheme, fragment and significant trailing paths; hash-router transitions execute instead of reporting false "already here", and do not wait for a full-document event.
+- Browser discovery rejects directories, non-executable files and invalid explicit `CHROME_PATH` overrides. Doctor shares the launcher's discovery, bounds the version probe, returns nonzero on failed checks and reports unmeasured disk space honestly.
+- Updater checksum responses are bounded during reads, including responses without Content-Length. Binary validation verifies the actual file size and reads only its header; SHA256 hashing streams the file instead of allocating a second complete binary.
+- Downloaded-binary startup verification has a five-second deadline, bounds stdout/stderr, reaps failed probes and disables network update checks in the verification child. A wedged candidate fails before installation.
+- Chrome startup logging refuses symlink/FIFO sinks before truncating and reads only the last 4 KiB on failure. A planted log symlink can no longer erase an unrelated file, and large logs do not require an unbounded read.
+
+### Changed
+- Update rustls to 0.23.46 for RUSTSEC-2026-0346–0349; no advisory exceptions added.
+- Update Tokio to 1.53.2, serde_json to 1.0.152 and CI's setup-node action to v7 (Dependabot #42–#44).
+
+### Added
+- Owned-browser regression coverage for setup errors, navigation identity, both incognito entry points, tab/storage continuity, login restart/logout, and WebSocket/pipe MCP sessions.
+
 ## [4.6.1] - 2026-10-14
 
 ### Changed

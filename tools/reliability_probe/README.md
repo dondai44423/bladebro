@@ -22,3 +22,12 @@ reject release binaries whose required glibc symbol versions exceed 2.28.
 
 Run `python3 tools/reliability_probe/profile-permissions.py` on Unix for
 actual MCP refusal of writable/symlinked fresh profiles and safe private reuse.
+
+Run `python3 tools/reliability_probe/browser-setup.py` for owned-browser setup
+and navigation checks: normal and incognito profiles, Chrome-flag compatibility,
+hash routes, significant paths, one-dispatch mutations, shared tab contexts,
+cookie persistence/logout, named storage restoration, doctor failures, and fresh
+MCP sessions on both transports. It uses a temporary HTTP server and homes.
+The Raspberry Pi OS host selector is tested separately with positive and
+negative OS/architecture/device-tree fixtures; this suite does not claim a
+physical Raspberry Pi runtime test.

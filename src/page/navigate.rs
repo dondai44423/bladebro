@@ -99,9 +99,20 @@ impl Page {
         } else {
             Duration::from_secs(10)
         };
-        let nav_event = tokio::time::timeout(grace, wait).await;
+        if nav_res.get("isDownload").and_then(Value::as_bool) == Some(true) {
+            return Err(BladeError::Other(format!("navigation to {target} started a download — use act download url=... to retrieve the file")));
+        }
+        // CDP omits loaderId for same-document navigations; those emit
+        // navigatedWithinDocument, never frameNavigated. Waiting for the
+        // latter adds ten seconds to every hash-router transition.
+        let same_document = nav_error.is_none() && nav_res.get("loaderId").is_none();
+        let nav_event = if same_document {
+            None
+        } else {
+            Some(tokio::time::timeout(grace, wait).await)
+        };
         _t("frameNavigated");
-        if nav_event.is_err() {
+        if matches!(nav_event, Some(result) if !matches!(result, Ok(Ok(_)))) {
             if let Some(err) = nav_error {
                 let hint = if err.contains("ERR_ABORTED") {
                     " (the URL may be a file download - try act download url=...)"
@@ -658,15 +669,17 @@ pub(crate) fn with_scheme(url: &str) -> String {
     let u = url.trim();
     if u.is_empty()
         || u.contains("://")
-        || u.starts_with("about:")
-        || u.starts_with("file:")
-        || u.starts_with("data:")
-        || u.starts_with("blob:")
-        || u.starts_with("javascript:")
+        || scheme_prefix(u).is_some_and(|s| {
+            matches!(
+                s.to_ascii_lowercase().as_str(),
+                "about" | "file" | "data" | "blob" | "javascript"
+            )
+        })
     {
         return u.to_string();
     }
-    let host = u.split('/').next().unwrap_or(u);
+    let parsed = url::Url::parse(&format!("http://{u}")).ok();
+    let host = parsed.as_ref().and_then(|url| url.host_str()).unwrap_or("");
     // localhost, loopback/private IPs, or an explicit port (dev-server
     // signal) default to http://; public hosts to https://.
     let is_local = host.eq_ignore_ascii_case("localhost")
@@ -677,6 +690,10 @@ pub(crate) fn with_scheme(url: &str) -> String {
                 std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
             })
             .unwrap_or(false)
+        || u.split(['/', '?', '#'])
+            .next()
+            .and_then(|authority| authority.rsplit_once(':'))
+            .is_some_and(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
         || host.contains(':');
     if is_local {
         format!("http://{u}")
@@ -857,24 +874,14 @@ fn nav_params_note(requested: &str, final_url: &str) -> Option<String> {
     ))
 }
 
-/// Normalize a URL for comparison: strip scheme, fragment, trailing slash.
-fn normalize_url(url: &str) -> String {
-    let (s, https) = url
-        .strip_prefix("https://")
-        .map(|s| (s, true))
-        .or_else(|| url.strip_prefix("http://").map(|s| (s, false)))
-        .unwrap_or((url, false));
-    let s = s.split('#').next().unwrap_or(s);
-    // Strip default ports: :443 on https, :80 on http (host part only).
-    let default_port = if https { ":443" } else { ":80" };
-    let s = if let Some(slash) = s.find('/') {
-        let (host, path) = s.split_at(slash);
-        let host = host.strip_suffix(default_port).unwrap_or(host);
-        format!("{host}{path}")
-    } else {
-        s.strip_suffix(default_port).unwrap_or(s).to_string()
-    };
-    s.strip_suffix('/').unwrap_or(&s).to_string()
+/// Canonical comparison preserves the origin, fragment and significant path.
+/// Only URL-standard equivalences (host case, default ports, root slash) may
+/// suppress a navigation; hash routers and /x versus /x/ are different pages.
+fn normalize_url(value: &str) -> String {
+    let value = with_scheme(value);
+    url::Url::parse(&value)
+        .map(|url| url.to_string())
+        .unwrap_or(value)
 }
 
 #[cfg(test)]
@@ -940,17 +947,46 @@ mod tests {
     }
 
     #[test]
-    fn normalize_url_strips_scheme_fragment_and_default_port() {
-        assert_eq!(normalize_url("https://example.com/"), "example.com");
+    fn navigation_identity_preserves_origin_hash_and_path() {
         assert_eq!(
-            normalize_url("https://example.com:443/x#frag"),
-            "example.com/x"
+            normalize_url("https://EXAMPLE.com:443"),
+            "https://example.com/"
         );
-        assert_eq!(normalize_url("http://example.com:80"), "example.com");
+        assert_eq!(normalize_url("example.com"), "https://example.com/");
         assert_eq!(
-            normalize_url("http://example.com:8080/x/"),
-            "example.com:8080/x"
+            normalize_url("http://example.com:80"),
+            "http://example.com/"
         );
+        for (a, b) in [
+            ("http://example.com/", "https://example.com/"),
+            ("https://example.com/#old", "https://example.com/#new"),
+            ("https://example.com/x", "https://example.com/x/"),
+            ("https://example.com/?q=1", "https://example.com/?q=2"),
+            ("http://example.com:8080/", "http://example.com:8081/"),
+        ] {
+            assert_ne!(
+                normalize_url(a),
+                normalize_url(b),
+                "{a} and {b} must navigate"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_local_urls_keep_http_with_queries_and_fragments() {
+        use super::with_scheme;
+        for u in [
+            "localhost?x=1",
+            "localhost#view",
+            "127.0.0.1?x=1",
+            "localhost:80/x",
+            "example.com:80/x",
+        ] {
+            assert_eq!(with_scheme(u), format!("http://{u}"));
+        }
+        assert_eq!(with_scheme("DATA:text/html,hello"), "DATA:text/html,hello");
+        assert_eq!(with_scheme("ABOUT:blank"), "ABOUT:blank");
+        assert_eq!(with_scheme("example.com?x=1"), "https://example.com?x=1");
     }
 
     /// R1: the scheme gate. The rejected set is exactly the class that used

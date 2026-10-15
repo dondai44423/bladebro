@@ -177,7 +177,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             if res.get("success").and_then(Value::as_bool) == Some(false) {
                 return Err(BladeError::Other(format!("Chrome rejected cookie {name:?}; check its URL, domain and security attributes")));
             }
-            let stored = cdp.send("Storage.getCookies", None).await?;
+            let stored = cdp.cookie_store().await?;
             let expected_domain = if let Some(u) = url {
                 url::Url::parse(u)
                     .ok()
@@ -439,7 +439,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                     )));
                 }
             }
-            let restored = cdp.send("Storage.getCookies", None).await?;
+            let restored = cdp.cookie_store().await?;
             let all = restored
                 .get("cookies")
                 .and_then(Value::as_array)

@@ -136,7 +136,7 @@ async fn update(args: &[String]) -> Result<()> {
     ui::info("Binary verified (magic + size)");
 
     // Try executing the binary to confirm it runs.
-    match download::verify_binary_runs(&binary_path) {
+    match download::verify_binary_runs(&binary_path).await {
         Ok(()) => ui::info("Binary starts: confirmed"),
         Err(e) => {
             download::cleanup_tmp(&binary_path.path);

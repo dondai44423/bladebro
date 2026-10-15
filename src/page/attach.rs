@@ -13,10 +13,32 @@ impl Page {
     /// `browser_client` is the browser-level connection in pipe mode (S1) —
     /// used for tab listing since pipe mode has no HTTP debug endpoint.
     pub async fn attach(
-        cdp: CdpSession,
+        mut cdp: CdpSession,
         base: &str,
         browser_client: Option<CdpClient>,
     ) -> Result<Self> {
+        if crate::browser::launched_incognito() && !crate::realbrowser::real_lane() {
+            let info = cdp.send("Target.getTargetInfo", None).await?;
+            let context = info["targetInfo"]["browserContextId"]
+                .as_str()
+                .ok_or_else(|| {
+                    BladeError::Other(
+                        "incognito compatibility: target has no browser context".into(),
+                    )
+                })?
+                .to_string();
+            let browser = match &browser_client {
+                Some(client) => client.clone(),
+                None => {
+                    let version = crate::cdp::version(base).await?;
+                    let ws = version.web_socket_debugger_url.ok_or_else(|| {
+                        BladeError::Other("Chrome returned no browser WebSocket URL".into())
+                    })?;
+                    CdpClient::connect(&ws).await?
+                }
+            };
+            cdp.set_cookie_context(browser, context);
+        }
         #[allow(unused_assignments)]
         let mut worker_task: Option<tokio::task::JoinHandle<()>> = None;
         cdp.enable("Page").await?;

@@ -97,7 +97,7 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
     }
     // Page-scoped Network.getCookies omits other sites; Storage reads the
     // browser-wide store, even before the first origin loads.
-    let res = cdp.send("Storage.getCookies", None).await?;
+    let res = cdp.cookie_store().await?;
     let arr = res
         .get("cookies")
         .and_then(Value::as_array)
@@ -224,7 +224,7 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
             "{rejected}/{total} saved cookies were rejected; login sidecar preserved"
         )));
     }
-    let store = cdp.send("Storage.getCookies", None).await?;
+    let store = cdp.cookie_store().await?;
     let restored = store
         .get("cookies")
         .and_then(Value::as_array)
