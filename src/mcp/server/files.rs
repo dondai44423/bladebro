@@ -374,31 +374,40 @@ pub async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
                 // Chrome may still download it if the server returns
                 // Content-Disposition: attachment. The correlated wait
                 // tells a real download from a viewer tab.
-                let create_res = page
-                    .cdp_ref()
-                    .send(
-                        "Target.createTarget",
-                        Some(serde_json::json!({
-                            "url": url,
-                        })),
+                // Attach before navigating: download events belong to the
+                // initiating page, not the caller's original page. A blank
+                // target also keeps the request in the caller's cookie context.
+                let new_id = page.open_tab_target("about:blank").await?;
+                let waited = async {
+                    let download_page = page.attach_tab_target(&new_id).await?;
+                    let downloads = download_page.downloads();
+                    download_page
+                        .cdp_ref()
+                        .send("Page.navigate", Some(json!({"url": url})))
+                        .await?;
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                    wait_for_download(
+                        &downloads,
+                        &[],
+                        expected.as_deref(),
+                        deadline,
+                        None,
+                        timeout_secs,
                     )
-                    .await?;
-                let new_id = create_res
-                    .get("targetId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        crate::error::BladeError::Other("no targetId for download tab".into())
-                    })?;
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-                let waited = wait_for_download(
-                    &downloads,
-                    &seen,
-                    expected.as_deref(),
-                    deadline,
-                    None,
-                    timeout_secs,
-                )
+                    .await
+                    .map_err(|error| {
+                        if error.starts_with("no completed download") {
+                            BladeError::Other(format!(
+                                "{error} The cross-origin fallback did not produce a completed attachment. \
+                                 The server may serve content inline or require a different login. \
+                                 Navigate to the page linking to the file and click its download link."
+                            ))
+                        } else {
+                            BladeError::Other(error)
+                        }
+                    })
+                }
                 .await;
                 // Close the download tab regardless of outcome.
                 let _ = page
@@ -410,18 +419,7 @@ pub async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
                         })),
                     )
                     .await;
-                return match waited {
-                    Ok(d) => Ok(describe_download(&d)),
-                    Err(e) if e.starts_with("download canceled") => {
-                        Err(crate::error::BladeError::Other(e))
-                    }
-                    Err(_) => Err(crate::error::BladeError::Other(
-                        "URL is CORS-protected and Chrome opened it in the viewer instead of downloading.\n\
-                         The URL serves content inline (e.g. PDF, HTML) without Content-Disposition: attachment.\n\
-                         Workaround: navigate to the page that links to this file, then click the download link:\n\
-                         act navigate url=... ; act click text=\"Download\" ; act download".to_string(),
-                    )),
-                };
+                return waited.map(|download| describe_download(&download));
             }
             return Err(crate::error::BladeError::Other(format!(
                 "download failed: {err}"

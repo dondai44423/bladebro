@@ -96,6 +96,14 @@ jobs:
           node tools/dsh_probe/run.mjs
           node tools/dsh_probe/run.mjs
 
+      - name: Authenticated cross-origin downloads — native browser
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
+          python tools/reliability_probe/download.py
+          python tools/reliability_probe/download.py
+
       # 4.6.1: real runtime stealth validation on every OS — the built binary
       # drives its own vectors page through a real browser and exits non-zero
       # on any FAIL (the audit is a gate since 4.6.1). Kills the class of
