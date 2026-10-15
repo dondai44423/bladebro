@@ -23,11 +23,11 @@ import sys
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / "target" / "release" / "bladebro"
+BIN = Path(os.environ.get("BLADEBRO", str(ROOT / "target" / "release" / "bladebro")))
 
 RUN = sys.argv[1] if len(sys.argv) > 1 else "1"
 HOME = Path(tempfile.mkdtemp(prefix=f"blade-gap44-{RUN}-"))
@@ -74,7 +74,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
         pass
 
 
-server = HTTPServer(("127.0.0.1", 0), FixtureHandler)
+# Chrome can preconnect and leave a socket idle before sending request bytes.
+# A single-threaded HTTPServer then stops serving the PDF fetch behind that
+# socket, manufacturing a CDP timeout. Keep fixture requests independent.
+server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
 PORT = server.server_address[1]
 threading.Thread(target=server.serve_forever, daemon=True).start()
 BASE = f"http://127.0.0.1:{PORT}"

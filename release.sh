@@ -61,6 +61,11 @@ for command in cargo cargo-zigbuild zig git gh npm python3 sha256sum objdump car
 done
 [[ $(git branch --show-current) == main ]] || { echo "ERROR: release from main" >&2; exit 1; }
 [[ -z $(git status --porcelain) ]] || { echo "ERROR: commit tracked changes before releasing" >&2; exit 1; }
+if [[ -n "${BLADE_RELEASE_VERIFY:-}" ]]; then
+    [[ "$BLADE_RELEASE_VERIFY" == /* && -f "$BLADE_RELEASE_VERIFY" && -x "$BLADE_RELEASE_VERIFY" ]] || {
+        echo "ERROR: BLADE_RELEASE_VERIFY must be an absolute executable file" >&2; exit 1;
+    }
+fi
 if git rev-parse --verify "refs/tags/v$VERSION" >/dev/null 2>&1; then
     echo "ERROR: tag v$VERSION already exists" >&2; exit 1
 fi
@@ -205,6 +210,25 @@ if [[ -z "$RUN_ID" ]]; then
 fi
 [[ -n "$RUN_ID" ]] || { echo "ERROR: no native CI run for $RELEASE_SHA" >&2; exit 1; }
 gh run watch "$RUN_ID" --exit-status
+
+# Optional additional candidate verification: run against the exact clean
+# version/build after native CI, BEFORE any public tag or package. The hook
+# may test artifacts but cannot silently replace them or advance the source.
+if [[ -n "${BLADE_RELEASE_VERIFY:-}" ]]; then
+    verify_artifacts=(target/release/bladebro
+        target/x86_64-pc-windows-gnu/release/bladebro.exe
+        target/x86_64-apple-darwin/release/bladebro
+        target/aarch64-apple-darwin/release/bladebro
+        target/aarch64-unknown-linux-gnu/release/bladebro)
+    frozen_hashes=$(sha256sum "${verify_artifacts[@]}")
+    "$BLADE_RELEASE_VERIFY" "$VERSION" "$RELEASE_SHA"
+    [[ $(git rev-parse HEAD) == "$RELEASE_SHA" && -z $(git status --porcelain) ]] || {
+        echo "ERROR: candidate verification changed the release source" >&2; exit 1;
+    }
+    [[ $(sha256sum "${verify_artifacts[@]}") == "$frozen_hashes" ]] || {
+        echo "ERROR: candidate verification changed a release artifact" >&2; exit 1;
+    }
+fi
 check_release_security
 git tag -a "v$VERSION" -m "v$VERSION"
 git push origin "v$VERSION"

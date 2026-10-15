@@ -14,7 +14,7 @@ pub(super) fn find_xvfb() -> Option<String> {
         "/opt/Xvfb/bin/Xvfb",
     ];
     for path in candidates {
-        if std::path::Path::new(path).exists() {
+        if is_executable(std::path::Path::new(path)) {
             return Some(path.to_string());
         }
     }
@@ -23,11 +23,12 @@ pub(super) fn find_xvfb() -> Option<String> {
 }
 
 /// Find the Chrome/Chromium binary on this system.
-pub(super) fn find_chrome() -> Result<String> {
+pub(crate) fn find_chrome() -> Result<String> {
     if let Ok(path) = std::env::var("CHROME_PATH") {
-        if std::path::Path::new(&path).exists() {
+        if is_executable(std::path::Path::new(&path)) {
             return Ok(path);
         }
+        return Err(BladeError::Other("CHROME_PATH is not an executable file; set it to the Chrome/Chromium binary or unset it for automatic discovery".into()));
     }
 
     let names = if cfg!(target_os = "macos") {
@@ -55,7 +56,7 @@ pub(super) fn find_chrome() -> Result<String> {
 
     let paths = common_paths();
     for path in &paths {
-        if std::path::Path::new(path).exists() {
+        if is_executable(std::path::Path::new(path)) {
             return Ok(path.to_string());
         }
     }
@@ -64,7 +65,7 @@ pub(super) fn find_chrome() -> Result<String> {
     #[cfg(target_os = "windows")]
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         let p = format!("{local}\\Google\\Chrome\\Application\\chrome.exe");
-        if std::path::Path::new(&p).exists() {
+        if is_executable(std::path::Path::new(&p)) {
             return Ok(p);
         }
     }
@@ -133,7 +134,7 @@ pub(super) fn find_in_path(cmd: &str) -> Option<String> {
 }
 
 fn is_executable(path: &std::path::Path) -> bool {
-    if !path.exists() {
+    if !path.is_file() {
         return false;
     }
     #[cfg(unix)]
@@ -208,7 +209,7 @@ fn find_via_nix_shell() -> Option<String> {
     }
 
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !path.is_empty() && std::path::Path::new(&path).exists() {
+    if !path.is_empty() && is_executable(std::path::Path::new(&path)) {
         Some(path)
     } else {
         None
@@ -382,4 +383,30 @@ pub(crate) fn endpoint_owned_by_pid(_port: u16, _pid: u32) -> bool {
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn endpoint_owned_by_own_browser(_port: u16) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_candidates_reject_directories_and_non_executable_files() {
+        let root = std::env::temp_dir().join(format!("blade-discover-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(
+            !is_executable(&root),
+            "a searchable directory is not a browser executable"
+        );
+        let file = root.join("chrome");
+        std::fs::write(&file, b"fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(!is_executable(&file));
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(is_executable(&file));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

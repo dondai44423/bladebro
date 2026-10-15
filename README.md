@@ -630,11 +630,14 @@ Everything optional; configuration is environment variables.
 | `BLADE_IDLE_TIMEOUT` | `600` | Daemon idle time before Chrome shuts down, seconds |
 | `BLADE_TRANSPORT` | ws | MCP transport: WebSocket by default (native `webdriver=false`); `pipe` opts into the zero-port pipe (its automation flag is masked) |
 | `BLADE_CHROME_FLAGS` | none | Extra Chrome launch flags |
+| `BLADE_INCOGNITO` | `auto` | Agent lane only: `1` uses incognito compatibility, `0` disables automatic compatibility; restart the client/daemon after changing |
 | `BLADE_LANE` | auto | `real` forces the real-browser lane for this process (same as `rb on`) |
 | `BLADE_RB_DEBUG` | — | `1` surfaces the browser's own stderr on real-lane launches |
 | `BLADE_PLAIN` | — | `1` renders CLI output plain — no ANSI even on a terminal (same: `NO_COLOR`; override: `CLICOLOR_FORCE=1`) |
 
-Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME/.local/state/blade` → `$HOME/.blade` (legacy). Existing installs keep their tree — nothing is ever split across two directories. Windows: `%USERPROFILE%\.blade` (plus `BLADE_HOME`). `bladebro doctor` prints the resolved data root.
+Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME/.local/state/blade` → `$HOME/.blade` (legacy). Existing installs keep their tree — nothing is ever split across two directories. Windows: `%USERPROFILE%\.blade` (plus `BLADE_HOME`). `bladebro doctor` prints the resolved data root and exits nonzero when a required check fails. An explicit `CHROME_PATH` must point to an executable file; invalid overrides report an error instead of silently launching another browser.
+
+**Raspberry Pi OS trixie (arm64):** issue [#45](https://github.com/dondai44423/bladebro/issues/45) reports Chromium's regular-profile network service hanging even on loopback. On a detected Raspberry Pi running Debian/Raspbian trixie, the agent lane automatically uses one managed incognito context. Other hosts keep their persistent profile, and an explicit `BLADE_PROFILE_DIR` keeps its chosen mode. Set `BLADE_INCOGNITO=1` to request this compatibility path elsewhere, or `0` to disable automatic selection. The real-browser and external-attach lanes keep their existing behavior. Incognito cookies still persist through Bladebro's login snapshot; named `state save`/`load` sessions restore cookies and storage. History, cache and automatic localStorage persistence are unavailable in this mode; launch diagnostics and `doctor` disclose that tradeoff. The reporter verified the Pi workaround; the release regression suite exercises the context, tabs, HTTP navigation and persistence contracts on Linux x64.
 
 ## 🔄 Maintenance
 

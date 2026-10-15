@@ -24,6 +24,7 @@ use crate::error::{BladeError, Result};
 use crate::platform;
 
 mod alerts;
+mod compat;
 mod discover;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod display;
@@ -36,7 +37,9 @@ pub mod proxy;
 pub use self::alerts::{
     pending_notes, reset_gl_alert, set_stealth_inject_failed, set_ua_override_failed,
 };
+pub(crate) use self::compat::{incognito_policy, launched_incognito};
 pub(crate) use self::discover::endpoint_owned_by_own_browser;
+pub(crate) use self::discover::find_chrome;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use self::display::VirtualDisplay;
 pub use self::flags::{

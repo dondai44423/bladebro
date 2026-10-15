@@ -119,6 +119,7 @@ impl Browser {
         use tokio::net::unix::pipe;
 
         let chrome_path = find_chrome()?;
+        let extra = super::compat::agent_extra_flags()?;
         let profile = crate::session_profile::SessionProfile::create()?;
         let user_data_dir = profile.dir().to_path_buf();
         font_audit();
@@ -156,9 +157,6 @@ impl Browser {
         }
         // Power-user escape hatch (same as the WS path — this used to be
         // WS-only, another quiet lane divergence).
-        let extra: Vec<String> = std::env::var("BLADE_CHROME_FLAGS")
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default();
         set_launched_pipe(true);
         let args = launch_args(&LaunchCfg {
             stage,
@@ -254,6 +252,11 @@ impl Browser {
                         .and_then(|p| p.as_str())
                         .unwrap_or("unknown");
                     eprintln!("[bladebro] Chrome ready: {product} (pipe transport)");
+                    if let Err(error) = super::compat::prepare_incognito(&client).await {
+                        platform::shutdown_child(&mut child);
+                        profile.cleanup();
+                        return Err(error);
+                    }
                     let probe = probe_gl_pipe(&client).await;
                     return Ok((
                         Self {

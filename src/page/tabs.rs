@@ -161,10 +161,12 @@ impl Page {
         // reads "localhost:" as the scheme — leaving a stuck about:blank tab
         // whose screenshot then burns its full CDP timeout (reproduced live).
         let url = with_scheme(url);
+        let mut params = json!({"url":url.as_str()});
+        if let Some(id) = self.cdp.browser_context_id() {
+            params["browserContextId"] = json!(id);
+        }
         if let Some(bc) = &self.browser_client {
-            let res = bc
-                .send("Target.createTarget", Some(json!({ "url": url.as_str() })))
-                .await?;
+            let res = bc.send("Target.createTarget", Some(params)).await?;
             return res
                 .get("targetId")
                 .and_then(|v| v.as_str())
@@ -177,9 +179,7 @@ impl Page {
             .web_socket_debugger_url
             .ok_or_else(|| BladeError::Other("browser has no webSocketDebuggerUrl".into()))?;
         let client = CdpClient::connect(&ws).await?;
-        let res = client
-            .send("Target.createTarget", Some(json!({ "url": url.as_str() })))
-            .await?;
+        let res = client.send("Target.createTarget", Some(params)).await?;
         res.get("targetId")
             .and_then(|v| v.as_str())
             .map(String::from)

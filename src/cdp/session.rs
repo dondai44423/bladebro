@@ -26,6 +26,7 @@ use crate::error::Result;
 pub struct CdpSession {
     client: CdpClient,
     session_id: Option<String>,
+    cookie_context: Option<(CdpClient, String)>,
 }
 
 impl CdpSession {
@@ -35,6 +36,7 @@ impl CdpSession {
         Self {
             client,
             session_id: None,
+            cookie_context: None,
         }
     }
 
@@ -43,6 +45,7 @@ impl CdpSession {
         Self {
             client,
             session_id: Some(session_id.into()),
+            cookie_context: None,
         }
     }
 
@@ -59,6 +62,29 @@ impl CdpSession {
     /// This session's id, if it is a child session.
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    pub(crate) fn set_cookie_context(&mut self, browser: CdpClient, context: String) {
+        self.cookie_context = Some((browser, context));
+    }
+
+    pub(crate) fn browser_context_id(&self) -> Option<&str> {
+        self.cookie_context.as_ref().map(|(_, id)| id.as_str())
+    }
+
+    /// Storage's default is the regular browser profile, even on an OTR page.
+    /// Only a browser-level command accepts browserContextId.
+    pub(crate) async fn cookie_store(&self) -> Result<Value> {
+        if let Some((browser, context)) = &self.cookie_context {
+            browser
+                .send(
+                    "Storage.getCookies",
+                    Some(serde_json::json!({"browserContextId":context})),
+                )
+                .await
+        } else {
+            self.send("Storage.getCookies", None).await
+        }
     }
 
     /// Send a command with the default timeout.
@@ -105,22 +131,29 @@ impl CdpSession {
     }
 
     /// Wait for the next event on this session whose method equals `method`.
-    pub async fn wait_for(&self, method: &str, deadline: Duration) -> Result<CdpEvent> {
+    pub fn wait_for(
+        &self,
+        method: &str,
+        deadline: Duration,
+    ) -> impl std::future::Future<Output = Result<CdpEvent>> {
         let mut sub = self.subscribe();
-        tokio::time::timeout(deadline, async {
-            loop {
-                match sub.recv().await {
-                    Ok(ev) if ev.method == method => return Ok(ev),
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Err(crate::error::BladeError::Closed)
+        let method = method.to_string();
+        async move {
+            tokio::time::timeout(deadline, async {
+                loop {
+                    match sub.recv().await {
+                        Ok(ev) if ev.method == method => return Ok(ev),
+                        Ok(_) => continue,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(crate::error::BladeError::Closed)
+                        }
                     }
                 }
-            }
-        })
-        .await
-        .map_err(|_| crate::error::BladeError::Timeout(deadline))?
+            })
+            .await
+            .map_err(|_| crate::error::BladeError::Timeout(deadline))?
+        }
     }
 }
 

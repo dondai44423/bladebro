@@ -132,6 +132,7 @@ impl Browser {
         let timing = std::env::var("NAV_TIMING").is_ok();
         let t0 = std::time::Instant::now();
         let chrome_path = find_chrome()?;
+        let extra = super::compat::agent_extra_flags()?;
         let profile = crate::session_profile::SessionProfile::create()?;
         if timing {
             eprintln!("[launch-timing] profile: {:?}", t0.elapsed());
@@ -182,9 +183,6 @@ impl Browser {
         // Power-user escape hatch: append raw Chrome flags. Useful for
         // diagnosing GL/WebGL backend issues on odd displays and for
         // users who need a specific Chromium switch. Whitespace-split.
-        let extra: Vec<String> = std::env::var("BLADE_CHROME_FLAGS")
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default();
         let args = launch_args(&LaunchCfg {
             stage,
             headful,
@@ -271,6 +269,21 @@ impl Browser {
                     if timing {
                         eprintln!("[launch-timing] chrome-ready: {:?}", t0.elapsed());
                     }
+                    if super::compat::launched_incognito() {
+                        let prepared = async {
+                            let ws = v.web_socket_debugger_url.as_deref().ok_or_else(|| {
+                                BladeError::Other("Chrome returned no browser WebSocket URL".into())
+                            })?;
+                            let client = crate::cdp::CdpClient::connect(ws).await?;
+                            super::compat::prepare_incognito(&client).await
+                        }
+                        .await;
+                        if let Err(error) = prepared {
+                            platform::shutdown_child(&mut child);
+                            profile.cleanup();
+                            return Err(error);
+                        }
+                    }
                     let probe = probe_gl_ws(&base).await;
                     if timing {
                         eprintln!("[launch-timing] healthcheck: {:?}", t0.elapsed());
@@ -331,6 +344,7 @@ impl Browser {
         visible: bool,
         profile_directory: Option<&str>,
     ) -> Result<Self> {
+        super::compat::clear_incognito();
         #[cfg(windows)]
         platform::guard_browser_process_tree()?;
         let user_data_dir = profile.dir().to_path_buf();
@@ -694,14 +708,39 @@ pub(super) fn font_audit() {
 pub(super) fn chrome_stderr_sink() -> Option<std::fs::File> {
     let dir = crate::platform::blade_dir().join("logs");
     crate::platform::secure_create_dir_all(&dir).ok()?;
+    open_chrome_stderr(&dir.join("chrome-last-launch.log"))
+}
+
+fn open_chrome_stderr(path: &std::path::Path) -> Option<std::fs::File> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return None;
+    }
     let mut opts = std::fs::OpenOptions::new();
-    opts.create(true).write(true).truncate(true);
+    opts.create(true).write(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        opts.mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    opts.open(dir.join("chrome-last-launch.log")).ok()
+    let file = opts.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return None;
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .ok()?;
+    }
+    // Validate the opened object before truncating: a planted symlink must
+    // never erase an unrelated file, and a FIFO must never wedge startup.
+    file.set_len(0).ok()?;
+    Some(file)
 }
 
 /// Tail of the last launch's Chrome stderr ("" when nothing was captured).
@@ -709,13 +748,69 @@ pub(super) fn chrome_stderr_tail() -> String {
     let path = crate::platform::blade_dir()
         .join("logs")
         .join("chrome-last-launch.log");
-    let Ok(data) = std::fs::read(&path) else {
-        return String::new();
-    };
-    if data.is_empty() {
-        return String::new();
+    read_chrome_stderr_tail(&path).unwrap_or_default()
+}
+
+fn read_chrome_stderr_tail(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return None;
     }
-    let start = data.len().saturating_sub(4096);
-    let tail = String::from_utf8_lossy(&data[start..]);
-    format!("\n--- chrome stderr (tail of last launch) ---\n{tail}")
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = opts.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    file.seek(SeekFrom::Start(metadata.len().saturating_sub(4096)))
+        .ok()?;
+    let mut data = Vec::new();
+    file.take(4096).read_to_end(&mut data).ok()?;
+    if data.is_empty() {
+        return Some(String::new());
+    }
+    let tail = String::from_utf8_lossy(&data);
+    Some(format!(
+        "\n--- chrome stderr (tail of last launch) ---\n{tail}"
+    ))
+}
+
+#[cfg(test)]
+mod stderr_tests {
+    use super::*;
+
+    #[test]
+    fn stderr_tail_is_bounded_and_sink_is_private() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("blade-stderr-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("launch.log");
+        let mut file = open_chrome_stderr(&path).unwrap();
+        file.write_all(&vec![b'x'; 8192]).unwrap();
+        file.write_all(b"LAST-LINE").unwrap();
+        drop(file);
+        let tail = read_chrome_stderr_tail(&path).unwrap();
+        assert!(tail.ends_with("LAST-LINE"));
+        assert!(tail.len() < 4200);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let link = root.join("link.log");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(open_chrome_stderr(&link).is_none());
+            assert!(read_chrome_stderr_tail(&link).is_none());
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 8201);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
