@@ -17,4 +17,7 @@ python3 tools/gap44/probe.py 2
 Each run prints one line per check (`[ok ]` / `[FAIL]`) and writes
 `receipts.json` under its scratch home. Exit 0 means every check passed;
 an internal probe exception fails the run loudly (it never silently drops
-checks). Uses the release binary at `target/release/bladebro`.
+checks). Uses `BLADEBRO` when set, otherwise the release binary at
+`target/release/bladebro`. The HTTP fixture handles connections concurrently:
+Chrome's idle preconnect socket must not block the subsequent PDF fetch and
+manufacture a browser timeout.
