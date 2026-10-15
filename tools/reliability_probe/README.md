@@ -12,10 +12,14 @@ tool definitions, clean shutdown on stdin EOF, and a visible reason when the
 binary is missing.
 Run `python3 tools/reliability_probe/release-preflight.py` for copied-file
 release guards; fake publishers prove the refusal paths without a real publish.
-The ten cases include exact-commit CI dispatch, branch-advance and failed-CI
+The sixteen cases include exact-commit CI dispatch, branch-advance and failed-CI
 refusals, plus security-alert and locked-advisory refusals before
 version changes. Release hosts require cargo-deny; run
 `cargo deny --locked check advisories` against the actual dependency graph.
+`BLADE_RELEASE_VERIFY=/absolute/executable` adds a candidate check after native
+CI and before any public tag/package. It receives the version and exact commit;
+failure, source mutation or replacement of any platform artifact aborts the
+release. The security gate is refreshed after this additional verification.
 
 Run `python3 tools/reliability_probe/linux-abi.py <linux-binary> ...` to
 reject release binaries whose required glibc symbol versions exceed 2.28.

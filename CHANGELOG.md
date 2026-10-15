@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Owned-browser regression coverage for setup errors, navigation identity, both incognito entry points, tab/storage continuity, login restart/logout, and WebSocket/pipe MCP sessions.
+- Release candidates can run an additional verification hook before any tag/package is public. Failure, source changes or replaced platform artifacts abort publication; advisory checks refresh afterward. Six new refusal controls verify this gate without publishing anything.
 
 ## [4.6.1] - 2026-10-14
 

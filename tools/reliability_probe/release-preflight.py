@@ -26,6 +26,7 @@ with tempfile.TemporaryDirectory(prefix='blade-release-test-') as tmp:
     script('uname', 'case "$1" in -s) echo Linux;; -m) echo x86_64;; esac')
     script('cargo', 'if [ "$1" = deny ]; then shift; exec cargo-deny "$@"; fi\nexit 0')
     env = dict(os.environ, PATH=str(commands), BLADE_RELEASE_CAPPED='1')
+    env.pop('BLADE_RELEASE_VERIFY', None)
     before = {name: (root / name).read_bytes() for name in ('Cargo.toml','CHANGELOG.md')}
     result = subprocess.run(['/bin/bash', str(root / 'release.sh'),'4.1.0'], env=env, cwd=root, capture_output=True, text=True)
     # dirname/basename are used before preflight; preserve genuine utilities.
@@ -134,4 +135,31 @@ GH""")
             assert 'no native CI run' in result.stderr
             assert sum('--event' in a and a[a.index('--event')+1]=='workflow_dispatch' for a in calls)==12
         print('PASS release CI gate:',mode)
-    print('RELEASE PREFLIGHT 10/10')
+    # Extra verification must run before publication without being able to
+    # replace a binary or change the source identity. All commands here are
+    # copied fixtures/fakes; no real tag or publish can be reached.
+    hook_start=text.index('# Optional additional candidate verification:')
+    hook_end=text.index('\ncheck_release_security\n',hook_start)
+    hook_gate=root/'candidate-gate.sh'
+    hook_gate.write_text('set -euo pipefail\n'+text[hook_start:hook_end]+'\necho CANDIDATE_GATE_PASSED\n')
+    script('git','case "$1" in rev-parse) echo "$TEST_HOOK_HEAD";; status) echo "$TEST_HOOK_DIRTY";; *) exit 1;; esac')
+    hook=commands/'verify-candidate'
+    env.update(VERSION='4.1.1',TEST_HOOK_HEAD=env['RELEASE_SHA'],TEST_HOOK_DIRTY='',BLADE_RELEASE_VERIFY=str(hook),TEST_HOOK_RECEIPT=str(root/'hook-receipt'))
+    original_artifact=(root/'target/release/bladebro').read_bytes()
+    for mode in ('success','failure','artifact-changed','head-changed','dirty-tree'):
+        (root/'target/release/bladebro').write_bytes(original_artifact)
+        env.update(TEST_HOOK_HEAD='b'*40 if mode=='head-changed' else env['RELEASE_SHA'],TEST_HOOK_DIRTY=' M Cargo.toml' if mode=='dirty-tree' else '')
+        script('verify-candidate','printf "%s\\n%s\\n" "$1" "$2" > "$TEST_HOOK_RECEIPT"\n'+('exit 7' if mode=='failure' else 'echo changed >> target/release/bladebro' if mode=='artifact-changed' else 'exit 0'))
+        result=subprocess.run(['/bin/bash',str(hook_gate)],env=env,cwd=root,capture_output=True,text=True)
+        assert (root/'hook-receipt').read_text().splitlines()==['4.1.1',env['RELEASE_SHA']]
+        assert (result.returncode==0)==(mode=='success'),(mode,result.stdout,result.stderr)
+        assert ('CANDIDATE_GATE_PASSED' in result.stdout)==(mode=='success'),mode
+        print('PASS candidate verification gate:',mode)
+    # Invalid hooks refuse at preflight, before editing version files.
+    env['BLADE_RELEASE_VERIFY']='relative-script'
+    script('git','case "$1" in branch) echo main;; status) exit 0;; rev-parse) exit 1;; *) exit 0;; esac')
+    result=subprocess.run(['/bin/bash',str(root/'release.sh'),'4.1.1'],env=env,cwd=root,capture_output=True,text=True)
+    assert result.returncode!=0 and 'absolute executable file' in result.stderr,result.stderr
+    assert all((root/name).read_bytes()==data for name,data in before.items())
+    print('PASS invalid candidate hook refuses before version mutation')
+    print('RELEASE PREFLIGHT 16/16')
