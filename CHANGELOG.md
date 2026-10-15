@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.2] - 2026-10-15
+
 ### Fixed
 - Raspberry Pi OS trixie arm64 agent sessions automatically use a scoped incognito compatibility path for the Chromium network-service hang reported in #45. Other hosts retain persistent profiles; explicit profile overrides and real/external browsers retain their mode. `BLADE_INCOGNITO=auto|0|1` provides an override, with the storage tradeoff disclosed at launch and in `doctor`.
 - Incognito tabs stay in one managed browser context. Browser-wide cookie snapshots and readback use that same context, preserving login restart, explicit logout and named-session restoration instead of silently reading the regular profile's cookie jar.
@@ -2084,7 +2086,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.1...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.2...HEAD
+[4.6.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.2
 [4.6.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.1
 [4.6.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.0
 [4.5.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.2
