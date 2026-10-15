@@ -8,9 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.2] - 2026-10-15
-
 ### Fixed
+- Authenticated cross-origin downloads keep the active browser context and subscribe to the temporary download tab before navigating. Completed attachments no longer report a false failure; rejected/inline responses fail honestly and close the auxiliary tab while preserving the original page.
 - Raspberry Pi OS trixie arm64 agent sessions automatically use a scoped incognito compatibility path for the Chromium network-service hang reported in #45. Other hosts retain persistent profiles; explicit profile overrides and real/external browsers retain their mode. `BLADE_INCOGNITO=auto|0|1` provides an override, with the storage tradeoff disclosed at launch and in `doctor`.
 - Incognito tabs stay in one managed browser context. Browser-wide cookie snapshots and readback use that same context, preserving login restart, explicit logout and named-session restoration instead of silently reading the regular profile's cookie jar.
 - CDP event waits subscribe before the triggering command, so an event arriving before its response cannot disappear. Navigation preserves scheme, fragment and significant trailing paths; hash-router transitions execute instead of reporting false "already here", and do not wait for a full-document event.
@@ -24,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update Tokio to 1.53.2, serde_json to 1.0.152 and CI's setup-node action to v7 (Dependabot #42–#44).
 
 ### Added
+- Native Linux/macOS/Windows CI verifies authenticated cross-origin downloads twice, including incognito cookies, exact bytes, denied/inline responses, original-page continuity and tab cleanup.
 - Owned-browser regression coverage for setup errors, navigation identity, both incognito entry points, tab/storage continuity, login restart/logout, and WebSocket/pipe MCP sessions.
 - Release candidates can run an additional verification hook before any tag/package is public. Failure, source changes or replaced platform artifacts abort publication; advisory checks refresh afterward. Six new refusal controls verify this gate without publishing anything.
 
@@ -2086,8 +2086,7 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.2...HEAD
-[4.6.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.2
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.1...HEAD
 [4.6.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.1
 [4.6.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.0
 [4.5.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.5.2

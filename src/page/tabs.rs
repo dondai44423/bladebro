@@ -186,16 +186,8 @@ impl Page {
             .ok_or_else(|| BladeError::Other("no targetId from Target.createTarget".into()))
     }
 
-    /// Switch the session to a different tab (target id from
-    /// `state tabs`). The whole page state is rebuilt against the
-    /// new tab: domains re-enabled, stealth re-injected, fresh
-    /// capture. The old tab stays OPEN — this is focus switching,
-    /// not closing. `*self = new_page` drops the old Page, whose
-    /// Drop aborts its background tasks (dialogs/network/hum).
-    pub async fn switch_tab(&mut self, target_id: &str) -> Result<()> {
-        // Attach to the NEW target FIRST. The old code detached
-        // the current session first — if the attach then failed,
-        // the session was detached from everything (bricked).
+    /// Attach an auxiliary tab without detaching or replacing the active page.
+    pub(crate) async fn attach_tab_target(&self, target_id: &str) -> Result<Page> {
         let session = if let Some(client) = &self.browser_client {
             // Pipe mode: flat-session attach via the browser-level client.
             let res = client
@@ -228,6 +220,20 @@ impl Page {
             let client = CdpClient::connect(t.ws_url()?).await?;
             CdpSession::root(client)
         };
+        Page::attach(session, &self.base, self.browser_client.clone()).await
+    }
+
+    /// Switch the session to a different tab (target id from
+    /// `state tabs`). The whole page state is rebuilt against the
+    /// new tab: domains re-enabled, stealth re-injected, fresh
+    /// capture. The old tab stays OPEN — this is focus switching,
+    /// not closing. `*self = new_page` drops the old Page, whose
+    /// Drop aborts its background tasks (dialogs/network/hum).
+    pub async fn switch_tab(&mut self, target_id: &str) -> Result<()> {
+        // Attach to the NEW target FIRST. The old code detached
+        // the current session first — if the attach then failed,
+        // the session was detached from everything (bricked).
+        let new_page = self.attach_tab_target(target_id).await?;
         // New session attached — now detach the OLD one (pipe
         // mode) so only one session stays attached. Failure
         // here is harmless (two sessions attached briefly).
@@ -241,7 +247,6 @@ impl Page {
                     .await;
             }
         }
-        let new_page = Page::attach(session, &self.base, self.browser_client.clone()).await?;
         *self = new_page;
         Ok(())
     }

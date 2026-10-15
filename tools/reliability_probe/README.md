@@ -35,3 +35,9 @@ MCP sessions on both transports. It uses a temporary HTTP server and homes.
 The Raspberry Pi OS host selector is tested separately with positive and
 negative OS/architecture/device-tree fixtures; this suite does not claim a
 physical Raspberry Pi runtime test.
+
+Run `python3 tools/reliability_probe/download.py` for authenticated downloads
+across two local origins. It checks normal/incognito sessions over WebSocket
+and (on Unix) pipe, exact attachment bytes, single fallback requests, rejected
+and inline responses, auxiliary-tab cleanup, and original-page continuity.
+Native Linux/macOS/Windows CI runs this probe twice.
