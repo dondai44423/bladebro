@@ -148,10 +148,25 @@ pub async fn handle_eval(
                 .or_else(|| exc.get("text").and_then(|t| t.as_str()))
                 .unwrap_or("JS evaluation failed")
                 .to_string();
-            // Expression-wrapper SyntaxError = the code was statements, not
-            // an expression. Retry via direct eval.
-            if msg.contains("SyntaxError") && i + 1 < expressions.len() {
-                continue;
+            // A runtime SyntaxError can follow a mutation. Parse the SAME
+            // wrapper inside an uncalled function before choosing the
+            // statement fallback. `void` discards the inert function, so
+            // neither user code nor a remote object survives this check.
+            // compileScript requires Runtime.enable, which leaks automation.
+            if exc.pointer("/exception/className").and_then(|v| v.as_str()) == Some("SyntaxError")
+                && i + 1 < expressions.len()
+            {
+                if let Ok(parsed) = page.cdp_ref().send_with_timeout(
+                    "Runtime.evaluate",
+                    Some(json!({"expression": format!("void function(){{return ({expression});}}"), "returnByValue": true})),
+                    std::time::Duration::from_secs(3),
+                ).await {
+                    if parsed.pointer("/exceptionDetails/exception/className").and_then(|v| v.as_str())
+                        == Some("SyntaxError")
+                    {
+                        continue;
+                    }
+                }
             }
             if msg.contains("EvalError") && msg.contains("unsafe-eval") {
                 return Err(BladeError::Other(
