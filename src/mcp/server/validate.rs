@@ -181,6 +181,17 @@ pub(super) fn see(args: &Value) -> Result<()> {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
+            // Older CLI parsers use this internal sentinel alongside the
+            // real extract field. Preserve that path without accepting typos.
+            if key == "mode"
+                && value == "extract"
+                && args
+                    .get("extract")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| matches!(s, "auto" | "json" | "links" | "forms"))
+            {
+                continue;
+            }
             if !choices.split('|').any(|c| c == value) {
                 return Err(BladeError::Usage(format!(
                     "unknown {key}: {value} (use {choices})"
@@ -221,6 +232,8 @@ mod tests {
         assert!(act(&json!({"action":"click","x":1.5,"y":2})).is_ok());
         assert!(act(&json!({"action":"fill","fields":[{"label":"Agree","check":false}]})).is_ok());
         assert!(see(&json!({"mode":"content","budget":10})).is_ok());
+        assert!(see(&json!({"mode":"extract","extract":"auto"})).is_ok());
+        assert!(see(&json!({"mode":"extract"})).is_err());
         for args in [
             json!({"mode":"typo"}),
             json!({"mode":true}),
