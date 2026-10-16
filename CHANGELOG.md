@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Eval distinguishes expression parse failures from runtime `SyntaxError`s before trying the statement fallback. Code that changed the page and then threw, including `JSON.parse` failures with no stack, executes once.
+- `run` shares ordinary action dispatch with `act`: coordinate clicks, type plus Enter, dialog expectations, scoped reads, validation and recovery hints behave consistently. Element reads retain their text instead of silently cutting it at 200 characters.
+- Form fill reads checkbox/radio/switch state live and verifies the requested state after one click. Impossible radio unchecks, missing field values and malformed arguments fail clearly; malformed text cannot silently clear a field or execute JavaScript.
+- Basic link/form extraction crosses open shadow roots and same-origin frames, handles quoted control IDs and multi-part labels, honors item limits with an explicit omission note, and reports script failures instead of returning a false empty success. Large scans disclose their bounds.
+
+### Performance
+- Composed navigation reuses the shared load/settle/capture path, removing a redundant quiet wait in `run` and explicit batch navigation while retaining late-fetch mount checks.
+
+### Verification
+- New owned-browser MCP regressions run on native Linux, macOS and Windows in normal and incognito modes, covering mutation counts, input readback, action parity, extraction and navigation timing.
+
 ## [4.6.2] - 2026-10-15
 
 ### Fixed

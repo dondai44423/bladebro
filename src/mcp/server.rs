@@ -20,7 +20,8 @@
 //! loop); the protocol verbs — `initialize`, `server/discover`, `tools/list`,
 //! `tools/call` — live in `proto`. Handlers: `act`/`see`/`state`/`run`/
 //! `vision`, with shared pieces in `eval` (JS), `extract` (template/auto/
-//! collect), `files` (pdf/download), and `resolve` (text/selector → ref).
+//! collect), `files` (pdf/download), `resolve` (text/selector → ref), and
+//! `validate` (supplied argument types before any navigation/input).
 
 use serde_json::{json, Value};
 
@@ -35,6 +36,7 @@ mod run;
 mod see;
 mod serve;
 mod state;
+mod validate;
 mod vision;
 
 pub use act::{handle_act, handle_fill};

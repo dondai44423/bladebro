@@ -31,8 +31,9 @@ mod perform;
 mod verdict;
 
 pub use self::find::{
-    find_by_selector, find_by_text, find_label_route, find_miss_diag, locate_text, read_text,
-    LabelRoute, MissDiag, MissExample, SelectorDiag, SelectorLookup, TextLocation, TextMatch,
+    find_by_selector, find_by_text, find_label_route, find_miss_diag, locate_text, read_checked,
+    read_text, LabelRoute, MissDiag, MissExample, SelectorDiag, SelectorLookup, TextLocation,
+    TextMatch,
 };
 pub use self::perform::{perform, perform_with_network, MUT_WATCH};
 #[cfg(test)]

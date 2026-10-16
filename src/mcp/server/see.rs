@@ -48,6 +48,7 @@ fn pdf_read_message(url: &str) -> String {
 }
 
 pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
+    super::validate::see(args)?;
     // NOTE (4.4.0): `see` deliberately does NOT reset the act-loop counter.
     // It used to, which kept the dominant act→see→act→see loop permanently
     // fresh: every post-read act got the full budget and re-sent a delta the
@@ -235,38 +236,12 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
 
     // M12: extract — structured data extraction (links/forms).
     if !extract.is_empty() {
-        let expr = match extract {
-            "links" => {
-                r#"(()=>{const links=[...document.querySelectorAll('a[href]')];return JSON.stringify(links.map(a=>({text:(a.textContent||'').trim().slice(0,80),href:a.href})).filter(l=>l.text||l.href));})()"#
-            }
-            "forms" => {
-                r#"(()=>{
-function extractForms(doc){
-const forms=[...doc.querySelectorAll('form')];
-return forms.map(f=>({action:f.action,method:(f.method||'get').toLowerCase(),fields:[...f.elements].filter(e=>e.tagName!=='FIELDSET'&&e.tagName!=='BUTTON').map(e=>{
-// Label resolution priority: <label for=id> > aria-label > aria-labelledby > placeholder > wrapping <label> > preceding text
-var label='';
-if(e.id){var lbl=doc.querySelector('label[for="'+e.id+'"]');if(lbl)label=lbl.textContent.trim().slice(0,60);}
-if(!label&&e.getAttribute('aria-label'))label=e.getAttribute('aria-label').trim().slice(0,60);
-if(!label&&e.getAttribute('aria-labelledby')){var lb=doc.getElementById(e.getAttribute('aria-labelledby'));if(lb)label=lb.textContent.trim().slice(0,60);}
-if(!label&&e.placeholder)label=e.placeholder.trim().slice(0,60);
-if(!label&&e.closest('label'))label=e.closest('label').textContent.trim().slice(0,60);
-return{tag:e.tagName.toLowerCase(),type:e.type||null,name:e.name||'',label:label};
-})}));
-}
-var allForms=extractForms(document);
-// Search iframes too (W3Schools TryIt etc render forms in iframes).
-try{for(const ifr of document.querySelectorAll('iframe')){try{if(ifr.contentDocument){allForms=allForms.concat(extractForms(ifr.contentDocument));}}catch(e){}}
-}catch(e){}
-return JSON.stringify(allForms);
-})()"#
-            }
-            _ => {
-                return Err(BladeError::Other(format!(
-                    "unknown extract type: {extract} (use 'links' or 'forms')"
-                )))
-            }
-        };
+        let expr = format!(
+            "{}({}, {})",
+            include_str!("../../page/js/extract_basic.js"),
+            serde_json::to_string(extract)?,
+            limit,
+        );
         let res = page
             .cdp_ref()
             .send(
@@ -277,11 +252,22 @@ return JSON.stringify(allForms);
                 })),
             )
             .await?;
+        if let Some(exc) = res.get("exceptionDetails") {
+            let message = exc
+                .pointer("/exception/description")
+                .and_then(Value::as_str)
+                .or_else(|| exc.get("text").and_then(Value::as_str))
+                .unwrap_or("JavaScript failed");
+            return Err(BladeError::Other(format!(
+                "extract {extract} failed: {}",
+                crate::platform::truncate_utf8(message, 240)
+            )));
+        }
         let json_str = res
             .get("result")
             .and_then(|r| r.get("value"))
             .and_then(|v| v.as_str())
-            .unwrap_or("[]");
+            .ok_or_else(|| BladeError::Other(format!("extract {extract}: browser returned no data; retry the read after the page settles")))?;
         // V10: offload large extracts to a file. W2: format=json returns a
         // parseable payload (bare when it fits, an artifact envelope when
         // not) instead of the truncating preview.
@@ -303,7 +289,11 @@ return JSON.stringify(allForms);
             // ~0 items for form lists).
             let count = serde_json::from_str::<Value>(json_str)
                 .ok()
-                .and_then(|v| v.as_array().map(|a| a.len()))
+                .and_then(|v| {
+                    v.as_array()
+                        .or_else(|| v.get("data").and_then(Value::as_array))
+                        .map(|a| a.len())
+                })
                 .unwrap_or(0);
             return Ok(format!(
                 "extract {extract} (~{count} items, {} bytes)\npreview: {}…\n{}",

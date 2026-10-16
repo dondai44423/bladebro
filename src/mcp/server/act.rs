@@ -107,40 +107,11 @@ fn handle_dialog_expect(args: &Value, page: &Page) -> Result<String> {
 /// steps: the step vocabulary and the act schema had drifted, which is why
 /// `fill` used to be "unknown action" inside run and schema-rejected in batch.
 pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
+    super::validate::fill(args)?;
     let fields = args
         .get("fields")
         .and_then(|f| f.as_array())
         .ok_or_else(|| BladeError::Other("fill requires 'fields' array".into()))?;
-    // Reject malformed fields before changing any earlier field.
-    for (index, field) in fields.iter().enumerate() {
-        if !field.is_object()
-            || !["ref", "label", "selector"].iter().any(|key| {
-                field
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| !s.is_empty())
-            })
-        {
-            return Err(BladeError::Other(format!(
-                "fill field {} requires ref, label or selector",
-                index + 1
-            )));
-        }
-        for key in ["ref", "label", "selector", "text", "option"] {
-            if field.get(key).is_some_and(|value| !value.is_string()) {
-                return Err(BladeError::Other(format!(
-                    "fill field {}: {key} must be a string",
-                    index + 1
-                )));
-            }
-        }
-        if field.get("check").is_some_and(|value| !value.is_boolean()) {
-            return Err(BladeError::Other(format!(
-                "fill field {}: check must be a boolean",
-                index + 1
-            )));
-        }
-    }
     let submit = args.get("submit").and_then(|s| s.as_str()).unwrap_or("");
     let mut last_verdict = String::new();
     let mut count = 0usize;
@@ -168,48 +139,70 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
             continue;
         };
 
+        page.ensure_ref(&resolved).await?;
         // Dispatch the right action based on element type.
         let role = page
             .model()
             .element(&resolved)
             .map(|e| e.raw.role.clone())
             .unwrap_or_default();
+        if f_check.is_some() && !matches!(role.as_str(), "checkbox" | "radio" | "switch") {
+            return Err(BladeError::Usage(format!(
+                "fill {resolved}: check requires a checkbox, radio or switch"
+            )));
+        }
+        if !matches!(role.as_str(), "checkbox" | "radio" | "switch")
+            && field.get("text").is_none()
+            && field.get("option").is_none()
+        {
+            return Err(BladeError::Usage(format!(
+                "fill {resolved}: text or option is required; use text=\"\" to clear explicitly"
+            )));
+        }
         let action = match role.as_str() {
-            "checkbox" | "radio" => {
+            "checkbox" | "radio" | "switch" => {
                 // For checkboxes/radios: click to toggle.
                 // If 'check' is specified, only click if current
                 // state doesn't match desired state.
                 let should_click = match f_check {
                     Some(want_checked) => {
-                        let is_checked = page
-                            .model()
-                            .element(&resolved)
-                            .and_then(|e| e.raw.checked)
-                            .unwrap_or(false);
+                        let is_checked =
+                            crate::action::read_checked(page.cdp_ref(), page.model(), &resolved)
+                                .await?;
+                        if role == "radio" && is_checked && !want_checked {
+                            return Err(BladeError::Usage(format!("fill {resolved}: a checked radio cannot be unchecked by clicking it; select another option in its group")));
+                        }
                         is_checked != want_checked
                     }
                     None => true, // no 'check' param → just click
                 };
                 if should_click {
-                    Action::Click { ref_id: resolved }
+                    Action::Click {
+                        ref_id: resolved.clone(),
+                    }
                 } else {
                     count += 1;
                     continue; // already in desired state
                 }
             }
             "combobox" => Action::Select {
-                ref_id: resolved,
+                ref_id: resolved.clone(),
                 option: f_text.into(),
             },
             _ => {
                 // Default: type into text-like fields.
                 Action::Type {
-                    ref_id: resolved,
+                    ref_id: resolved.clone(),
                     text: f_text.into(),
                 }
             }
         };
         let (_, verdict) = page.act(action).await?;
+        if let Some(want) = f_check {
+            if crate::action::read_checked(page.cdp_ref(), page.model(), &resolved).await? != want {
+                return Err(BladeError::Other(format!("fill {resolved}: click dispatched once but check={want} was not accepted; verify state before retrying")));
+            }
+        }
         last_verdict = verdict;
         count += 1;
     }
@@ -243,6 +236,7 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
 }
 
 pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
+    super::validate::act(args)?;
     let action_str = args.get("action").and_then(|a| a.as_str()).unwrap_or("");
     let ref_id = args.get("ref").and_then(|r| r.as_str()).unwrap_or("");
     let text = args.get("text").and_then(|t| t.as_str()).unwrap_or("");
@@ -663,13 +657,18 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                         if curr_url != prev_url {
                             // Settle-based (typically ~120ms) instead of a
                             // blind 200ms sleep — and content-aware.
-                            let _ = crate::page::wait_for_settle_with_network(
-                                page.cdp_ref(),
-                                std::time::Duration::from_millis(1200),
-                                Some(page.in_flight_ref()),
-                            )
-                            .await;
-                            let _ = page.recapture().await;
+                            // Explicit navigation already ran load, settle,
+                            // network drain, re-quiet and capture. Repeating
+                            // that here adds a quiet window to every page.
+                            if step_action != "navigate" {
+                                let _ = crate::page::wait_for_settle_with_network(
+                                    page.cdp_ref(),
+                                    std::time::Duration::from_millis(1200),
+                                    Some(page.in_flight_ref()),
+                                )
+                                .await;
+                                let _ = page.recapture().await;
+                            }
                             verdicts.push(format!(
                                 "step{}[{}]: {} (→ {})",
                                 i + 1,

@@ -41,3 +41,10 @@ across two local origins. It checks normal/incognito sessions over WebSocket
 and (on Unix) pipe, exact attachment bytes, single fallback requests, rejected
 and inline responses, auxiliary-tab cleanup, and original-page continuity.
 Native Linux/macOS/Windows CI runs this probe twice.
+
+Run `python3 tools/reliability_probe/polish.py` for actual MCP checks of
+eval mutation replay, composed-action parity, live toggle readback, validation
+before input, quoted form IDs, and shadow/frame extraction. It retains actual
+responses and navigation timings at `POLISH_OUT` (default under `work/`).
+`--baseline` records failures without stopping, for testing an older binary.
+Native desktop CI runs normal and incognito profiles.

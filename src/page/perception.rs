@@ -599,6 +599,7 @@ mod script_syntax_tests {
 
     #[test]
     fn shadow_awareness_and_condition_scripts_are_valid_js() {
+        node_check("extract-basic", include_str!("js/extract_basic.js"));
         // The mutation watcher now observes shadow roots and same-origin
         // iframes; the content/outline/condition probes are shadow-piercing
         // too. A syntax slip in any of them disables that layer at runtime,

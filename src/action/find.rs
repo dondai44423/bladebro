@@ -100,6 +100,23 @@ pub async fn read_text(cdp: &CdpSession, lpm: &LivePageModel, ref_id: &str) -> R
     Ok(found.text.unwrap_or_default())
 }
 
+/// Live state, including visible labels standing in for hidden controls.
+/// The LPM may predate a property-only change and must not decide a toggle.
+pub async fn read_checked(cdp: &CdpSession, lpm: &LivePageModel, ref_id: &str) -> Result<bool> {
+    let (sig, frame) = resolve_ref(lpm, ref_id)?;
+    let found = find_by_sig(cdp, &sig, &frame, "state", None).await?;
+    if !found.ok {
+        return Err(BladeError::ElementNotFound(ref_id.into()));
+    }
+    match found.state.as_deref() {
+        Some("checked=true" | "aria-checked=true") => Ok(true),
+        Some("checked=false" | "aria-checked=false") => Ok(false),
+        _ => Err(BladeError::NotInteractable(format!(
+            "{ref_id}: check requires a checkbox, radio or switch with readable boolean state"
+        ))),
+    }
+}
+
 /// A text-addressing match result.
 #[derive(Debug, Deserialize)]
 pub struct TextMatch {
