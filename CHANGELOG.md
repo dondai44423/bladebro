@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.3] - 2026-10-16
+
 ### Fixed
 - Eval distinguishes expression parse failures from runtime `SyntaxError`s before trying the statement fallback. Code that changed the page and then threw, including `JSON.parse` failures with no stack, executes once.
 - `run` shares ordinary action dispatch with `act`: coordinate clicks, type plus Enter, dialog expectations, scoped reads, validation and recovery hints behave consistently. Element reads retain their text instead of silently cutting it at 200 characters.
@@ -2100,7 +2102,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.2...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.3...HEAD
+[4.6.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.3
 [4.6.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.2
 [4.6.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.1
 [4.6.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.0
