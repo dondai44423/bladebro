@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.4] - 2026-10-18
+
 ### Fixed
 - Popup links restore the opener's activation before further input, report the new tab ID once, and finish action bookkeeping. Explicit tab switches activate their target. Scroll refuses the first failed dispatch instead of continuing timed-out wheel events.
 - Targeted key presses focus and verify the addressed control before dispatch; macOS Meta+A carries the native select-all editing command; equally ranked text/label matches refuse with candidate refs and context. Error recovery includes one page-state section, and timeout guidance preserves unknown outcomes without prescribing blind retries.
@@ -2116,7 +2118,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.3...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.4...HEAD
+[4.6.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.4
 [4.6.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.3
 [4.6.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.2
 [4.6.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.1
