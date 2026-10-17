@@ -192,12 +192,9 @@ pub(super) async fn resolve_text_target(
         }
     }
 
-    // Phase 2: Positional fallback for forms. If the query is a common
-    // field type (username/password/email) and there are textboxes in
-    // the model, pick the first textbox for username/email and the
-    // password-typed one for password. Guarded to nth-less calls: a
-    // positional guess is a "no matches, cope" heuristic, and answering
-    // nth=3 with the first password box would be a silent wrong target.
+    // Unlabelled forms may still have one unmistakable username/password
+    // field. Never guess among multiple fields or disregard the requested
+    // role; an explicit nth belongs to the ordinary live matching path.
     if let Some(group) = alias_group.filter(|_| nth.is_none()) {
         let is_username_like = group
             .iter()

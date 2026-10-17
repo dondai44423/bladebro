@@ -52,7 +52,7 @@ pub fn all_tools() -> Vec<ToolDef> {
                     "ref":{"type":"string","description":"Page-scoped element ID, e.g. e5; refresh after navigation/tab switch."},
                     "text": {"type": "string", "description": "Visible text, value to type, file path, or URL (action-dependent)."},
                     "label": {"type": "string", "description": "Field label for click/type/fill/select/clear/read/hover."},
-                    "selector":{"type":"string","description":"CSS target (including press/wait); open shadows and same-origin frames. nth disambiguates; hidden targets refuse."},
+                    "selector":{"type":"string","description":"CSS target (including press/wait); open shadows. Wait selectors also traverse same-origin frames. nth disambiguates; hidden targets refuse."},
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches. An out-of-range nth errors with the real match count instead of falling back to the first match."},
                     "key": {"type": "string", "description": "Key or chord: Enter, Tab, Escape, Backspace, ArrowDown, Control+a, Meta+Enter, Shift+Tab."},
@@ -131,12 +131,12 @@ pub fn all_tools() -> Vec<ToolDef> {
                     "extract": {
                         "type": "string",
                         "enum": ["links", "forms", "json", "auto"],
-                        "description": "auto (template-free, site-aware; Reddit post pages → the complete comment tree), json (needs template), links, forms."
+                        "description": "auto (site-aware; Reddit posts attempt the full tree, inspect complete/partial), json (template), links, forms."
                     },
                     "sort": {"type":"string","enum":["confidence","top","new","controversial","old","qa"],"description":"Reddit post auto-extract sort; overrides page sort."},
-                    "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}. Text reads are RENDERED - a hidden element is omitted (the item lists it in _omitted); read one explicitly with {\"sel\":\"css\",\"raw\":true}. Lookups span light DOM, open shadow roots and same-origin frames; skipped frames are reported."},
-                    "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set). For artifact reads: max chars (default 20000)."},
-                    "logs": {"type":"string","enum":["console","network"],"description":"Current-navigation console or network log."},
+                    "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}. @attr reads the container attribute. Text reads are RENDERED - a hidden element is omitted (the item lists it in _omitted); read one explicitly with {\"sel\":\"css\",\"raw\":true}. Lookups span light DOM, open shadow roots and same-origin frames; skipped frames are reported."},
+                    "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set). Artifact: chars (default 20000), or rows with items=true (default 50)."},
+                    "logs": {"type":"string","enum":["console","network"],"description":"Console: current document. Network: current navigation."},
                     "clear": {"type":"boolean","description":"Read then clear selected log."},
                     "preview": {"type":"boolean","description":"extract=auto: sampled container and fields, without rows."},
                     "changes": {"type":"boolean","description":"Model delta since last capture; format=json for structured output."},

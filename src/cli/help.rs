@@ -224,12 +224,12 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro see --find \"Submit\"",
                 "bladebro see --logs network"
             ],
-            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it returns the full comment tree (every reply, complete flag)", "extract=auto envelope: container,count,items + page_total/partial/paged when the page claims more results than the DOM holds, sponsored (paid placements), duplicates_removed, redirects_unwrapped — each explained by a note line"]
+            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it attempts the full comment tree; complete/partial disclose API denial and missing replies", "extract=auto envelope: container,count,items + page_total/partial/paged when the page claims more results than the DOM holds, sponsored (paid placements), duplicates_removed, redirects_unwrapped/redirects_unresolved — each explained by a note line"]
         }),
         "act" => json!({
             "usage": "bladebro act <action> [target] [value] [--flags]",
             "tool": "act",
-            "actions": ["click","type","fill","select","clear","press","scroll","hover","navigate","upload","download","wait","eval","collect","extract","read","batch","pdf","back","forward","reload","save","load","open-tab","close-tab","switch-tab"],
+            "actions": crate::action::ACT_ACTIONS,
             "universal_flags": {
                 "--ref": "element ref (self-heals; page-scoped — refresh after navigation; clear/read also take labels)",
                 "--label": "field label",
@@ -245,6 +245,9 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--dx/--dy": "scroll distance",
                 "--js": "eval expression (@file or - for scripts)",
                 "--submit": "fill: submit button ref or text",
+                "--next": "paginate: CSS selector or text=Next (also label=/ref=)",
+                "--body": "download: HTTP body, <=32MiB/30s, no browser cookies; honors HTTP(S) BLADE_PROXY",
+                "--sort": "Reddit post extract: confidence|top|new|controversial|old|qa",
                 "--slim": "verdict-only successful actions; batch/run inherit, reads/errors retained",
                 "--format": "extract/eval: text (default) | json — pure JSON output (for eval: the bare returned value; {data,note} when a note rides along; an {artifact,bytes} envelope when oversized)"
             },
@@ -583,6 +586,8 @@ ACTIONS
   scroll <dx> <dy>         hover <target>            navigate <url> [--block]
   upload <target> <path>   download <url> [--path]  wait <condition> [value]
   eval <js> [--ref]        collect <url> [--max N]   read <ref|label>
+  paginate <next> [--max N] [--extract auto]  bounded read/advance, retains pages
+  download <url> --body   save an HTTP body without browser cookies (HTTP(S) proxy honored)
   extract [auto|links|forms|json]   structured data (same as 'see extract …')
   batch <steps|@file|->    pdf [--path] [--landscape]
   back / forward / reload  save <name> / load <name>
@@ -606,7 +611,7 @@ RESULT SHAPES (stable — parse them without guessing)
   extract auto  envelope {container,count,items,…} plus, when they apply:
                 page_total/partial/paged (the page claims more results than the
                 DOM holds), sponsored (paid placements — flagged per item, left in
-                page order), duplicates_removed, redirects_unwrapped. Each has a
+                page order), duplicates_removed, redirects_unwrapped/redirects_unresolved. Each has a
                 `note:` line explaining what to do about it.
 
 EXAMPLES
