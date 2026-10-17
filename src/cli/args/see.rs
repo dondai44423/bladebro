@@ -26,7 +26,7 @@ pub(crate) fn parse_see_args(args: &[String]) -> Result<Value> {
         };
         if let Some(flag) = long.strip_prefix("--") {
             match flag {
-                "filter" | "find" | "logs" | "scope" | "artifact" => {
+                "filter" | "find" | "logs" | "scope" | "artifact" | "sort" => {
                     let v = take_value(args, &mut i, flag)?;
                     j[flag] = json!(v);
                 }
@@ -60,7 +60,7 @@ pub(crate) fn parse_see_args(args: &[String]) -> Result<Value> {
                     j["template"] = tpl;
                 }
                 "url" => url = Some(take_value(args, &mut i, flag)?),
-                "content" => j["content"] = json!(true),
+                "content" | "clear" | "preview" | "items" | "changes" => j[flag] = json!(true),
                 _ => {
                     return Err(BladeError::Usage(format!(
                         "unknown flag --{flag} for see — see 'bladebro help see'"

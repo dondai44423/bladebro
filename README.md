@@ -237,9 +237,15 @@ Every call returns an **outcome verdict + page delta**. Clicks choose a role-awa
 
 - **Self-healing refs** — a dead ref re-resolves by identity: `act click e5` after navigation finds the new "Sign in" and reports `[ref e5 healed]`.
 - **Batch** — one call fills, submits, clicks; it continues through navigation and stops on the first error with step number + page state.
-- **`selector=` everywhere** — click, hover, type, select, clear, read, upload, eval, `fill` fields, and `batch`/`run` steps all accept a CSS selector (light DOM + open shadow roots); `nth=` picks among matches.
+- **`selector=` everywhere** — click, hover, type, press, wait, select, clear, read, upload, eval, `fill` fields, and `batch`/`run` steps all accept a CSS selector (light DOM + open shadow roots); `nth=` picks among matches.
 - **`url=` on any action** — navigate first, then act: `act fill url="https://..." fields=[...]` reaches a page and fills it in one call.
-- **`slim=true`** — verdict only, no delta.
+- **`slim=true`** — successful actions return verdicts only, including navigate/fill. On batch/run it inherits through steps and branches, preserving reads and failure recovery; a run step can set `slim:false` to opt back in.
+
+- **Unambiguous targeting:** equally ranked text/label matches refuse with candidate refs/context. Choose `ref`, a unique selector, or `nth` (1-based). Targeted `press` focuses and checks its target before keys; an omitted target uses current focus.
+- **Popups:** `_blank` clicks report the new tab ID once and restore the opener. Use `state switch-tab` to act in the popup. Input reactivates the addressed tab; no mutation is retried after a timeout.
+- **Waits:** `act wait selector=".ready"` waits for visible CSS across open shadows/same-origin frames. `condition=element text="Ready"` also finds ordinary visible elements. `condition=network` requires 300ms with no tracked requests (long-lived streams excluded), and times out honestly. A false `if`/`while` may exit before its maximum budget.
+- **Pagination:** `act paginate next="text=Next" max=5 extract="auto"` reads the current page, clicks once per advance and stops at missing Next, repeated data or the cap. The result retains each page and discloses partial completion. `next` also accepts a CSS selector, `label=...` or `ref=...`; `max` is 1–100 pages.
+- **HTTP body save:** `act download url="https://example.com" body=true` saves an HTTP response (up to 32MiB/30s), reports status/final URL/path, and uses no browser cookies or JavaScript. It honors HTTP(S) `BLADE_PROXY`; other configured proxy types refuse before sending. The ordinary download path remains the browser-context attachment path.
 
 ### `see` — observe
 
@@ -254,11 +260,14 @@ Every call returns an **outcome verdict + page delta**. Clicks choose a role-awa
 | `see extract="json" template={...}` | Custom CSS-template extraction |
 | `see extract="links"` / `"forms"` | All links / all form fields |
 | `see scope=e5` | One element's subtree text; with `mode=content`: that subtree as markdown (budget honored) |
-| `see logs="console"` / `"network"` | JS errors / requests, failures first |
+| `see logs="console"` / `"network"` | Current-navigation JS errors / requests, failures first; `clear:true` reads then clears |
+| `see extract="auto" preview=true` | Container and sampled field names without rows |
+| `see changes=true format="json"` | Structured model delta since the last capture, with stable refs |
 
 - **Truncation is deterministic:** output ends with `…(N more: X link, Y button)` — roles sorted by count desc, then alphabetically; the full set stays available via `see filter=`.
+- **Artifact JSON paging:** `next_offset:0` in an offload envelope means start at offset zero. Default pages are valid JSON envelopes whose `data` is a character fragment: concatenate the strings, then parse the payload. `see artifact="<path>" items=true offset=0 limit=50` instead returns independently usable rows from a JSON array or `items`/`data` array; offsets count rows, `next_offset:null` means done. Item pages are capped at 500 rows/200KB; oversized individual rows require character paging.
 - **Big data goes to files.** Payloads over 12KB are written to `artifacts/` and returned as a path + preview; read any artifact back in pages with `see artifact="<path>"` (+`offset`/`limit`) — no filesystem access needed.
-- **Site-aware:** on Reddit post pages and X.com status pages, `extract=auto` returns the full comment tree / thread in ONE call; Hacker News rows carry points, author, age and comment count.
+- **Site-aware:** on Reddit post pages and X.com status pages, `extract=auto` attempts the full comment tree / thread in ONE call; `complete`/`partial` and fallback notes disclose API blocks or missing replies; Hacker News rows carry points, author, age and comment count.
 
 ### `state` — cookies, storage, tabs, sessions
 
@@ -268,7 +277,7 @@ Every call returns an **outcome verdict + page delta**. Clicks choose a role-awa
 | `cookies` / `set-cookie` / `del-cookie` | Cookies |
 | `save name=login` / `load name=login` | Save cookies + storage; navigate to the saved origin before loading, then reload |
 | `ls` / `ss` / `set-ls` / `set-ss` / `rm-ls` / `rm-ss` | localStorage / sessionStorage |
-| `block classes="images,fonts,trackers"` | Block inert assets — never first-party scripts |
+| `block classes="images,fonts,trackers"` | Block inert assets — never first-party scripts; `block` without arguments reports measured blocked-request count since attach. Byte/time savings are unmeasured. |
 | `compress on/off/status` | Context pruning toggle |
 
 ### `run` — batch + branch + JS
@@ -508,7 +517,7 @@ browser is left running, untouched. No host restart anywhere.
 
 Built-in, automatic, zero config — and zero cost to the tool definitions. Adapters are runtime heuristics: they add no tools and no parameters, and their extra fields appear only on pages that have them.
 
-- **Reddit** — `see extract=auto` on a post returns the FULL comment tree in ONE call: every reply (collapsed included), thread-ordered with depth, author/date, `fuzzed_score` (Reddit's displayed values, labeled as such), full text, an `op` flag on the submitter's comments, and honest `count`/`total`/`complete` fields. On feeds: typed posts (title, `fuzzed_score`, comments, author, subreddit, date, domain). `see mode=content` gives clean title/meta/body markdown.
+- **Reddit** — `see extract=auto` on a post attempts the full comment tree in ONE call (API denial returns a clearly partial DOM fallback): every reply (collapsed included), thread-ordered with depth, author/date, `fuzzed_score` (Reddit's displayed values, labeled as such), full text, an `op` flag on the submitter's comments, and honest `count`/`total`/`complete` fields. `sort=confidence|top|new|controversial|old|qa` overrides the active/URL sort for a Reddit post. Safe transient GET failures have two bounded retries; policy denials and rate limits stop without switching hosts. On feeds: typed posts (title, `fuzzed_score`, comments, author, subreddit, date, domain). `see mode=content` gives clean title/meta/body markdown.
 - **X.com (Twitter)** — `see extract=auto` on a status page returns the FULL conversation in ONE call: the focal post plus every reply and nested reply, thread-ordered with depth, author/date/counts, media and an `op` flag — read from the page's own API traffic (query ids captured live, self-healing across deploys). Profile/search/home return timelines the same way; search falls back to bounded in-page collection when X gates its API. The composer works through the normal tools: `act click` Reply → `act type` → `act click` Post.
 - **GitHub** — repo pages: description, stars, forks, language, topics; issue/PR lists: number, title, status, labels, author per row.
 - **Product pages** — price (with strikethrough original), rating, availability, key features — on any shop, not a fixed list of stores.

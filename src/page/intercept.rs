@@ -40,6 +40,7 @@ pub const BLOCK_TRACKERS: u32 = 8;
 pub struct InterceptState {
     /// Active block-class bitmask.
     pub rules: Arc<AtomicU32>,
+    pub blocked_requests: Arc<std::sync::atomic::AtomicU64>,
     /// Registrable domain (eTLD+1) of the current page, for
     /// third-party detection. Updated on every navigation.
     pub page_domain: Arc<RwLock<String>>,
@@ -52,6 +53,7 @@ impl Default for InterceptState {
     fn default() -> Self {
         Self {
             rules: Arc::new(AtomicU32::new(0)),
+            blocked_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             page_domain: Arc::new(RwLock::new(String::new())),
             pending: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
@@ -421,6 +423,9 @@ pub async fn run_interception(
             )
             .await
         };
+        if block && verdict.is_ok() {
+            state.blocked_requests.fetch_add(1, Ordering::Relaxed);
+        }
         state.remove_pending(request_id);
 
         // A Closed session means the browser died; the serve() loop

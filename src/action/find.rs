@@ -100,6 +100,18 @@ pub async fn read_text(cdp: &CdpSession, lpm: &LivePageModel, ref_id: &str) -> R
     Ok(found.text.unwrap_or_default())
 }
 
+/// Focus the addressed control and prove focus before dispatching keys.
+pub async fn focus(cdp: &CdpSession, lpm: &LivePageModel, ref_id: &str) -> Result<()> {
+    let (sig, frame) = resolve_ref(lpm, ref_id)?;
+    let found = find_by_sig(cdp, &sig, &frame, "focus", None).await?;
+    if !found.ok || found.focused != Some(true) {
+        return Err(BladeError::NotInteractable(format!(
+            "{ref_id}: focus did not land; no keys dispatched"
+        )));
+    }
+    Ok(())
+}
+
 /// Live state, including visible labels standing in for hidden controls.
 /// The LPM may predate a property-only change and must not decide a toggle.
 pub async fn read_checked(cdp: &CdpSession, lpm: &LivePageModel, ref_id: &str) -> Result<bool> {

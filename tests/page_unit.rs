@@ -466,3 +466,51 @@ fn re_render_no_fingerprint_falls_back_to_normal_flow() {
     assert_eq!(d.removed.len(), 1, "old ref should be removed");
     assert_eq!(d.removed[0], ref_save, "correct ref removed");
 }
+
+#[test]
+fn reddit_markdown_is_observational_and_preserves_live_dom() {
+    let mock = r#"
+let removed=0;
+global.location={hostname:'www.reddit.com',href:'https://www.reddit.com/r/rust/comments/test/title/',pathname:'/r/rust/comments/test/title/'};
+const text={nodeType:3,textContent:'Visible article content'};
+const ad={remove(){removed++}};
+const main={nodeType:1,tagName:'MAIN',innerHTML:'content',innerText:'Visible article content '.repeat(20),childNodes:[text],className:'',id:'',hidden:false,hasAttribute(){return false},getAttribute(){return null},querySelectorAll(s){return s.includes('data-testid')?[ad]:[]}};
+global.document={body:{innerText:'Visible article content '.repeat(20)},title:'Title',querySelector(s){if(s==='h1')return {innerText:'Discussion title'};if(s==='main,[role="main"]')return main;return null},querySelectorAll(){return []},defaultView:{getComputedStyle(){return {display:'block',visibility:'visible',opacity:'1'}}}};
+main.ownerDocument=document;
+"#;
+    let script = include_str!("../src/page/js/markdown.js")
+        .replace("__SCOPE_FLAG__", "false")
+        .replace("__BUDGET__", "8000")
+        .replace("__SCOPE_MAIN__", "findMain(document)");
+    let output=std::process::Command::new("node").arg("-e").arg(format!("{mock}\nconst value={script};if(removed!==0||!value.includes('Visible article content'))throw Error('markdown changed the live DOM: '+removed);"))
+        .output().expect("node is required for injected-script tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn redirect_resolution_preserves_destination_escaping_and_wrapper_origin() {
+    let script = include_str!("../src/mcp/server/js/auto_extract.js");
+    let start = script.find("const REDIRECT_PATH=").unwrap();
+    let end = script.find("// How many results").unwrap();
+    let probe = r#"
+global.location={href:'https://page.example/',origin:'https://page.example'};
+const assert=require('node:assert/strict');
+assert.equal(canonicalURL('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Factual%3Fq%3Da%2526b'),'https://example.com/actual?q=a%26b');
+assert.equal(canonicalURL('https://wrapper.example/url?q=%2Frelative'),'https://wrapper.example/relative');
+assert.equal(canonicalURL('https://www.google.com/goto?url=OPAQUE'),'https://www.google.com/goto?url=OPAQUE');
+"#;
+    let result = std::process::Command::new("node")
+        .arg("-e")
+        .arg(format!("{}\n{probe}", &script[start..end]))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

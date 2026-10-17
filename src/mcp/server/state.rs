@@ -143,8 +143,9 @@ pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
                 return Ok("blocking: none".to_string());
             }
             return Ok(format!(
-                "blocking: {}",
-                crate::page::intercept::InterceptState::describe(page.block_rules())
+                "blocking: {}; {} requests blocked since attach; byte/time savings unmeasured",
+                crate::page::intercept::InterceptState::describe(page.block_rules()),
+                page.blocked_requests()
             ));
         }
         _ => {}

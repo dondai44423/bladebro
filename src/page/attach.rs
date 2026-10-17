@@ -652,6 +652,13 @@ impl Page {
         let net_log_t = net_log.clone();
         let xhr_log_t = xhr_log.clone();
         let route_t = route.clone();
+        let main_frame = cdp
+            .send("Page.getFrameTree", None)
+            .await?
+            .pointer("/frameTree/frame/id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let network_task = tokio::spawn(async move {
             use std::collections::HashMap;
             let mut rx = cdp_for_net.subscribe();
@@ -686,6 +693,19 @@ impl Page {
                             .get("requestId")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
+                        if ty == "Document"
+                            && ev.params.get("frameId").and_then(Value::as_str)
+                                == Some(main_frame.as_str())
+                        {
+                            if let Ok(mut log) = net_log_t.lock() {
+                                log.clear();
+                            }
+                            if let Ok(mut log) = xhr_log_t.lock() {
+                                log.clear();
+                            }
+                            pending.clear();
+                            open.clear();
+                        }
                         if !id.is_empty() && ty != "WebSocket" && ty != "EventSource" {
                             open.insert(id.to_string(), std::time::Instant::now());
                             let req = ev.params.get("request");
@@ -850,6 +870,14 @@ impl Page {
                     // with the old route's content.
                     Some(Ok(ev)) if ev.method == "Page.navigatedWithinDocument" => {
                         route_t.note_nav();
+                        if ev.params.get("frameId").and_then(Value::as_str)
+                            == Some(main_frame.as_str())
+                        {
+                            if let Ok(mut log) = net_log_t.lock() {
+                                log.clear();
+                            }
+                            pending.clear();
+                        }
                     }
                     Some(Ok(_)) => {}
                     Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {

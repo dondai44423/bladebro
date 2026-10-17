@@ -5,6 +5,14 @@ use super::*;
 use crate::cdp::list_page_targets;
 
 impl Page {
+    /// Input is delivered to this target, including after a foreground popup.
+    pub async fn activate(&self) -> Result<()> {
+        self.cdp
+            .send_with_timeout("Page.bringToFront", None, Duration::from_secs(5))
+            .await?;
+        Ok(())
+    }
+
     /// Evaluate a JS expression in an isolated world. The isolated world has
     /// DOM access but its own JavaScript context — anti-bot scripts in the
     /// main world cannot observe our queries via patched DOM methods or
@@ -234,6 +242,7 @@ impl Page {
         // the current session first — if the attach then failed,
         // the session was detached from everything (bricked).
         let new_page = self.attach_tab_target(target_id).await?;
+        new_page.activate().await?;
         // New session attached — now detach the OLD one (pipe
         // mode) so only one session stays attached. Failure
         // here is harmless (two sessions attached briefly).

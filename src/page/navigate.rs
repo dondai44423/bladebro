@@ -9,6 +9,7 @@ impl Page {
     /// recaptures and returns the delta. Shared by `act navigate`, `run`
     /// navigate steps, and the CLI `nav` command.
     pub async fn navigate(&mut self, url: &str) -> Result<PageDelta> {
+        self.activate().await?;
         // S4+S5: track action timing for pacing + idle hum.
         self.is_busy
             .store(true, std::sync::atomic::Ordering::Relaxed);

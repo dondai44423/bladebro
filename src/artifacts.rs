@@ -14,6 +14,7 @@
 //! Rotation keeps the newest 300 files; older ones are
 //! deleted on write.
 
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::Result;
@@ -90,7 +91,7 @@ struct ArtifactChunk {
 /// Validate the path (inside the artifact dir, text-ish) and slice the
 /// requested char range. The restrictions live here once; the text and
 /// JSON readers both build their result from this.
-fn artifact_chunk(path: &str, offset: usize, limit: usize) -> Result<ArtifactChunk> {
+fn artifact_path(path: &str) -> Result<std::path::PathBuf> {
     let dir = artifact_dir();
     let dir_canon = dir
         .canonicalize()
@@ -116,6 +117,11 @@ fn artifact_chunk(path: &str, offset: usize, limit: usize) -> Result<ArtifactChu
             canon.display()
         )));
     }
+    Ok(canon)
+}
+
+fn artifact_chunk(path: &str, offset: usize, limit: usize) -> Result<ArtifactChunk> {
+    let canon = artifact_path(path)?;
     let bytes = std::fs::read(&canon)
         .map_err(|e| crate::error::BladeError::Other(format!("artifact read: {e}")))?;
     let text = String::from_utf8_lossy(&bytes);
@@ -175,6 +181,48 @@ pub fn read_artifact_json(path: &str, offset: usize, limit: usize) -> Result<Str
         "data": c.chunk,
     })
     .to_string())
+}
+
+/// Item-addressed JSON pages. Restrict via the same path/binary gate first.
+pub(crate) fn read_artifact_value(path: &str) -> Result<serde_json::Value> {
+    let canon = artifact_path(path)?;
+    if std::fs::metadata(&canon)?.len() > 32 * 1024 * 1024 {
+        return Err(crate::error::BladeError::Other(
+            "JSON item reads require <=32 MiB; use char paging or a file tool".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&canon)?
+        .take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 32 * 1024 * 1024 {
+        return Err(crate::error::BladeError::Other(
+            "artifact grew beyond 32 MiB".into(),
+        ));
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub fn read_artifact_items(path: &str, offset: usize, limit: usize) -> Result<String> {
+    let canon = artifact_path(path)?;
+    let value = read_artifact_value(path)?;
+    let rows = value.as_array().or_else(|| value.get("items").and_then(|v| v.as_array())).or_else(|| value.get("data").and_then(|v| v.as_array())).or_else(|| value.get("pages").and_then(|v|v.as_array())).ok_or_else(|| crate::error::BladeError::Other("items=true requires a JSON array, or an items/data array; use char paging for other shapes".into()))?;
+    let offset = offset.min(rows.len());
+    let mut end = offset;
+    let mut bytes = 0;
+    for row in rows.iter().skip(offset).take(limit.clamp(1, 500)) {
+        bytes += serde_json::to_vec(row)?.len();
+        if bytes > 200_000 {
+            if end == offset {
+                return Err(crate::error::BladeError::Other(
+                    "one item exceeds 200000 bytes; use char paging or a file tool".into(),
+                ));
+            }
+            break;
+        }
+        end += 1;
+    }
+    Ok(serde_json::json!({"path":canon.display().to_string(),"offset":offset,"next_offset":if end < rows.len(){Some(end)}else{None},"total_items":rows.len(),"items":rows[offset..end]}).to_string())
 }
 
 /// The artifact directory: `~/.blade/artifacts/`.

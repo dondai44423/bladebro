@@ -586,3 +586,126 @@ mod download_correlation_tests {
         assert!(err.contains("two.pdf"), "{err}");
     }
 }
+
+/// Explicit curl-like body fetch. Browser cookies/JS are intentionally absent;
+/// callers needing authenticated browser downloads keep the ordinary path.
+pub(super) async fn handle_body_download(args: &Value) -> Result<String> {
+    let url = args.get("url").and_then(Value::as_str).unwrap_or("");
+    let parsed = reqwest::Url::parse(url).map_err(|_| {
+        BladeError::Usage("download body=true requires an absolute http(s) url".into())
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(BladeError::Usage(
+            "body download supports http(s) only".into(),
+        ));
+    }
+    if args.get("path").is_some() {
+        return Err(BladeError::Usage(
+            "body downloads return an artifact; omit path".into(),
+        ));
+    }
+    let proxy = crate::browser::proxy::env_blade_proxy()
+        .map_err(|e| BladeError::Usage(format!("body download proxy: {e}")))?;
+    let client = body_client(proxy)?;
+    let mut response = client
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|e| BladeError::Other(format!("body download: {e}")))?;
+    let status = response.status().as_u16();
+    let final_url = response.url().to_string();
+    let kind = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| BladeError::Other(format!("body download: {e}")))?
+    {
+        if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
+            return Err(BladeError::Other(
+                "body download exceeds 32 MiB; no artifact written".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let ext = if kind.contains("json") {
+        "json"
+    } else if kind.contains("html") {
+        "html"
+    } else if kind.starts_with("text/") {
+        "txt"
+    } else {
+        "bin"
+    };
+    let path = crate::artifacts::write_artifact_bytes(&bytes, ext)?;
+    Ok(json!({"path":path,"bytes":bytes.len(),"status":status,"url":final_url,"content_type":kind,"note":"HTTP body; browser cookies/session not used; status is the server response"}).to_string())
+}
+
+fn body_client(proxy: Option<crate::browser::proxy::ProxySpec>) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+    if let Some(proxy) = proxy {
+        if proxy.server.starts_with("socks") || proxy.server.starts_with("quic:") {
+            return Err(BladeError::Usage("body download supports HTTP(S) BLADE_PROXY only; use browser downloads for this proxy type".into()));
+        }
+        let server = if proxy.server.contains("://") {
+            proxy.server
+        } else {
+            format!("http://{}", proxy.server)
+        };
+        let configured = reqwest::Proxy::all(server).map_err(|_| {
+            BladeError::Usage(
+                "body download could not configure BLADE_PROXY; no request sent".into(),
+            )
+        })?;
+        builder = builder.proxy(configured);
+    }
+    builder
+        .build()
+        .map_err(|_| BladeError::Other("body download HTTP client setup failed".into()))
+}
+
+#[cfg(test)]
+mod body_proxy_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[tokio::test]
+    async fn body_fetch_reaches_configured_proxy_without_destination_dns() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut data = vec![0; 4096];
+            let count = stream.read(&mut data).await.unwrap();
+            let request = String::from_utf8_lossy(&data[..count]).to_string();
+            assert!(
+                request.starts_with("GET http://body-download.invalid/fixture HTTP/1.1"),
+                "{request}"
+            );
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nPROXIED",
+                )
+                .await
+                .unwrap();
+        });
+        let proxy = crate::browser::proxy::parse_blade_proxy(&format!("http://{address}")).unwrap();
+        let response = body_client(Some(proxy))
+            .unwrap()
+            .get("http://body-download.invalid/fixture")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "PROXIED");
+        server.await.unwrap();
+        let proxy =
+            crate::browser::proxy::parse_blade_proxy("socks5://user:secret@127.0.0.1:9").unwrap();
+        let error = body_client(Some(proxy)).unwrap_err().to_string();
+        assert!(!error.contains("secret"));
+        assert!(error.contains("HTTP(S)"));
+    }
+}

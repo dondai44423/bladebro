@@ -428,7 +428,7 @@ pub(crate) fn element_condition_expr(needle: &str) -> String {
         + JS_READ_TREE
         + "const t="
         + &needle_js
-        + ";let found=false;walkReadTree(d.body,n=>{if(n.nodeType!==1||!n.matches(sel)||!vis(n))return;const r=(n.getAttribute('role')||n.tagName.toLowerCase());const nm=(n.getAttribute('aria-label')||n.innerText||n.placeholder||'').trim();if(r.toLowerCase().includes(t)||nm.toLowerCase().includes(t)){found=true;return false;}});return found;})()"
+        + ";let found=false;walkReadTree(d.body,n=>{if(n.nodeType!==1||!vis(n))return;const r=(n.getAttribute('role')||n.tagName.toLowerCase());const nm=(n.getAttribute('aria-label')||n.innerText||n.placeholder||'').trim();if(r.toLowerCase().includes(t)||nm.toLowerCase().includes(t)){found=true;return false;}});return found;})()"
 }
 
 /// Text conditions use rendered light-DOM text first; the bounded fallback
@@ -541,6 +541,33 @@ pub async fn eval_condition(
                 // v3.10: confirmed-absence fast path — `if`/`while` pass the
                 // in-flight counter as the probe; `wait` passes None.
                 if absence_confirmed(&mut absent_since, absence_probe) {
+                    return Ok(CondOutcome::Timeout);
+                }
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+        }
+        "selector" => {
+            let selector = serde_json::to_string(text)?;
+            let expr = "(()=>{const d=document;".to_string() + &JS_PREAMBLE + JS_READ_TREE
+                + "const s=" + &selector + ";d.querySelector(s);let found=false;walkReadTree(d.body,n=>{if(n.nodeType===1&&n.matches(s)&&vis(n)){found=true;return false;}});return found;})()";
+            loop {
+                let res = cdp
+                    .send(
+                        "Runtime.evaluate",
+                        Some(json!({"expression":expr,"returnByValue":true})),
+                    )
+                    .await?;
+                if let Some((_, message)) = res.get("exceptionDetails").and_then(js_exception) {
+                    return Ok(CondOutcome::Error(format!(
+                        "selector wait failed: {message}"
+                    )));
+                }
+                if res.pointer("/result/value").and_then(|v| v.as_bool()) == Some(true) {
+                    return Ok(CondOutcome::Met);
+                }
+                if tokio::time::Instant::now() >= deadline
+                    || absence_confirmed(&mut absent_since, absence_probe)
+                {
                     return Ok(CondOutcome::Timeout);
                 }
                 tokio::time::sleep(Duration::from_millis(60)).await;
@@ -737,8 +764,30 @@ pub async fn eval_condition(
                 tokio::time::sleep(Duration::from_millis(60)).await;
             }
         }
-        "settle" | "network" => {
-            let _ = wait_for_settle(cdp, timeout).await;
+        "network" | "network-idle" => {
+            let Some(counter) = absence_probe else {
+                return Ok(CondOutcome::Error(
+                    "network wait requires the page request tracker".into(),
+                ));
+            };
+            let mut quiet_since = None;
+            loop {
+                if counter.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                    let since = *quiet_since.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= Duration::from_millis(300) {
+                        return Ok(CondOutcome::Met);
+                    }
+                } else {
+                    quiet_since = None;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Ok(CondOutcome::Timeout);
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }
+        "settle" => {
+            wait_for_settle(cdp, timeout).await?;
             Ok(CondOutcome::Met)
         }
         _ => {

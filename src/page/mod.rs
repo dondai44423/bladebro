@@ -388,6 +388,13 @@ impl Page {
         }
     }
 
+    /// Requests actually refused by this attachment, not estimated savings.
+    pub fn blocked_requests(&self) -> u64 {
+        self.intercept
+            .blocked_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Current block-class bitmask (for `state op=block get`).
     pub fn block_rules(&self) -> u32 {
         self.intercept.rules()
@@ -512,6 +519,11 @@ impl Page {
         } else {
             None
         };
+        // Chrome can foreground a popup while our model still belongs to the
+        // opener. Activate before input; never replay an input after timeout.
+        if action.injects_input() {
+            self.activate().await?;
+        }
         // S5: pacing governor — realistic inter-action gaps.
         self.pace(&action).await;
         self.is_busy
@@ -571,7 +583,7 @@ impl Page {
                 return Err(e);
             }
         };
-        let verdict = match heal_note {
+        let mut verdict = match heal_note {
             Some(note) => format!("{verdict} [{note}]"),
             None => verdict,
         };
@@ -588,18 +600,22 @@ impl Page {
                 let tab_info: Vec<String> = new_tabs
                     .iter()
                     .map(|t| {
-                        if t.title.is_empty() {
-                            t.url.clone()
-                        } else {
-                            t.title.clone()
-                        }
+                        format!(
+                            "{} (tab {})",
+                            if t.title.is_empty() { &t.url } else { &t.title },
+                            t.id
+                        )
                     })
                     .collect();
                 let new_verdict = format!("outcome: new tab opened — {}", tab_info.join(", "));
-                if let Ok(mut a) = self.ambient.lock() {
-                    a.push(new_verdict.clone());
+                verdict = new_verdict;
+                // Keep the opener usable and report the popup once. Finish
+                // normal busy/timing cleanup below, even when a tab opened.
+                if let Err(e) = self.activate().await {
+                    verdict.push_str(&format!(
+                        "; opener activation failed: {e}; use state switch-tab"
+                    ));
                 }
-                return Ok((delta, new_verdict));
             }
         }
         // S4+S5: mark action complete — hum resumes, next action paces.

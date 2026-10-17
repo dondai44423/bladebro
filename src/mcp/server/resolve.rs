@@ -178,7 +178,17 @@ pub(super) async fn resolve_text_target(
                 // fall through to the live DOM search and error only if the
                 // live page is short too. Never silently pick the first match.
             }
-            None => return Ok(lpm_matches[0].0.clone()),
+            None => {
+                let best = lpm_matches[0].4;
+                let tied: Vec<_> = lpm_matches.iter().filter(|m| m.4 == best).collect();
+                if tied.len() == 1 {
+                    return Ok(tied[0].0.clone());
+                }
+                return Err(BladeError::Other(format!(
+                    "ambiguous \"{query}\": {} equally ranked visible matches: {}. Use ref, selector or nth (1-based).",
+                    tied.len(), tied.iter().take(8).map(|m| format!("{} {} \"{}\" [{}]", m.0, m.1, m.2, page.model().element(&m.0).map(|e|e.raw.ctx.as_str()).unwrap_or(""))).collect::<Vec<_>>().join("; ")
+                )));
+            }
         }
     }
 
@@ -239,7 +249,7 @@ pub(super) async fn resolve_text_target(
         let lang = page_lang_note(page.cdp_ref()).await;
         let view = page.view(2000);
         return Err(BladeError::Other(format!(
-            "no element matching \"{}\" found{}{}\n\n--- current page ---\n{}",
+            "no element matching \"{}\" found{}{}\n\n--- current page state ---\n{}",
             query, note, lang, view
         )));
     }
@@ -249,7 +259,7 @@ pub(super) async fn resolve_text_target(
             return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
         }
         return Err(BladeError::Other(format!(
-            "nth={n} requested but \"{query}\" has only {} visible match(es) (nth is 1-based; omit nth to use the top match)",
+            "nth={n} requested but \"{query}\" has only {} visible match(es) (nth is 1-based; choose a valid nth or a unique ref/selector)",
             matches.len()
         )));
     }
@@ -263,6 +273,12 @@ pub(super) async fn resolve_text_target(
         .adopt(&top.sig, &top.role, &top.name, &top.frame);
     for m in &matches[1..] {
         let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
+    }
+    if matches.iter().filter(|m| m.score == top.score).count() > 1 {
+        return Err(BladeError::Other(format!(
+            "ambiguous \"{query}\": {} visible matches. Use ref, selector or nth (1-based).",
+            matches.len()
+        )));
     }
     Ok(id)
 }

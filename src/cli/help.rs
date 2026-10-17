@@ -210,7 +210,10 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--limit": "max extract items (default 50; Reddit post comments: all up to 1000 unless set)",
                 "--logs": "console | network",
                 "--template": "JSON or @file — for extract=json",
-                "--artifact": "read an offloaded payload from disk, paged: --artifact <path> [--offset N] [--limit N]",
+                "--artifact": "read offloaded text chunks (concatenate data then parse); --items pages JSON rows; offset/limit count chars or rows",
+                "--preview": "auto-extract container/schema without rows",
+                "--changes": "model delta since last capture; --format json for structured fields",
+                "--clear": "read then clear the selected log",
                 "--format": "text (default) | json — pure JSON output for extract/artifact reads ({offset,next_offset,data} pages)"
             },
             "examples": [
@@ -242,7 +245,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--dx/--dy": "scroll distance",
                 "--js": "eval expression (@file or - for scripts)",
                 "--submit": "fill: submit button ref or text",
-                "--slim": "skip the delta",
+                "--slim": "verdict-only successful actions; batch/run inherit, reads/errors retained",
                 "--format": "extract/eval: text (default) | json — pure JSON output (for eval: the bare returned value; {data,note} when a note rides along; an {artifact,bytes} envelope when oversized)"
             },
             "examples": [
@@ -550,7 +553,11 @@ FLAGS
   --budget <N>        max response chars (default 8000)
   --limit <N>         max extract items (default 50; Reddit comments: all ≤1000)
   --logs console|network
-  --artifact <path>   paged read of an offloaded payload (--offset/--limit)
+  --artifact <path>   paged read (--offset/--limit count chars; --items counts JSON rows)
+  --preview           extract auto: container/schema without rows
+  --changes           model delta since last capture; --format json for structured fields
+  --clear             read then clear --logs console|network
+  --sort <sort>       Reddit post auto-extract: confidence|top|new|controversial|old|qa
   --format text|json  json: pure JSON out for extract/artifact/eval reads
   --url <url>         navigate first (or pass the URL positionally)
 
@@ -583,7 +590,7 @@ ACTIONS
 
 UNIVERSAL FLAGS (mirror the MCP schema — accepted on every action)
   --ref --label --text --selector --role --nth --key --url --option --condition --timeout
-  --dx --dy --js --submit --block --slim --format  (per-action: --path, --max, --x/--y…)
+  --next --body --sort --dx --dy --js --submit --block --slim --format  (per-action: --path, --max, --x/--y…)
 
 Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
 payloads: @file or - (stdin). Unknown flags fail loudly (exit 2). Key chords: 'act press Control+a'.
