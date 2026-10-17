@@ -108,6 +108,18 @@ try:
 
             try:
                 fresh()
+                evaluate("document.body.insertAdjacentHTML('beforeend','<input id=second value=def>')")
+                call('see',{})
+                text,error=call('act',dict(action='type',label='username',text='replacement'))
+                check('G3 unlabelled field ambiguity refuses without writing',error and evaluate("Array.from(document.querySelectorAll('input')).map(e=>e.value).join('|')")=='abc|def')
+                evaluate("document.querySelector('#second').remove()")
+                call('see',{})
+                evaluate("document.querySelector('#name').addEventListener('input',e=>window.aliasTrusted=e.isTrusted)")
+                text,error=call('act',dict(action='type',label='username',text='single'))
+                check('G3 single unlabelled field fallback remains trusted',not error and evaluate("document.querySelector('#name').value==='single' && window.aliasTrusted") is True)
+                text,error=call('act',dict(action='type',label='username',role='link',text='wrong'))
+                check('G3 role filter cannot fall back to an unrelated field',error and evaluate("document.querySelector('#name').value")=='single')
+                fresh()
                 text, error = call('act', dict(action='click', selector='#effect'))
                 check('A before popup click trusted effect', not error and evaluate('window.clicks') == 1)
                 text, error = call('act', dict(action='click', selector='#blank'))

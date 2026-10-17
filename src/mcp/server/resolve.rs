@@ -210,23 +210,22 @@ pub(super) async fn resolve_text_target(
                 .iter()
                 .filter(|e| e.raw.role == "textbox" || e.raw.role == "combobox")
                 .collect();
-            if is_password_like {
-                // Prefer password-typed inputs.
-                if let Some(pw) = textboxes
-                    .iter()
-                    .find(|e| e.raw.element_type.as_deref() == Some("password"))
-                {
-                    return Ok(pw.ref_id.clone());
-                }
+            let candidates: Vec<_> = textboxes
+                .into_iter()
+                .filter(|e| {
+                    role_filter.is_none_or(|role| e.raw.role == role)
+                        && if is_password_like {
+                            e.raw.element_type.as_deref() == Some("password")
+                        } else {
+                            e.raw.element_type.as_deref() != Some("password")
+                        }
+                })
+                .collect();
+            if candidates.len() == 1 {
+                return Ok(candidates[0].ref_id.clone());
             }
-            if is_username_like && !textboxes.is_empty() {
-                // First non-password textbox is the username field.
-                if let Some(tb) = textboxes
-                    .iter()
-                    .find(|e| e.raw.element_type.as_deref() != Some("password"))
-                {
-                    return Ok(tb.ref_id.clone());
-                }
+            if candidates.len() > 1 {
+                return Err(BladeError::Other(format!("ambiguous \"{query}\": {} possible fields: {}. Use ref, selector or an explicit field label.", candidates.len(), candidates.iter().take(8).map(|e| format!("{} {} \"{}\" [{}]",e.ref_id,e.raw.role,e.raw.name,e.raw.ctx)).collect::<Vec<_>>().join("; "))));
             }
         }
     }
