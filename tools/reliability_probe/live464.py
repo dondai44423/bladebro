@@ -61,6 +61,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def check(name, passed):
     checks.append(dict(name=name, passed=bool(passed)))
     print(('PASS ' if passed else 'FAIL ') + name, flush=True)
+    if not passed:
+        print('FAILURE READBACK '+json.dumps(receipts[-2:],ensure_ascii=True),flush=True)
 
 
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -144,7 +146,8 @@ try:
                     text,error=call(tool,args)
                     check('F exactly one error context '+tool+'/'+args.get('action','run'), text.count('--- current page') == 1)
                 text,error=call('act',dict(action='press',selector='#name',key='Meta+a' if sys.platform=='darwin' else 'Control+a'))
-                check('G2 targeted press focuses before chord', not error and evaluate("document.activeElement.id==='name' && document.querySelector('#name').selectionEnd===3") is True)
+                key_state=evaluate("(()=>{let e=document.querySelector('#name');return {active:document.activeElement.id,start:e.selectionStart,end:e.selectionEnd,value:e.value}})()")
+                check('G2 targeted press focuses before chord', not error and key_state==dict(active='name',start=0,end=3,value='abc'))
                 text,error=call('act',dict(action='click',text='Delete'))
                 check('G3 ambiguity refuses before mutation', error and '2' in text and evaluate('window.deletes') == 0)
                 evaluate('window.deletes=0')
@@ -162,7 +165,9 @@ try:
                 text,error=call('run',dict(steps=[dict(action='if',condition='text',text='MISSING',timeout=5)]))
                 check('G9 if false wording does not invent elapsed timeout', 'skipped (timeout 5s)' not in text)
                 text,error=call('run',dict(slim=True,steps=[dict(action='navigate',url=origin+'/?run-slim'),dict(action='see',extract='links',format='json')]))
-                check('J1 run slim retains reads and omits models', not error and 'actionable' not in text and 'application' in text)
+                quiet_nav=not error and 'actionable' not in text and 'application' in text
+                text,error=call('run',dict(slim=True,steps=[dict(action='open-tab',url=origin+'/tab-slim'),dict(action='see',extract='links',format='json')]))
+                check('J1 run slim retains reads and IDs and omits models', quiet_nav and not error and 'actionable' not in text and 'application' in text and 'opened' in text)
                 text,error=call('act',dict(action='batch',slim=True,steps=[dict(action='navigate',url=origin+'/?batch-slim'),dict(action='see',extract='links',format='json')]))
                 check('J1 batch slim retains reads and omits models', not error and 'actionable' not in text and 'application' in text)
                 text,error=call('act',dict(action='wait',selector='#marker',timeout=0))

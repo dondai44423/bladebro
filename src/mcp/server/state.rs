@@ -10,6 +10,23 @@ use crate::page::Page;
 use crate::state::StateOp;
 
 pub async fn handle_state(args: &Value, page: &mut Page) -> Result<String> {
+    if args.get("slim").is_some_and(|v| !v.is_boolean()) {
+        return Err(BladeError::Usage("state slim must be a boolean".into()));
+    }
+    let out = handle_state_inner(args, page).await?;
+    // Tab IDs are essential readback; their model is optional in a quiet run.
+    if args.get("slim").and_then(Value::as_bool).unwrap_or(false)
+        && matches!(
+            args.get("op").and_then(Value::as_str),
+            Some("open-tab" | "close-tab" | "switch-tab")
+        )
+    {
+        return Ok(out.lines().next().unwrap_or_default().to_string());
+    }
+    Ok(out)
+}
+
+async fn handle_state_inner(args: &Value, page: &mut Page) -> Result<String> {
     if !args.is_object() {
         return Err(BladeError::Other(
             "state arguments must be an object".into(),

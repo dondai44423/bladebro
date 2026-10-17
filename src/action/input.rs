@@ -293,11 +293,25 @@ pub(super) fn combo_events(
     Ok((evs, main_idx))
 }
 
+// CDP cannot synthesize macOS's native editing selector from Meta+A alone.
+// Carry Chrome's editing command on that keydown; canceled key events still
+// suppress it, and unrelated chords keep their ordinary event semantics.
+fn shortcut_commands(combo: &KeyCombo, macos: bool) -> Option<Vec<String>> {
+    (macos
+        && combo.meta
+        && !combo.ctrl
+        && !combo.alt
+        && !combo.shift
+        && combo.key.eq_ignore_ascii_case("a"))
+    .then(|| vec!["selectAll".to_string()])
+}
+
 /// Dispatch a key press (keyDown + keyUp) via `Input.dispatchKeyEvent`.
 /// Accepts single characters, named keys, and chords ("Control+a").
 pub(super) async fn dispatch_key(cdp: &CdpSession, key: &str) -> Result<()> {
     if let Some(combo) = parse_key_combo(key).map_err(BladeError::Other)? {
-        return dispatch_combo(cdp, &combo, None).await;
+        let commands = shortcut_commands(&combo, cfg!(target_os = "macos"));
+        return dispatch_combo(cdp, &combo, commands).await;
     }
     // Printable single character: full char event (code + VK + text).
     // `act press key="a"` used to dispatch key:"a" code:"Unidentified"
@@ -540,4 +554,31 @@ pub(super) fn char_to_key_code(ch: char) -> (String, u32, bool) {
         _ => ("Unidentified".to_string(), 0),
     };
     (code, vk, shift)
+}
+
+#[cfg(test)]
+mod mac_shortcut_tests {
+    use super::*;
+    #[test]
+    fn macos_meta_a_requests_native_select_all_without_other_chords() {
+        let select = parse_key_combo("Meta+a").unwrap().unwrap();
+        assert_eq!(
+            shortcut_commands(&select, true),
+            Some(vec!["selectAll".into()])
+        );
+        assert_eq!(shortcut_commands(&select, false), None);
+        for key in [
+            "Control+a",
+            "Meta+Shift+a",
+            "Meta+Alt+a",
+            "Meta+Enter",
+            "Meta+z",
+        ] {
+            assert_eq!(
+                shortcut_commands(&parse_key_combo(key).unwrap().unwrap(), true),
+                None,
+                "{key}"
+            );
+        }
+    }
 }

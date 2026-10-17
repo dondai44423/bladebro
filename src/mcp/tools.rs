@@ -51,7 +51,7 @@ pub fn all_tools() -> Vec<ToolDef> {
                     },
                     "ref":{"type":"string","description":"Page-scoped element ID, e.g. e5; refresh after navigation/tab switch."},
                     "text": {"type": "string", "description": "Visible text, value to type, file path, or URL (action-dependent)."},
-                    "label": {"type": "string", "description": "Field label for click/type/fill/select/clear/read/hover."},
+                    "label": {"type": "string", "description": "Field label for click/type/fill/select/clear/read/hover/press."},
                     "selector":{"type":"string","description":"CSS target (including press/wait); open shadows. Wait selectors also traverse same-origin frames. nth disambiguates; hidden targets refuse."},
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches. An out-of-range nth errors with the real match count instead of falling back to the first match."},
