@@ -133,7 +133,7 @@ pub async fn handle_template_extract(
             .unwrap_or("template extraction failed");
         return Err(BladeError::Other(format!(
             "extract failed: {}",
-            crate::platform::truncate_utf8(msg, 200)
+            crate::platform::truncate_utf8(msg.lines().next().unwrap_or(msg), 200)
         )));
     }
 
@@ -285,7 +285,7 @@ async fn auto_extract_eval(page: &Page, expr: &str) -> Result<serde_json::Value>
             .unwrap_or("auto-extract eval failed");
         return Err(BladeError::Other(format!(
             "auto-extract: {}",
-            crate::platform::truncate_utf8(msg, 200)
+            crate::platform::truncate_utf8(msg.lines().next().unwrap_or(msg), 200)
         )));
     }
     let json_str = res
@@ -523,14 +523,35 @@ fn parse_price(shown: &str) -> Option<f64> {
     cleaned.parse::<f64>().ok()
 }
 
+pub(super) async fn auto_preview(page: &Page) -> Result<String> {
+    let value = run_auto_extract(page, 3, false).await?;
+    let fields: std::collections::BTreeSet<String> = value
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .flat_map(|o| o.keys().cloned())
+        .collect();
+    Ok(json!({"container":value.get("container"),"fields":fields,"sampled":value.get("count"),"note":"schema sampled from up to 3 rendered rows; other rows may have additional fields"}).to_string())
+}
+
 pub async fn handle_auto_extract(
     page: &mut Page,
     limit: usize,
     limit_explicit: bool,
     json_mode: bool,
+    sort_override: Option<&str>,
 ) -> Result<String> {
     let val = run_auto_extract(page, limit, true).await?;
 
+    if sort_override.is_some()
+        && val.get("container").and_then(Value::as_str) != Some("reddit-post-page")
+    {
+        return Err(BladeError::Usage(
+            "sort applies to extract=auto on Reddit post pages only".into(),
+        ));
+    }
     // Reddit post pages: the marker hands off to the comment-tree sweep — one
     // in-page API pass returns every comment (collapsed replies included),
     // thread-ordered and structured, instead of scraping the rendered DOM.
@@ -540,11 +561,12 @@ pub async fn handle_auto_extract(
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string();
-        let sort = val
-            .get("sort")
-            .and_then(|s| s.as_str())
-            .unwrap_or("confidence")
-            .to_string();
+        let sort = sort_override.map(str::to_string).unwrap_or_else(|| {
+            val.get("sort")
+                .and_then(|s| s.as_str())
+                .unwrap_or("confidence")
+                .to_string()
+        });
         if !permalink.is_empty() {
             let cap = if limit_explicit {
                 limit.clamp(1, crate::reddit::MAX_COMMENT_CAP)
@@ -559,12 +581,13 @@ pub async fn handle_auto_extract(
                 Err(e) => {
                     // API route failed (exotic host, blocked page): fall back to
                     // the DOM listing — and say so, because the DOM misses
-                    // collapsed replies. A transient network-security wall gets
-                    // a retry hint: it clears in seconds, and the DOM fallback
-                    // is genuinely partial.
-                    let val = run_auto_extract(page, limit, false).await?;
+                    // collapsed replies. Policy denials can persist; the
+                    // fallback never claims the full tree or promises a retry.
+                    let mut val = run_auto_extract(page, limit, false).await?;
+                    val["complete"] = json!(false);
+                    val["partial"] = json!(true);
                     let hint = if crate::reddit::is_security_block(&e) {
-                        " (reddit's network-security wall is transient — retrying the extract in a few seconds usually returns the full thread)"
+                        " (Reddit denied the API request; repeated extracts may remain blocked. DOM coverage is partial; verify complete before treating this as the full thread)"
                     } else {
                         ""
                     };
@@ -601,9 +624,11 @@ pub async fn handle_auto_extract(
                 Err(e) => {
                     // Wall / cold profile: fall back to the mounted DOM, and
                     // say so — the DOM cannot prove which query it shows.
-                    let val = run_auto_extract(page, limit, false).await?;
+                    let mut val = run_auto_extract(page, limit, false).await?;
+                    val["complete"] = json!(false);
+                    val["partial"] = json!(true);
                     let hint = if crate::reddit::is_security_block(&e) {
-                        " (reddit's network-security wall is transient — retrying the extract in a few seconds usually returns the full listing)"
+                        " (Reddit denied the API request; repeated extracts may remain blocked. DOM coverage is partial)"
                     } else {
                         ""
                     };
@@ -635,7 +660,9 @@ pub async fn handle_auto_extract(
             Err(e) => {
                 // Capture/fetch failed (no API traffic seen, exotic page):
                 // fall back to the DOM listing and say so.
-                let val = run_auto_extract(page, limit, false).await?;
+                let mut val = run_auto_extract(page, limit, false).await?;
+                val["complete"] = json!(false);
+                val["partial"] = json!(true);
                 let note = format!(
                     "\nnote: x.com fast path failed ({e}); items above are a DOM fallback{}",
                     route_note(page)

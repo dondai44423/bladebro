@@ -25,7 +25,7 @@ pub enum BladeError {
     /// `degraded:true` tag (S3): an unanswered command is a browser-health
     /// signal (GPU/renderer stall, overloaded main thread, wedged
     /// process) - not a page-side error an agent should retry blindly.
-    #[error("CDP command timed out after {0:?} - degraded:true (client-side: the browser did not answer within the deadline)")]
+    #[error("CDP command timed out after {0:?} - degraded:true (client-side: this command did not answer within the deadline; outcome unknown - observe before retrying input)")]
     Timeout(std::time::Duration),
 
     /// The browser connection is no longer usable (process gone / dropped).

@@ -10,7 +10,7 @@ use super::eval::handle_eval;
 use super::extract::handle_collect;
 use super::files::{handle_download, handle_pdf};
 use super::resolve::{resolve_selector_target, resolve_text_target};
-use super::run::{resolve_condition_fields, resolve_wait_timeout};
+use super::run::resolve_wait_timeout;
 use super::see::handle_see;
 use super::state::handle_state;
 
@@ -231,7 +231,11 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
     };
     Ok(format!(
         "filled {count} fields\n{last_verdict}\n{}",
-        page.delta_view(&last_delta, 8000)
+        if args.get("slim").and_then(Value::as_bool).unwrap_or(false) {
+            String::new()
+        } else {
+            page.delta_view(&last_delta, 8000)
+        }
     ))
 }
 
@@ -403,7 +407,26 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 option: opt.into(),
             }
         }
-        "press" => Action::Press { key: key.into() },
+        "press" => {
+            let target = if !ref_id.is_empty() {
+                Some(ref_id.to_string())
+            } else if !selector.is_empty() {
+                Some(resolve_selector_target(page, selector, nth).await?)
+            } else if !label.is_empty() {
+                Some(resolve_text_target(page, label, None, nth).await?)
+            } else {
+                None
+            };
+            if let Some(target) = target {
+                if crate::realbrowser::input_paused() {
+                    return Err(crate::realbrowser::paused_error());
+                }
+                page.ensure_ref(&target).await?;
+                page.activate().await?;
+                crate::action::focus(page.cdp_ref(), page.model(), &target).await?;
+            }
+            Action::Press { key: key.into() }
+        }
         "scroll" => Action::Scroll { dx, dy },
         "reload" => Action::Reload,
         "forward" => Action::Forward,
@@ -427,9 +450,13 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             return handle_pdf(page, args).await;
         }
         "download" => {
+            if args.get("body").and_then(Value::as_bool).unwrap_or(false) {
+                return super::files::handle_body_download(args).await;
+            }
             // V19: wait for the most recent download to complete.
             return handle_download(page, args).await;
         }
+        "paginate" => return super::paginate::handle_paginate(args, page).await,
         "collect" => {
             // V22: auto-extract + scroll + dedupe loop. Infinite-scroll collection.
             return handle_collect(page, args).await;
@@ -532,12 +559,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
         "fill" => return handle_fill(args, page).await,
         "wait" => {
             let timeout = resolve_wait_timeout(args, 10)?;
-            let (condition, needle) = resolve_condition_fields(
-                args.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
-                args.get("text").and_then(|t| t.as_str()).unwrap_or(""),
-                args.get("js").and_then(|j| j.as_str()).unwrap_or(""),
-                "settle",
-            )?;
+            let (condition, needle) = super::run::condition_from_args(args, "settle")?;
             Action::Wait {
                 condition,
                 text: needle,
@@ -646,7 +668,13 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     prev_url = page.model().url().to_string();
                     continue;
                 }
-                match Box::pin(handle_act(step, page)).await {
+                let mut nested = step.clone();
+                if args.get("slim").and_then(Value::as_bool).unwrap_or(false)
+                    && nested.get("slim").is_none()
+                {
+                    nested["slim"] = serde_json::json!(true);
+                }
+                match Box::pin(handle_act(&nested, page)).await {
                     Ok(verdict) => {
                         ok_count += 1;
                         let vline = verdict.lines().next().unwrap_or("ok").trim().to_string();
@@ -704,7 +732,16 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             }
             // Cumulative final delta — one render, all the changes.
             let final_delta = page.recapture().await?;
-            let view = page.delta_view(&final_delta, 8000);
+            let view = if args.get("slim").and_then(Value::as_bool).unwrap_or(false)
+                && halted.is_none()
+                || verdicts
+                    .iter()
+                    .any(|v| v.contains("--- current page state ---"))
+            {
+                String::new()
+            } else {
+                page.delta_view(&final_delta, 8000)
+            };
             let summary = if let Some(halt) = halted {
                 format!("batch stopped at step {halt} ({ok_count} ok)")
             } else {
@@ -745,6 +782,9 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             // The agent gets enough to act AND read — skipping a separate
             // see call for most tasks. For dense pages use see mode=model
             // (more refs) or mode=content (full text).
+            if args.get("slim").and_then(Value::as_bool).unwrap_or(false) {
+                return Ok(verdict);
+            }
             let top = page.view(3000);
             if delta.navigated {
                 let content = page.content(1500).await.unwrap_or_default();

@@ -57,6 +57,36 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // cheap shape. Resets remain where prior context is truly invalidated:
     // navigation and act-error recapture (both in act.rs). `state
     // op=compress mode=off` restores always-full responses.
+    if args.get("preview").and_then(Value::as_bool) == Some(true)
+        && args.get("extract").and_then(Value::as_str) != Some("auto")
+    {
+        return Err(BladeError::Usage(
+            "preview=true requires extract=auto".into(),
+        ));
+    }
+    if args.get("items").and_then(Value::as_bool) == Some(true)
+        && args
+            .get("artifact")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(BladeError::Usage(
+            "items=true requires artifact=path".into(),
+        ));
+    }
+    if args.get("changes").and_then(Value::as_bool) == Some(true)
+        && ["extract", "logs", "artifact", "scope", "find"]
+            .iter()
+            .any(|k| {
+                args.get(k)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            })
+    {
+        return Err(BladeError::Usage(
+            "changes=true is a model delta read; omit extract/logs/artifact/scope/find".into(),
+        ));
+    }
     let budget = args.get("budget").and_then(|b| b.as_u64()).unwrap_or(8000) as usize;
     let filter = args.get("filter").and_then(|f| f.as_str()).unwrap_or("");
     let want_content = args
@@ -90,10 +120,37 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     if !artifact.is_empty() {
         let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
         let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(20000) as usize;
+        if args.get("items").and_then(Value::as_bool).unwrap_or(false) {
+            return crate::artifacts::read_artifact_items(
+                artifact,
+                offset,
+                args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize,
+            );
+        }
         return if json_out {
             crate::artifacts::read_artifact_json(artifact, offset, limit)
         } else {
             crate::artifacts::read_artifact(artifact, offset, limit)
+        };
+    }
+    if args
+        .get("changes")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let delta = page.recapture().await?;
+        return if json_out {
+            let value = json!({"url":delta.url,"title":delta.title,"phase":delta.phase,"navigated":delta.navigated,
+                "added":delta.added.iter().map(|e| json!({"ref":e.ref_id,"role":e.raw.role,"name":e.raw.name})).collect::<Vec<_>>(),
+                "removed":delta.removed,"changed":delta.changed.iter().map(|(r,c)| json!({"ref":r,"value":c.value,"disabled":c.disabled,"checked":c.checked})).collect::<Vec<_>>(),"rebound":delta.rebound}).to_string();
+            if value.len() > 12000 {
+                let path = crate::artifacts::write_artifact(&value, "json")?;
+                Ok(json!({"artifact":path,"bytes":value.len(),"next_offset":0}).to_string())
+            } else {
+                Ok(value)
+            }
+        } else {
+            Ok(page.delta_view(&delta, budget))
         };
     }
     // format=json is only meaningful for extract=/artifact= reads; anything
@@ -155,7 +212,15 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
 
     // V8: logs — console (injection hook) or network (tracker ring).
     if !logs.is_empty() {
-        return handle_logs(page, logs).await;
+        let out = handle_logs(page, logs).await?;
+        if args.get("clear").and_then(Value::as_bool).unwrap_or(false) {
+            if logs == "network" {
+                page.clear_network_log();
+            } else {
+                page.clear_console_log().await?;
+            }
+        }
+        return Ok(out);
     }
 
     // V9: template extraction — structured data in ONE call.
@@ -172,7 +237,21 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // and INFERS field names by content type (title/link/image/price/date).
     // No template, no LLM.
     if extract == "auto" {
-        return handle_auto_extract(page, limit, limit_explicit, json_out).await;
+        if args
+            .get("preview")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return super::extract::auto_preview(page).await;
+        }
+        return handle_auto_extract(
+            page,
+            limit,
+            limit_explicit,
+            json_out,
+            args.get("sort").and_then(Value::as_str),
+        )
+        .await;
     }
 
     // M11: find — search all actionable elements by text, return matches with refs.

@@ -625,18 +625,18 @@ pub async fn perform_with_network(
                 let step_dx = total_x * (e(t1) - e(t0));
                 let step_dy = total_y * (e(t1) - e(t0));
 
-                let _ = cdp
-                    .send(
-                        "Input.dispatchMouseEvent",
-                        Some(json!({
-                            "type": "mouseWheel",
-                            "x": cx,
-                            "y": cy,
-                            "deltaX": step_dx,
-                            "deltaY": step_dy,
-                        })),
-                    )
-                    .await;
+                cdp.send_with_timeout(
+                    "Input.dispatchMouseEvent",
+                    Some(json!({
+                        "type": "mouseWheel",
+                        "x": cx,
+                        "y": cy,
+                        "deltaX": step_dx,
+                        "deltaY": step_dy,
+                    })),
+                    Duration::from_secs(5),
+                )
+                .await?;
 
                 // 8-18ms jitter between steps.
                 let jitter = 8 + rng.range(0, 10) as u64;
@@ -689,7 +689,19 @@ pub async fn perform_with_network(
             // recover (a silent "waited" would be a lie — the condition failed).
             // A deterministic evaluation failure (js syntax error / repeated
             // throw) carries its reason instead of masquerading as a timeout.
-            match eval_condition(cdp, condition, text, *timeout, None).await? {
+            match eval_condition(
+                cdp,
+                condition,
+                text,
+                *timeout,
+                if matches!(condition.as_str(), "network" | "network-idle") {
+                    in_flight
+                } else {
+                    None
+                },
+            )
+            .await?
+            {
                 CondOutcome::Met => {}
                 CondOutcome::Timeout => {
                     return Err(BladeError::Other(format!(

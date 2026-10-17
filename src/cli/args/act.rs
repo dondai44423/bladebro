@@ -79,6 +79,8 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
                     let v: f64 = take_num(args, &mut i, flag)?;
                     j[flag] = json!(v);
                 }
+                "body" => j["body"] = json!(true),
+                "next" | "sort" => j[flag] = json!(take_value(args, &mut i, flag)?),
                 "slim" => j["slim"] = json!(true),
                 "landscape" => j["landscape"] = json!(true),
                 "print-background" => j["printBackground"] = json!(true),
@@ -315,6 +317,9 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             if j.get("condition").is_none() && !pos.is_empty() {
                 j["condition"] = json!(pos[0].clone());
             }
+            if j.get("condition").is_none() && j.get("selector").is_some() {
+                j["condition"] = json!("selector");
+            }
             if j.get("condition").is_none() {
                 return Err(BladeError::Usage(
                     "wait needs a condition — element, title, url, text, settle, or js \
@@ -325,7 +330,15 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             let cond = j["condition"].as_str().unwrap_or("").to_string();
             if !matches!(
                 cond.as_str(),
-                "element" | "title" | "url" | "text" | "settle" | "js"
+                "element"
+                    | "selector"
+                    | "title"
+                    | "url"
+                    | "text"
+                    | "settle"
+                    | "js"
+                    | "network"
+                    | "network-idle"
             ) {
                 return Err(BladeError::Usage(format!(
                     "unknown wait condition '{cond}' — element, title, url, text, settle, js"
@@ -345,7 +358,10 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
                         "wait js needs an expression — `act wait js \"window.ready\"` (or --js \"…\")".into(),
                     ));
                 }
-            } else if cond != "settle" && j.get("text").is_none() {
+            } else if !matches!(cond.as_str(), "settle" | "network" | "network-idle")
+                && j.get("text").is_none()
+                && j.get("selector").is_none()
+            {
                 return Err(BladeError::Usage(format!(
                     "wait {cond} needs a match value — `act wait {cond} --text \"…\"`"
                 )));
@@ -394,6 +410,16 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             if j["extract"].as_str() == Some("json") && j.get("template").is_none() {
                 return Err(BladeError::Usage(
                     "extract json needs --template '<json>' (or use `extract auto`)".into(),
+                ));
+            }
+        }
+        "paginate" => {
+            if j.get("next").is_none() && !pos.is_empty() {
+                j["next"] = json!(pos[0]);
+            }
+            if pos.len() > 1 || j.get("next").is_none() {
+                return Err(BladeError::Usage(
+                    "paginate needs --next CSS or text=Next, with optional --max/--extract".into(),
                 ));
             }
         }

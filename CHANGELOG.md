@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Popup links restore the opener's activation before further input, report the new tab ID once, and finish action bookkeeping. Explicit tab switches activate their target. Scroll refuses the first failed dispatch instead of continuing timed-out wheel events.
+- Targeted key presses focus and verify the addressed control before dispatch; macOS Meta+A carries the native select-all editing command; equally ranked text/label matches refuse with candidate refs and context. Error recovery includes one page-state section, and timeout guidance preserves unknown outcomes without prescribing blind retries.
+- Markdown preserves whitespace around inline links/emphasis. Auto-extraction reads descriptions from the live rendered tree, keeps heading titles separate from breadcrumbs, decodes supported redirects and flags opaque destinations. Template fields accept the container's own `@attribute` and invalid CSS reports a concise error.
+- Navigation/fill and inherited run/batch slim output keep verdicts and explicit reads without repeating models. Network logs reset at top-frame navigation; selected console/network logs support read-and-clear. Branch messages distinguish a false condition from the configured wait budget.
+- Reddit API denial returns explicit partial/incomplete DOM fallback metadata without promising a retry will work. Safe transient GET failures retry twice with bounded backoff; policy denials/rate limits stop, and comment sort can be specified.
+
+### Added
+- Bounded pagination through ordinary extraction/click dispatch, with page retention, cycle/cap detection and honest completion metadata.
+- Visible CSS waits across open shadow roots/same-origin frames and a measured 300ms tracked-network idle condition.
+- Artifact item paging with independently usable JSON rows alongside compatible character chunks; sampled auto-extraction schema previews; structured model changes since the last capture.
+- Explicit HTTP body downloads with response status/final URL and bounded size/deadline, separate from browser-session attachments. Resource blocking reports measured refused-request counts without inventing byte/time savings.
+- Compact five-tool definitions and CLI help describe the new contracts; owned-browser report regressions run natively on Linux, macOS and Windows in normal/incognito modes.
+
 ## [4.6.3] - 2026-10-16
 
 ### Fixed

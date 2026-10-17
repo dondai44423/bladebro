@@ -15,6 +15,11 @@ use super::see::handle_see;
 use super::state::handle_state;
 
 pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
+    super::validate::fields(args, "run")?;
+    let slim = args.get("slim").and_then(Value::as_bool).unwrap_or(false);
+    let mut inherited = args.clone();
+    inherit_slim(&mut inherited, slim);
+    let args = &inherited;
     let steps = args
         .get("steps")
         .and_then(|s| s.as_array())
@@ -89,6 +94,24 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
     Ok(observations.join("\n"))
 }
 
+// Inherit through branches; a step can explicitly opt back into full output.
+fn inherit_slim(value: &mut Value, inherited: bool) {
+    let own = value
+        .get("slim")
+        .and_then(Value::as_bool)
+        .unwrap_or(inherited);
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("slim").or_insert(Value::Bool(own));
+        for key in ["steps", "then", "else"] {
+            if let Some(Value::Array(steps)) = obj.get_mut(key) {
+                for step in steps {
+                    inherit_slim(step, own);
+                }
+            }
+        }
+    }
+}
+
 /// Unified wait/condition field resolution (G02): ONE expression contract for
 /// `act`, nested `batch`, `run` steps and `if`/`while`.
 ///
@@ -137,17 +160,42 @@ pub(super) fn resolve_condition_fields(
             )),
         };
     }
+    if !matches!(
+        cond,
+        "element" | "selector" | "title" | "url" | "text" | "settle" | "network" | "network-idle"
+    ) {
+        return Err(BladeError::Usage(format!("unknown wait condition '{cond}' - use element, selector, text, title, url, js, settle or network")));
+    }
     if !js.is_empty() {
         return Err(crate::error::BladeError::Usage(format!(
             "wait: a 'js' field is set but condition=\"{cond}\" does not evaluate JavaScript - use condition=\"js\", or drop the js field"
         )));
     }
-    if matches!(cond, "element" | "title" | "url" | "text") && text.is_empty() {
+    if matches!(cond, "element" | "selector" | "title" | "url" | "text") && text.is_empty() {
         return Err(crate::error::BladeError::Usage(format!(
             "wait condition=\"{cond}\" needs a non-empty match value in 'text'"
         )));
     }
     Ok((cond.to_string(), text.to_string()))
+}
+
+pub(super) fn condition_from_args(args: &Value, default: &str) -> Result<(String, String)> {
+    let cond = args.get("condition").and_then(Value::as_str).unwrap_or("");
+    let text = args.get("text").and_then(Value::as_str).unwrap_or("");
+    let js = args.get("js").and_then(Value::as_str).unwrap_or("");
+    if let Some(selector) = args
+        .get("selector")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        if !matches!(cond, "" | "selector") || !text.is_empty() || !js.is_empty() {
+            return Err(BladeError::Usage(
+                "selector wait cannot be combined with another condition/text/js".into(),
+            ));
+        }
+        return Ok(("selector".into(), selector.into()));
+    }
+    resolve_condition_fields(cond, text, js, default)
 }
 
 /// Timeout validation shared by wait/if/while (G02): integer seconds,
@@ -188,12 +236,7 @@ async fn execute_step(
     match action_str {
         "if" => {
             let timeout = resolve_wait_timeout(step, 5)?;
-            let (condition, match_text) = resolve_condition_fields(
-                step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
-                step.get("text").and_then(|t| t.as_str()).unwrap_or(""),
-                step.get("js").and_then(|j| j.as_str()).unwrap_or(""),
-                "settle",
-            )?;
+            let (condition, match_text) = super::run::condition_from_args(step, "settle")?;
             let then_steps = step
                 .get("then")
                 .and_then(|s| s.as_array())
@@ -239,7 +282,7 @@ async fn execute_step(
                     ));
                 } else {
                     observations.push(format!(
-                        "step {path}: if({condition} \"{match_text}\") → skipped (timeout {}s)",
+                        "step {path}: if({condition} \"{match_text}\") → skipped (condition not met; budget {}s)",
                         timeout.as_secs()
                     ));
                 }
@@ -267,12 +310,7 @@ async fn execute_step(
         }
         "while" => {
             let timeout = resolve_wait_timeout(step, 5)?;
-            let (condition, match_text) = resolve_condition_fields(
-                step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
-                step.get("text").and_then(|t| t.as_str()).unwrap_or(""),
-                step.get("js").and_then(|j| j.as_str()).unwrap_or(""),
-                "element",
-            )?;
+            let (condition, match_text) = super::run::condition_from_args(step, "element")?;
             let max = step.get("max").and_then(|m| m.as_u64()).unwrap_or(10) as usize;
             let body = step
                 .get("steps")
@@ -424,12 +462,7 @@ async fn execute_step(
         }
         "wait" => {
             let timeout = resolve_wait_timeout(step, 10)?;
-            let (condition, match_text) = resolve_condition_fields(
-                step.get("condition").and_then(|c| c.as_str()).unwrap_or(""),
-                step.get("text").and_then(|t| t.as_str()).unwrap_or(""),
-                step.get("js").and_then(|j| j.as_str()).unwrap_or(""),
-                "settle",
-            )?;
+            let (condition, match_text) = super::run::condition_from_args(step, "settle")?;
             let else_steps = step
                 .get("else")
                 .and_then(|s| s.as_array())
@@ -447,7 +480,11 @@ async fn execute_step(
                     Ok((delta, verdict)) => {
                         observations.push(format!(
                             "step {path}: {verdict}\n{}",
-                            page.delta_view(&delta, 4000)
+                            if step.get("slim").and_then(Value::as_bool).unwrap_or(false) {
+                                String::new()
+                            } else {
+                                page.delta_view(&delta, 4000)
+                            }
                         ));
                     }
                     Err(BladeError::Closed) => return Err(BladeError::Closed),
@@ -463,7 +500,7 @@ async fn execute_step(
                 // wait + else: a gate with a fallback branch — the branch runs
                 // only when the condition times out, and the outcome line says
                 // which path was taken.
-                if condition == "settle" || condition == "network" {
+                if condition == "settle" {
                     return Err(crate::error::BladeError::Other(
                         "wait else: 'else' needs a real condition (element/text/title/url/js) — 'settle' always succeeds; use an 'if' step for plain branching".into(),
                     ));

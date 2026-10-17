@@ -137,6 +137,9 @@ pub async fn handle_tools_call(
             // Drain ambient events (consent, block detection).
             let ambient = page.drain_ambient();
             for a in &ambient {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
                 text.push_str(&format!("\u{26a0} {}\n", a));
             }
             Ok(json!({
@@ -203,6 +206,9 @@ pub async fn handle_tools_call(
             }
             let ambient = page.drain_ambient();
             for a in &ambient {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
                 text.push_str(&format!("\u{26a0} {}\n", a));
             }
             Ok(json!({

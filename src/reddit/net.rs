@@ -64,7 +64,7 @@ pub(super) fn classify_gate_body(path: &str, text: &str) -> Option<BladeError> {
     let lower = text.to_ascii_lowercase();
     if lower.contains("blocked by network security") || lower.contains("whoa there, pardner") {
         return Some(BladeError::Other(format!(
-            "reddit: network-security block (soft, transient — retry shortly) on {path}"
+            "reddit: network-security block (API denied; repeated requests may remain blocked) on {path}"
         )));
     }
     if lower.contains("js_challenge") || lower.contains("requestsubmit") {
@@ -77,6 +77,24 @@ pub(super) fn classify_gate_body(path: &str, text: &str) -> Option<BladeError> {
 
 /// Fetch one same-origin reddit JSON path from inside the page.
 pub(super) async fn fetch_json(cdp: &CdpSession, path: &str) -> Result<Value> {
+    for attempt in 0..3 {
+        match fetch_json_once(cdp, path).await {
+            Err(e) if attempt < 2 && transient_read(&e) => {
+                tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await;
+            }
+            result => return result,
+        }
+    }
+    Err(BladeError::Other("reddit: read retries exhausted".into()))
+}
+
+// Only safe GET observations, never challenge denial or rate limiting. An
+// unanswered CDP eval is not replayed: its pending fetch may still be alive.
+fn transient_read(error: &BladeError) -> bool {
+    matches!(error, BladeError::Other(message) if ["HTTP 0", "HTTP 502", "HTTP 503", "HTTP 504"].iter().any(|suffix| message.ends_with(suffix)))
+}
+
+async fn fetch_json_once(cdp: &CdpSession, path: &str) -> Result<Value> {
     let url_js = serde_json::to_string(path)?;
     let expr = format!(
         "(async()=>{{try{{const c=new AbortController();const t=setTimeout(()=>c.abort(),{PAGE_FETCH_TIMEOUT_MS});\
@@ -201,4 +219,64 @@ pub(super) fn is_rate_limit(e: &BladeError) -> bool {
 /// and must stop — it is transient, and hammering extends it.
 pub fn is_security_block(e: &BladeError) -> bool {
     e.to_string().contains("network-security block")
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn fixture(statuses: Vec<i64>) -> (CdpSession, tokio::task::JoinHandle<usize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut count = 0;
+            for status in statuses {
+                let request = socket.next().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+                assert_eq!(request["method"], "Runtime.evaluate");
+                let body = if status == 200 {
+                    "{\"ok\":true}"
+                } else if status == 403 {
+                    "blocked by network security"
+                } else {
+                    "temporary server failure"
+                };
+                socket.send(Message::Text(json!({"id":request["id"],"result":{"result":{"value":{"s":status,"t":body}}}}).to_string().into())).await.unwrap();
+                count += 1;
+            }
+            count
+        });
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        (CdpSession::root(client), task)
+    }
+
+    #[tokio::test]
+    async fn transient_get_recovers_but_denials_never_retry() {
+        let (cdp, task) = fixture(vec![503, 502, 200]).await;
+        assert_eq!(fetch_json(&cdp, "/fixture.json").await.unwrap()["ok"], true);
+        assert_eq!(task.await.unwrap(), 3);
+        for status in [403, 429] {
+            let (cdp, task) = fixture(vec![status]).await;
+            assert!(fetch_json(&cdp, "/fixture.json").await.is_err());
+            assert_eq!(task.await.unwrap(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_transient_read_stops_after_three_attempts() {
+        let (cdp, task) = fixture(vec![503, 503, 503]).await;
+        let error = fetch_json(&cdp, "/fixture.json").await.unwrap_err();
+        assert!(error.to_string().contains("HTTP 503"));
+        assert_eq!(task.await.unwrap(), 3);
+        assert!(!transient_read(&BladeError::Timeout(Duration::from_secs(
+            5
+        ))));
+    }
 }

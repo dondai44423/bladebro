@@ -210,7 +210,10 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--limit": "max extract items (default 50; Reddit post comments: all up to 1000 unless set)",
                 "--logs": "console | network",
                 "--template": "JSON or @file — for extract=json",
-                "--artifact": "read an offloaded payload from disk, paged: --artifact <path> [--offset N] [--limit N]",
+                "--artifact": "read offloaded text chunks (concatenate data then parse); --items pages JSON rows; offset/limit count chars or rows",
+                "--preview": "auto-extract container/schema without rows",
+                "--changes": "model delta since last capture; --format json for structured fields",
+                "--clear": "read then clear the selected log",
                 "--format": "text (default) | json — pure JSON output for extract/artifact reads ({offset,next_offset,data} pages)"
             },
             "examples": [
@@ -221,12 +224,12 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro see --find \"Submit\"",
                 "bladebro see --logs network"
             ],
-            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it returns the full comment tree (every reply, complete flag)", "extract=auto envelope: container,count,items + page_total/partial/paged when the page claims more results than the DOM holds, sponsored (paid placements), duplicates_removed, redirects_unwrapped — each explained by a note line"]
+            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it attempts the full comment tree; complete/partial disclose API denial and missing replies", "extract=auto envelope: container,count,items + page_total/partial/paged when the page claims more results than the DOM holds, sponsored (paid placements), duplicates_removed, redirects_unwrapped/redirects_unresolved — each explained by a note line"]
         }),
         "act" => json!({
             "usage": "bladebro act <action> [target] [value] [--flags]",
             "tool": "act",
-            "actions": ["click","type","fill","select","clear","press","scroll","hover","navigate","upload","download","wait","eval","collect","extract","read","batch","pdf","back","forward","reload","save","load","open-tab","close-tab","switch-tab"],
+            "actions": crate::action::ACT_ACTIONS,
             "universal_flags": {
                 "--ref": "element ref (self-heals; page-scoped — refresh after navigation; clear/read also take labels)",
                 "--label": "field label",
@@ -242,7 +245,10 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--dx/--dy": "scroll distance",
                 "--js": "eval expression (@file or - for scripts)",
                 "--submit": "fill: submit button ref or text",
-                "--slim": "skip the delta",
+                "--next": "paginate: CSS selector or text=Next (also label=/ref=)",
+                "--body": "download: HTTP body, <=32MiB/30s, no browser cookies; honors HTTP(S) BLADE_PROXY",
+                "--sort": "Reddit post extract: confidence|top|new|controversial|old|qa",
+                "--slim": "verdict-only successful actions; batch/run inherit, reads/errors retained",
                 "--format": "extract/eval: text (default) | json — pure JSON output (for eval: the bare returned value; {data,note} when a note rides along; an {artifact,bytes} envelope when oversized)"
             },
             "examples": [
@@ -550,7 +556,11 @@ FLAGS
   --budget <N>        max response chars (default 8000)
   --limit <N>         max extract items (default 50; Reddit comments: all ≤1000)
   --logs console|network
-  --artifact <path>   paged read of an offloaded payload (--offset/--limit)
+  --artifact <path>   paged read (--offset/--limit count chars; --items counts JSON rows)
+  --preview           extract auto: container/schema without rows
+  --changes           model delta since last capture; --format json for structured fields
+  --clear             read then clear --logs console|network
+  --sort <sort>       Reddit post auto-extract: confidence|top|new|controversial|old|qa
   --format text|json  json: pure JSON out for extract/artifact/eval reads
   --url <url>         navigate first (or pass the URL positionally)
 
@@ -576,6 +586,8 @@ ACTIONS
   scroll <dx> <dy>         hover <target>            navigate <url> [--block]
   upload <target> <path>   download <url> [--path]  wait <condition> [value]
   eval <js> [--ref]        collect <url> [--max N]   read <ref|label>
+  paginate <next> [--max N] [--extract auto]  bounded read/advance, retains pages
+  download <url> --body   save an HTTP body without browser cookies (HTTP(S) proxy honored)
   extract [auto|links|forms|json]   structured data (same as 'see extract …')
   batch <steps|@file|->    pdf [--path] [--landscape]
   back / forward / reload  save <name> / load <name>
@@ -583,7 +595,7 @@ ACTIONS
 
 UNIVERSAL FLAGS (mirror the MCP schema — accepted on every action)
   --ref --label --text --selector --role --nth --key --url --option --condition --timeout
-  --dx --dy --js --submit --block --slim --format  (per-action: --path, --max, --x/--y…)
+  --next --body --sort --dx --dy --js --submit --block --slim --format  (per-action: --path, --max, --x/--y…)
 
 Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
 payloads: @file or - (stdin). Unknown flags fail loudly (exit 2). Key chords: 'act press Control+a'.
@@ -599,7 +611,7 @@ RESULT SHAPES (stable — parse them without guessing)
   extract auto  envelope {container,count,items,…} plus, when they apply:
                 page_total/partial/paged (the page claims more results than the
                 DOM holds), sponsored (paid placements — flagged per item, left in
-                page order), duplicates_removed, redirects_unwrapped. Each has a
+                page order), duplicates_removed, redirects_unwrapped/redirects_unresolved. Each has a
                 `note:` line explaining what to do about it.
 
 EXAMPLES

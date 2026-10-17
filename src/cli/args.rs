@@ -680,4 +680,24 @@ mod endpoint_args_tests {
             Err(BladeError::Usage(_))
         ));
     }
+    #[test]
+    fn polish464_flags_reach_shared_dispatch() {
+        let strings = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let value =
+            parse_act_args(&strings(&["paginate", "--next", "text=Next", "--max", "3"])).unwrap();
+        assert_eq!(value["next"], "text=Next");
+        assert_eq!(value["max"], 3);
+        let value = parse_act_args(&strings(&["wait", "--selector", ".ready"])).unwrap();
+        assert_eq!(value["condition"], "selector");
+        assert!(parse_act_args(&strings(&["wait", "network"])).is_ok());
+        let value = parse_act_args(&strings(&["extract", "auto", "--sort", "new"])).unwrap();
+        assert_eq!(value["sort"], "new");
+        let value =
+            parse_act_args(&strings(&["download", "https://example.com", "--body"])).unwrap();
+        assert_eq!(value["body"], true);
+        let value = parse_run_args(&strings(&["--slim", "[{\"action\":\"see\"}]"])).unwrap();
+        assert_eq!(value["slim"], true);
+        let value = parse_see_args(&strings(&["--artifact", "/fixture.json", "--items"])).unwrap();
+        assert_eq!(value["items"], true);
+    }
 }
