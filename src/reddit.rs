@@ -493,7 +493,7 @@ fn assemble(
         ));
     } else if security_blocked {
         status = Some(format!(
-            "reddit's network-security wall interrupted the sweep: {count} of {total_s} comments loaded (it's transient — retry in a few seconds for the rest)"
+            "reddit's network-security wall interrupted the sweep: {count} of {total_s} comments loaded (API denied; repeated requests may remain blocked)"
         ));
     } else if rate_limited {
         status = Some(format!(
@@ -784,7 +784,7 @@ mod tests {
             note5.contains("network-security wall interrupted"),
             "{note5}"
         );
-        assert!(note5.contains("transient"), "{note5}");
+        assert!(note5.contains("may remain blocked"), "{note5}");
     }
 
     #[test]
@@ -795,7 +795,7 @@ mod tests {
         let e = classify_gate_body("/r/x/comments/y/.json", wall).expect("wall classified");
         assert!(is_security_block(&e));
         assert!(!is_rate_limit(&e));
-        assert!(e.to_string().contains("transient"), "{e}");
+        assert!(e.to_string().contains("may remain blocked"), "{e}");
 
         // The classic variant some reddit edges still serve.
         let whoa =

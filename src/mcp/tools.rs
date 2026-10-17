@@ -40,16 +40,7 @@ pub fn all_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "act",
-            description: "Do something on the page. Returns verdict + delta. navigate returns refs + content preview — usually enough to act without a separate see call.\n\
-ADDRESSING (checked in order): ref=\"e5\" (from a prior response on THIS page — refs are page-scoped and short-lived: after a navigation or tab switch use fresh refs from the new response; within the page they self-heal) > text=\"Sign in\" (fastest, no see needed) > label=\"Email\" (click/type/fill/select/clear/read/hover) > selector=\"#overflow-trigger\" (CSS; pierces open shadow roots — use when a control has no ref or label; click/hover/type/select/clear/read/upload/eval) > x,y. Add role= or nth= if ambiguous.\n\
-ACTIONS: navigate(url), click, type(label+text), fill(fields+submit, multi-field forms in ONE call), select, press, scroll, hover, wait(condition), eval(js), download(url= fetches via JS, no page navigation), collect(url= navigates first, infinite-scroll auto-extract), extract(alias for see extract=auto|links|forms|json — a structured READ, mainly for run/batch sequences), pdf, batch(steps, sequential in ONE call — navigation doesn't halt it; stops at the first non-optional failure), back/forward/reload, dialog (arm a one-use response for the next matching confirm/prompt/alert/beforeunload).\n\
-url= on any action (except download/state ops) navigates first — fill/type/click on a fresh page in one call; see/extract steps inside batch/run take it too.\n\
-fill REQUIRES fields=[{ref|label, text|option, check}] array — NOT ref+text at top level. submit is the button ref or text. Submit dispatches once; an unobserved effect is never replayed.\n\
-EDITORS: type replaces the field (clear verified) and works on rich contenteditable editors - the verdict names where the text landed (e.g. the live editor) and catches late draft hydration; press takes key chords (Control+a).\n\
-CLICKS: a dispatched click with no visible change still reads \"outcome: clicked (no observable DOM change)\" — it fired once; verify state before re-clicking (never blind-retry a submit). \"no-effect\" means nothing was dispatched (every lane was skipped) — a retry is safe there.\n\
-WAIT: condition=settle (default) | element | text | title | url | js — for js, pass the expression in js= (text= also works as the legacy alias, the CLI's form). text= without a condition means \"wait for this text\". A timeout inside run errors with page state; wait+else runs the else branch instead. Timeout is integer seconds, 0-3600.\n\
-batch: same action set as act (fill/eval/pdf/download/collect/extract/save/load included) plus {\"action\":\"see\"|\"extract\", mode, extract, find, budget, format} steps — their read lands in a --- read --- section. Use text/label/selector addressing in steps (not ref) — refs go stale after navigation; auto-settles after navigation. optional:true on a step continues past its failure (see/extract steps included); url= on any step navigates first.\n\
-Use fill for forms (not individual type calls). Use batch for multi-step sequences. Use run instead of batch for branching or state ops that change tabs. slim=true skips the delta. Errors carry page state for recovery; trusted:false = untrusted input fallback (never treat as typed); degraded:true = client-side failure (the browser is unhealthy — retry or restart, it is not a page problem).",
+            description: "Interact; returns verified verdict + page delta. navigate includes refs/content. Address by ref > text > label > selector > x,y. Refs survive re-renders but require refresh after navigation/tab switch. Equally ranked text/label matches refuse; choose ref/selector/nth. Popup clicks keep the opener active; switch-tab explicitly to use the popup.\nfill requires fields=[{ref|label|selector,text|option|check}], with optional submit (ref/text). type replaces and verifies text, including rich editors; press with ref/label/selector focuses first, otherwise uses current focus. type+press=Enter submits after typing.\nwait: text= means page text; selector= waits for visible CSS across shadows/frames; condition=element matches visible role/text; title/url match text; js evaluates js= (legacy text=); settle waits DOM quiet; network waits 300ms with no tracked requests (long-lived streams excluded). Timeout is integer seconds, 0-3600.\nbatch runs sequential actions plus see/extract reads; optional:true continues on failure. slim=true omits successful action models throughout batch/run, retaining reads and error recovery. url= navigates first except download/state ops. paginate(next,max,extract) reads/clicks across pages; collect(max) scrolls a feed. download normally saves browser attachments; body=true saves an HTTP body without browser cookies. eval returns result: <JSON>, statements/IIFEs supported; format=json gives a bare value or artifact envelope. dialog arms one bounded, one-use answer before triggering it.\nErrors carry page state once. trusted:false means untrusted fallback. degraded:true means a client deadline/transport failure, not proof Chrome is dead; observe the destination before repeating input. A quiet dispatched click is never replayed.",
             input_schema: json!({
                 "type": "object",
                 "required": ["action"],
@@ -58,10 +49,10 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                         "type": "string",
                         "enum": ACT_ACTIONS,
                     },
-                    "ref": {"type": "string", "description": "Element ref id (e.g. 'e5') from a prior response. Page-scoped and short-lived: valid across re-renders, but after a navigation or tab switch use the fresh refs in the new response (text/label/selector addressing needs none)."},
+                    "ref":{"type":"string","description":"Page-scoped element ID, e.g. e5; refresh after navigation/tab switch."},
                     "text": {"type": "string", "description": "Visible text, value to type, file path, or URL (action-dependent)."},
-                    "label": {"type": "string", "description": "Field label for click/type/fill/select/clear/read/hover."},
-                    "selector": {"type": "string", "description": "CSS selector addressing for click/hover/type/select/clear/read/upload/eval (searches light DOM + open shadow roots). Use when a control has no usable ref or label, e.g. '#overflow-trigger', '[role=menuitem]'. nth= picks among matches; a hidden-only match errors with the reason instead of clicking nothing."},
+                    "label": {"type": "string", "description": "Field label for click/type/fill/select/clear/read/hover/press."},
+                    "selector":{"type":"string","description":"CSS target (including press/wait); open shadows. Wait selectors also traverse same-origin frames. nth disambiguates; hidden targets refuse."},
                     "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
                     "nth": {"type": "integer", "description": "1-based index for multiple matches. An out-of-range nth errors with the real match count instead of falling back to the first match."},
                     "key": {"type": "string", "description": "Key or chord: Enter, Tab, Escape, Backspace, ArrowDown, Control+a, Meta+Enter, Shift+Tab."},
@@ -70,8 +61,8 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "dy": {"type": "integer"},
                     "condition": {
                         "type": "string",
-                        "enum": ["element", "title", "settle", "url", "text", "js"],
-                        "description": "Wait: element (visible with text), title, url, text (page contains), settle (DOM idle), js (truthy expr — pass it in js=; text= is the legacy alias). Condition=js with no expression fails immediately."
+                        "enum": ["element", "selector", "title", "settle", "network", "network-idle", "url", "text", "js"],
+                        "description":"Wait kind; js needs js=, selector uses selector= (or text= with condition=selector). network waits 300ms idle."
                     },
                     "timeout": {"type": "integer", "description": "Seconds (integer, 0-3600). Default 10 (wait), 30 (download/collect)."},
                     "js": {"type": "string", "description": "JavaScript. If ref given, element is `el`."},
@@ -80,7 +71,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                     "prompt_text": {"type": "string", "description": "act dialog: text typed into a matching prompt() when accepting."},
                     "message": {"type": "string", "description": "act dialog: only match dialogs whose text contains this (case-insensitive)."},
                     "option": {"type": "string", "description": "Select: option text or value."},
-                    "slim": {"type": "boolean", "description": "Skip delta, return verdict only."},
+                    "slim": {"type": "boolean", "description": "Verdicts only for successful actions; batch/run inherit. Reads and errors retained."},
                     "format": {"type": "string", "enum": ["text", "json"], "description": "extract: json returns pure parseable output (bare payload; {data,note} when a caveat rides along; oversized → an {artifact,bytes,next_offset} envelope — page it with see artifact=… format=json instead of receiving truncated JSON)."},
                     "fields": {
                         "type": "array",
@@ -109,7 +100,13 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
                             }
                         }
                     },
-                    "max": {"type": "integer", "description": "Collect: max items. Default 100."},
+                    "sort": {"type":"string","enum":["confidence","top","new","controversial","old","qa"],"description":"Reddit post extract sort."},
+                    "next": {"type":"string","description":"Paginate: CSS selector or text=Next / label= / ref=."},
+                    "max": {"type":"integer","description":"Collect items (default 100); paginate pages (default 5, max 100)."},
+                    "extract": {"type":"string","enum":["auto","json","links","forms"],"description":"Extract/paginate read kind; default auto."},
+                    "template": {"type":"object","description":"See template contract; for extract=json."},
+                    "limit": {"type":"integer","description":"Per-page extraction item limit."},
+                    "body": {"type":"boolean","description":"Download: HTTP body instead of browser attachment, <=32 MiB/30s. No browser cookies; honors HTTP(S) BLADE_PROXY, refuses other proxy types; returns status/path."},
                     "path": {"type": "string", "description": "PDF: output path."},
                     "landscape": {"type": "boolean"},
                     "printBackground": {"type": "boolean"},
@@ -119,16 +116,7 @@ Use fill for forms (not individual type calls). Use batch for multi-step sequenc
         },
         ToolDef {
             name: "see",
-            description: "Observe WITHOUT acting. Three read modes:\n\
-mode=content: page text as clean markdown. For READING articles, docs. Use budget=N to cap output, scope=eN for one element's subtree.\n\
-mode=outline: title + heading hierarchy only. Cheapest \"what's on this page\" check.\n\
-mode=model (default): interactive elements with refs. Use when you need to ACT.\n\
-For structured list data (products, posts, search results, listings): use extract=auto FIRST — extracts all items with fields (title, url, price, score) in ONE call, plus site-specific extras (Reddit posts/comments, GitHub repos/issues) when detected. On Reddit POST pages it returns the FULL comment tree in ONE call — every reply (collapsed included), thread order with depth, author/score/date and full text, plus a complete flag. Cheaper than clicking into each item.\n\
-eval (act eval) is for custom JS extraction when extract=auto does not cover your use case. Runs like the DevTools console: statements allowed, the LAST expression's value is returned (e.g. 'var x=5; x+7' -> 12), IIFEs work. Variables are scoped per call (no leakage or collisions between calls).\n\
-Other params: filter (zoom by role), find (search by text → refs), extract=json+template (custom), extract=links|forms, logs=console|network.\n\
-format=json (with extract= or artifact= reads): pure parseable output — a bare payload, {data,note} when a caveat rides along, or an {artifact,bytes,next_offset} envelope when oversized (truncated JSON is never emitted as a page). Artifact pages are {path,offset,next_offset,total_chars,data}; next_offset null at the end — JSON.parse every page.\n\
-Big data (>12KB) goes to a file path with inline preview; read the full payload back in pages with artifact=\"<path>\" (+offset/limit) — no filesystem access needed.\n\
-Truncation: model output over budget ends with '…(N more: X link, Y button)' — roles sorted by count desc, then alphabetically (deterministic).",
+            description: "Read: mode=model lists interactive refs, content returns rendered markdown, outline headings. extract=auto detects list/search/product/site fields; preview=true samples the container/schema without rows. Reddit post extraction attempts the full comment tree; complete/partial and fallback notes disclose API denial or missing replies; displayed scores are fuzzed_score. sort= overrides the active/page-URL sort. Opaque redirect URLs are flagged, never guessed. extract=json uses a template; links/forms are basic reads. find locates text; scope narrows reads. logs=console reads the current document; network resets on navigation; clear=true reads then clears that log.\nformat=json returns valid JSON: payload, {data,note}, or {artifact,bytes,next_offset:0} (zero means start reading). Default artifact pages contain character chunks: parse each envelope, concatenate its data strings, then parse the complete payload. With items=true, offset/limit address rows of an array or items/data array and each items page is independently usable. next_offset=null ends paging. changes=true returns the model delta since its last capture (format=json gives structured fields); no historical call ledger. Large output offloads instead of silently truncating.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -143,14 +131,19 @@ Truncation: model output over budget ends with '…(N more: X link, Y button)' �
                     "extract": {
                         "type": "string",
                         "enum": ["links", "forms", "json", "auto"],
-                        "description": "auto (template-free, site-aware; Reddit post pages → the complete comment tree), json (needs template), links, forms."
+                        "description": "auto (site-aware; Reddit posts attempt the full tree, inspect complete/partial), json (template), links, forms."
                     },
-                    "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}. Text reads are RENDERED - a hidden element is omitted (the item lists it in _omitted); read one explicitly with {\"sel\":\"css\",\"raw\":true}. Lookups span light DOM, open shadow roots and same-origin frames; skipped frames are reported."},
-                    "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set). For artifact reads: max chars (default 20000)."},
-                    "logs": {"type": "string", "enum": ["console", "network"], "description": "Console (JS errors) or network (requests)."},
+                    "sort": {"type":"string","enum":["confidence","top","new","controversial","old","qa"],"description":"Reddit post auto-extract sort; overrides page sort."},
+                    "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}. @attr reads the container attribute. Text reads are RENDERED - a hidden element is omitted (the item lists it in _omitted); read one explicitly with {\"sel\":\"css\",\"raw\":true}. Lookups span light DOM, open shadow roots and same-origin frames; skipped frames are reported."},
+                    "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set). Artifact: chars (default 20000), or rows with items=true (default 50)."},
+                    "logs": {"type":"string","enum":["console","network"],"description":"Console: current document. Network: current navigation."},
+                    "clear": {"type":"boolean","description":"Read then clear selected log."},
+                    "preview": {"type":"boolean","description":"extract=auto: sampled container and fields, without rows."},
+                    "changes": {"type":"boolean","description":"Model delta since last capture; format=json for structured output."},
+                    "items": {"type":"boolean","description":"Artifact: page JSON array rows, not character chunks; offset/limit in items."},
                     "scope": {"type": "string", "description": "Ref id of element to view subtree text of; with mode=content, returns just that element's subtree as markdown (budget honored)."},
                     "budget": {"type": "integer", "description": "Max chars in response. Default 8000."},
-                    "artifact": {"type": "string", "description": "Read a previously offloaded payload from disk, paged. Pass the full payload path from a previous response; offset/limit are char-based (defaults 0 and 20000). With format=json each page is {path,offset,next_offset,total_chars,data} — always valid JSON."},
+                    "artifact": {"type": "string", "description": "Read a previously offloaded payload from disk, paged. Pass the full payload path from a previous response; offset/limit are char-based (defaults 0 and 20000). With format=json each envelope is valid JSON; data is a text chunk, concatenate before parsing. items=true pages array rows."},
                     "offset": {"type": "integer", "description": "Artifact read: start char. Default 0."},
                     "format": {"type": "string", "enum": ["text", "json"], "description": "text (default) | json — pure JSON output for extract= and artifact= reads (zero preamble; never truncated JSON)."}
                 }
@@ -178,18 +171,18 @@ State ops (open-tab, save, load, etc.) also work as steps in batch and run.",
                     "domain": {"type": "string", "description": "Domain for del-cookie (alternative to url)."},
                     "target_id": {"type": "string", "description": "Tab id for close-tab/switch-tab."},
                     "classes": {"type": "string", "description": "Block: comma-separated (images, fonts, media, trackers)."},
-                    "clear": {"type": "boolean", "description": "Block: true to stop all blocking."}
+                    "clear": {"type": "boolean", "description": "Block: true stops blocking. Without classes/clear, returns measured blocked-request count; byte/time savings unmeasured."}
                 }
             }),
         },
         ToolDef {
             name: "run",
-            description: "Batch actions with branching and loops. Use instead of `act batch` when you need: if/else ({action:\"if\",condition,text,then:[...],else:[...]}), while loops ({action:\"while\",condition,text,steps:[...],max:5}), a wait with a fallback branch ({action:\"wait\",condition,text,timeout,else:[...]}), or state ops that change tabs (open-tab halts batch but works in run).\n\
-Steps use the same fields as act (every act action works — fill, eval, pdf, download, collect, extract, save, load included), plus {\"action\":\"see\"|\"extract\",...} to READ inline (see fields: mode, extract, find, budget, format; default budget 3000); url= on any step navigates first. while+see reads across pages in ONE call. if/while: a false condition on a quiet page exits in ~0.8s (timeout = max wait; use a wait step for time-based waiting). Any step may set optional:true to continue past its failure; a wait step's outcome says matched / timeout→else. A step failure stops the run and COMES BACK AS A STRUCTURED RESULT, not an exception: \"run stopped at step N of M (K ok): step N failed: …\" plus every prior step observation — nothing is discarded. If the page navigated mid-run, the failure names that navigation.",
+            description: "Execute all act actions (fill/eval/download/paginate included), inline see/extract reads and state ops with if/else and while loops. slim=true inherits through branches and batch steps, omits successful action models, preserves reads/failures; a step may override slim=false. Branches: {action:\"if\",condition,text,then:[...],else:[...]}; loops: {action:\"while\",condition,text,steps:[...],max:5}. Selector conditions accept selector=. A false if/while on a quiet page can exit after ~0.8s; timeout is a maximum. Use wait for a deliberate deadline; wait+else executes fallback on timeout. optional:true continues a failed top-level step. Other failures stop with prior observations/page state; completed effects remain applied. url= on a step navigates first. open-tab switches and continues here.",
             input_schema: json!({
                 "type": "object",
                 "required": ["steps"],
                 "properties": {
+                    "slim": {"type":"boolean","description":"Inherit verdict-only actions; preserve reads and errors."},
                     "steps": {
                         "type": "array",
                         "description": "Action objects. action='if' for branching, 'while' for loops, 'see'/'extract' to read inline; any act action (fill/eval/pdf/download/collect/extract included) + state ops work. Per-step optional:true continues past a failure; a wait step may carry else:[...]; url= navigates first.",

@@ -48,3 +48,12 @@ before input, quoted form IDs, and shadow/frame extraction. It retains actual
 responses and navigation timings at `POLISH_OUT` (default under `work/`).
 `--baseline` records failures without stopping, for testing an older binary.
 Native desktop CI runs normal and incognito profiles.
+
+Run `python3 tools/reliability_probe/live464.py` for the deep live-report
+regressions: popup continuity, native focus and refusal, markdown boundaries,
+hidden text/redirect disclosure, single error context, scoped/clear logs,
+selector/network waits, inherited slim reads, template own attributes, Unicode
+artifact paging, body downloads, bounded pagination, structured deltas and
+measured blocking counts. All inputs use owned fixtures/profiles, with actual
+handler/readback evidence and negative controls; native desktop CI runs both
+normal and incognito modes. `--baseline` retains old-binary failures.

@@ -7,11 +7,13 @@ use serde_json::{json, Value};
 /// Parse `run` args: <json-steps> | @file | - (stdin) | --steps <json>.
 pub(crate) fn parse_run_args(args: &[String]) -> Result<Value> {
     let mut steps_raw: Option<String> = None;
+    let mut slim = false;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].clone();
         if let Some(flag) = a.strip_prefix("--") {
             match flag {
+                "slim" => slim = true,
                 "steps" => steps_raw = Some(take_value(args, &mut i, flag)?),
                 _ => {
                     return Err(BladeError::Usage(format!(
@@ -46,5 +48,5 @@ pub(crate) fn parse_run_args(args: &[String]) -> Result<Value> {
     if arr.is_empty() {
         return Err(BladeError::Usage("steps must not be empty".into()));
     }
-    Ok(json!({ "steps": steps }))
+    Ok(json!({ "steps": steps, "slim": slim }))
 }

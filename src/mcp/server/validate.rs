@@ -13,7 +13,7 @@ pub(super) fn fields(args: &Value, tool: &str) -> Result<()> {
     }
     let strings: &[&str] = match tool {
         "see" => &[
-            "mode", "filter", "find", "extract", "logs", "scope", "artifact", "format",
+            "mode", "filter", "find", "extract", "logs", "scope", "artifact", "format", "sort",
         ],
         _ => &[
             "action",
@@ -35,6 +35,8 @@ pub(super) fn fields(args: &Value, tool: &str) -> Result<()> {
             "format",
             "path",
             "block",
+            "next",
+            "sort",
         ],
     };
     for key in strings {
@@ -49,6 +51,11 @@ pub(super) fn fields(args: &Value, tool: &str) -> Result<()> {
         "content",
         "landscape",
         "printBackground",
+        "clear",
+        "preview",
+        "items",
+        "changes",
+        "body",
     ] {
         if args.get(key).is_some_and(|v| !v.is_boolean()) {
             return Err(BladeError::Usage(format!("{tool} {key} must be a boolean")));
@@ -111,6 +118,38 @@ pub(super) fn act(args: &Value) -> Result<()> {
             action,
         )));
     }
+    if action == "paginate" {
+        if args
+            .get("next")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(BladeError::Usage(
+                "paginate requires next=CSS or text=Next".into(),
+            ));
+        }
+        if args
+            .get("max")
+            .and_then(Value::as_u64)
+            .is_some_and(|n| !(1..=100).contains(&n))
+        {
+            return Err(BladeError::Usage("paginate max must be 1-100".into()));
+        }
+        let kind = args
+            .get("extract")
+            .and_then(Value::as_str)
+            .unwrap_or("auto");
+        if !matches!(kind, "auto" | "json" | "links" | "forms") {
+            return Err(BladeError::Usage(
+                "paginate extract must be auto|json|links|forms".into(),
+            ));
+        }
+        if kind == "json" && args.get("template").is_none_or(|v| !v.is_object()) {
+            return Err(BladeError::Usage(
+                "paginate extract=json requires template".into(),
+            ));
+        }
+    }
     if action == "type" && args.get("text").is_none() {
         return Err(BladeError::Usage(
             "type requires text (use clear to empty a field, or text=\"\" explicitly)".into(),
@@ -170,6 +209,21 @@ pub(super) fn fill(args: &Value) -> Result<()> {
 
 pub(super) fn see(args: &Value) -> Result<()> {
     fields(args, "see")?;
+    if let Some(sort) = args.get("sort").and_then(Value::as_str) {
+        if !matches!(
+            sort,
+            "confidence" | "top" | "new" | "controversial" | "old" | "qa"
+        ) {
+            return Err(BladeError::Usage(
+                "sort must be confidence|top|new|controversial|old|qa".into(),
+            ));
+        }
+        if args.get("extract").and_then(Value::as_str) != Some("auto") {
+            return Err(BladeError::Usage(
+                "sort requires extract=auto on a Reddit post".into(),
+            ));
+        }
+    }
     for (key, choices) in [
         ("mode", "model|content|outline"),
         ("extract", "auto|json|links|forms"),

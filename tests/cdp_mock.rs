@@ -221,3 +221,61 @@ async fn protocol_error_is_typed() {
         other => panic!("expected Cdp, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn rejected_scroll_stops_at_first_dispatch_without_claiming_success() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let observed = dispatched.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        while let Some(Ok(message)) = ws.next().await {
+            let Ok(text) = message.to_text() else {
+                continue;
+            };
+            let Ok(request) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            let response = if request["method"] == "Input.dispatchMouseEvent" {
+                observed.fetch_add(1, Ordering::SeqCst);
+                json!({"id":request["id"],"error":{"code":-32000,"message":"owned scroll refusal"}})
+            } else {
+                json!({"id":request["id"],"result":{"result":{"value":{}}}})
+            };
+            if ws
+                .send(Message::Text(response.to_string().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let client = CdpClient::connect(&format!("ws://{address}"))
+        .await
+        .unwrap();
+    let cdp = CdpSession::root(client);
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        bladebro::action::perform(
+            &cdp,
+            &mut bladebro::page::LivePageModel::new(),
+            &bladebro::action::Action::Scroll { dx: 0, dy: 500 },
+            &Arc::new(Mutex::new(None)),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("owned scroll refusal"));
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    server.abort();
+}

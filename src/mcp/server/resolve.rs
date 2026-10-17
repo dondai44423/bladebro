@@ -178,16 +178,23 @@ pub(super) async fn resolve_text_target(
                 // fall through to the live DOM search and error only if the
                 // live page is short too. Never silently pick the first match.
             }
-            None => return Ok(lpm_matches[0].0.clone()),
+            None => {
+                let best = lpm_matches[0].4;
+                let tied: Vec<_> = lpm_matches.iter().filter(|m| m.4 == best).collect();
+                if tied.len() == 1 {
+                    return Ok(tied[0].0.clone());
+                }
+                return Err(BladeError::Other(format!(
+                    "ambiguous \"{query}\": {} equally ranked visible matches: {}. Use ref, selector or nth (1-based).",
+                    tied.len(), tied.iter().take(8).map(|m| format!("{} {} \"{}\" [{}]", m.0, m.1, m.2, page.model().element(&m.0).map(|e|e.raw.ctx.as_str()).unwrap_or(""))).collect::<Vec<_>>().join("; ")
+                )));
+            }
         }
     }
 
-    // Phase 2: Positional fallback for forms. If the query is a common
-    // field type (username/password/email) and there are textboxes in
-    // the model, pick the first textbox for username/email and the
-    // password-typed one for password. Guarded to nth-less calls: a
-    // positional guess is a "no matches, cope" heuristic, and answering
-    // nth=3 with the first password box would be a silent wrong target.
+    // Unlabelled forms may still have one unmistakable username/password
+    // field. Never guess among multiple fields or disregard the requested
+    // role; an explicit nth belongs to the ordinary live matching path.
     if let Some(group) = alias_group.filter(|_| nth.is_none()) {
         let is_username_like = group
             .iter()
@@ -200,23 +207,22 @@ pub(super) async fn resolve_text_target(
                 .iter()
                 .filter(|e| e.raw.role == "textbox" || e.raw.role == "combobox")
                 .collect();
-            if is_password_like {
-                // Prefer password-typed inputs.
-                if let Some(pw) = textboxes
-                    .iter()
-                    .find(|e| e.raw.element_type.as_deref() == Some("password"))
-                {
-                    return Ok(pw.ref_id.clone());
-                }
+            let candidates: Vec<_> = textboxes
+                .into_iter()
+                .filter(|e| {
+                    role_filter.is_none_or(|role| e.raw.role == role)
+                        && if is_password_like {
+                            e.raw.element_type.as_deref() == Some("password")
+                        } else {
+                            e.raw.element_type.as_deref() != Some("password")
+                        }
+                })
+                .collect();
+            if candidates.len() == 1 {
+                return Ok(candidates[0].ref_id.clone());
             }
-            if is_username_like && !textboxes.is_empty() {
-                // First non-password textbox is the username field.
-                if let Some(tb) = textboxes
-                    .iter()
-                    .find(|e| e.raw.element_type.as_deref() != Some("password"))
-                {
-                    return Ok(tb.ref_id.clone());
-                }
+            if candidates.len() > 1 {
+                return Err(BladeError::Other(format!("ambiguous \"{query}\": {} possible fields: {}. Use ref, selector or an explicit field label.", candidates.len(), candidates.iter().take(8).map(|e| format!("{} {} \"{}\" [{}]",e.ref_id,e.raw.role,e.raw.name,e.raw.ctx)).collect::<Vec<_>>().join("; "))));
             }
         }
     }
@@ -239,7 +245,7 @@ pub(super) async fn resolve_text_target(
         let lang = page_lang_note(page.cdp_ref()).await;
         let view = page.view(2000);
         return Err(BladeError::Other(format!(
-            "no element matching \"{}\" found{}{}\n\n--- current page ---\n{}",
+            "no element matching \"{}\" found{}{}\n\n--- current page state ---\n{}",
             query, note, lang, view
         )));
     }
@@ -249,7 +255,7 @@ pub(super) async fn resolve_text_target(
             return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
         }
         return Err(BladeError::Other(format!(
-            "nth={n} requested but \"{query}\" has only {} visible match(es) (nth is 1-based; omit nth to use the top match)",
+            "nth={n} requested but \"{query}\" has only {} visible match(es) (nth is 1-based; choose a valid nth or a unique ref/selector)",
             matches.len()
         )));
     }
@@ -263,6 +269,12 @@ pub(super) async fn resolve_text_target(
         .adopt(&top.sig, &top.role, &top.name, &top.frame);
     for m in &matches[1..] {
         let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
+    }
+    if matches.iter().filter(|m| m.score == top.score).count() > 1 {
+        return Err(BladeError::Other(format!(
+            "ambiguous \"{query}\": {} visible matches. Use ref, selector or nth (1-based).",
+            matches.len()
+        )));
     }
     Ok(id)
 }

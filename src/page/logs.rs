@@ -147,6 +147,17 @@ impl Page {
             .unwrap_or_default()
     }
 
+    pub fn clear_network_log(&self) {
+        if let Ok(mut log) = self.net_log.lock() {
+            log.clear();
+        }
+    }
+
+    pub async fn clear_console_log(&self) -> Result<()> {
+        self.cdp.send("Runtime.evaluate", Some(json!({"expression":"(()=>{const q=window[Symbol.for('q')];if(Array.isArray(q))q.length=0})()"}))).await?;
+        Ok(())
+    }
+
     /// Recent XHR/fetch requests (last 24, start-observed, full URLs).
     pub fn xhr_log(&self) -> Vec<XhrEntry> {
         self.xhr_log
