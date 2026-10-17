@@ -39,7 +39,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         <section><button onclick="window.deletes++">Delete</button></section>
         <section><button onclick="window.deletes++">Delete</button></section>
         <ul><li><h2><a href="https://www.google.com/goto?url=OPAQUE">First result</a></h2><p>Visible one<span style="display:none">HIDDEN_POISON</span></p></li>
-        <li><h2><a href="https://example.com/two">Second result</a></h2><p>Visible two</p></li>
+        <li><h2><a href="https://en.wikipedia.org/wiki/URL">Second result</a></h2><p>Visible two</p></li>
         <li><h2><a href="https://example.com/three">Third result</a></h2><p>Visible three</p></li></ul>
         <article id="own-id">Self value</article></main>
         <script>window.clicks=0;window.deletes=0;fetch('/request'+location.pathname);</script>"""
@@ -137,7 +137,9 @@ try:
                 check('C markdown preserves inline word boundaries', ']('+origin+'/application) for' in text and '**very** useful' in text)
                 text, error = call('see', dict(extract='auto', format='json'))
                 check('D auto extract omits hidden descendants', not error and 'HIDDEN_POISON' not in text)
-                check('E opaque redirect is disclosed', 'unresolved' in text.lower() or 'wrapped' in text.lower())
+                value=json.loads(text) if not error else {}
+                if isinstance(value.get('data'),dict):value=value['data']
+                check('E opaque redirect is disclosed without ordinary URL false flags',not error and value.get('redirects_unresolved')==1 and not next((i for i in value.get('items',[]) if i.get('url')=='https://en.wikipedia.org/wiki/URL'),{}).get('url_wrapped'))
                 for tool,args in [('act',dict(action='click',text='MISSING')),('act',dict(action='batch',steps=[dict(action='click',text='MISSING')])),('run',dict(steps=[dict(action='click',text='MISSING')]))]:
                     text,error=call(tool,args)
                     check('F exactly one error context '+tool+'/'+args.get('action','run'), text.count('--- current page') == 1)

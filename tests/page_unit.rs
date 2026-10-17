@@ -502,6 +502,8 @@ const assert=require('node:assert/strict');
 assert.equal(canonicalURL('https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Factual%3Fq%3Da%2526b'),'https://example.com/actual?q=a%26b');
 assert.equal(canonicalURL('https://wrapper.example/url?q=%2Frelative'),'https://wrapper.example/relative');
 assert.equal(canonicalURL('https://www.google.com/goto?url=OPAQUE'),'https://www.google.com/goto?url=OPAQUE');
+assert.equal(wrappedURL('https://en.wikipedia.org/wiki/URL'),false);
+assert.equal(wrappedURL('https://www.google.com/goto?url=OPAQUE'),true);
 "#;
     let result = std::process::Command::new("node")
         .arg("-e")

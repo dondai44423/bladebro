@@ -40,6 +40,8 @@ function canonicalURL(href){try{let u=new URL(href,location.href);for(let i=0;i<
 if(/^https?:\/\//i.test(d)){next=d;break;}if(d.charAt(0)==='/'){next=new URL(d,u).href;break;}}
 if(!next)break;try{u=new URL(next);}catch(e){break;}}
 return u.href;}catch(e){return href;}}
+// Real articles can end in /URL too; a path alone is not a redirect.
+function wrappedURL(href){try{const u=new URL(href,location.href);return /^https?:$/.test(u.protocol)&&REDIRECT_PATH.test(u.pathname)&&REDIRECT_PARAMS.some(p=>!!u.searchParams.get(p));}catch(e){return false;}}
 // How many results the page TEXT claims vs. how many are in the DOM. This is
 // the lazy-load/pagination tell: a page that says 3,412 with 24 items loaded
 // answers a "show me the results" question with a fraction of them. Advisory
@@ -213,7 +215,7 @@ if(title&&/^\s*[\d.,]+\s*(units?|beds?|baths?|ba|bd|mi|miles?|sq\.?\s?ft|sqft|ac
 // A price glued into the title (listing-card text) is a field, not a name.
 if(title){const pi=title.search(PRICE);if(pi>=10)title=title.slice(0,pi).trim();}
 if(title)o.title=title.slice(0,200);
-if(link){const cu=canonicalURL(link.href);if(cu!==link.href)unwrapped++;o.url=cu;if(REDIRECT_PATH.test(new URL(cu,location.href).pathname)){o.url_wrapped=true;unresolved++;}}
+if(link){const cu=canonicalURL(link.href);if(cu!==link.href)unwrapped++;o.url=cu;if(wrappedURL(cu)){o.url_wrapped=true;unresolved++;}}
 // Image.
 const img=item.querySelector('img[src]');
 if(img){o.image=img.src;if(img.alt)o.image_alt=img.alt.slice(0,100);}
