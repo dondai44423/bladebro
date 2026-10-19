@@ -119,8 +119,10 @@ try:
                         check('explicit check readback '+selector+' '+str(desired)+' '+str(before),not error and checked==desired and after-before==int(was!=desired))
                 fresh()
                 for tool,args in [('act',dict(action='batch',steps=[dict(action='fill',fields=[dict(selector='#consent',text='false')])])),('run',dict(steps=[dict(action='fill',fields=[dict(selector='#consent',option='false')])]))]:
+                    fresh()
                     text,error=call(tool,args)
                     check('nested fill refuses without toggling '+tool,'require check=true/false' in text and evaluate("!document.querySelector('#consent').checked && window.toggles===0") is True)
+                fresh()
                 text,error=call('act',dict(action='fill',fields=[dict(selector='#choice',check=True)],slim=True))
                 check('explicit radio selection remains supported',not error and evaluate("document.querySelector('#choice').checked && window.toggles===1") is True)
                 text,error=call('act',dict(action='fill',fields=[dict(selector='#choice',check=False)],slim=True))
