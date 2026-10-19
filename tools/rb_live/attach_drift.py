@@ -16,12 +16,14 @@ processes. Exit 0 = the contract holds.
 Run:  python3 tools/rb_live/attach_drift.py
       BLADEBRO=/path/to/bladebro python3 tools/rb_live/attach_drift.py
 """
+import http.server
 import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -171,6 +173,40 @@ def main():
     with open(os.path.join(USERHOME, ".config", "chromium", "Local State"), "w") as f:
         f.write('{"profile":{"info_cache":{"Default":{"name":"Main"}}}}')
 
+    # Attachment ownership must not depend on DNS, TLS or an external site's
+    # availability. A Chrome network-error document can retain the attempted
+    # target URL; require the local document marker as well as navigation text.
+    class Fixture(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            marker = self.path.lstrip("/")
+            if marker not in ("attached", "detached"):
+                self.send_error(404)
+                return
+            body = (f'<!doctype html><title>Attach drift {marker}</title>'
+                    f'<body data-marker="{marker}"><main>{marker}</main>').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    origin = f"http://127.0.0.1:{server.server_port}"
+    attached_url, detached_url = origin + "/attached", origin + "/detached"
+
+    def page_readback(client):
+        text = client.tool("act", {"action": "eval", "format": "json",
+                                  "js": "({href:location.href,marker:document.body.dataset.marker})"})
+        try:
+            return json.loads(text)
+        except ValueError:
+            return {"error": text[:300]}
+
     chrome = subprocess.Popen(
         [CHROME, f"--user-data-dir={USERHOME}/.config/chromium", "--profile-directory=Default",
          "--remote-debugging-port=0", "--headless=new", "--no-first-run",
@@ -189,18 +225,21 @@ def main():
         # Phase 1: attach — the MCP session drives the scratch browser.
         write_cfg(True)
         m = Mcp()
-        t = m.tool("act", {"action": "navigate", "url": "https://example.com"})
+        t = m.tool("act", {"action": "navigate", "url": attached_url})
         check("attach: nav lands in the attached browser",
-              "outcome" in t and "https://example.com" in t, t[:200])
+              "outcome" in t and attached_url in t, t[:200])
         check("attach: no blade-owned browser was launched",
               not pids_under(BLADE_HOME), str(pids_under(BLADE_HOME)))
         before = scratch_targets()
         check("attach: scratch browser holds the page",
-              any("example.com" in u for u in before), str(before))
+              attached_url in before, str(before))
+
+        actual = page_readback(m)
+        check("attach: local fixture readback", actual == {"href": attached_url, "marker": "attached"}, str(actual))
 
         # Phase 2: rb off mid-attach — the next call must detach + relaunch.
         write_cfg(False)
-        t = m.tool("act", {"action": "navigate", "url": "https://example.net"})
+        t = m.tool("act", {"action": "navigate", "url": detached_url})
         check("flip: response carries the detach note",
               "detached from the attached browser" in t, t[:300])
         check("flip: the attached browser was NOT navigated",
@@ -208,7 +247,9 @@ def main():
         check("flip: relaunched on the current lane (agent browser up)",
               bool(pids_under(BLADE_HOME)), "no blade-owned browser after the flip")
         check("flip: nav landed in the new browser",
-              "https://example.net" in t, t[:300])
+              detached_url in t, t[:300])
+        actual = page_readback(m)
+        check("flip: local fixture readback", actual == {"href": detached_url, "marker": "detached"}, str(actual))
     finally:
         if m:
             m.close()
@@ -219,6 +260,8 @@ def main():
             chrome.wait(timeout=5)
         except Exception:
             chrome.kill()
+        server.shutdown()
+        server.server_close()
 
     print(f"\n{'OK' if failures == 0 else 'FAILED'} — {failures} failure(s)")
     return 0 if failures == 0 else 1
