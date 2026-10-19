@@ -62,6 +62,9 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+      - name: Oracle evidence parser
+        run: python tools/diff_oracle/test_oracle.py
+
       - name: Clippy
         run: cargo clippy --release -- -D warnings
 
@@ -133,6 +136,9 @@ jobs:
           export BLADE_HOME="${RUNNER_TEMP:-/tmp}/bb-audit"
           export BLADE_NO_WARMING=1
           "$binary" audit
+          # Default headful launches skip the notification mask. Exercise its
+          # native argument/promise contract explicitly on every desktop OS.
+          BLADE_PERMS=patch BLADE_MEDIA=patch BLADE_INCOGNITO=1 "$binary" audit
   msrv:
     runs-on: ubuntu-latest
     steps:

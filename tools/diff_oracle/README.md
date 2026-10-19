@@ -67,3 +67,20 @@ and the run would measure the AGENT lane while claiming to measure the real one.
 - `oracle.py` `EXPECTED` table — add a key pattern **only** with a precise
   reason and stable evidence. Anything unexplained stays DIVERGENT until the
   root cause is fixed or proven by design.
+
+The shared `tests/fixtures/native_behavior.js` battery records synchronous
+throws separately from promise rejection, error type/message, rejection order
+relative to a queued microtask, descriptor getter/Proxy reads and status shape.
+Chromium's promise-returning WebIDL methods reject invalid calls; assertions
+must not manufacture synchronous throws. These rows have no EXPECTED exemptions.
+`bladebro audit` uses the same probes. Run with `BLADE_PERMS=patch BLADE_MEDIA=patch`
+to exercise optional masks even on a headful host that does not need them.
+
+Both lanes pin the same 1600x900 window below the virtual screen's automatic
+maximize threshold and the same native system-frame preference in their owned
+profiles. Chrome's WM-dependent frame default otherwise varies at startup,
+changing inner dimensions even in the old binary. Geometry is still compared,
+without new exemptions; the user's profile is never used.
+`--json-report FILE.json` retains complete stock/subject observations, including
+messages and timing orders. CLI artifact offloading is read in full; it must
+never truncate the battery. Parser tests: `python3 tools/diff_oracle/test_oracle.py`.

@@ -2,7 +2,8 @@
 //!
 //! Executed by main.rs with an owned, guarded browser. The vector suite and
 //! the injection-lint fixtures live in `tests/vectors.html`; the bar is the
-//! suite's own total (63/63 on the reference machine after the 4.6.0
+//! suite's own total (111/111 on the reference machine with native behavior
+//! conformance, after the 4.6.0
 //! shell-torture + platform-truth checks and the 4.6.1 worker-renderer /
 //! fn-proto additions — the total is platform- and profile-dependent and
 //! prints itself). Any FAIL line — vector, self-check, or consistency drift —
