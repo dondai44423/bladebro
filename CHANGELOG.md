@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.5] - 2026-10-19
+
 ### Fixed
 - Optional notification permission masking keeps `permissions.query` native: descriptor getters run once, native promises/errors retain their timing, and existing `PermissionStatus` objects track real permission changes without stale own properties. Invalid media-device receivers retain the native rejected promise and microtask order.
 - Visible selector waits include the document root, including same-origin frame roots, so readiness classes/attributes on `<html>` can satisfy waits while hidden frames still cannot.
@@ -2127,7 +2129,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.4...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.5...HEAD
+[4.6.5]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.5
 [4.6.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.4
 [4.6.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.3
 [4.6.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.2
