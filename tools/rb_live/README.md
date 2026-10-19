@@ -15,7 +15,9 @@ browser after the switch.
 
 Fully isolated: scratch `HOME` + scratch headless Chromium on an ephemeral
 debug port + scratch `BLADE_HOME`; no display leak; cleans up its own
-processes. Exit 0 = the contract holds.
+processes. Navigation uses an owned local HTTP fixture with distinct document
+markers and native page readback, so DNS/TLS failures cannot masquerade as
+attach drift. Exit 0 = the contract holds.
 
 ```bash
 python3 tools/rb_live/attach_drift.py          # uses target/release/bladebro

@@ -39,9 +39,9 @@ else{var _wp=(typeof Window!=='undefined'&&Window.prototype)?Window.prototype:Ob
 // native and stays that way (a horizontal panel keeps it equal to width; a
 // narrow one is an honest side dock).
 
-// permissions.query rewrite lives in PERMISSIONS_PATCH (apply()): a
-// perfect native relay; only a real-origin 'denied' notifications result
-// is rewritten (the headless tell). Opaque origins keep native results.
+// PermissionStatus.state mask lives in PERMISSIONS_PATCH (apply()): only
+// real-origin denied notifications are rewritten. query stays native; opaque
+// origins and all other permission states keep their native result.
 
 // Web API polyfills: REMOVED in 4.6.0 (share, canShare, ContentIndex,
 // ContactsManager, connection.downlinkMax, NetworkInformation). The old

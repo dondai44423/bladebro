@@ -1,20 +1,16 @@
-
+// Leave query itself native. Reading descriptor.name after delegation invokes
+// caller getters twice; chaining its promise also changes rejection scheduling.
+// Mask only the native status getter, after native receiver validation, without
+// touching arguments, returned promises, or the status instance's own keys.
 try{
-var _opq=navigator.permissions.query;
-var _pp=Object.getPrototypeOf(navigator.permissions);
-var _pq=function(th,a,og){
-  var p=og.apply(th,a);
-  try{
-    var d=a.length>0?a[0]:undefined;
-    if(d&&typeof d==='object'&&d.name==='notifications'&&location.origin!=='null'){
-      return p.then(function(s){
-        if(s&&s.state==='denied'){try{Object.defineProperty(s,'state',{value:'prompt',configurable:true});}catch(e){}}
-        return s;
-      });
-    }
-  }catch(e){}
-  return p;
-};
-_defFn(_pp,'query',_pp.query||_opq,_pq);
+if(typeof PermissionStatus!=='undefined'){
+  var _psp=PermissionStatus.prototype;
+  var _psn=_ogs(_psp,'name');
+  var _pss=_ogs(_psp,'state');
+  if(_psn&&_pss)_defGet(_psp,'state',_pss,function(th,a,og){
+    var s=Reflect.apply(og,th,a);
+    if(s==='denied'&&Reflect.apply(_psn,th,[])==='notifications'&&location.origin!=='null')return 'prompt';
+    return s;
+  });
+}
 }catch(e){}
-

@@ -60,6 +60,11 @@ out.permDesc = (() => {
   return d ? [d.writable, d.enumerable, d.configurable].join(",") : "none";
 })();
 
+// Timing, native errors, argument getter effects and result shape are separate
+// from value equality. No EXPECTED exemptions: these must match stock exactly.
+const behavior = await nativeBehaviorProbe();
+for (const [key, value] of Object.entries(behavior.rows)) out['behavior.' + key] = JSON.stringify(value);
+
 // --- WebGL1 ---
 const mk = (t) => { try { const c = document.createElement("canvas"); return c.getContext(t); } catch (e) { return null; } };
 const g = mk("webgl");

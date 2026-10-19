@@ -126,15 +126,10 @@ const STEALTH_TAIL: &str = include_str!("js/stealth_tail.js");
 /// exact pre-permission shape (devices present, ids and labels empty).
 const MEDIA_PATCH: &str = include_str!("js/media_patch.js");
 
-/// permissions.query('notifications') rewrite — always installed; the
-/// rewrite itself fires only for genuinely-origined documents
-/// (`location.origin !== 'null'`) whose result is 'denied'. On opaque
-/// origins (about:blank) real Chrome also reports 'denied', so the native
-/// result stands; on real origins the only divergent environment
-/// (headless-new: 'denied' everywhere) is masked to 'prompt'. The wrapper
-/// relays with the caller's exact receiver and arguments — native validation
-/// runs first, so zero-arg TypeErrors, non-object TypeErrors, wrong-receiver
-/// 'Illegal invocation' and promise timing stay byte-native.
+/// Headless-only PermissionStatus.state mask for denied notifications on real
+/// origins. query stays native: exact arguments, dictionary getters, promises
+/// and validation timing pass through untouched. The native state getter runs
+/// first to validate receivers; opaque origins and other permissions stay real.
 const PERMISSIONS_PATCH: &str = include_str!("js/permissions_patch.js");
 
 /// `--remote-debugging-pipe` is Chrome's automation transport, and Chrome

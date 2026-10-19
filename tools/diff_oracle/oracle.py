@@ -149,12 +149,24 @@ def setup_display_session(display):
     return proc
 
 
+def seed_oracle_profile(root):
+    # Chromium chooses its default frame from WM state at profile creation.
+    # Concurrent independent X displays can choose different native frames.
+    # Pin the same ordinary UI preference in every OWNED oracle profile; no
+    # geometry output is masked or exempted. Never touch the user's profile.
+    default = os.path.join(root, "Default")
+    os.makedirs(default, mode=0o700, exist_ok=True)
+    with open(os.path.join(default, "Preferences"), "w", encoding="utf-8") as f:
+        json.dump({"browser": {"custom_chrome_frame": False}}, f)
+
+
 def pristine_probe(chrome, port, display, url, battery, lane="agent"):
     """Launch stock Chrome on the given display and run the battery.
     In real-lane mode the stock flags mirror the real lane's own launch set
     (plus the same functional GL enablers bladebro receives), so the only
     thing under test is bladebro's own behavior."""
     tmp = tempfile.mkdtemp(prefix="blade-oracle-")
+    seed_oracle_profile(tmp)
     env = dict(os.environ)
     if display is not None:
         env["DISPLAY"] = f":{display}"
@@ -189,7 +201,7 @@ def pristine_probe(chrome, port, display, url, battery, lane="agent"):
         args = [
             chrome, "--no-first-run", "--no-default-browser-check",
             f"--user-data-dir={tmp}", f"--remote-debugging-port={port}",
-            "--window-size=1920,1080",
+            "--window-size=1600,900", "--window-position=0,0",
             *gl_enablers,
             "--ozone-platform=x11",
         ]
@@ -241,6 +253,26 @@ def pristine_probe(chrome, port, display, url, battery, lane="agent"):
 
 
 def parse_bladebro_eval(out):
+    # JSON output can offload a large battery to an artifact; treating the
+    # human "result: [artifact ...]" notice as JSON silently loses coverage.
+    try:
+        envelope = json.loads(out)
+    except ValueError:
+        envelope = None
+    if isinstance(envelope, dict):
+        if not envelope.get("ok") or envelope.get("is_error"):
+            fail(f"eval failed: {str(envelope)[:400]}")
+        value = json.loads(envelope["text"])
+        if isinstance(value, dict) and "artifact" in value:
+            with open(value["artifact"], encoding="utf-8") as artifact:
+                value = json.load(artifact)
+        if isinstance(value, dict) and "data" in value and "note" in value:
+            value = value["data"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            fail("eval battery did not return a JSON object")
+        return value
     for line in reversed(out.splitlines()):
         line = line.strip()
         if line.startswith("result: "):
@@ -258,7 +290,7 @@ def bladebro_probe(bladebro, url, battery, env=None):
     r = subprocess.run([bladebro, "nav", url], env=env, capture_output=True, text=True, timeout=240)
     if r.returncode != 0:
         fail(f"bladebro nav failed: {r.stdout[-300:]} {r.stderr[-300:]}")
-    r = subprocess.run([bladebro, "act", "eval", battery], env=env, capture_output=True, text=True, timeout=240)
+    r = subprocess.run([bladebro, "--json", "act", "eval", battery, "--format", "json"], env=env, capture_output=True, text=True, timeout=240)
     if r.returncode != 0:
         fail(f"bladebro act eval failed: {r.stdout[-300:]} {r.stderr[-300:]}")
     return parse_bladebro_eval(r.stdout)
@@ -297,12 +329,16 @@ def main():
                     help="agent lane (masked — classified EXPECTED surface) or the real-browser lane "
                          "(zero patches — every diff is DIVERGENT, and nothing is expected)")
     ap.add_argument("--report", help="write the report to this file as well")
+    ap.add_argument("--json-report", help="write full stock/subject observations and differences as JSON")
     ap.add_argument("--keep", action="store_true", help="keep temp files/processes (debug)")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
     battery_body = open(os.path.join(here, "battery.js"), encoding="utf-8").read()
-    battery = "(async()=>{" + battery_body + "})()"
+    behavior = os.path.join(here, "..", "..", "tests", "fixtures", "native_behavior.js")
+    with open(behavior, encoding="utf-8") as f:
+        behavior_body = f.read()
+    battery = "(async()=>{" + behavior_body + battery_body + "})()"
 
     bladebro = os.environ.get("BLADEBRO")
     if not bladebro:
@@ -344,9 +380,7 @@ def main():
         # BLADE_LANE so a persisted config can never skew the run.
         real_home = tempfile.mkdtemp(prefix="blade-oracle-home-")
         real_src = tempfile.mkdtemp(prefix="blade-oracle-src-")
-        os.makedirs(os.path.join(real_src, "Default"), exist_ok=True)
-        with open(os.path.join(real_src, "Default", "Preferences"), "w") as f:
-            f.write("{}")
+        seed_oracle_profile(real_src)
         browser_id = "chromium"
         base = os.path.basename(chrome).lower()
         if "brave" in base:
@@ -359,6 +393,8 @@ def main():
             json.dump({"enabled": True, "mode": "clone", "browser": browser_id,
                        "profile": real_src, "visible": True}, f)
         real_env = dict(os.environ)
+        for key in ("BLADE_PROFILE_DIR", "BLADE_FRESH"):
+            real_env.pop(key, None)
         real_env["BLADE_HOME"] = real_home
         real_env["BLADE_LANE"] = "real"
         # Same functional GL enablers as the stock baseline.
@@ -385,10 +421,20 @@ def main():
             # (test session profiles + a leftover daemon in ~/.blade, found
             # live 2026-09-26); no warming keeps runs deterministic.
             agent_home = tempfile.mkdtemp(prefix="blade-oracle-agent-")
+            seed_oracle_profile(os.path.join(agent_home, "profile"))
             agent_env = dict(os.environ)
+            for key in ("BLADE_PROFILE_DIR", "BLADE_FRESH"):
+                agent_env.pop(key, None)
             agent_env["BLADE_LANE"] = "agent"
             agent_env["BLADE_HOME"] = agent_home
             agent_env["BLADE_NO_WARMING"] = "1"
+            # A screen-sized window straddles xfwm4's automatic-maximize
+            # threshold: identical launches can get different frame extents.
+            # Mirror the real-lane control on BOTH sides, below that threshold;
+            # keep all geometry comparisons strict instead of exempting them.
+            agent_env["BLADE_CHROME_FLAGS"] = (
+                agent_env.get("BLADE_CHROME_FLAGS", "") +
+                " --window-size=1600,900 --window-position=0,0")
             subject = bladebro_probe(bladebro, args.url, battery, env=agent_env)
     finally:
         if wm_proc:
@@ -466,6 +512,11 @@ def main():
         with open(args.report, "w", encoding="utf-8") as f:
             f.write(report + "\n")
         print(f"[oracle] report written to {args.report}")
+    if args.json_report:
+        with open(args.json_report, "w", encoding="utf-8") as f:
+            json.dump({"lane": args.lane, "url": args.url, "binary": bladebro,
+                       "chrome": chrome, "stock": stock, "subject": subject,
+                       "expected": expected, "divergent": divergent}, f, indent=2)
     sys.exit(1 if divergent else 0)
 
 

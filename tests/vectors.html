@@ -4,6 +4,7 @@
 <body>
 <h1>Bladebro Stealth Vector Suite</h1>
 <pre id="out">RUNNING</pre>
+<script src="fixtures/native_behavior.js"></script>
 <script>
 // Bladebro local stealth vector suite. Results rendered as plain text so
 // `see content=true` can read them. Format: "PASS name: detail" / "FAIL name: detail".
@@ -68,6 +69,14 @@ async function run() {
           "query=" + p.state + " perm=" + Notification.permission);
   } catch (e) { check("perm-notifications", false, "threw: " + e.message); }
 
+  // Promise-returning WebIDL methods reject invalid calls in Chromium. Do
+  // not manufacture synchronous errors: compare exact messages in the oracle.
+  const behavior = await nativeBehaviorProbe();
+  for (const [name, ok] of Object.entries(behavior.checks)) {
+    const row = behavior.rows[name.replace(/\.microtask$/, '')];
+    check('native-behavior.' + name, ok, ok ? 'native timing/shape' : JSON.stringify(row));
+  }
+
   // toString integrity of patched functions
   check("tostring-permissions-query", /\[native code\]/.test(navigator.permissions.query.toString()), navigator.permissions.query.toString().slice(0, 60));
   check("tostring-Worker", /\[native code\]/.test(Worker.toString()), Worker.toString().slice(0, 60));
@@ -105,6 +114,8 @@ async function run() {
     addT("nav.sendBeacon", () => navigator.sendBeacon);
     addT("nav.getBattery", () => navigator.getBattery);
     addT("nav.permissions.query", () => navigator.permissions.query);
+    addT("permission.state", () => Object.getOwnPropertyDescriptor(PermissionStatus.prototype, "state").get);
+    addT("media.enumerateDevices", () => navigator.mediaDevices.enumerateDevices);
     addT("screen.availHeight", () => Object.getOwnPropertyDescriptor(Screen.prototype, "availHeight").get);
     addT("gl.getParameter", () => WebGLRenderingContext.prototype.getParameter);
     addT("gl.getShaderPrecisionFormat", () => WebGLRenderingContext.prototype.getShaderPrecisionFormat);
