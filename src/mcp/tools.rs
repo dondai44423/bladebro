@@ -75,7 +75,7 @@ pub fn all_tools() -> Vec<ToolDef> {
                     "format": {"type": "string", "enum": ["text", "json"], "description": "extract: json returns pure parseable output (bare payload; {data,note} when a caveat rides along; oversized → an {artifact,bytes,next_offset} envelope — page it with see artifact=… format=json instead of receiving truncated JSON)."},
                     "fields": {
                         "type": "array",
-                        "description": "Fill: REQUIRED. [{ref|label, text|option, check}]. Auto-detects field type (text, checkbox, select).",
+                        "description": "Fill: [{ref|label|selector,text|option|check}]. Toggles accept only check=true/false; omit values to toggle.",
                         "items": {
                             "type": "object",
                             "properties": {

@@ -549,7 +549,7 @@ pub async fn eval_condition(
         "selector" => {
             let selector = serde_json::to_string(text)?;
             let expr = "(()=>{const d=document;".to_string() + &JS_PREAMBLE + JS_READ_TREE
-                + "const s=" + &selector + ";d.querySelector(s);let found=false;walkReadTree(d.body,n=>{if(n.nodeType===1&&n.matches(s)&&vis(n)){found=true;return false;}});return found;})()";
+                + "const s=" + &selector + ";d.querySelector(s);let found=false;walkReadTree(d.documentElement,n=>{if(n.nodeType===1&&n.matches(s)&&vis(n)){found=true;return false;}});return found;})()";
             loop {
                 let res = cdp
                     .send(

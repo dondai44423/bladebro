@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Optional notification permission masking keeps `permissions.query` native: descriptor getters run once, native promises/errors retain their timing, and existing `PermissionStatus` objects track real permission changes without stale own properties. Invalid media-device receivers retain the native rejected promise and microtask order.
+- Visible selector waits include the document root, including same-origin frame roots, so readiness classes/attributes on `<html>` can satisfy waits while hidden frames still cannot.
+- Form fill rejects text/option values on checkboxes, radios and switches instead of silently ignoring the value and toggling. Use `check:true/false` for explicit state, or omit values to toggle. Batch/run share the same refusal and readback behavior.
+
+### Verification
+- Native API behavior has 48 shared assertions covering errors, descriptor side effects, promise scheduling, receiver validation and own properties; audit now checks 111 vectors and the stock-browser oracle compares 99 observations.
+- Native desktop CI exercises root waits and toggle fill in normal/incognito modes. Compact five-tool guidance documents the explicit toggle values without adding parameters.
+
 ## [4.6.4] - 2026-10-18
 
 ### Fixed

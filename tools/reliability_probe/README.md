@@ -57,3 +57,5 @@ artifact paging, body downloads, bounded pagination, structured deltas and
 measured blocking counts. All inputs use owned fixtures/profiles, with actual
 handler/readback evidence and negative controls; native desktop CI runs both
 normal and incognito modes. `--baseline` retains old-binary failures.
+
+`qol465.py` verifies document/frame-root selector waits, hidden-frame refusal, invalid CSS, toggle value refusal without mutations, nested batch/run parity, explicit/idempotent check states, radio refusal, legacy toggles and explicit textbox clearing. Run with `BLADEBRO=... POLISH_OUT=...`; `--baseline` records all failures against an older binary.

@@ -19,7 +19,7 @@ function walkReadTree(root, visit) {
       if (n.tagName === 'IFRAME') {
         try {
           const doc = n.contentDocument;
-          if (doc && doc.body && roots++ < 400) stack.push(doc.body);
+          if (doc && doc.documentElement && roots++ < 400) stack.push(doc.documentElement);
         } catch (_) {}
         continue;
       }
