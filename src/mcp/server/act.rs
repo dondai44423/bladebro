@@ -146,6 +146,13 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
             .element(&resolved)
             .map(|e| e.raw.role.clone())
             .unwrap_or_default();
+        if matches!(role.as_str(), "checkbox" | "radio" | "switch")
+            && (field.get("text").is_some() || field.get("option").is_some())
+        {
+            return Err(BladeError::Usage(format!(
+                "fill {resolved}: checkbox, radio and switch require check=true/false; omit all values to toggle (text/option cannot set checked state)"
+            )));
+        }
         if f_check.is_some() && !matches!(role.as_str(), "checkbox" | "radio" | "switch") {
             return Err(BladeError::Usage(format!(
                 "fill {resolved}: check requires a checkbox, radio or switch"
