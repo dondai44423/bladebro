@@ -7,6 +7,12 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    ignore:
+      # sha2 0.11.1 raised its MSRV to rustc 1.88. This crate publishes
+      # rust-version = 1.86 and CI proves that floor. Remove this ignore
+      # when the MSRV is deliberately raised (then take the newer sha2).
+      - dependency-name: "sha2"
+        versions: [">0.11.0"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
