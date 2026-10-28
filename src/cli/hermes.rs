@@ -450,11 +450,29 @@ mod tests {
     }
 
     fn scratch() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("blade-hermes-{}-{nonce}", std::process::id()))
+        // Tests run on parallel threads. A repeated clock reading can hand
+        // two callers the same path; one then truncates the fake hermes
+        // script while the other is exec'ing it, which Linux reports as
+        // ETXTBSY ("Text file busy") — seen on CI. The counter makes the
+        // path unique even when the clock does not advance.
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("blade-hermes-{}-{nonce}-{seq}", std::process::id()))
+    }
+
+    #[test]
+    fn scratch_paths_stay_unique_across_parallel_threads() {
+        let handles: Vec<_> = (0..8).map(|_| std::thread::spawn(scratch)).collect();
+        let paths: std::collections::HashSet<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("scratch thread"))
+            .collect();
+        assert_eq!(paths.len(), 8);
     }
 
     #[test]
