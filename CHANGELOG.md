@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Owned browser launches accept a debug endpoint held by a forked child of the spawned launcher (Helium AppImage/AppRun, shell wrappers), while listeners from other process trees are still refused. Shutdown and launch-failure cleanup signal the browser's process group, so `stop` reaps the forked browser instead of leaving it running.
 
+### Changed
+- Update rustls-webpki to 0.103.16 and webpki-roots to 1.0.11 for RUSTSEC-2026-0381/0382; no advisory exceptions added.
+
 ## [4.6.5] - 2026-10-19
 
 ### Fixed
