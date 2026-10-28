@@ -230,6 +230,7 @@ impl Browser {
             apply_xvfb_env(&mut cmd, xvfb);
         }
 
+        platform::isolate_owned_child(&mut cmd);
         let mut child = cmd
             .spawn()
             .map_err(|e| BladeError::Other(format!("failed to launch Chrome: {e}")))?;
@@ -248,13 +249,14 @@ impl Browser {
                     // SECURITY: a parseable-JSON responder is not proof the
                     // endpoint belongs to the Chrome we spawned —
                     // free_port's bind-release window can be won by a local
-                    // impostor. On Linux require our child to hold the
+                    // impostor. On Linux require our child (or a forked
+                    // launcher's child, e.g. an AppImage) to hold the
                     // listening socket; keep polling otherwise (the window
                     // resolves once Chrome finishes binding). Elsewhere the
                     // check is skipped.
                     if !endpoint_owned_by_pid(port, child.id()) {
                         if Instant::now() >= deadline {
-                            let _ = child.kill();
+                            platform::kill_child_tree(&mut child);
                             return Err(BladeError::Other(
                                 "the debug endpoint on this port is not served by the browser process — refusing it (possible local port hijack)".into(),
                             ));
@@ -315,7 +317,7 @@ impl Browser {
                         }
                     }
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
+                        platform::kill_child_tree(&mut child);
                         return Err(BladeError::Other(format!(
                             "Chrome debug endpoint not responding after 20s{}",
                             chrome_stderr_tail()
@@ -454,6 +456,7 @@ impl Browser {
                 // stale session-type claim from the child env.
                 cmd.env_remove("XDG_SESSION_TYPE");
             }
+            platform::isolate_owned_child(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| {
                 BladeError::Other(format!("failed to launch {}: {e}", binary.display()))
             })?;
@@ -465,10 +468,10 @@ impl Browser {
                     Ok(v) => {
                         // SECURITY: same ownership requirement as the agent
                         // lane — the endpoint must be held by the browser
-                        // process we spawned.
+                        // process we spawned (or a forked launcher's child).
                         if !endpoint_owned_by_pid(port, child.id()) {
                             if Instant::now() >= deadline {
-                                let _ = child.kill();
+                                platform::kill_child_tree(&mut child);
                                 last_err = Some(BladeError::Other(
                                     "the debug endpoint on this port is not served by the browser process — refusing it (possible local port hijack)".into(),
                                 ));
@@ -518,7 +521,7 @@ impl Browser {
                             }
                         }
                         if Instant::now() >= deadline {
-                            let _ = child.kill();
+                            platform::kill_child_tree(&mut child);
                             last_err = Some(BladeError::Other(
                                 "browser debug endpoint not responding after 20s".into(),
                             ));
