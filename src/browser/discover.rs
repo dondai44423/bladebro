@@ -252,16 +252,69 @@ pub(crate) fn loopback_listener_inode(port: u16) -> Option<u64> {
     None
 }
 
-/// True when the process `pid` holds the listening socket for `port` open.
-/// The readiness gate uses this to require the debug endpoint to belong to
-/// the Chrome we just spawned — a bare JSON responder on the port could be
-/// any process that won the free_port bind-release window.
+/// True when the listening socket for `port` is held by the process `pid`
+/// or by a descendant of it. The readiness gate uses this to require the
+/// debug endpoint to belong to the Chrome we just spawned — a bare JSON
+/// responder on the port could be any process that won the free_port
+/// bind-release window.
+///
+/// The holder is not always the spawned pid: launchers that fork instead of
+/// exec'ing (an AppImage's AppRun script, a shell wrapper) run the real
+/// browser as their child, so the listener lives one level down. Accepting
+/// the whole subtree keeps the same ownership proof — only processes we
+/// started can be in it — while a listener from another process tree is
+/// still refused (issue #57).
 #[cfg(target_os = "linux")]
 pub(crate) fn endpoint_owned_by_pid(port: u16, pid: u32) -> bool {
     let Some(ino) = loopback_listener_inode(port) else {
         return false;
     };
-    pid_holds_socket(pid, ino)
+    if pid_holds_socket(pid, ino) {
+        return true;
+    }
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    procs.flatten().any(|entry| {
+        let Ok(candidate) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            return false;
+        };
+        candidate != pid
+            && pid_within_process_tree(candidate, pid)
+            && pid_holds_socket(candidate, ino)
+    })
+}
+
+/// True when `pid` is `root` or a direct/indirect child of it, walking
+/// /proc's parent links. Bounded so a corrupt or racing chain cannot loop;
+/// an unreadable parent fails closed.
+#[cfg(target_os = "linux")]
+fn pid_within_process_tree(mut pid: u32, root: u32) -> bool {
+    // Real launch chains are short (AppRun → wrapper → browser → helper).
+    // A deeper chain is not evidence of ownership.
+    for _ in 0..64 {
+        if pid == root {
+            return true;
+        }
+        if pid <= 1 {
+            return false;
+        }
+        pid = proc_ppid(pid);
+    }
+    false
+}
+
+/// Parent pid of a process (0 when /proc is unreadable or unparseable).
+#[cfg(target_os = "linux")]
+fn proc_ppid(pid: u32) -> u32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    // Format: pid (comm) state ppid ... — comm can contain spaces/parens,
+    // so parse after the last ')'.
+    stat.rsplit(')')
+        .next()
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0)
 }
 
 /// True when ANY live process of this uid holds the loopback listener for
@@ -408,5 +461,106 @@ mod tests {
         }
         assert!(is_executable(&file));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Issue #57: an AppImage's AppRun forks the real browser instead of
+    /// exec'ing it, so the debug port is held by a child of the PID bladebro
+    /// spawned. The ownership gate must accept that subtree and still refuse
+    /// a listener that belongs to a different process tree.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn endpoint_ownership_accepts_a_listener_forked_by_the_spawned_wrapper() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let python3 = Command::new("python3")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !python3 {
+            eprintln!("python3 unavailable; skipping forked-launcher ownership test");
+            return;
+        }
+
+        // The wrapper forks and waits (AppRun's exact shape): the spawned pid
+        // never holds the listener itself.
+        let script = "python3 -c 'import socket,time; s=socket.socket(); \
+                      s.bind((\"127.0.0.1\",0)); print(s.getsockname()[1], flush=True); \
+                      s.listen(1); time.sleep(30)' & wait";
+        let mut wrapper = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn forking wrapper");
+        let mut port_line = String::new();
+        BufReader::new(wrapper.stdout.take().expect("wrapper stdout"))
+            .read_line(&mut port_line)
+            .expect("read listener port");
+        let port: u16 = port_line.trim().parse().expect("listener port");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut accepted = false;
+        while std::time::Instant::now() < deadline {
+            if endpoint_owned_by_pid(port, wrapper.id()) {
+                accepted = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let mut unrelated = Command::new("sleep")
+            .arg("5")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn unrelated process");
+        let refused_outside = !endpoint_owned_by_pid(port, unrelated.id());
+
+        // Locate the forked listener and prove shutdown reaps it.
+        let inode = loopback_listener_inode(port).expect("listener inode");
+        let listener_pid = std::fs::read_dir("/proc")
+            .expect("scan /proc")
+            .flatten()
+            .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+            .find(|pid| {
+                *pid != wrapper.id()
+                    && pid_within_process_tree(*pid, wrapper.id())
+                    && pid_holds_socket(*pid, inode)
+            })
+            .expect("forked listener pid");
+
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        // A direct-pid kill would leave the forked browser running.
+        crate::platform::shutdown_child(&mut wrapper);
+        let mut listener_gone = false;
+        for _ in 0..40 {
+            if !crate::platform::process_alive(listener_pid) {
+                listener_gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert!(
+            accepted,
+            "a listener held by a descendant of the spawned launcher is owned by it"
+        );
+        assert!(
+            refused_outside,
+            "a listener outside the spawned process tree must still be refused"
+        );
+        assert!(
+            listener_gone,
+            "shutdown must terminate the forked browser, not only the launcher"
+        );
     }
 }

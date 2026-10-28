@@ -928,17 +928,34 @@ pub fn kill_process_force(pid: u32) {
 
 /// Shut down a child process gracefully: SIGTERM first (Unix), then
 /// SIGKILL after a grace period. On Windows, TerminateProcess directly.
+///
+/// Owned browsers are spawned as their own process group
+/// (`isolate_owned_child`): a wrapper launcher (AppImage AppRun, a shell
+/// script) forks the real browser, so signalling only `child.id()` would
+/// leave the browser running after `stop`. Signal the whole group, and keep
+/// the direct kill as a fallback for any child that was not isolated.
 pub fn shutdown_child(child: &mut Child) {
     #[cfg(unix)]
     {
-        unsafe {
-            libc::kill(child.id() as i32, libc::SIGTERM);
+        let pgid = (child.id() <= i32::MAX as u32).then(|| child.id() as i32);
+        if let Some(pgid) = pgid {
+            unsafe {
+                libc::kill(-pgid, libc::SIGTERM);
+            }
         }
+        // Wait for the launcher AND the browser it forked. try_wait reaps
+        // the leader so its zombie cannot keep the group looking alive.
         for _ in 0..30 {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                Err(_) => break,
+            let child_done = child.try_wait().is_ok_and(|s| s.is_some());
+            let group_done = pgid.is_none_or(|g| !process_group_alive(g));
+            if child_done && group_done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if let Some(pgid) = pgid {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
             }
         }
         let _ = child.kill();
@@ -949,6 +966,57 @@ pub fn shutdown_child(child: &mut Child) {
         // Windows: no graceful signal. TerminateProcess is the only option.
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+/// Force-kill an owned browser's whole process group without a graceful
+/// wait. Used on launch-failure paths, where a forked launcher would
+/// otherwise leave the real browser running.
+pub fn kill_child_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if child.id() <= i32::MAX as u32 {
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    #[cfg(windows)]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Put an owned browser launch into its own process group so shutdown can
+/// signal the whole tree. A launcher that forks instead of exec'ing (an
+/// AppImage's AppRun script, a shell wrapper) keeps the real browser outside
+/// `child.id()`; the group still reaches it. No-op on Windows — the
+/// process-lifetime kernel job already owns browser descendants.
+pub fn isolate_owned_child(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        let _ = cmd;
+    }
+}
+
+/// True while any process in `pgid` exists (EPERM means it exists but is not
+/// ours; for an owned group that still counts as alive).
+#[cfg(unix)]
+fn process_group_alive(pgid: i32) -> bool {
+    if pgid <= 1 {
+        return false;
+    }
+    unsafe {
+        libc::kill(-pgid, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 }
 
