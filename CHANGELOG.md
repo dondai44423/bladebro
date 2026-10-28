@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.6] - 2026-10-28
+
 ### Fixed
 - Owned browser launches accept a debug endpoint held by a forked child of the spawned launcher (Helium AppImage/AppRun, shell wrappers), while listeners from other process trees are still refused. Shutdown and launch-failure cleanup signal the browser's process group, so `stop` reaps the forked browser instead of leaving it running.
 
@@ -2135,7 +2137,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.5...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.6...HEAD
+[4.6.6]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.6
 [4.6.5]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.5
 [4.6.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.4
 [4.6.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.3
