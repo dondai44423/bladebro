@@ -544,14 +544,48 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             };
             // Self-heal: the ref may have died since the agent saw it.
             let heal = page.ensure_ref(&ref_id).await?;
-            let text_content =
-                crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
+            let mut data = crate::action::inspect(page.cdp_ref(), page.model(), &ref_id).await?;
             let el = page.model().element(&ref_id);
             let role = el.map(|e| e.raw.role.clone()).unwrap_or_default();
             let name = el.map(|e| e.raw.name.clone()).unwrap_or_default();
+            data["ref"] = serde_json::json!(ref_id);
+            data["role"] = serde_json::json!(role);
+            data["name"] = serde_json::json!(name);
+            if let Some(ref note) = heal {
+                data["note"] = serde_json::json!(note);
+            }
+            let compact = super::bounded_json(&data)?;
+            if args.get("format").and_then(Value::as_str) == Some("json") {
+                return Ok(compact);
+            }
+            if let Some(path) = serde_json::from_str::<Value>(&compact)?
+                .get("artifact")
+                .and_then(Value::as_str)
+            {
+                return Ok(format!("read: {compact}\n{}", super::artifact_hint(path)));
+            }
+            let text_content = data
+                .get("value")
+                .or_else(|| data.get("text"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let details = data
+                .as_object_mut()
+                .map(|o| {
+                    for key in ["value", "text", "ref", "role", "name", "note", "tag"] {
+                        o.remove(key);
+                    }
+                    o.is_empty()
+                })
+                .unwrap_or(true);
+            let extra = if details {
+                String::new()
+            } else {
+                format!("  state: {data}\n")
+            };
             let note = heal.map(|n| format!(" [{n}]")).unwrap_or_default();
             return Ok(format!(
-                "Page: {} | phase: {} | {} actionable\n{} {} \"{}\"{}\n  text: \"{}\"\n",
+                "Page: {} | phase: {} | {} actionable\n{} {} \"{}\"{}\n  text: {}\n{}",
                 page.model().url(),
                 page.model().phase(),
                 page.model().actionables(),
@@ -559,7 +593,8 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 role,
                 name,
                 note,
-                text_content
+                text_content,
+                extra
             ));
         }
         "dialog" => return handle_dialog_expect(args, page),

@@ -31,7 +31,7 @@ mod perform;
 mod verdict;
 
 pub use self::find::{
-    find_by_selector, find_by_text, find_label_route, find_miss_diag, focus, locate_text,
+    find_by_selector, find_by_text, find_label_route, find_miss_diag, focus, inspect, locate_text,
     read_checked, read_text, LabelRoute, MissDiag, MissExample, SelectorDiag, SelectorLookup,
     TextLocation, TextMatch,
 };
@@ -497,6 +497,7 @@ mod action_tests {
             ("selhost", None),
             ("select", Some("opt")),
             ("read", None),
+            ("inspect", None),
             ("hover", None),
             ("click", None),
             ("state", None),

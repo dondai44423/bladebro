@@ -16,6 +16,7 @@ use super::state::handle_state;
 
 pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
     super::validate::run(args)?;
+    let json_out = args.get("format").and_then(Value::as_str) == Some("json");
     let slim = args.get("slim").and_then(Value::as_bool).unwrap_or(false);
     let mut inherited = args.clone();
     inherit_slim(&mut inherited, slim);
@@ -26,6 +27,7 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
         .ok_or_else(|| crate::error::BladeError::Other("run requires 'steps' array".into()))?;
 
     let mut observations = Vec::new();
+    let mut results = Vec::new();
     let mut ok_count = 0usize;
     let total = steps.len();
     // Track page moves: a navigation mid-run can consume a later step's
@@ -41,8 +43,12 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
             .get("optional")
             .and_then(|o| o.as_bool())
             .unwrap_or(false);
+        let before = observations.len();
         match execute_step(page, step, &step_num.to_string(), &mut observations).await {
             Ok(()) => {
+                if json_out {
+                    results.push(serde_json::json!({"step":step_num,"status":"ok","output":observations[before..].join("\n")}));
+                }
                 ok_count += 1;
                 let curr_url = page.model().url().to_string();
                 if curr_url != prev_url {
@@ -54,6 +60,9 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
             Err(BladeError::Closed) => return Err(BladeError::Closed),
             Err(e) => {
                 if optional {
+                    if json_out {
+                        results.push(serde_json::json!({"step":step_num,"status":"optional_failed","output":observations[before..].join("\n"),"error":e.to_string()}));
+                    }
                     observations.push(format!(
                         "step {step_num} (optional): failed — {e} (continued)"
                     ));
@@ -66,6 +75,14 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
                     ),
                     _ => String::new(),
                 };
+                if json_out {
+                    results.push(serde_json::json!({"step":step_num,"status":"failed","output":observations[before..].join("\n"),"error":e.to_string()}));
+                    return super::bounded_json(&serde_json::json!({
+                        "status":"stopped","stopped_at":step_num,"results":results,
+                        "error":e.to_string(),"page":page.view(1200),
+                        "note":format!("completed effects remain applied; verify the failed step's outcome before retrying.{nav_ctx}")
+                    }));
+                }
                 // W5: a page-step failure is a structured result, not an
                 // exception — the run stops at the step and the result still
                 // carries every prior observation, so a surrounding pipeline
@@ -89,7 +106,11 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
             }
         }
     }
-    Ok(observations.join("\n"))
+    if json_out {
+        super::bounded_json(&serde_json::json!({"status":"completed","results":results}))
+    } else {
+        Ok(observations.join("\n"))
+    }
 }
 
 // Inherit through branches; a step can explicitly opt back into full output.

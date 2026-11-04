@@ -8,12 +8,21 @@ use serde_json::{json, Value};
 pub(crate) fn parse_run_args(args: &[String]) -> Result<Value> {
     let mut steps_raw: Option<String> = None;
     let mut slim = false;
+    let mut format = "text".to_string();
     let mut i = 0;
     while i < args.len() {
         let a = args[i].clone();
         if let Some(flag) = a.strip_prefix("--") {
             match flag {
                 "slim" => slim = true,
+                "format" => {
+                    format = take_value(args, &mut i, flag)?;
+                    if !matches!(format.as_str(), "text" | "json") {
+                        return Err(BladeError::Usage(
+                            "run --format must be text or json".into(),
+                        ));
+                    }
+                }
                 "steps" => steps_raw = Some(take_value(args, &mut i, flag)?),
                 _ => {
                     return Err(BladeError::Usage(format!(
@@ -48,5 +57,23 @@ pub(crate) fn parse_run_args(args: &[String]) -> Result<Value> {
     if arr.is_empty() {
         return Err(BladeError::Usage("steps must not be empty".into()));
     }
-    Ok(json!({ "steps": steps, "slim": slim }))
+    Ok(json!({ "steps": steps, "slim": slim, "format": format }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_run_format_is_explicit_and_validated() {
+        let args = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let value = parse_run_args(&args(&["--format", "json", "[{\"action\":\"see\"}]"])).unwrap();
+        assert_eq!(value["format"], "json");
+        assert_eq!(
+            parse_run_args(&args(&["[{\"action\":\"see\"}]"])).unwrap()["format"],
+            "text"
+        );
+        assert!(parse_run_args(&args(&["--format", "yaml", "[{\"action\":\"see\"}]"])).is_err());
+        assert!(parse_run_args(&args(&["--format"])).is_err());
+    }
 }

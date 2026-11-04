@@ -121,6 +121,16 @@ fn artifact_hint(path: &str) -> String {
     format!("full payload: {path} — read it back in pages with see artifact=\"{path}\" (offset/limit) or any file tool")
 }
 
+/// Preserve complete structured reads while bounding the inline context cost.
+fn bounded_json(value: &Value) -> crate::error::Result<String> {
+    let text = serde_json::to_string(value)?;
+    if text.len() <= 8000 {
+        return Ok(text);
+    }
+    let path = crate::artifacts::write_artifact(&text, "json")?;
+    Ok(json!({"artifact":path,"bytes":text.len(),"next_offset":0}).to_string())
+}
+
 /// Only observational calls may be replayed after an ambiguous disconnect.
 pub(crate) fn retry_safe(tool: &str, args: &Value) -> bool {
     (tool == "see"

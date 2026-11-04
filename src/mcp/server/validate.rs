@@ -495,6 +495,13 @@ pub(super) fn vision(args: &Value) -> Result<()> {
 
 pub(super) fn run(args: &Value) -> Result<()> {
     fields(args, "run")?;
+    if args
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !matches!(s, "" | "text" | "json"))
+    {
+        return Err(BladeError::Usage("run format must be text or json".into()));
+    }
     sequence(args, "steps", false, 0, &mut 0)
 }
 

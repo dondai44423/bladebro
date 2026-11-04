@@ -147,6 +147,14 @@ jobs:
           POLISH_OUT=work/persistence-1.json python tools/reliability_probe/persistence.py
           POLISH_OUT=work/persistence-2.json python tools/reliability_probe/persistence.py
 
+      - name: Agent control reads and structured runs — native browser
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
+          BLADE_INCOGNITO=0 POLISH_OUT=work/agent-ux-native.json python tools/reliability_probe/agent_ux.py
+          BLADE_INCOGNITO=1 POLISH_OUT=work/agent-ux-incognito.json python tools/reliability_probe/agent_ux.py
+
       # 4.6.1: real runtime stealth validation on every OS — the built binary
       # drives its own vectors page through a real browser and exits non-zero
       # on any FAIL (the audit is a gate since 4.6.1). Kills the class of

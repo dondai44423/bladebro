@@ -103,9 +103,9 @@ pub fn all_tools() -> Vec<ToolDef> {
                     "accept": {"type": "boolean", "description": "act dialog: accept (default true) or cancel the matching dialog."},
                     "prompt_text": {"type": "string", "description": "act dialog: text typed into a matching prompt() when accepting."},
                     "message": {"type": "string", "description": "act dialog: only match dialogs whose text contains this (case-insensitive)."},
-                    "option": {"type": "string", "description": "Select: option text or value."},
+                    "option": {"type": "string", "description": "Select: label, text or value."},
                     "slim": {"type": "boolean", "description": "Verdicts only for successful actions; batch/run inherit. Reads and errors retained."},
-                    "format": {"type": "string", "enum": ["text", "json"], "description": "eval/extract: JSON payload, {data,note} for caveats/events, or {artifact,bytes,next_offset:0}; page artifacts with see."},
+                    "format": {"type": "string", "enum": ["text", "json"], "description": "read: live value/toggle state + select options (first 80; clipping explicit). eval/read/extract json: payload, {data,note} for notices, or {artifact,bytes,next_offset:0}; page artifacts with see."},
                     "fields": {
                         "type": "array",
                         "description": "Fill: [{ref|label|selector,text|option|check}]. Toggles accept only check=true/false; omit values to toggle.",
@@ -219,6 +219,7 @@ pub fn all_tools() -> Vec<ToolDef> {
                 "required": ["steps"],
                 "properties": {
                     "slim": {"type":"boolean","description":"Inherit verdict-only actions; preserve reads and errors."},
+                    "format": {"type":"string","enum":["text","json"],"description":"json: {status:completed|stopped,results:[{step,status:ok|optional_failed|failed,output,error?}],stopped_at?,error?,page?,note?}. Steps are 1-based; nested observations stay in output text. Not inherited: set each read's format explicitly. Oversized results use artifact paging."},
                     "steps": {
                         "type": "array",
                         "description": "Steps reuse act/see/state fields plus optional:true and if/while branches. wait may carry else:[...].",

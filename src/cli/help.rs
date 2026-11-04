@@ -249,7 +249,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--body": "download: HTTP body, <=32MiB/30s, no browser cookies; honors HTTP(S) BLADE_PROXY",
                 "--sort": "Reddit post extract: confidence|top|new|controversial|old|qa",
                 "--slim": "verdict-only successful actions; batch/run inherit, reads/errors retained",
-                "--format": "extract/eval: text (default) | json — pure JSON output (for eval: the bare returned value; {data,note} when a note rides along; an {artifact,bytes} envelope when oversized)"
+                "--format": "read/extract/eval: text (default) | json — read returns live values/state/select choices; {data,note} for notices; {artifact,bytes,next_offset:0} when oversized"
             },
             "examples": [
                 "bladebro act click e5",
@@ -305,7 +305,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro run @steps.json",
                 "cat steps.json | bladebro run -"
             ],
-            "notes": ["stops on first error with the step number + page state", "while+see reads across pages in ONE call"]
+            "notes": ["stops on first error with the step number + page state", "while+see reads across pages in ONE call", "--format json: status, results per top-level step, stopped_at/error/page/note on failure; nested observations remain output text; step formats are explicit; large results offload"]
         }),
         "vision" => json!({
             "usage": "bladebro vision [--marks]",
@@ -601,6 +601,9 @@ Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
 payloads: @file or - (stdin). Unknown flags fail loudly (exit 2). Key chords: 'act press Control+a'.
 
 RESULT SHAPES (stable — parse them without guessing)
+  read          live text/control value, checked/indeterminate and ARIA state,
+                select choices (first 80; options_total/options_truncated disclose bounds).
+                --format json returns structured properties; large reads offload.
   eval          one line: `result: <compact JSON of the returned value>` — read
                 that line, json.loads it. A returned string that CONTAINS JSON is
                 called out in a `note:` line (parse the value once more — do not
@@ -668,7 +671,7 @@ EXAMPLES
             r#"bladebro run — batch actions with branching and loops
 
 USAGE
-  bladebro run '<json-steps>'      (or @file / - for stdin)
+  bladebro run '<json-steps>' [--slim] [--format text|json] (or @file / -)
 
 Steps are action objects (same fields as act) plus:
   {"action":"if","condition":…,"then":[…],"else":[…]}   branch
@@ -678,6 +681,10 @@ Steps are action objects (same fields as act) plus:
 
 Stops on the first error and returns the step number + page state.
 Conditions: element, title, url, text, settle, js.
+--format json returns status=completed|stopped and results with 1-based top-level
+step IDs, status=ok|optional_failed|failed and output text. Stopped runs include
+stopped_at/error/page/note. Nested observations stay in output; set each read's
+format explicitly. Oversized results use the usual artifact paging envelope.
 
 EXAMPLES
   bladebro run '[{"action":"navigate","url":"example.com"},{"action":"see","mode":"content"}]'

@@ -232,7 +232,7 @@ Input actions return an **outcome verdict + page delta**; explicit reads/eval re
 | `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
 | `press` | `act press key=Enter` / `key=Control+a` | Real key event; full chords (`Control+a`, `Meta+Enter`, `Shift+Tab`) |
 | `select` | `act select e4 option="Nepal"` | Dropdown by option text or value |
-| `read` | `act read e5` | Element text content |
+| `read` | `act read e5` | Live text/control value, toggle state and select choices; `--format json` for structured data |
 | `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
 | `clear` | `act clear e3` | Empty an input or rich editor |
 | `download` | `act download url=... timeout=10` | Fetch + Blob download, returns the path |
@@ -244,6 +244,9 @@ Input actions return an **outcome verdict + page delta**; explicit reads/eval re
 - **`selector=` everywhere** — click, hover, type, press, wait, select, clear, read, upload, eval, `fill` fields, and `batch`/`run` steps all accept a CSS selector (light DOM + open shadow roots); `nth=` picks among matches.
 - **`url=` on input/read actions** — navigate first, then act: `act fill url="https://..." fields=[...]` reaches a page and fills it in one call. Download URLs identify the file; state URLs identify tab destinations or cookie scope.
 - **`slim=true`** — successful actions return verdicts only, including navigate/fill. On batch/run it inherits through steps and branches, preserving reads and failure recovery; a run step can set `slim:false` to opt back in.
+
+- **Inspect controls without eval** — MCP `act {action:"read",label:"Country",format:"json"}` returns the live value and select choices with labels, values, selection and disabled state. Textareas use the current value; checkboxes/radios include checked state, checkboxes also include indeterminate, and ARIA toggle states retain values such as `mixed`. Select choices are capped at 80 with `options_total` and `options_truncated:true` when clipped; multiple selects include all selected `values`. Large read results offload complete JSON to an artifact. `see scope=...` remains a text-subtree read.
+- **Machine-readable plans** — MCP `run {format:"json",steps:[...]}` returns `{status:"completed"|"stopped",results:[{step,status,output,error?}],stopped_at?,error?,page?,note?}`. Top-level step IDs are 1-based; statuses are `ok`, `optional_failed` or `failed`. Nested observations remain text inside `output`; `ok` means the top-level step finished, including any locally optional failures. The outer format does not change step formats: request JSON on individual reads explicitly. Oversized runs offload the complete result using the usual artifact paging envelope. Default run output stays text.
 
 - **Unambiguous targeting:** equally ranked text/label matches refuse with candidate refs/context. Choose `ref`, a unique selector, or `nth` (1-based). Targeted `press` focuses and checks its target before keys; an omitted target uses current focus.
 - **Popups:** `_blank` clicks report the new tab ID once and restore the opener. Use `state switch-tab` to act in the popup. Input reactivates the addressed tab; no mutation is retried after a timeout.

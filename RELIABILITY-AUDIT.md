@@ -1,8 +1,9 @@
-# Agent reliability audit — 2026-11-04 (unreleased)
+# Agent reliability audit — 2026-11-04
 
-Baseline: `66aedeb`, Bladebro 4.6.6. This work changes no version, dependency,
-release tag, published package or installed user binary. The five-tool interface
-remains `act`, `see`, `state`, `run`, `vision`.
+Baseline: `66aedeb`, Bladebro 4.6.6. The audit was committed as `dc3f319`
+without a release. The subsequently authorized 4.6.7 release includes these
+fixes and the agent workflow improvements described in [AGENT-UX.md](AGENT-UX.md).
+The five-tool interface remains `act`, `see`, `state`, `run`, `vision`.
 
 ## Reproduced problems and changes
 

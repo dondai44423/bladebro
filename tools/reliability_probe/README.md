@@ -58,6 +58,13 @@ measured blocking counts. All inputs use owned fixtures/profiles, with actual
 handler/readback evidence and negative controls; native desktop CI runs both
 normal and incognito modes. `--baseline` retains old-binary failures.
 
+Run `python3 tools/reliability_probe/agent_ux.py` for live control inspection
+and structured run results: changed textarea values, select/multiple/disabled
+choices, native and ARIA toggle states, shadow/frame addressing, Unicode
+artifact fidelity, stopped/optional/nested steps and preflight-before-effects.
+It retains JSON-RPC requests, replies and timings at `POLISH_OUT`; `--baseline`
+records unsupported behavior on an older binary. Run under `capped` locally.
+
 `qol465.py` verifies document/frame-root selector waits, hidden-frame refusal, invalid CSS, toggle value refusal without mutations, nested batch/run parity, explicit/idempotent check states, radio refusal, legacy toggles and explicit textbox clearing. Run with `BLADEBRO=... POLISH_OUT=...`; `--baseline` records all failures against an older binary.
 
 `agent_contract.py` verifies actual MCP preflight rejection without an available
