@@ -111,7 +111,7 @@ pub(super) async fn launch_browser(
             Ok(page) => Ok((page, browser)),
             Err(e) => {
                 if let Some(b) = browser {
-                    let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+                    b.shutdown_gracefully().await;
                 }
                 Err(e)
             }
@@ -133,7 +133,7 @@ pub(super) async fn launch_browser(
                     return Ok((page, Some(browser)));
                 }
                 Err(e) => {
-                    let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+                    browser.shutdown_gracefully().await;
                     return Err(e);
                 }
             }
@@ -161,7 +161,7 @@ pub(super) async fn launch_browser(
             Ok(page) => Ok((page, Some(browser))),
             Err(e) => {
                 // Clean up the browser we just launched.
-                let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+                browser.shutdown_gracefully().await;
                 Err(e)
             }
         }
@@ -176,12 +176,9 @@ pub(super) async fn launch_browser(
     }
 }
 
-/// Shut down Chrome without blocking the async executor:
-/// Browser::drop sends SIGTERM and waits up to 3s
-/// synchronously — on the executor thread that stalls every
-/// other task. Offload to a blocking thread.
+/// Close owned Chrome through CDP, then offload bounded process/profile cleanup.
 pub(super) async fn shutdown_browser(b: crate::browser::Browser) {
-    let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+    b.shutdown_gracefully().await;
 }
 
 /// Wait for a termination signal (SIGTERM/SIGINT/SIGHUP on

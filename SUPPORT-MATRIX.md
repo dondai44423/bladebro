@@ -2,39 +2,48 @@
 
 What is verified, on which platform, by which instrument. Every claim below
 points at a re-runnable instrument; everything not verified is listed as a gap.
-No perfect claims. Last full local floor: 2026-10-14, bladebro 4.6.1
-(Chromium 154.0.8037.97; receipts `work/floor461/`).
+No perfect claims. Current published baseline: 4.6.6. Latest local verification:
+2026-11-04, **unreleased** audit on Chromium 156.0.8078.79, Arch Linux x86_64.
+See [RELIABILITY-AUDIT.md](RELIABILITY-AUDIT.md) for exact scope and results;
+raw local receipts are under `work/agent-reliability-20261104/verified/`.
 
 ## Platforms
 
-| Platform | Build | Unit tests | Browser lifecycle | Stealth floor | Status |
-|---|---|---|---|---|---|
-| Linux x86_64 | local + CI (ubuntu) | local + CI | CI (dsh probe x2) + local lanes | audit 63/63, QoL 122/122, reliability 36/36, oracle, lanes 5x5 | full |
-| macOS (arm64/x86_64) | CI (macos) | CI | CI (dsh probe x2) | audit 52/52 (CI, 4.6.1); full local floor not run | CI-verified |
-| Windows x86_64 | CI (windows) | CI | CI (dsh probe x2) | audit 52/52 (CI, 4.6.1); full local floor not run | CI-verified |
+| Platform | Current audit coverage | Runtime coverage |
+|---|---|---|
+| Linux x86_64 | strict release Clippy, release tests twice, glibc 2.28 cross build, local npm installs | full local browser floor, audit 111/111 twice, both oracles, five lanes x5 |
+| Linux ARM64 | glibc 2.28 cross build + architecture/ABI inspection | physical ARM64/Pi runtime not run |
+| macOS Intel/Apple Silicon | both cross builds + architecture inspection | historical native CI; new commit's native GUI checks pending |
+| Windows x86_64 | cross build + strict all-target cross Clippy + PE inspection | historical native CI; new commit's native GUI checks pending |
+| Android | existing source-only CI configuration; no published binary | not run in this local audit |
 
-CI (`.github/workflows/ci.yml`) per OS: `cargo fmt --check`,
-`cargo clippy --release -- -D warnings`, `cargo test --release`,
-`cargo build --release`, then the DSH npm-package integration twice with the
-real native binary driving a browser (Node 24), and — since 4.6.1 —
-`bladebro audit`: the stealth vector suite through a real browser, exit-code
-gated (any FAIL fails the job; 4.6.1: ubuntu 55/55, macOS 52/52, Windows
-52/52). Linux CI installs Google
-Chrome stable + xvfb; macOS/Windows use the runner's Chrome. A separate msrv
-job checks Rust 1.86.0 (`cargo check --locked --all-targets`).
+Rust 1.86.0 passes `cargo check --locked --all-targets` on Linux. Native CI
+(`.github/workflows/ci.yml`) builds/tests Linux, macOS and Windows and drives
+Chrome with package, download, action and audit probes. This audit adds agent
+contract probes in normal/incognito mode and owned-storage persistence checks.
+A configured CI step is **not** evidence that this unpublished commit ran on
+another OS. Historical desktop CI coverage remains distinct from these local
+cross-build results.
+
+The local cross links retain the existing Zig deprecated linker-optimization
+and macOS SDK-discovery diagnostics. Artifacts linked and passed architecture
+checks; source Clippy is warning-clean. A supported local SDK/toolchain setup
+is still needed to remove those toolchain diagnostics without suppression.
 
 ## Engines
 
 | Engine | Evidence |
 |---|---|
-| Chromium 154 (this machine's /usr/sbin/chromium) | full local floor + acceptance probes |
+| Chromium 156.0.8078.79 (local Arch Linux) | full local floor + persistence and agent-contract probes |
 | Google Chrome stable (CI Linux; runner Chrome on macOS/Windows) | CI tests + lifecycle x2 per OS |
-| Other Chromium forks (Helium, Brave, Edge) | not verified |
+| Other Chromium forks (Helium, Brave, Edge) | discovery/wrapper mechanisms have fixtures; full engine-specific GUI runs not verified |
 
 ## Feature to instrument
 
 | Area | Instrument |
 |---|---|
+| Agent schemas, preflight, nested plans, JSON notices | `tools/reliability_probe/agent_contract.py` + `cargo test --release` |
+| Owned storage flush, EOF and forked-launcher restart | `tools/reliability_probe/persistence.py` + `browser-setup.py` |
 | Trusted input (isTrusted, paused wrapper) | `tools/qol_probe/run.py` + `tools/gap44/probe.py` |
 | Addressing (selector/text/nth/scope, options, labels) | `tools/qol_probe/run.py` + G01 in `tools/gap44/probe.py` |
 | Wait/readiness contract | `tools/qol_probe/run.py` + G02 in `tools/gap44/probe.py` |
@@ -46,7 +55,7 @@ job checks Rust 1.86.0 (`cargo check --locked --all-targets`).
 | Geometry coherence, WebRTC under proxy | `tools/gap44/webrtc_proxy.py` |
 | Proxy credential redaction | `cargo test --release` (`browser/proxy` tests) + G13 in `tools/gap44/probe.py` |
 | Updater retries, install integrity | `cargo test --release` (`updater` tests) |
-| Stealth posture | `bladebro audit` (63 vectors, stable across runs, exits non-zero on any FAIL since 4.6.1) |
+| Stealth posture | `bladebro audit` (111 local vectors, cross-run stamps, nonzero on failure) |
 | Stock-parity (page-visible differences) | `tools/diff_oracle/oracle.py` |
 | Cold start, all 5 lanes, owned-process hygiene | `tools/lane_matrix.py all 5` |
 | Real-browser lane attachment | `tools/rb_live/attach_drift.py` (run when the lane changes) |
@@ -59,7 +68,7 @@ job checks Rust 1.86.0 (`cargo check --locked --all-targets`).
   floor (QoL, reliability, lanes, oracle) still runs on Linux only.
 - Real-network proxies and proxy chains: G10 evidence uses a local forward
   proxy; behavior behind commercial proxies is untested.
-- Other Chromium forks (Helium and friends): untested, not claimed.
+- Other Chromium forks: full engine-specific GUI behavior remains unverified; forked launch and cleanup fixtures use stock Chromium.
 - Scanned/image PDFs: out of scope by design (download hands the bytes to
   host tooling; no OCR layer in the driver).
 
@@ -68,6 +77,8 @@ job checks Rust 1.86.0 (`cargo check --locked --all-targets`).
 ```bash
 cargo fmt --check && cargo clippy --release -- -D warnings && cargo test --release
 ./target/release/bladebro audit
+python3 tools/reliability_probe/agent_contract.py
+python3 tools/reliability_probe/persistence.py
 python3 tools/qol_probe/run.py
 python3 tools/diff_oracle/oracle.py
 python3 tools/lane_matrix.py all 5

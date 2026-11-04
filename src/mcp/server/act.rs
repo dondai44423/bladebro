@@ -650,6 +650,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                                 chars
                             ));
                         }
+                        Err(BladeError::Closed) => return Err(BladeError::Closed),
                         Err(e) => {
                             // optional:true continues past a failed read step
                             // like it does for every other step.
@@ -684,7 +685,25 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 match Box::pin(handle_act(&nested, page)).await {
                     Ok(verdict) => {
                         ok_count += 1;
-                        let vline = verdict.lines().next().unwrap_or("ok").trim().to_string();
+                        let state_op = if step_action == "state" {
+                            step.get("op").and_then(Value::as_str).unwrap_or("")
+                        } else {
+                            step_action
+                        };
+                        let explicit_read = matches!(step_action, "eval" | "read")
+                            || matches!(
+                                state_op,
+                                "ls" | "ss" | "cookies" | "tabs" | "block" | "compress"
+                            );
+                        if explicit_read {
+                            reads
+                                .push(format!("=== {step_action} (step {}) ===\n{verdict}", i + 1));
+                        }
+                        let vline = if explicit_read {
+                            format!("read ({} chars)", verdict.chars().count())
+                        } else {
+                            verdict.lines().next().unwrap_or("ok").trim().to_string()
+                        };
                         let curr_url = page.model().url().to_string();
                         // Auto-settle: if this step caused navigation, give the
                         // SPA time to render and recapture for fresh refs.
@@ -716,6 +735,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                         }
                         prev_url = curr_url;
                     }
+                    Err(BladeError::Closed) => return Err(BladeError::Closed),
                     Err(e) => {
                         if step
                             .get("optional")
@@ -750,7 +770,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 page.delta_view(&final_delta, 8000)
             };
             let summary = if let Some(halt) = halted {
-                format!("batch stopped at step {halt} ({ok_count} ok)")
+                format!("batch stopped at step {halt} ({ok_count} ok); completed effects remain applied; verify the failed step before retrying")
             } else {
                 format!("batch ({} steps, {} ok)", steps.len(), ok_count)
             };

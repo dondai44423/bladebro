@@ -42,7 +42,7 @@ use super::artifact_hint;
 /// The traversal/read script lives in `js/template_extract.js` (house rule:
 /// embedded JS stays in src/**/js); `__LISTS__` is substituted with the
 /// per-list code generated from the template.
-fn template_extract_expr(template: &Value, limit: usize) -> Result<String> {
+pub(super) fn template_extract_expr(template: &Value, limit: usize) -> Result<String> {
     let obj = template
         .as_object()
         .ok_or_else(|| BladeError::Other("template must be a JSON object".into()))?;
@@ -56,16 +56,22 @@ fn template_extract_expr(template: &Value, limit: usize) -> Result<String> {
         }
         let fields = spec
             .get("fields")
-            .and_then(|f| f.as_object())
-            .cloned()
-            .unwrap_or_default();
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                BladeError::Usage(format!("template list '{list_name}' needs a fields object"))
+            })?;
         // Field value: a string (rendered text, or css@attr) or an object
         // {"sel": "...", "raw": true} for intentional hidden-text reads.
         let mut field_code = Vec::new();
-        for (fname, fsel) in &fields {
+        for (fname, fsel) in fields {
             let (sel, raw) = match fsel {
                 Value::String(s) => (s.clone(), false),
                 Value::Object(o) => {
+                    if o.get("raw").is_some_and(|r| !r.is_boolean()) {
+                        return Err(BladeError::Usage(format!(
+                            "template field '{fname}' raw must be a boolean"
+                        )));
+                    }
                     let sel = o
                         .get("sel")
                         .and_then(|s| s.as_str())

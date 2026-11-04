@@ -123,7 +123,10 @@ fn artifact_hint(path: &str) -> String {
 
 /// Only observational calls may be replayed after an ambiguous disconnect.
 pub(crate) fn retry_safe(tool: &str, args: &Value) -> bool {
-    (tool == "see" && args.get("url").is_none() && args.get("eval").is_none())
+    (tool == "see"
+        && args.get("url").is_none()
+        && args.get("eval").is_none()
+        && args.get("clear").and_then(Value::as_bool) != Some(true))
         || (tool == "state"
             && matches!(
                 args.get("op").and_then(Value::as_str),
@@ -141,6 +144,7 @@ mod retry_tests {
         }
         assert!(!retry_safe("see", &json!({"url":"https://example.com"})));
         assert!(!retry_safe("see", &json!({"eval":"fetch('/pay')"})));
+        assert!(!retry_safe("see", &json!({"logs":"network","clear":true})));
         assert!(retry_safe("see", &json!({"mode":"content"})));
         for op in ["set-cookie", "clear-ls", "save", "load", "close-tab", ""] {
             assert!(!retry_safe("state", &json!({"op":op})), "unsafe op {op}");

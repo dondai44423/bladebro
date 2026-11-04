@@ -226,11 +226,12 @@ pub async fn handle_eval(
                         })
                         .collect();
                     if !new_tabs.is_empty() {
-                        return Ok(format!(
-                            "{result}\n✓ {} popup tab(s) created:\n  {}\n  use state tabs to inspect, switch-tab to move",
+                        let notice = format!(
+                            "✓ {} popup tab(s) created:\n  {}\n  use state tabs to inspect, switch-tab to move",
                             new_tabs.len(),
                             new_tabs.join("\n  ")
-                        ));
+                        );
+                        return Ok(super::proto::append_notices(result, &notice, json_out));
                     }
                 }
             }

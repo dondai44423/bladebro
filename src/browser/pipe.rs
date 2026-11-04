@@ -57,7 +57,7 @@ impl Browser {
         for (i, stage) in stages.iter().enumerate() {
             if let Some((b, c)) = last.take() {
                 drop(c);
-                let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+                b.shutdown_gracefully().await;
             }
             let (browser, client, probe) =
                 Self::launch_pipe_inner_stage(no_sandbox, *stage).await?;
@@ -266,6 +266,8 @@ impl Browser {
                             xvfb,
                             port: 0,
                             profile,
+                            shutdown_connection: Some(ShutdownConnection::Pipe(client.clone())),
+                            close_requested: false,
                         },
                         client,
                         probe,

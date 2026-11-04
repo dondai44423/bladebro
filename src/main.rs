@@ -336,7 +336,7 @@ where
 {
     let result = run().await;
     if let Some(b) = browser.take() {
-        let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+        b.shutdown_gracefully().await;
     }
     result
 }

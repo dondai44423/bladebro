@@ -935,10 +935,16 @@ pub fn kill_process_force(pid: u32) {
 /// leave the browser running after `stop`. Signal the whole group, and keep
 /// the direct kill as a fallback for any child that was not isolated.
 pub fn shutdown_child(child: &mut Child) {
+    finish_child_shutdown(child, false);
+}
+
+/// After Browser.close, wait before signalling: Chrome needs its child
+/// storage services alive until the browser has flushed and exited.
+pub(crate) fn finish_child_shutdown(child: &mut Child, close_requested: bool) {
     #[cfg(unix)]
     {
         let pgid = (child.id() <= i32::MAX as u32).then(|| child.id() as i32);
-        if let Some(pgid) = pgid {
+        if let Some(pgid) = pgid.filter(|_| !close_requested) {
             unsafe {
                 libc::kill(-pgid, libc::SIGTERM);
             }
@@ -963,9 +969,35 @@ pub fn shutdown_child(child: &mut Child) {
     }
     #[cfg(windows)]
     {
+        if close_requested {
+            for _ in 0..30 {
+                if child.try_wait().is_ok_and(|s| s.is_some()) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
         // Windows: no graceful signal. TerminateProcess is the only option.
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+/// Validate the browser process reported by CDP against our owned tree before
+/// closing it. A recycled/debug-port race must not close a borrowed browser.
+pub(crate) fn owns_browser_process(child: u32, browser: u32) -> bool {
+    #[cfg(unix)]
+    {
+        child > 1
+            && child <= i32::MAX as u32
+            && browser > 1
+            && browser <= i32::MAX as u32
+            && unsafe { libc::getpgid(browser as i32) == child as i32 }
+    }
+    #[cfg(windows)]
+    {
+        let _ = child;
+        windows_job::owns_browser_process(browser)
     }
 }
 
@@ -1073,6 +1105,41 @@ pub fn stale_binary() -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[cfg(unix)]
+    #[test]
+    fn requested_browser_close_preserves_pending_storage_flush() {
+        use std::os::unix::process::CommandExt;
+        let marker = std::env::temp_dir().join(format!(
+            "blade-flush-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "trap 'exit 23' TERM; sleep 0.15; printf flushed > \"$BLADE_TEST_FLUSH\"",
+            ])
+            .env("BLADE_TEST_FLUSH", &marker)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        assert!(owns_browser_process(child.id(), child.id()));
+        assert!(!owns_browser_process(child.id(), std::process::id()));
+        finish_child_shutdown(&mut child, true);
+        let flushed = std::fs::read_to_string(&marker).ok();
+        let _ = std::fs::remove_file(marker);
+        assert_eq!(
+            flushed.as_deref(),
+            Some("flushed"),
+            "a requested close must finish its storage flush before the group is signalled"
+        );
+    }
 
     #[test]
     fn stale_binary_is_false_for_a_normally_launched_process() {

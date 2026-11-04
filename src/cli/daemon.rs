@@ -256,7 +256,7 @@ pub async fn run_daemon() -> Result<()> {
                             if drifted { "lane/settings changed" } else { "connection lost" }
                         );
                         if let Some(b) = browser.take() {
-                            let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+                            b.shutdown_gracefully().await;
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     } else if drifted {
@@ -351,7 +351,7 @@ pub async fn run_daemon() -> Result<()> {
                         // Self-heal: relaunch and retry.
                         eprintln!("[bladebro] browser closed during tool call, reconnecting...");
                         if let Some(b) = browser.take() {
-                            let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+                            b.shutdown_gracefully().await;
                         }
                         page = None;
                         match launch_browser().await {
@@ -401,7 +401,7 @@ pub async fn run_daemon() -> Result<()> {
                                 if let Err(e) = crate::logins::snapshot(p.cdp_ref()).await { eprintln!("[bladebro] login snapshot failed: {e}"); }
                             }
                         }
-                        let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+                        b.shutdown_gracefully().await;
                     }
                     page = None;
                 }
@@ -442,7 +442,7 @@ pub async fn run_daemon() -> Result<()> {
         }
     }
     if let Some(b) = browser {
-        let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+        b.shutdown_gracefully().await;
     }
     // Flush the knowledge base before exit (consent, visits, timing, risk).
     if let Ok(mut kb) = knowledge.lock() {
@@ -494,7 +494,7 @@ async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
         Err(e) => {
             // Clean up a browser we launched (attach lane: never ours).
             if let Some(b) = browser {
-                let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+                b.shutdown_gracefully().await;
             }
             Err(e)
         }
@@ -577,7 +577,9 @@ pub async fn stop_daemon() -> Result<String> {
         // file last. Without this, an immediate second `stop` could connect
         // to the dying daemon's still-bound socket and report "stopped"
         // again instead of "not running".
-        for _ in 0..50 {
+        // Browser close can use two 2s CDP deadlines, a 1s ownership check,
+        // and a 3s process grace; allow time for the profile copy as well.
+        for _ in 0..100 {
             if !path.exists() {
                 break;
             }
@@ -595,7 +597,7 @@ pub async fn stop_daemon() -> Result<String> {
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
             }
-            for _ in 0..50 {
+            for _ in 0..100 {
                 if !process_alive(pid) {
                     break;
                 }

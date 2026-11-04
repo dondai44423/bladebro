@@ -1,9 +1,12 @@
 //! `vision` handler: screenshot (+ optional Set-of-Marks overlay).
 
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::BladeError;
 use crate::page::Page;
+
+static MARK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Capture a screenshot of the current page and return it as an MCP image
 /// content block (base64 PNG).
@@ -15,8 +18,15 @@ pub async fn handle_vision(
     args: &Value,
     page: &mut Page,
 ) -> std::result::Result<Value, BladeError> {
+    super::validate::vision(args)?;
     let marks = args.get("marks").and_then(|m| m.as_bool()).unwrap_or(false);
     let mut note = String::new();
+    let overlay_id = serde_json::to_string(&format!(
+        "blade-marks-{}-{}",
+        std::process::id(),
+        MARK_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ))?;
+    let mut overlay_installed = false;
 
     // A tab that is not the frontmost one can stall captureScreenshot —
     // Chromium throttles occluded/background renderers, so the call burns
@@ -40,8 +50,9 @@ pub async fn handle_vision(
         let overlay = "((items)=>{".to_string()
             + "const d=document;if(!d||!d.body)return 0;"
             + &crate::page::perception::JS_PREAMBLE
-            + "const old=d.getElementById('blade-marks');if(old)old.remove();"
-            + "const ov=d.createElement('div');ov.id='blade-marks';"
+            // Never remove a page-owned node merely because its ID matches.
+            + &format!("const id={overlay_id};if(d.getElementById(id))throw new Error('marks ID collision');")
+            + "const ov=d.createElement('div');ov.id=id;"
             + "ov.style.cssText='position:fixed;inset:0;pointer-events:none;z-index:2147483647;';"
             + "const vw=innerWidth,vh=innerHeight;"
             + "const all=deepAll(d,sel);"
@@ -83,6 +94,7 @@ pub async fn handle_vision(
                 crate::platform::truncate_utf8(msg, 120)
             );
         } else {
+            overlay_installed = true;
             let marked = res
                 .get("result")
                 .and_then(|r| r.get("value"))
@@ -104,9 +116,9 @@ pub async fn handle_vision(
 
     // Remove the overlay BEFORE processing the result —
     // the page must never keep our marks.
-    if marks {
+    if overlay_installed {
         let _ = page.cdp_ref().send("Runtime.evaluate", Some(json!({
-            "expression": "(()=>{const o=document.getElementById('blade-marks');if(o)o.remove();return true;})()",
+            "expression": format!("(()=>{{const o=document.getElementById({overlay_id});if(o)o.remove();return true;}})()"),
             "returnByValue": true,
         }))).await;
     }

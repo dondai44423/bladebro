@@ -74,7 +74,7 @@ impl Browser {
                 // No GL in the previous stage — tear it down before the
                 // relaunch (fresh Xvfb + profile; the WS transport re-binds
                 // the same port, so the old Chrome must be gone first).
-                let _ = tokio::task::spawn_blocking(move || b.shutdown()).await;
+                b.shutdown_gracefully().await;
             }
             let (browser, probe) = Self::launch_inner_stage(port, no_sandbox, *stage).await?;
             match probe {
@@ -297,6 +297,10 @@ impl Browser {
                             xvfb,
                             port,
                             profile,
+                            shutdown_connection: v
+                                .web_socket_debugger_url
+                                .map(ShutdownConnection::WebSocket),
+                            close_requested: false,
                         },
                         probe,
                     ));
@@ -490,6 +494,10 @@ impl Browser {
                             xvfb: None,
                             port,
                             profile,
+                            shutdown_connection: v
+                                .web_socket_debugger_url
+                                .map(ShutdownConnection::WebSocket),
+                            close_requested: false,
                         });
                     }
                     Err(_) => {

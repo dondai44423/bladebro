@@ -74,6 +74,14 @@ pub struct Browser {
     xvfb: Option<VirtualDisplay>,
     port: u16,
     profile: crate::session_profile::SessionProfile,
+    shutdown_connection: Option<ShutdownConnection>,
+    close_requested: bool,
+}
+
+enum ShutdownConnection {
+    WebSocket(String),
+    #[cfg(unix)]
+    Pipe(crate::cdp::CdpClient),
 }
 
 impl Browser {
@@ -95,21 +103,69 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        // Graceful shutdown: SIGTERM first (lets Chrome flush
-        // localStorage/cookies to the profile), then SIGKILL
-        // after 3s if it hasn't exited. On Windows,
-        // TerminateProcess directly.
-        platform::shutdown_child(&mut self.child);
+        // A requested Browser.close gets a flush grace before forced cleanup.
+        // Unwinding/failed launches retain the emergency process-tree path.
+        platform::finish_child_shutdown(&mut self.child, self.close_requested);
         // Xvfb is dropped here too (field order: child first, then xvfb).
     }
 }
 
 impl Browser {
-    /// Graceful shutdown: kill Chrome (Drop), then sync the
-    /// session profile back to the template and remove it.
-    /// Call this on every deliberate teardown path (stdin EOF,
-    /// signal, idle timeout). On SIGKILL nothing runs — the
-    /// next launch's orphan reaper cleans up instead.
+    /// Let Chrome flush its storage services before process-tree cleanup.
+    /// Signalling the entire process group first also kills those services,
+    /// losing localStorage even when Chrome's main process exits cleanly.
+    pub async fn shutdown_gracefully(mut self) {
+        let client = match self.shutdown_connection.take() {
+            Some(ShutdownConnection::WebSocket(url)) => {
+                match tokio::time::timeout(
+                    Duration::from_secs(2),
+                    crate::cdp::CdpClient::connect(&url),
+                )
+                .await
+                {
+                    Ok(Ok(client)) => Some(client),
+                    _ => None,
+                }
+            }
+            #[cfg(unix)]
+            Some(ShutdownConnection::Pipe(client)) => Some(client),
+            None => None,
+        };
+        if let Some(client) = client {
+            let owned = client
+                .send_with_timeout("SystemInfo.getProcessInfo", None, Duration::from_secs(1))
+                .await
+                .ok()
+                .and_then(|v| v.get("processInfo").and_then(|p| p.as_array()).cloned())
+                .is_some_and(|rows| {
+                    rows.iter().any(|p| {
+                        p["type"] == "browser"
+                            && p["id"]
+                                .as_u64()
+                                .and_then(|id| u32::try_from(id).ok())
+                                .is_some_and(|id| {
+                                    platform::owns_browser_process(self.child.id(), id)
+                                })
+                    })
+                });
+            if owned {
+                // Close may disconnect before acknowledging. In either case
+                // give the owned tree its flush grace before forced cleanup.
+                self.close_requested = true;
+                let _ = client
+                    .send_with_timeout("Browser.close", None, Duration::from_secs(2))
+                    .await;
+            }
+        }
+        if !self.close_requested {
+            eprintln!("[bladebro] graceful close of the owned browser was unavailable; using process cleanup, recent storage flush is unverified");
+        }
+        let _ = tokio::task::spawn_blocking(move || self.shutdown()).await;
+    }
+
+    /// Synchronous process cleanup + profile sync. Normal async callers use
+    /// shutdown_gracefully first so Chrome can flush its storage services.
+    /// On SIGKILL nothing runs; the next launch's orphan reaper cleans up.
     pub fn shutdown(self) {
         let profile = self.profile.clone();
         drop(self); // kills Chrome + Xvfb
