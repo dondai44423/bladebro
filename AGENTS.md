@@ -49,7 +49,7 @@ Other places: `tests/` (integration tests + fixtures; unit tests live inline as 
 
 ## Non-negotiables (PRs violating these are rejected)
 
-1. **Five tools. Forever.** `act`, `see`, `state`, `run`, `vision`. New capabilities are parameters or behaviors of those five — never a sixth tool. The tool definitions (~1,900 tokens) are the entire interface budget of every agent using bladebro.
+1. **Five tools. Forever.** `act`, `see`, `state`, `run`, `vision`. New capabilities are parameters or behaviors of those five — never a sixth tool. The tool definitions (five compact definitions) are the entire interface budget of every agent using bladebro.
 2. **No LLM inside the driver.** Deterministic machinery only. The agent is the intelligence; bladebro never calls a model.
 3. **No CAPTCHA solving as a capability — with one narrow, adapter-only exception.** The standing rule: detect, report an honest `blocked:` verdict, apply the remediation ladder; nothing is ever fake-solved. The exception: a site adapter may pass a challenge that is trivial for a human — a single check-the-box click through the normal humanized input path, as the reddit adapter does for reddit's one-time "prove your humanity" gate. Conditions that keep it honest: adapter-specific and site-gated (never a universal solver), and if the challenge escalates beyond the simple check (an image grid), that is reported honestly and never solved.
 4. **No Chromium fork.** The engine is stock system Chrome/Chromium. Everything else is built here.
@@ -100,6 +100,7 @@ Match the surrounding code. Specific to this repo:
 
 ## Gotchas worth knowing (each one cost real debugging time)
 
+- **Owned browser shutdown must flush before process-tree cleanup.** Await `Browser::shutdown_gracefully()` on normal exit, EOF, signal and idle paths. Killing the whole process group first kills Chrome's storage services before localStorage reaches disk. Keep emergency tree cleanup bounded; never close an externally attached browser. `tools/reliability_probe/persistence.py` locks direct/forked CLI and MCP restart behavior.
 - **A running daemon/MCP keeps the old binary inode.** After rebuilding, `bladebro stop` (or restart the MCP server) before testing — otherwise you're still testing the old build.
 - **The MCP lane defaults to the WebSocket transport** (native `navigator.webdriver == false`). `BLADE_TRANSPORT=pipe` is the opt-in zero-port pipe: Chrome then reports `webdriver == true` and needs a mask — keep it opt-in, never a default.
 - **The stealth baseline is Chrome-version-sensitive.** Current audited numbers were measured against Chrome 151 (at v4.0.0). Re-measure on a different Chrome before calling something a regression.

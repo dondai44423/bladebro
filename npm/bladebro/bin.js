@@ -28,7 +28,13 @@ if (result.signal) {
   // file). Without this branch the shim exited 0 while nothing ran — a
   // silent no-op that scripts and agents read as success.
   process.stderr.write('bladebro: failed to launch ' + binPath + ': ' + result.error.message + '\n');
-  process.stderr.write('Reinstall: npm install bladebro\n');
+  if (process.platform === 'linux' && result.error.code === 'ENOENT') {
+    // The kernel reports ENOENT for a present ELF whose dynamic loader is
+    // missing too. Reinstalling the same glibc prebuild cannot help musl hosts.
+    process.stderr.write('The executable or its loader is missing. Prebuilt Linux binaries require glibc >= 2.28; on Alpine/musl, build from source: https://github.com/dondai44423/bladebro#from-source\n');
+  } else {
+    process.stderr.write('Reinstall: npm install bladebro\n');
+  }
   process.exit(1);
 } else {
   process.exit(result.status || 0);

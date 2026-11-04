@@ -50,5 +50,17 @@ try {
   for (const f of ['bin.js','binary.cjs']) writeFileSync(join(isolated, f), readFileSync(join(root, f)));
   const result = spawnSync(process.execPath, [join(isolated, 'bin.js'), 'mcp'], { encoding: 'utf8' });
   check('missing optional dependency exits nonzero with recovery guidance', result.status === 1 && result.stderr.includes('optional dependencies enabled') && result.stdout === '');
+  if (process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch)) {
+    // ENOENT also means a present executable has no usable interpreter/ELF
+    // loader (the glibc prebuild on Alpine/musl). Reinstalling cannot fix it.
+    const native = join(isolated, 'node_modules', 'bladebro-linux-' + process.arch);
+    mkdirSync(native, { recursive: true });
+    writeFileSync(join(native, 'package.json'), JSON.stringify({ name: 'bladebro-linux-' + process.arch }));
+    writeFileSync(join(native, 'bladebro'), '#!/bladebro-fixture-missing-interpreter\n');
+    chmodSync(join(native, 'bladebro'), 0o755);
+    const loader = spawnSync(process.execPath, [join(isolated, 'bin.js'), '--version'], { encoding: 'utf8' });
+    if (!loader.stderr.includes('glibc >= 2.28')) process.stderr.write(loader.stderr);
+    check('missing Linux loader names glibc and source-build recovery', loader.status === 1 && loader.stdout === '' && loader.stderr.includes('glibc >= 2.28') && loader.stderr.includes('build from source'));
+  }
   console.log(`DSH package probe: ${checks} checks passed`);
 } finally { rmSync(scratch, { recursive: true, force: true }); }

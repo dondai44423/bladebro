@@ -4,6 +4,8 @@ use std::ffi::c_void;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::OnceLock;
 
+static JOB: OnceLock<std::result::Result<OwnedHandle, String>> = OnceLock::new();
+
 // Win32 JOBOBJECT_BASIC_LIMIT_INFORMATION / JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
 #[repr(C)]
 #[derive(Default)]
@@ -37,6 +39,8 @@ extern "system" {
         -> i32;
     fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
     fn GetCurrentProcess() -> *mut c_void;
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn IsProcessInJob(process: *mut c_void, job: *mut c_void, result: *mut i32) -> i32;
 }
 
 /// Join before spawning Chrome so every descendant inherits the job, without
@@ -46,7 +50,6 @@ pub(crate) fn guard_browser_process_tree() -> crate::Result<()> {
     // Keep the handle for the PROCESS lifetime: closing it while we are alive
     // would also kill us. Static destructors do not run; the OS closes it even
     // on TerminateProcess. Nested jobs work on supported Windows versions.
-    static JOB: OnceLock<std::result::Result<OwnedHandle, String>> = OnceLock::new();
     let job = JOB.get_or_init(|| unsafe {
         let raw = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if raw.is_null() {
@@ -75,6 +78,24 @@ pub(crate) fn guard_browser_process_tree() -> crate::Result<()> {
     })
 }
 
+pub(crate) fn owns_browser_process(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return false;
+    }
+    let Some(Ok(job)) = JOB.get() else {
+        return false;
+    };
+    unsafe {
+        let process = OpenProcess(0x1000, 0, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if process.is_null() {
+            return false;
+        }
+        let process = OwnedHandle::from_raw_handle(process);
+        let mut owned = 0;
+        IsProcessInJob(process.as_raw_handle(), job.as_raw_handle(), &mut owned) != 0 && owned != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +119,7 @@ mod tests {
                 .spawn()
                 .unwrap();
             std::fs::write(std::env::var(PID_FILE).unwrap(), child.id().to_string()).unwrap();
+            assert_eq!(owns_browser_process(child.id()), role == "guarded");
             let _ = child.wait();
             return;
         }

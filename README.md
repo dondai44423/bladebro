@@ -48,7 +48,7 @@ Run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benc
 |---|---|
 | **Re-render immunity** | Refs survive React/Vue/Angular DOM replacement via structural fingerprints — no other agent browser does this. |
 | **Delta-first results** | Every action returns what changed: 60–570 tokens per action, not full-page snapshot dumps. |
-| **5 tools, not 30** | ~1,900 tokens of tool definitions total; comparable tools ship 8,000–13,700. |
+| **5 tools, not 30** | Five compact definitions; shared step fields avoid repeated schemas. |
 | **Batch + branching** | `act batch` runs multi-step workflows in ONE call; `run` adds `if`/`while` logic. |
 | **Auto-extract + adapters** | Template-free list extraction, site-aware: Reddit comment trees, X.com threads, GitHub repos, product pages. |
 | **Infinite-scroll collect** | `act collect` scrolls, dedupes and returns a whole feed as one artifact, in one call. |
@@ -72,11 +72,13 @@ Requires Chrome/Chromium; prebuilt Linux binaries require glibc 2.28 or newer. N
 |---|---|---|---|
 | Linux x86_64 | `bladebro-linux-x64` | 7.4 MB | Live-verified |
 | Linux ARM64 | `bladebro-linux-arm64` | 6.5 MB | Not live-verified |
-| Windows x86_64 | `bladebro-windows-x64` | 6.9 MB | Live-verified |
+| Windows x86_64 | `bladebro-windows-x64` | 6.9 MB | CI-verified |
 | macOS Intel | `bladebro-darwin-x64` | 6.9 MB | CI-verified |
 | macOS Apple Silicon | `bladebro-darwin-arm64` | 6.4 MB | CI-verified |
 
 <sub>Every release builds and passes CI on Ubuntu, macOS and Windows. Linux ARM64 and macOS binaries are cross-compiled from Linux with cargo-zigbuild.</sub>
+
+A Linux `ENOENT` launch error can mean the executable's loader is missing even when the file exists. The prebuilt binaries require glibc >=2.28; use a source build on Alpine/musl rather than reinstalling the same prebuild. A missing optional platform package is a separate error: reinstall with optional dependencies enabled.
 
 ### Pi coding agent
 
@@ -96,8 +98,8 @@ dsh plugin --profile web add bladebro
 
 pnpm 11 defaults to a [one-day release-age delay](https://pnpm.io/blog/releases/11.0),
 so an unversioned install immediately after a release can select an older package.
-To install this release, use `dsh plugin --profile web add bladebro@4.3.0`
-(or enter `bladebro@4.3.0` in Plugins). If your package manager explicitly enforces
+To select an exact release, append its version, for example `dsh plugin --profile web add bladebro@4.6.6`
+(or enter `bladebro@4.6.6` in Plugins). If your package manager explicitly enforces
 a stricter release-age policy, wait for its configured delay. Keep that policy intact.
 
 Restart the profile and start a new chat. Desktop users can install `bladebro`
@@ -210,9 +212,11 @@ Source builds self-update too: `bladebro -u` swaps in the official released bina
 
 ## 🎯 The 5 tools
 
+The tables use compact MCP parameter notation. CLI calls use named flags, for example `bladebro act click --text "Sign in"` or `bladebro act eval --url https://example.com --js document.title`.
+
 ### `act` — do, then observe
 
-Every call returns an **outcome verdict + page delta**. Clicks choose a role-aware activation lane and dispatch once; a quiet DOM never triggers another click. After a disconnect, mutating actions report an unknown outcome so the agent can inspect the destination before repeating them; clicking by text skips the read step (`act click text="Sign in"`), and ambiguous text returns matches with refs + `nth` values. Verdicts report observable evidence only: a state-only change is labeled `state-only, no nodes added/removed` (never a phantom `(+0 −0)`), an occluded click names what actually receives it, and a coordinate click that hits nothing names the topmost element at that point.
+Input actions return an **outcome verdict + page delta**; explicit reads/eval return their data. Clicks choose a role-aware activation lane and dispatch once; a quiet DOM never triggers another click. After a disconnect, mutating actions report an unknown outcome so the agent can inspect the destination before repeating them; clicking by text skips the read step (`act click text="Sign in"`), and ambiguous text returns matches with refs + `nth` values. Verdicts report observable evidence only: a state-only change is labeled `state-only, no nodes added/removed` (never a phantom `(+0 −0)`), an occluded click names what actually receives it, and a coordinate click that hits nothing names the topmost element at that point.
 
 | Action | Example | What it does |
 |---|---|---|
@@ -222,24 +226,27 @@ Every call returns an **outcome verdict + page delta**. Clicks choose a role-awa
 | `batch` | `act batch steps=[...]` | Multi-step workflows in ONE call |
 | `navigate` | `act navigate url="https://example.com"` | Idempotent; returns the page model |
 | `collect` | `act collect max=50 timeout=30` | Auto-extract + scroll + dedupe an infinite feed |
-| `wait` | `act wait condition=url text="dashboard"` | 6 conditions: element, title, settle, url, text, js |
+| `wait` | `act wait condition=url text="dashboard"` | Visible element/CSS/text, title, URL, JS, DOM quiet, or tracked network quiet |
 | `eval` | `act eval js="document.title"` | Console-style JS; `el` in scope when a ref is given |
 | `scroll` | `act scroll dy=800` | Smooth, eased wheel events |
 | `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
 | `press` | `act press key=Enter` / `key=Control+a` | Real key event; full chords (`Control+a`, `Meta+Enter`, `Shift+Tab`) |
 | `select` | `act select e4 option="Nepal"` | Dropdown by option text or value |
-| `read` | `act read e5` | Element text content |
+| `read` | `act read e5` | Live text/control value, toggle state and select choices; `--format json` for structured data |
 | `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
 | `clear` | `act clear e3` | Empty an input or rich editor |
 | `download` | `act download url=... timeout=10` | Fetch + Blob download, returns the path |
 | `pdf` | `act pdf` | Export the page as a PDF artifact |
 | `back` / `forward` / `reload` | `act back` | History + reload |
 
-- **Self-healing refs** — a dead ref re-resolves by identity: `act click e5` after navigation finds the new "Sign in" and reports `[ref e5 healed]`.
-- **Batch** — one call fills, submits, clicks; it continues through navigation and stops on the first error with step number + page state.
+- **Self-healing refs** — within a page, dead refs re-resolve by identity after re-renders. Refresh refs after navigation or a tab switch; IDs from the previous page are not a cross-page address.
+- **Batch** — one call fills, submits, clicks and reads; it continues through navigation and stops on the first runtime error with step number + page state. Explicit `see`, `extract`, `read`, `eval` and state reads retain their data even with `slim:true`. Use `run` for branches or a batch inside a larger plan; batches cannot nest batches.
 - **`selector=` everywhere** — click, hover, type, press, wait, select, clear, read, upload, eval, `fill` fields, and `batch`/`run` steps all accept a CSS selector (light DOM + open shadow roots); `nth=` picks among matches.
-- **`url=` on any action** — navigate first, then act: `act fill url="https://..." fields=[...]` reaches a page and fills it in one call.
+- **`url=` on input/read actions** — navigate first, then act: `act fill url="https://..." fields=[...]` reaches a page and fills it in one call. Download URLs identify the file; state URLs identify tab destinations or cookie scope.
 - **`slim=true`** — successful actions return verdicts only, including navigate/fill. On batch/run it inherits through steps and branches, preserving reads and failure recovery; a run step can set `slim:false` to opt back in.
+
+- **Inspect controls without eval** — MCP `act {action:"read",label:"Country",format:"json"}` returns the live value and select choices with labels, values, selection and disabled state. Textareas use the current value; checkboxes/radios include checked state, checkboxes also include indeterminate, and ARIA toggle states retain values such as `mixed`. Select choices are capped at 80 with `options_total` and `options_truncated:true` when clipped; multiple selects include all selected `values`. Large read results offload complete JSON to an artifact. `see scope=...` remains a text-subtree read.
+- **Machine-readable plans** — MCP `run {format:"json",steps:[...]}` returns `{status:"completed"|"stopped",results:[{step,status,output,error?}],stopped_at?,error?,page?,note?}`. Top-level step IDs are 1-based; statuses are `ok`, `optional_failed` or `failed`. Nested observations remain text inside `output`; `ok` means the top-level step finished, including any locally optional failures. The outer format does not change step formats: request JSON on individual reads explicitly. Oversized runs offload the complete result using the usual artifact paging envelope. Default run output stays text.
 
 - **Unambiguous targeting:** equally ranked text/label matches refuse with candidate refs/context. Choose `ref`, a unique selector, or `nth` (1-based). Targeted `press` focuses and checks its target before keys; an omitted target uses current focus.
 - **Popups:** `_blank` clicks report the new tab ID once and restore the opener. Use `state switch-tab` to act in the popup. Input reactivates the addressed tab; no mutation is retried after a timeout.
@@ -266,7 +273,8 @@ Every call returns an **outcome verdict + page delta**. Clicks choose a role-awa
 
 - **Truncation is deterministic:** output ends with `…(N more: X link, Y button)` — roles sorted by count desc, then alphabetically; the full set stays available via `see filter=`.
 - **Artifact JSON paging:** `next_offset:0` in an offload envelope means start at offset zero. Default pages are valid JSON envelopes whose `data` is a character fragment: concatenate the strings, then parse the payload. `see artifact="<path>" items=true offset=0 limit=50` instead returns independently usable rows from a JSON array or `items`/`data` array; offsets count rows, `next_offset:null` means done. Item pages are capped at 500 rows/200KB; oversized individual rows require character paging.
-- **Big data goes to files.** Payloads over 12KB are written to `artifacts/` and returned as a path + preview; read any artifact back in pages with `see artifact="<path>"` (+`offset`/`limit`) — no filesystem access needed.
+- **JSON notices stay JSON:** dialog, popup and browser health notices use `{data,note}` when a JSON result needs a caveat; artifact envelopes keep their paging fields and add `note`. Parse the complete text block, then inspect the envelope.
+- **Big data goes to files.** Large payloads (threshold depends on read type) are written to `artifacts/` and returned as a path + preview; read any artifact back in pages with `see artifact="<path>"` (+`offset`/`limit`) — no filesystem access needed.
 - **Site-aware:** on Reddit post pages and X.com status pages, `extract=auto` attempts the full comment tree / thread in ONE call; `complete`/`partial` and fallback notes disclose API blocks or missing replies; Hacker News rows carry points, author, age and comment count.
 
 ### `state` — cookies, storage, tabs, sessions
@@ -280,6 +288,8 @@ Every call returns an **outcome verdict + page delta**. Clicks choose a role-awa
 | `block classes="images,fonts,trackers"` | Block inert assets — never first-party scripts; `block` without arguments reports measured blocked-request count since attach. Byte/time savings are unmeasured. |
 | `compress on/off/status` | Context pruning toggle |
 
+Cookie and storage reads preserve complete values. Large reads return a JSON artifact path for `see artifact="..." format="json" items=true`; values are not silently shortened. Setters require an explicit value; `value:""` sets an empty value. Normal owned-browser exits flush ordinary profile storage before cleanup; force-kills cannot guarantee the latest writes. Incognito storage remains ephemeral; use named sessions when restoration is needed.
+
 ### `run` — batch + branch + JS
 
 ```json
@@ -291,7 +301,9 @@ Every call returns an **outcome verdict + page delta**. Clicks choose a role-awa
 ]}
 ```
 
-Use instead of `act batch` when you need branching (`if`/`else`), loops (`while`), or state ops that change tabs. `see` steps read inline — nav + loop + read across pages in ONE call. Steps take `optional: true` (a tolerated failure reports `failed (optional)` and the run continues), and `wait` accepts an `else: [...]` fallback branch when its condition times out.
+Plans are validated before their first effect, including later steps and unchosen branches. Fix malformed arguments rather than marking them optional. Plans allow up to 1,000 static steps and 32 nesting levels; `while max` is 0–100 (default 10). Every `while` needs a `steps` array. `url` on `if`, `while` or `wait` navigates once before evaluating that step. Runtime failure does not undo completed effects; inspect the failed destination before repeating input. A failed batch stops its enclosing run.
+
+Use instead of `act batch` when you need branching (`if`/`else`), loops (`while`), or state ops that change tabs. `see` steps read inline — nav + loop + read across pages in ONE call. Steps take `optional: true` (a runtime failure is reported and execution continues locally, including inside branches and loops), and `wait` accepts an `else: [...]` fallback branch when its condition times out.
 
 ### `vision` — screenshot (last resort)
 
@@ -425,7 +437,7 @@ The agent sees `↺ e2 (re-render survived)` in the delta. The click works. No r
 **5× more token-efficient than every competitor.**
 
 - **Delta results** — 60–570 tokens per action; snapshot-based tools spend ~1,400–2,000+.
-- **Tool defs** — ~1,900 tokens vs 8,000–13,700. The agent plans; it doesn't juggle APIs.
+- **Tool defs** — five compact definitions with a serialized-size regression guard. The agent plans; it doesn't juggle APIs.
 - **Context pruning** — `act` responses compress after turn 3 on the same page: full (8K) → reduced (3K) → verdict-only (500 chars). ~54% fewer tokens over a session, zero capability loss.
 
 ```bash
@@ -539,7 +551,7 @@ Learns from every session, persists in `knowledge/` under your data root, surviv
 
 | | Bladebro | agent-browser | Playwright MCP | Chrome DevTools MCP |
 |---|---|---|---|---|
-| Tool defs | **~1,900 tokens** | 0 (CLI) | ~13,700 tokens | ~8,000 tokens |
+| Tool defs | **5 compact definitions** | 0 (CLI) | ~13,700 tokens | ~8,000 tokens |
 | Per-click result | **60–570 tokens** (delta) | ~1,400 (snapshot) | 2,000+ | 2,000+ |
 | Stealth | **6 layers + biometrics** | None | None | None |
 | Drive your own browser | **Yes (`rb on`)** | No | No | No |
@@ -596,7 +608,7 @@ Honest boundaries: what surprises people, and what Bladebro deliberately does no
 | **Browser extensions** | Not supported — CDP cannot load them, and they would break the stealth profile. |
 | **Session video recording** | Not supported. Use `vision` screenshots. |
 | **Firefox / Gecko** | Not supported — the driver speaks CDP, which is Chromium-only. |
-| **macOS binaries** | Cross-compiled from Linux via cargo-zigbuild; CI builds and tests macOS natively on every release, and since 4.6.1 the CI stealth audit drives the released binary through a real browser on macOS (and Windows) per release — runtime-verified in CI, not yet on local hardware. File an issue if something breaks. |
+| **macOS binaries** | Cross-compiled from Linux via cargo-zigbuild; CI builds and tests macOS natively on every release, and since 4.6.1 the CI stealth audit drives the native CI build through a real browser on macOS (and Windows) — runtime-verified in CI, not yet on local hardware. File an issue if something breaks. |
 | **Linux ARM64** | Cross-compiled; not live-verified on ARM hardware yet. Community reports welcome. |
 | **`BLADE_NOISE=1`** | Canvas/audio noise can *hurt* — FingerprintJS ML reads it as tampering. Off by default; enable only if you know why. |
 

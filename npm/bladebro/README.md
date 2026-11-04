@@ -121,6 +121,8 @@ bladebro help --json
 - Chrome/Chromium installed (Bladebro finds it automatically)
 - Linux prebuilt binaries: glibc >= 2.28
 
+A Linux `ENOENT` launch error can mean the executable's loader is missing even when the file exists. The prebuilt binaries require glibc >=2.28; use a source build on Alpine/musl rather than reinstalling the same prebuild. A missing optional platform package is a separate error: reinstall with optional dependencies enabled.
+
 ## Platforms
 
 Prebuilt binaries available for:

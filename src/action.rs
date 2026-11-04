@@ -31,7 +31,7 @@ mod perform;
 mod verdict;
 
 pub use self::find::{
-    find_by_selector, find_by_text, find_label_route, find_miss_diag, focus, locate_text,
+    find_by_selector, find_by_text, find_label_route, find_miss_diag, focus, inspect, locate_text,
     read_checked, read_text, LabelRoute, MissDiag, MissExample, SelectorDiag, SelectorLookup,
     TextLocation, TextMatch,
 };
@@ -39,6 +39,13 @@ pub use self::perform::{perform, perform_with_network, MUT_WATCH};
 #[cfg(test)]
 pub(crate) use self::verdict::{element_condition_expr, text_condition_expr};
 pub use self::verdict::{eval_condition, CondOutcome};
+
+/// Validate chord syntax before a composed type+press can change a field.
+pub(crate) fn validate_key(key: &str) -> crate::error::Result<()> {
+    self::input::parse_key_combo(key)
+        .map(|_| ())
+        .map_err(crate::error::BladeError::Usage)
+}
 /// The act vocabulary — the SINGLE source of truth for the MCP schema enum,
 /// the batch-step vocabulary, the CLI parser AND the unknown-action error.
 /// It has drifted twice before (batch/run knew only half of act's actions;
@@ -98,7 +105,7 @@ const ACTION_FIELD_HINTS: &[(&str, &str)] = &[
     ("key", "use {\"action\":\"press\",\"key\":\"Enter\"}"),
     (
         "option",
-        "use {\"action\":\"select\",\"text\":\"Size\",\"option\":\"M\"}",
+        "use {\"action\":\"select\",\"label\":\"Size\",\"option\":\"M\"}",
     ),
     (
         "fields",
@@ -490,6 +497,7 @@ mod action_tests {
             ("selhost", None),
             ("select", Some("opt")),
             ("read", None),
+            ("inspect", None),
             ("hover", None),
             ("click", None),
             ("state", None),

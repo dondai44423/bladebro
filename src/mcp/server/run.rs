@@ -15,7 +15,8 @@ use super::see::handle_see;
 use super::state::handle_state;
 
 pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
-    super::validate::fields(args, "run")?;
+    super::validate::run(args)?;
+    let json_out = args.get("format").and_then(Value::as_str) == Some("json");
     let slim = args.get("slim").and_then(Value::as_bool).unwrap_or(false);
     let mut inherited = args.clone();
     inherit_slim(&mut inherited, slim);
@@ -26,6 +27,7 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
         .ok_or_else(|| crate::error::BladeError::Other("run requires 'steps' array".into()))?;
 
     let mut observations = Vec::new();
+    let mut results = Vec::new();
     let mut ok_count = 0usize;
     let total = steps.len();
     // Track page moves: a navigation mid-run can consume a later step's
@@ -41,8 +43,12 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
             .get("optional")
             .and_then(|o| o.as_bool())
             .unwrap_or(false);
+        let before = observations.len();
         match execute_step(page, step, &step_num.to_string(), &mut observations).await {
             Ok(()) => {
+                if json_out {
+                    results.push(serde_json::json!({"step":step_num,"status":"ok","output":observations[before..].join("\n")}));
+                }
                 ok_count += 1;
                 let curr_url = page.model().url().to_string();
                 if curr_url != prev_url {
@@ -54,6 +60,9 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
             Err(BladeError::Closed) => return Err(BladeError::Closed),
             Err(e) => {
                 if optional {
+                    if json_out {
+                        results.push(serde_json::json!({"step":step_num,"status":"optional_failed","output":observations[before..].join("\n"),"error":e.to_string()}));
+                    }
                     observations.push(format!(
                         "step {step_num} (optional): failed — {e} (continued)"
                     ));
@@ -66,6 +75,14 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
                     ),
                     _ => String::new(),
                 };
+                if json_out {
+                    results.push(serde_json::json!({"step":step_num,"status":"failed","output":observations[before..].join("\n"),"error":e.to_string()}));
+                    return super::bounded_json(&serde_json::json!({
+                        "status":"stopped","stopped_at":step_num,"results":results,
+                        "error":e.to_string(),"page":page.view(1200),
+                        "note":format!("completed effects remain applied; verify the failed step's outcome before retrying.{nav_ctx}")
+                    }));
+                }
                 // W5: a page-step failure is a structured result, not an
                 // exception — the run stops at the step and the result still
                 // carries every prior observation, so a surrounding pipeline
@@ -84,14 +101,16 @@ pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
                         page.view(1200)
                     ));
                 }
-                if ok_count > 0 {
-                    out.push_str("\nnote: completed steps remain applied; verify the failed step's outcome before retrying.");
-                }
+                out.push_str("\nnote: completed effects remain applied; verify the failed step's outcome before retrying.");
                 return Ok(out);
             }
         }
     }
-    Ok(observations.join("\n"))
+    if json_out {
+        super::bounded_json(&serde_json::json!({"status":"completed","results":results}))
+    } else {
+        Ok(observations.join("\n"))
+    }
 }
 
 // Inherit through branches; a step can explicitly opt back into full output.
@@ -219,6 +238,23 @@ pub(super) fn resolve_wait_timeout(step: &Value, default_secs: u64) -> Result<st
     Ok(std::time::Duration::from_secs(secs))
 }
 
+// Optional failures are scoped to their own step, including branch/loop bodies.
+async fn execute_nested_step(
+    page: &mut Page,
+    step: &Value,
+    path: &str,
+    observations: &mut Vec<String>,
+) -> Result<()> {
+    match Box::pin(execute_step(page, step, path, observations)).await {
+        Err(BladeError::Closed) => Err(BladeError::Closed),
+        Err(e) if step.get("optional").and_then(Value::as_bool) == Some(true) => {
+            observations.push(format!("step {path} (optional): failed — {e} (continued)"));
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 /// Execute a branch/read/state step or delegate to the shared act dispatcher.
 /// Recursion supports nested conditions without duplicating input mechanics.
 ///
@@ -232,6 +268,21 @@ async fn execute_step(
 ) -> Result<()> {
     super::validate::fields(step, "run step")?;
     let action_str = step.get("action").and_then(|a| a.as_str()).unwrap_or("");
+
+    // Ordinary actions delegate their pre-navigation to act. Conditions and
+    // waits have their own executor, so must honor url before evaluating too.
+    if matches!(action_str, "if" | "while" | "wait") {
+        if let Some(url) = step
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            if crate::realbrowser::input_paused() {
+                return Err(crate::realbrowser::paused_error());
+            }
+            page.navigate(url).await?;
+        }
+    }
 
     match action_str {
         "if" => {
@@ -304,7 +355,7 @@ async fn execute_step(
                 let _ = page.recapture().await?;
                 for (j, sub_step) in branch.iter().enumerate() {
                     let sub_path = format!("{path}.{j}");
-                    Box::pin(execute_step(page, sub_step, &sub_path, observations)).await?;
+                    Box::pin(execute_nested_step(page, sub_step, &sub_path, observations)).await?;
                 }
             }
         }
@@ -345,7 +396,7 @@ async fn execute_step(
                 let _ = page.recapture().await?;
                 for (j, sub_step) in body.iter().enumerate() {
                     let sub_path = format!("{path}.{i}.{j}");
-                    Box::pin(execute_step(page, sub_step, &sub_path, observations)).await?;
+                    Box::pin(execute_nested_step(page, sub_step, &sub_path, observations)).await?;
                 }
                 if i + 1 == max {
                     observations.push(format!(
@@ -355,8 +406,7 @@ async fn execute_step(
             }
         }
         "js" | "eval" => {
-            // V7: JS eval step. Result is captured as an
-            // observation, capped inline.
+            // JS eval uses the same bounded payload/artifact contract as act eval.
             let js_code = step
                 .get("js")
                 .and_then(|j| j.as_str())
@@ -372,17 +422,9 @@ async fn execute_step(
             eval_args["js"] = serde_json::json!(js_code);
             match Box::pin(handle_act(&eval_args, page)).await {
                 Ok(result) => {
-                    // P1: the 500-char cap is real (a step observation is not a
-                    // payload channel) but it must never be SILENT - a cut
-                    // mid-JSON used to read as a complete value, which is
-                    // exactly how a loop returns TOTAL=0 with data on screen.
-                    let capped: String = if result.chars().count() > 500 {
-                        let head: String = result.chars().take(500).collect();
-                        format!("{head}… (+{} chars truncated - use a `see`/`act eval` step for the full value)", result.chars().count() - 500)
-                    } else {
-                        result.clone()
-                    };
-                    observations.push(format!("step {path}: js → {capped}"));
+                    // handle_eval already offloads large data. A second cap
+                    // destroys usable JSON and forces a repeat tool call.
+                    observations.push(format!("step {path}: js → {result}"));
                 }
                 // Closed propagates unwrapped so serve() self-heals.
                 Err(BladeError::Closed) => return Err(BladeError::Closed),
@@ -447,8 +489,13 @@ async fn execute_step(
             }
             match handle_state(&state_args, page).await {
                 Ok(result) => {
-                    let capped: String = result.chars().take(2000).collect();
-                    observations.push(format!("step {path}: {capped}"));
+                    if result.len() > 12000 {
+                        let artifact = crate::artifacts::write_artifact(&result, "txt")?;
+                        observations
+                            .push(format!("step {path}: {}", super::artifact_hint(&artifact)));
+                    } else {
+                        observations.push(format!("step {path}: {result}"));
+                    }
                 }
                 Err(BladeError::Closed) => return Err(BladeError::Closed),
                 Err(e) => {
@@ -541,7 +588,8 @@ async fn execute_step(
                     let _ = page.recapture().await?;
                     for (j, sub_step) in else_steps.iter().enumerate() {
                         let sub_path = format!("{path}.{j}");
-                        Box::pin(execute_step(page, sub_step, &sub_path, observations)).await?;
+                        Box::pin(execute_nested_step(page, sub_step, &sub_path, observations))
+                            .await?;
                     }
                 }
             }
@@ -550,6 +598,11 @@ async fn execute_step(
             // Share the act dispatcher: coordinates, type+press, dialogs,
             // addressing and future fixes must have one implementation.
             match Box::pin(handle_act(step, page)).await {
+                Ok(result)
+                    if action_str == "batch" && result.starts_with("batch stopped at step ") =>
+                {
+                    return Err(BladeError::Other(result));
+                }
                 Ok(result) => observations.push(format!("step {path}: {result}")),
                 Err(BladeError::Closed) => return Err(BladeError::Closed),
                 Err(e) => return Err(BladeError::Other(format!("step {path} failed: {e}"))),

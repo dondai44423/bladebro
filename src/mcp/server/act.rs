@@ -544,14 +544,48 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             };
             // Self-heal: the ref may have died since the agent saw it.
             let heal = page.ensure_ref(&ref_id).await?;
-            let text_content =
-                crate::action::read_text(page.cdp_ref(), page.model(), &ref_id).await?;
+            let mut data = crate::action::inspect(page.cdp_ref(), page.model(), &ref_id).await?;
             let el = page.model().element(&ref_id);
             let role = el.map(|e| e.raw.role.clone()).unwrap_or_default();
             let name = el.map(|e| e.raw.name.clone()).unwrap_or_default();
+            data["ref"] = serde_json::json!(ref_id);
+            data["role"] = serde_json::json!(role);
+            data["name"] = serde_json::json!(name);
+            if let Some(ref note) = heal {
+                data["note"] = serde_json::json!(note);
+            }
+            let compact = super::bounded_json(&data)?;
+            if args.get("format").and_then(Value::as_str) == Some("json") {
+                return Ok(compact);
+            }
+            if let Some(path) = serde_json::from_str::<Value>(&compact)?
+                .get("artifact")
+                .and_then(Value::as_str)
+            {
+                return Ok(format!("read: {compact}\n{}", super::artifact_hint(path)));
+            }
+            let text_content = data
+                .get("value")
+                .or_else(|| data.get("text"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let details = data
+                .as_object_mut()
+                .map(|o| {
+                    for key in ["value", "text", "ref", "role", "name", "note", "tag"] {
+                        o.remove(key);
+                    }
+                    o.is_empty()
+                })
+                .unwrap_or(true);
+            let extra = if details {
+                String::new()
+            } else {
+                format!("  state: {data}\n")
+            };
             let note = heal.map(|n| format!(" [{n}]")).unwrap_or_default();
             return Ok(format!(
-                "Page: {} | phase: {} | {} actionable\n{} {} \"{}\"{}\n  text: \"{}\"\n",
+                "Page: {} | phase: {} | {} actionable\n{} {} \"{}\"{}\n  text: {}\n{}",
                 page.model().url(),
                 page.model().phase(),
                 page.model().actionables(),
@@ -559,7 +593,8 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 role,
                 name,
                 note,
-                text_content
+                text_content,
+                extra
             ));
         }
         "dialog" => return handle_dialog_expect(args, page),
@@ -650,6 +685,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                                 chars
                             ));
                         }
+                        Err(BladeError::Closed) => return Err(BladeError::Closed),
                         Err(e) => {
                             // optional:true continues past a failed read step
                             // like it does for every other step.
@@ -684,7 +720,25 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 match Box::pin(handle_act(&nested, page)).await {
                     Ok(verdict) => {
                         ok_count += 1;
-                        let vline = verdict.lines().next().unwrap_or("ok").trim().to_string();
+                        let state_op = if step_action == "state" {
+                            step.get("op").and_then(Value::as_str).unwrap_or("")
+                        } else {
+                            step_action
+                        };
+                        let explicit_read = matches!(step_action, "eval" | "read")
+                            || matches!(
+                                state_op,
+                                "ls" | "ss" | "cookies" | "tabs" | "block" | "compress"
+                            );
+                        if explicit_read {
+                            reads
+                                .push(format!("=== {step_action} (step {}) ===\n{verdict}", i + 1));
+                        }
+                        let vline = if explicit_read {
+                            format!("read ({} chars)", verdict.chars().count())
+                        } else {
+                            verdict.lines().next().unwrap_or("ok").trim().to_string()
+                        };
                         let curr_url = page.model().url().to_string();
                         // Auto-settle: if this step caused navigation, give the
                         // SPA time to render and recapture for fresh refs.
@@ -716,6 +770,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                         }
                         prev_url = curr_url;
                     }
+                    Err(BladeError::Closed) => return Err(BladeError::Closed),
                     Err(e) => {
                         if step
                             .get("optional")
@@ -750,7 +805,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 page.delta_view(&final_delta, 8000)
             };
             let summary = if let Some(halt) = halted {
-                format!("batch stopped at step {halt} ({ok_count} ok)")
+                format!("batch stopped at step {halt} ({ok_count} ok); completed effects remain applied; verify the failed step before retrying")
             } else {
                 format!("batch ({} steps, {} ok)", steps.len(), ok_count)
             };

@@ -57,36 +57,6 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     // cheap shape. Resets remain where prior context is truly invalidated:
     // navigation and act-error recapture (both in act.rs). `state
     // op=compress mode=off` restores always-full responses.
-    if args.get("preview").and_then(Value::as_bool) == Some(true)
-        && args.get("extract").and_then(Value::as_str) != Some("auto")
-    {
-        return Err(BladeError::Usage(
-            "preview=true requires extract=auto".into(),
-        ));
-    }
-    if args.get("items").and_then(Value::as_bool) == Some(true)
-        && args
-            .get("artifact")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
-    {
-        return Err(BladeError::Usage(
-            "items=true requires artifact=path".into(),
-        ));
-    }
-    if args.get("changes").and_then(Value::as_bool) == Some(true)
-        && ["extract", "logs", "artifact", "scope", "find"]
-            .iter()
-            .any(|k| {
-                args.get(k)
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| !s.is_empty())
-            })
-    {
-        return Err(BladeError::Usage(
-            "changes=true is a model delta read; omit extract/logs/artifact/scope/find".into(),
-        ));
-    }
     let budget = args.get("budget").and_then(|b| b.as_u64()).unwrap_or(8000) as usize;
     let filter = args.get("filter").and_then(|f| f.as_str()).unwrap_or("");
     let want_content = args

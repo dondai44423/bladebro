@@ -58,4 +58,26 @@ measured blocking counts. All inputs use owned fixtures/profiles, with actual
 handler/readback evidence and negative controls; native desktop CI runs both
 normal and incognito modes. `--baseline` retains old-binary failures.
 
+Run `python3 tools/reliability_probe/agent_ux.py` for live control inspection
+and structured run results: changed textarea values, select/multiple/disabled
+choices, native and ARIA toggle states, shadow/frame addressing, Unicode
+artifact fidelity, stopped/optional/nested steps and preflight-before-effects.
+It retains JSON-RPC requests, replies and timings at `POLISH_OUT`; `--baseline`
+records unsupported behavior on an older binary. Run under `capped` locally.
+
 `qol465.py` verifies document/frame-root selector waits, hidden-frame refusal, invalid CSS, toggle value refusal without mutations, nested batch/run parity, explicit/idempotent check states, radio refusal, legacy toggles and explicit textbox clearing. Run with `BLADEBRO=... POLISH_OUT=...`; `--baseline` records all failures against an older binary.
+
+`agent_contract.py` verifies actual MCP preflight rejection without an available
+browser, validation before navigation/input, complete plan validation, nested
+optional failures, failed batches, control-step URL handling, full eval/state/batch
+reads, JSON dialog/popup notices, marks isolation and schema completeness.
+`BLADEBRO` chooses the binary; `POLISH_OUT` records requests, responses and timing.
+`--baseline` records failures against an older binary. Run under `capped`; all
+profiles and HTTP fixtures are disposable. Native desktop CI runs normal and
+incognito modes.
+
+`persistence.py` checks complete Unicode localStorage across fresh one-shot
+browsers, MCP EOF on WebSocket/Unix pipe, and Linux forked-launcher sessions.
+It verifies write/readback, clean process exits and owned-process cleanup.
+`BLADEBRO` and `POLISH_OUT` select the binary and retain actual receipts;
+`--baseline` records old-binary failures. Native CI runs it twice per OS.

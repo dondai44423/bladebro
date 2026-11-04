@@ -78,6 +78,8 @@ pub(super) struct FoundElement {
     /// ("checked=true", "aria-selected=true", ...); None when it carries none.
     #[serde(default)]
     pub(super) state: Option<String>,
+    #[serde(default)]
+    pub(super) inspection: Option<serde_json::Value>,
 }
 
 /// Resolve a ref to its (signature, frame path) in the LPM.
@@ -98,6 +100,23 @@ pub async fn read_text(cdp: &CdpSession, lpm: &LivePageModel, ref_id: &str) -> R
         return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
     }
     Ok(found.text.unwrap_or_default())
+}
+
+/// Live control values/state and bounded select choices in one observational
+/// lookup. Unlike text content, these properties reflect edits since capture.
+pub async fn inspect(
+    cdp: &CdpSession,
+    lpm: &LivePageModel,
+    ref_id: &str,
+) -> Result<serde_json::Value> {
+    let (sig, frame) = resolve_ref(lpm, ref_id)?;
+    let found = find_by_sig(cdp, &sig, &frame, "inspect", None).await?;
+    if !found.ok {
+        return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
+    }
+    found
+        .inspection
+        .ok_or_else(|| BladeError::Other("element inspection returned no data".into()))
 }
 
 /// Focus the addressed control and prove focus before dispatching keys.
@@ -605,11 +624,12 @@ pub(super) fn find_sig_expr(
         + ";var _tpr=_th.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _tsd=Object.getOwnPropertyDescriptor(_tpr,'value');if(_tsd&&_tsd.set){_tsd.set.call(_th,_tx);}else{_th.value=_tx;}_th.dispatchEvent(new Event('input',{bubbles:true}));_th.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true,text:_read(_th)};}"
         + "if(mode==='select'){"
         + "if(n.tagName==='SELECT'){"
-        + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
+        + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.label.trim()===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.label.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
         + "if(match){n.value=match.value;n.dispatchEvent(new Event('change',{bubbles:true}));n.dispatchEvent(new Event('input',{bubbles:true}));return{ok:true};}"
         + "var __lo=[...n.options].slice(0,80).map(o=>{var t=(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦');var v=(o.value||'').trim().split('|').join('¦');if(t&&v&&t!==v)return t+'='+v;return t||(v?'='+v:'');}).filter(Boolean);return{ok:false,reason:'option not found in select',options:__lo,ototal:n.options.length};"
         + "}"
         + "n.value=" + &text_js + ";n.dispatchEvent(new Event('change',{bubbles:true}));n.dispatchEvent(new Event('input',{bubbles:true}));return{ok:true};}"
+        + if mode == "inspect" { include_str!("js/inspect.js") } else { "" }
         + "if(mode==='read'){var txt=n.innerText||n.textContent||'';if(!txt&&('value' in n)&&n.value)txt=n.value;return{ok:true,text:txt.slice(0,5000)};}"
         + "if(mode==='hover'){n.scrollIntoView({block:'center'});const rect=n.getBoundingClientRect();const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;const top=doc.elementFromPoint(cx,cy);const isTopmost=top===n||n.contains(top);return{ok:true,box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],isTopmost:isTopmost};}"
         + "return{ok:false,reason:'unknown mode'};}}"

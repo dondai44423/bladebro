@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Agent control inspection: `act read format=json` returns live field values, checked/indeterminate and ARIA state, and select choices with selection/disabled state. Text reads use current textarea values. Large reads offload complete JSON; option lists disclose their 80-choice bound.
+- Native selects accept their displayed option labels even when those labels differ from inner text. Inspection reports disabled state inherited from a fieldset.
+- Optional `run format=json` reports completion, stopped step, per-step status and retained observations with recovery context. Nested observations remain text; individual read formats are explicit. Invalid formats fail before any effect.
+
+### Fixed
+- Owned Chrome shutdown requests a confirmed-owned browser's graceful close before bounded process-tree cleanup, preserving localStorage across stop/MCP EOF while retaining forked-launcher cleanup.
+- Validate malformed calls and complete static plans before Chrome launch, navigation or input. Required fields, types, chords, waits, timeouts and plan bounds fail with actionable guidance.
+- Preserve run/batch reads, cookie/storage values and valid JSON when notices occur; honor nested optional failures and conditional navigation, and stop enclosing runs after failed batches.
+- Screenshot marks cannot remove page-owned elements. Log read-and-clear calls are never automatically replayed after disconnect.
+- Tool definitions expose supported inputs and current recovery contracts; npm Linux loader failures explain glibc requirements and source-build recovery.
+
 ## [4.6.6] - 2026-10-28
 
 ### Fixed

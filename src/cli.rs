@@ -637,7 +637,7 @@ async fn run_tool(
     // ALWAYS shut down Chrome, even if the above failed.
     // Without this, any error between launch and shutdown orphans Chrome + Xvfb.
     if let Some(browser) = browser {
-        let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+        browser.shutdown_gracefully().await;
     }
 
     let result = result?;

@@ -127,13 +127,13 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 out.push_str(&format!(
                     "{}={} domain={}{}{}\n",
                     c.name,
-                    truncate(&c.value, 60),
+                    c.value,
                     c.domain,
                     if c.secure { " secure" } else { "" },
                     if c.http_only { " httpOnly" } else { "" },
                 ));
             }
-            Ok(out)
+            bounded_state_read(out, &res["cookies"])
         }
 
         StateOp::SetCookie {
@@ -344,9 +344,8 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                 .filter(|v| v.is_array())
                 .cloned()
                 .ok_or_else(|| BladeError::Other("cookie snapshot missing cookie array".into()))?;
-            // Full-fidelity dump: NOT via get_storage (that truncates values
-            // to 60 chars for display — saving from it corrupts tokens) and
-            // not via text lines (values may contain '=' or newlines).
+            // Save structured entries, never the display representation:
+            // values may contain '=' or newlines.
             let ls_result = cdp.send("Runtime.evaluate", Some(json!({
                 "expression": "Object.keys(localStorage).map(k=>({key:k,value:localStorage.getItem(k)}))",
                 "returnByValue": true,
@@ -490,9 +489,20 @@ async fn get_storage(cdp: &CdpSession, storage: &str) -> Result<String> {
     }
     let mut out = String::new();
     for e in &entries {
-        out.push_str(&format!("{}={}\n", e.key, truncate(&e.value, 60)));
+        out.push_str(&format!("{}={}\n", e.key, e.value));
     }
-    Ok(out)
+    bounded_state_read(out, &entries)
+}
+
+// Values are evidence, not previews. Bound the context cost by offloading the
+// complete structured read rather than silently clipping individual tokens.
+fn bounded_state_read(text: String, data: &impl Serialize) -> Result<String> {
+    if text.len() <= 12000 {
+        return Ok(text);
+    }
+    let payload = serde_json::to_string(data)?;
+    let path = crate::artifacts::write_artifact(&payload, "json")?;
+    Ok(format!("state read offloaded ({} bytes); full payload: {path} — read with see artifact=\"{path}\" format=json items=true", payload.len()))
 }
 
 async fn set_storage(cdp: &CdpSession, storage: &str, key: &str, value: &str) -> Result<String> {

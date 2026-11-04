@@ -103,13 +103,14 @@ pub async fn handle_tools_call(
     };
 
     match result {
-        Ok(mut text) => {
+        Ok(text) => {
+            let mut notices = String::new();
             // Drain dialogs handled during this call (default handling or
             // an armed expectation), plus a one-shot note for an armed
             // expectation that expired unused.
             let dialogs = page.drain_dialogs();
             if !dialogs.is_empty() {
-                text.push_str("\n\u{26a0} dialogs handled:\n");
+                notices.push_str("\n\u{26a0} dialogs handled:\n");
                 for d in &dialogs {
                     let action = if d.accepted { "accepted" } else { "cancelled" };
                     let how = if d.via == "expectation" {
@@ -117,31 +118,32 @@ pub async fn handle_tools_call(
                     } else {
                         ""
                     };
-                    text.push_str(&format!(
+                    notices.push_str(&format!(
                         "  {} \"{}\" \u{2014} {}{}\n",
                         d.kind, d.message, action, how
                     ));
                     if let Some(n) = &d.note {
-                        text.push_str(&format!("    ({n})\n"));
+                        notices.push_str(&format!("    ({n})\n"));
                     }
                     if let Some(p) = &d.default_prompt {
                         if !p.is_empty() {
-                            text.push_str(&format!("    (prompt default: \"{}\")\n", p));
+                            notices.push_str(&format!("    (prompt default: \"{}\")\n", p));
                         }
                     }
                 }
             }
             if let Some(note) = page.drain_dialog_expect_note() {
-                text.push_str(&format!("\n\u{26a0} {note}\n"));
+                notices.push_str(&format!("\n\u{26a0} {note}\n"));
             }
             // Drain ambient events (consent, block detection).
             let ambient = page.drain_ambient();
             for a in &ambient {
-                if !text.ends_with('\n') {
-                    text.push('\n');
+                if !notices.ends_with('\n') {
+                    notices.push('\n');
                 }
-                text.push_str(&format!("\u{26a0} {}\n", a));
+                notices.push_str(&format!("\u{26a0} {}\n", a));
             }
+            let text = append_notices(text, &notices, json_response(&args));
             Ok(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -220,5 +222,75 @@ pub async fn handle_tools_call(
                 }
             }))
         }
+    }
+}
+
+/// Keep format=json machine-readable even when dialogs, browser health or lane
+/// changes add notices. Artifact envelopes keep their paging fields at the top.
+pub(super) fn append_notices(text: String, notices: &str, json_mode: bool) -> String {
+    if notices.trim().is_empty() {
+        return text;
+    }
+    if json_mode {
+        if let Ok(mut value) = serde_json::from_str::<Value>(&text) {
+            let envelope = value.get("artifact").is_some() && value.get("next_offset").is_some()
+                || value.as_object().is_some_and(|o| {
+                    o.len() == 2
+                        && o.contains_key("data")
+                        && o.get("note").is_some_and(Value::is_string)
+                });
+            if envelope {
+                let previous = value.get("note").and_then(Value::as_str).unwrap_or("");
+                value["note"] = json!(format!("{previous}\n{}", notices.trim()).trim());
+            } else {
+                value = json!({"data":value,"note":notices.trim()});
+            }
+            return value.to_string();
+        }
+    }
+    format!("{text}\n{}", notices.trim())
+}
+
+pub(super) fn json_response(args: &Value) -> bool {
+    args.get("format").and_then(Value::as_str) == Some("json")
+        || args.get("items").and_then(Value::as_bool) == Some(true)
+        || args.get("action").and_then(Value::as_str) == Some("paginate")
+        || (args.get("action").and_then(Value::as_str) == Some("download")
+            && args.get("body").and_then(Value::as_bool) == Some(true))
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+    #[test]
+    fn json_notices_preserve_payload_and_artifact_paging() {
+        for original in [json!("answer"), json!([1, 2]), json!(null), json!({"x":1})] {
+            let result: Value = serde_json::from_str(&append_notices(
+                original.to_string(),
+                "dialog handled",
+                true,
+            ))
+            .unwrap();
+            assert_eq!(result["data"], original);
+            assert_eq!(result["note"], "dialog handled");
+        }
+        let artifact = json!({"artifact":"payload.json","bytes":123,"next_offset":0});
+        let result: Value = serde_json::from_str(&append_notices(
+            artifact.to_string(),
+            "health warning",
+            true,
+        ))
+        .unwrap();
+        assert_eq!(result["next_offset"], 0);
+        assert_eq!(result["artifact"], "payload.json");
+        let result: Value = serde_json::from_str(&append_notices(
+            json!({"data":[1],"note":"first"}).to_string(),
+            "second",
+            true,
+        ))
+        .unwrap();
+        assert_eq!(result, json!({"data":[1],"note":"first\nsecond"}));
+        assert_eq!(append_notices("plain".into(), "note", false), "plain\nnote");
+        assert_eq!(append_notices("{}".into(), "", true), "{}");
     }
 }

@@ -162,6 +162,25 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                     }
                 };
 
+                // Invalid plans need neither Chrome nor a lane/config refresh.
+                // In particular, a typo must not cost a cold browser launch or
+                // reset an existing session before the caller can correct it.
+                if method == "tools/call" {
+                    if let Err(error) = super::validate::tool_call(&params) {
+                        if !is_notification {
+                            let mut text = format!("\u{2717} error: {error}");
+                            if let Some(p) = page.as_ref() {
+                                text.push_str(&format!("\n--- current page state ---\n{}", p.view(1200)));
+                            }
+                            let mut result = json!({"content":[{"type":"text","text":text}],"isError":true});
+                            shape_result(&mut result, version);
+                            writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+                            out.flush()?;
+                        }
+                        continue;
+                    }
+                }
+
                 let response = match method {
                     "initialize" => Some(handle_initialize(id, &params)),
                     "initialized" | "notifications/initialized" => None,
@@ -490,7 +509,13 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                             notes.extend(crate::browser::pending_notes());
                             if !notes.is_empty() {
                                 if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
-                                    content.insert(0, json!({ "type": "text", "text": notes.join("\n") }));
+                                    if let Some(text) = content.first_mut().and_then(|c| c.get_mut("text")) {
+                                        if let Some(original) = text.as_str() {
+                                            *text = Value::String(super::proto::append_notices(original.into(), &notes.join("\n"), super::proto::json_response(&params["arguments"])));
+                                        }
+                                    } else {
+                                        content.insert(0, json!({ "type": "text", "text": notes.join("\n") }));
+                                    }
                                 }
                             }
                             shape_result(result, version);
