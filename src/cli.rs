@@ -631,10 +631,12 @@ async fn run_tool(
     // That includes Ctrl-C, a harness's or `timeout`'s SIGTERM and a closed
     // terminal's SIGHUP: caught from before the launch on, they end the run,
     // not the process, which would never close Chrome (it runs in its own
-    // process group). One that lands mid-launch is held until the launch
-    // returns: the launch paths are not all safe to drop half-way.
+    // process group); bladebro dies of the signal only once Chrome is closed
+    // (`platform::reraise_termination_signal`, at exit). One that lands
+    // mid-launch is recorded and lets the launch finish: the launch paths
+    // are not all safe to drop half-way.
     let mut signal = crate::platform::TerminationSignal::listen();
-    let (browser, base) = crate::browser::launch_lane().await?;
+    let (browser, base) = signal.during_launch(crate::browser::launch_lane()).await?;
 
     // `external = real_lane`: on the real browser we never restore saved
     // logins, warm the profile, or snapshot cookies — it is not ours.

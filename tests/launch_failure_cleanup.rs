@@ -317,7 +317,9 @@ fn signal_run(
 
 /// SIGINT while the browser is still starting: bladebro must not die on the
 /// spot. It has to outlive the signal long enough to tear down the browser
-/// tree, the profile and the virtual display it started.
+/// tree, the profile and the virtual display it started (`signal_run` checks
+/// that), and then die of the signal after all: a shell running it in a loop
+/// or a script stops at Ctrl-C only when its child died of SIGINT.
 fn interrupt_mid_launch(name: &str, args: &[&str]) {
     let run = signal_run(
         name,
@@ -329,8 +331,9 @@ fn interrupt_mid_launch(name: &str, args: &[&str]) {
     );
     assert_eq!(
         run.status.signal(),
-        None,
-        "bladebro died of the signal instead of cleaning up\n{}",
+        Some(libc::SIGINT),
+        "bladebro did not die of the SIGINT it cleaned up after ({:?})\n{}",
+        run.status,
         run.stderr
     );
 }
@@ -396,8 +399,9 @@ fn sigint_mid_launch_of_probe_leaves_nothing_behind() {
 }
 
 /// Ctrl-C while the command itself runs (the launch is done): the run is
-/// dropped, the browser bladebro launched is closed, and the command fails as
-/// interrupted instead of bladebro dying with Chrome and Xvfb left running.
+/// dropped, the browser bladebro launched is closed, the command reports the
+/// interruption, and only then does bladebro die of the signal, instead of
+/// dying at once with Chrome left running.
 #[test]
 fn sigint_while_probe_runs_closes_the_browser_it_launched() {
     let run = signal_run(
@@ -408,7 +412,13 @@ fn sigint_while_probe_runs_closes_the_browser_it_launched() {
         running,
         &[libc::SIGINT],
     );
-    assert_eq!(run.status.code(), Some(1), "{}", run.stderr);
+    assert_eq!(
+        run.status.signal(),
+        Some(libc::SIGINT),
+        "{:?}\n{}",
+        run.status,
+        run.stderr
+    );
     assert!(
         run.stderr
             .contains("interrupted by a termination signal before the command finished"),

@@ -14,6 +14,8 @@ use std::time::Duration;
 #[cfg(windows)]
 pub(crate) use windows_job::guard_browser_process_tree;
 
+use std::sync::atomic::{AtomicI32, Ordering};
+
 /// The user's home directory.
 pub fn home_dir() -> PathBuf {
     #[cfg(unix)]
@@ -1165,6 +1167,8 @@ pub fn isolate_owned_child(cmd: &mut std::process::Command) {
 /// Listening starts in [`TerminationSignal::listen`]. From then on these
 /// signals no longer end the process by themselves, and one that arrives
 /// before [`TerminationSignal::recv`] is awaited (mid-launch, say) is kept.
+/// One that ends the command still ends the process, once the browser is
+/// closed: [`reraise_termination_signal`].
 ///
 /// A signal the process inherited as ignored stays ignored and is not
 /// listened for: `nohup` hands down SIGHUP that way, and a non-interactive
@@ -1173,7 +1177,7 @@ pub fn isolate_owned_child(cmd: &mut std::process::Command) {
 /// interrupt it was started to survive.
 pub struct TerminationSignal {
     #[cfg(unix)]
-    streams: Vec<tokio::signal::unix::Signal>,
+    streams: Vec<(libc::c_int, tokio::signal::unix::Signal)>,
     #[cfg(windows)]
     ctrl_c: Option<tokio::signal::windows::CtrlC>,
 }
@@ -1189,7 +1193,7 @@ impl TerminationSignal {
                 streams: [libc::SIGTERM, libc::SIGINT, libc::SIGHUP]
                     .into_iter()
                     .filter(|&sig| !signal_ignored(sig))
-                    .filter_map(|sig| signal(SignalKind::from_raw(sig)).ok())
+                    .filter_map(|sig| Some((sig, signal(SignalKind::from_raw(sig)).ok()?)))
                     .collect(),
             }
         }
@@ -1201,34 +1205,58 @@ impl TerminationSignal {
         }
     }
 
-    /// Resolves once a termination signal has arrived since `listen`.
+    /// Resolves once a termination signal has arrived since `listen` (at
+    /// once if one already did), and records which one for
+    /// [`reraise_termination_signal`] and [`termination_requested`].
     pub async fn recv(&mut self) {
+        if termination_requested() {
+            return;
+        }
         #[cfg(unix)]
         {
             let streams = &mut self.streams;
-            std::future::poll_fn(|cx| {
-                if streams.iter_mut().any(|s| s.poll_recv(cx).is_ready()) {
-                    std::task::Poll::Ready(())
-                } else {
-                    std::task::Poll::Pending
+            let sig = std::future::poll_fn(|cx| {
+                for (sig, stream) in streams.iter_mut() {
+                    if stream.poll_recv(cx).is_ready() {
+                        return std::task::Poll::Ready(*sig);
+                    }
                 }
+                std::task::Poll::Pending
             })
-            .await
+            .await;
+            TERMINATED_BY.store(sig, Ordering::SeqCst);
         }
         #[cfg(windows)]
         {
             match &mut self.ctrl_c {
                 Some(ctrl_c) => {
                     ctrl_c.recv().await;
+                    TERMINATED_BY.store(libc::SIGINT, Ordering::SeqCst);
                 }
                 None => std::future::pending().await,
             }
         }
     }
 
+    /// Await `launch` to the end while listening. A launch is not safe to
+    /// drop half-way (the real lane polls a bare `Child`), so a signal that
+    /// lands meanwhile is only recorded: the
+    /// [`interruptible`](Self::interruptible) run that follows fails at once,
+    /// and a launch that fails anyway still ends in death by the signal.
+    pub async fn during_launch<T>(&mut self, launch: impl std::future::Future<Output = T>) -> T {
+        let mut launch = std::pin::pin!(launch);
+        tokio::select! {
+            biased;
+            out = &mut launch => return out,
+            _ = self.recv() => {}
+        }
+        launch.await
+    }
+
     /// Run `work` unless a termination signal arrives first (or already
     /// arrived since `listen`): `work` is then dropped and the command fails
-    /// as interrupted. Closing the browser stays with the caller.
+    /// as interrupted. Closing the browser, then dying of the signal
+    /// ([`reraise_termination_signal`]), stays with the caller.
     pub async fn interruptible<T>(
         &mut self,
         work: impl std::future::Future<Output = crate::error::Result<T>>,
@@ -1240,6 +1268,52 @@ impl TerminationSignal {
             )),
             result = work => result,
         }
+    }
+}
+
+/// The termination signal a [`TerminationSignal`] received (0: none yet).
+/// Process-wide, like the signal: the final exit reads it.
+static TERMINATED_BY: AtomicI32 = AtomicI32::new(0);
+
+/// True once a [`TerminationSignal`] received a termination signal.
+pub fn termination_requested() -> bool {
+    TERMINATED_BY.load(Ordering::SeqCst) != 0
+}
+
+/// Once the browser of a command a termination signal interrupted is closed,
+/// end the process the way that signal would have: reset it to its default
+/// action and raise it. A shell tells by death-by-signal, not by an exit
+/// code, that its own job was interrupted: bash went on with a `for` loop of
+/// one-shot commands after Ctrl-C because the interrupted child exited 1, as
+/// if it had handled the signal. Returns `None` when no signal interrupted
+/// the command, and always on Windows, which keeps its exit code; otherwise
+/// `128 + signal`, the shell's code for that death, should the raise not end
+/// the process.
+pub fn reraise_termination_signal() -> Option<i32> {
+    #[cfg(unix)]
+    {
+        let sig = TERMINATED_BY.load(Ordering::SeqCst);
+        if sig == 0 {
+            return None;
+        }
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        // SAFETY: `sig` is one of the catchable signals `listen` registered;
+        // `set` is zero-initialised, then set up by sigemptyset(3).
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, sig);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            libc::raise(sig);
+        }
+        Some(128 + sig)
+    }
+    #[cfg(windows)]
+    {
+        None
     }
 }
 

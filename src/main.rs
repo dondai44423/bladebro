@@ -62,6 +62,10 @@ fn main() {
 /// remaining state is in-memory. Skipping the runtime drop
 /// is safe.
 fn exit_immediately(code: i32) -> ! {
+    // A command a termination signal interrupted has closed its browser by
+    // now: die of that signal, as bladebro did before it caught them, so the
+    // shell or harness that sent it sees it.
+    let code = bladebro::platform::reraise_termination_signal().unwrap_or(code);
     std::process::exit(code);
 }
 
@@ -252,10 +256,12 @@ fn run() -> Result<()> {
         let _rt = rt.enter();
         bladebro::platform::TerminationSignal::listen()
     });
-    let mut browser = if launches_here {
-        Some(rt.block_on(bladebro::browser::Browser::launch(0))?)
-    } else {
-        None
+    // `signal` listens exactly when the browser is launched here.
+    let mut browser = match signal.as_mut() {
+        Some(signal) => {
+            Some(rt.block_on(signal.during_launch(bladebro::browser::Browser::launch(0)))?)
+        }
+        None => None,
     };
     let base = if launches_here {
         browser.as_ref().unwrap().base()
@@ -340,8 +346,9 @@ fn run() -> Result<()> {
 ///
 /// The same goes for Ctrl-C, SIGTERM and SIGHUP: with `signal` listening
 /// (it does whenever the browser was launched here) they end the command,
-/// not the process. Dying on the default action would never close Chrome,
-/// which runs in its own process group.
+/// not the process, until the browser is closed (`exit_immediately` then
+/// re-raises the signal). Dying on the default action would never close
+/// Chrome, which runs in its own process group.
 async fn with_browser_guard<F, Fut>(
     browser: &mut Option<bladebro::browser::Browser>,
     signal: &mut Option<bladebro::platform::TerminationSignal>,
