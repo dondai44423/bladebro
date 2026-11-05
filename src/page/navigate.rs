@@ -712,10 +712,13 @@ async fn eval_location_href(cdp: &CdpSession) -> String {
 }
 
 fn extract_domain(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
+    // Read the host the navigation will actually open: a bare host gets its
+    // scheme first, so a `://` inside the query (`?next=http://x`) is never
+    // mistaken for this URL's own scheme separator.
+    let url = with_scheme(url);
+    after_scheme_slashes(&url)
+        .unwrap_or(&url)
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or("")
         .split(':')
@@ -733,7 +736,7 @@ fn extract_domain(url: &str) -> String {
 pub(crate) fn with_scheme(url: &str) -> String {
     let u = url.trim();
     if u.is_empty()
-        || u.contains("://")
+        || after_scheme_slashes(u).is_some()
         || scheme_prefix(u).is_some_and(|s| {
             matches!(
                 s.to_ascii_lowercase().as_str(),
@@ -828,6 +831,15 @@ fn scheme_prefix(url: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// The rest of a URL that STARTS with `scheme://`, or None. Only a leading
+/// scheme counts: a bare host carrying a URL in its query or fragment
+/// (`127.0.0.1:8080/?next=http://x`) used to read as already-schemed, went
+/// to Chrome without one and failed as "Cannot navigate to invalid URL".
+fn after_scheme_slashes(url: &str) -> Option<&str> {
+    let scheme = scheme_prefix(url)?;
+    url[scheme.len() + 1..].strip_prefix("//")
 }
 
 /// Scheme names that look like they could be `host:port` but are schemes.
@@ -1215,6 +1227,37 @@ mod tests {
         assert_eq!(with_scheme("DATA:text/html,hello"), "DATA:text/html,hello");
         assert_eq!(with_scheme("ABOUT:blank"), "ABOUT:blank");
         assert_eq!(with_scheme("example.com?x=1"), "https://example.com?x=1");
+    }
+
+    /// A `://` inside the query or path (a return-URL parameter) is not the
+    /// URL's own scheme: the bare host must still get one, or Chrome rejects
+    /// the target as "Cannot navigate to invalid URL".
+    #[test]
+    fn bare_urls_carrying_a_url_in_the_query_still_get_a_scheme() {
+        use super::with_scheme;
+        assert_eq!(
+            with_scheme("127.0.0.1:8080/?next=http://x"),
+            "http://127.0.0.1:8080/?next=http://x"
+        );
+        assert_eq!(
+            with_scheme("example.com/login?return=https://example.com/a"),
+            "https://example.com/login?return=https://example.com/a"
+        );
+        assert_eq!(
+            with_scheme("localhost/cb#u=ws://h"),
+            "http://localhost/cb#u=ws://h"
+        );
+        // A real leading scheme is still left alone.
+        assert_eq!(
+            with_scheme("https://e.com/?next=http://x"),
+            "https://e.com/?next=http://x"
+        );
+        // The domain-profile lookup reads the same input: it must name the
+        // host being opened, not the host inside the query.
+        assert_eq!(
+            extract_domain("127.0.0.1:8080/?next=http://x.example"),
+            "127.0.0.1"
+        );
     }
 
     /// R1: the scheme gate. The rejected set is exactly the class that used
