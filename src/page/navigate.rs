@@ -915,6 +915,16 @@ fn is_tracking_param(name: &str) -> bool {
     n.starts_with("utm_") || TRACKING_PARAMS.contains(&n.as_str())
 }
 
+/// One query key or value as the server decodes it (percent escapes
+/// resolved, `+` as a space). `parse` decodes whole `k=v` pairs; the dummy
+/// key keeps any `=` inside the part in the decoded value.
+fn form_decode(part: &str) -> String {
+    url::form_urlencoded::parse(format!("_={part}").as_bytes())
+        .next()
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_default()
+}
+
 /// The note for requested query parameters the final URL does not carry, or
 /// None when every meaningful parameter survived.
 fn nav_params_note(requested: &str, final_url: &str) -> Option<String> {
@@ -922,14 +932,18 @@ fn nav_params_note(requested: &str, final_url: &str) -> Option<String> {
     let fin = query_params(final_url).unwrap_or_default();
     let mut missing: Vec<String> = Vec::new();
     let mut rewritten: Vec<String> = Vec::new();
+    // Compare as the server reads them: Chrome percent-encodes what the
+    // caller typed (`café` -> `caf%C3%A9`, a space -> `%20`), so raw strings
+    // reported every non-ASCII or spaced value as "value changed".
     for (k, v) in &req {
         if is_tracking_param(k) {
             continue;
         }
-        match fin.iter().find(|(fk, _)| fk == k) {
+        let key = form_decode(k);
+        match fin.iter().find(|(fk, _)| form_decode(fk) == key) {
             None => missing.push(k.clone()),
             Some((_, fv)) => {
-                if !v.is_empty() && fv != v {
+                if !v.is_empty() && form_decode(fv) != form_decode(v) {
                     rewritten.push(k.clone());
                 }
             }
@@ -1111,6 +1125,24 @@ mod tests {
         .is_none());
         // No query at all → nothing to compare.
         assert!(nav_params_note("https://e.com/", "https://e.com/").is_none());
+    }
+
+    /// Chrome percent-encodes what the caller typed (`café` → `caf%C3%A9`,
+    /// a space → `%20`); that is the same value, not a site rewrite.
+    #[test]
+    fn chrome_encoding_of_a_query_value_is_not_reported_as_a_rewrite() {
+        for (requested, fin) in [
+            ("http://h/s?q=café", "http://h/s?q=caf%C3%A9"),
+            ("http://h/s?q=a b&x=1", "http://h/s?q=a%20b&x=1"),
+            ("http://h/s?q=a%20b", "http://h/s?q=a+b"),
+            ("http://h/s?q%5B%5D=1", "http://h/s?q[]=1"),
+        ] {
+            assert_eq!(nav_params_note(requested, fin), None, "{requested}");
+        }
+        // A value the site really changed is still named.
+        let note = nav_params_note("http://h/s?q=café", "http://h/s?q=cafe")
+            .expect("a changed value must be reported");
+        assert!(note.contains("value changed: q"), "{note}");
     }
 
     #[test]
