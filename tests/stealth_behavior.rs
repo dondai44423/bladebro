@@ -30,3 +30,8 @@ fn media_preserves_native_rejection_timing_and_real_devices() {
 fn rtc_icecandidate_listeners_keep_native_dedupe_and_removal() {
     regression("rtc-listeners");
 }
+
+#[test]
+fn rtc_sdp_filter_removes_whole_lines_and_remote_candidates_stay_native() {
+    regression("rtc-sdp");
+}

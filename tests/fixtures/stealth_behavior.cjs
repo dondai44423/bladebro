@@ -178,5 +178,26 @@ async function rtcListeners() {
   assert.equal(m, 1);
   console.log('icecandidate listener dedupe, removal, capture keys and filtering checks passed');
 }
-const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners };
+async function rtcSdp() {
+  const sdp = ['v=0', 'o=- 1 2 IN IP4 127.0.0.1', 's=-', 't=0 0', 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel', 'c=IN IP4 0.0.0.0',
+    'a=candidate:1 1 udp 2122260223 192.168.1.5 50000 typ host generation 0',
+    'a=candidate:2 1 udp 2122260223 abc.local 50001 typ host generation 0',
+    'a=candidate:3 1 udp 1686052607 203.0.113.5 50000 typ srflx raddr 192.168.1.5 rport 50000 generation 0',
+    'a=candidate:4 1 udp 41885439 198.51.100.1 3478 typ relay raddr 203.0.113.5 rport 50000 generation 0',
+    'a=ice-ufrag:abcd', 'a=end-of-candidates', ''].join('\r\n');
+  const { RTCPeerConnection, native, sentinel, aic } = installRtc(sdp);
+  const pc = new RTCPeerConnection();
+  for (const desc of [await pc.createOffer(), await pc.createAnswer()]) {
+    const lines = desc.sdp.split('\r\n');
+    assert.equal(lines.pop(), '', 'SDP still ends with CRLF');
+    assert.ok(lines.every(l => l.length > 0), 'no blank SDP lines (Chrome rejects them): ' + JSON.stringify(desc.sdp));
+    assert.ok(!/typ (host|srflx)/.test(desc.sdp), 'host/srflx candidates removed');
+    assert.ok(desc.sdp.includes('typ relay') && desc.sdp.includes('a=ice-ufrag:abcd'), 'other lines kept');
+  }
+  assert.equal(RTCPeerConnection.prototype.addIceCandidate, aic, 'addIceCandidate stays native');
+  await assert.rejects(pc.addIceCandidate({ candidate: 'candidate:1 1 udp 1 192.168.1.5 5 typ host', sdpMid: '0' }), e => e === sentinel);
+  assert.equal(native.aic, 1, 'remote host candidates reach the native method');
+  console.log('SDP candidate-line removal and native addIceCandidate checks passed');
+}
+const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp };
 (scenarios[process.argv[2]] || permissions)().catch(error => { console.error(error); process.exitCode = 1; });

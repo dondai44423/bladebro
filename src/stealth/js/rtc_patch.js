@@ -6,11 +6,14 @@ if(typeof RTCPeerConnection!=='undefined'){
   // a raw-IP host candidate. mDNS `.local` host candidates are obfuscated
   // and pass; relay and prflx pass.
   function _leakyCand(c){if(!c)return false;if(c.indexOf('typ srflx')!==-1)return true;if(c.indexOf('typ host')!==-1&&c.indexOf('.local')===-1)return true;return false;}
+  // Whole lines, terminator included: blanking only the text left empty SDP
+  // lines, and Chrome's parser rejects those (setLocalDescription /
+  // setRemoteDescription: "Failed to parse SessionDescription").
   function _filterSDP(sdp){
     if(!sdp)return sdp;
-    return sdp.replace(/a=candidate:[^\r\n]*typ host[^\r\n]*/g,'').replace(/a=candidate:[^\r\n]*typ srflx[^\r\n]*/g,'');
+    return sdp.replace(/a=candidate:[^\r\n]*typ (?:host|srflx)[^\r\n]*(?:\r\n|\n|$)/g,'');
   }
-  var _oco=_origRTC.createOffer,_oca=_origRTC.createAnswer,_oaic=_origRTC.addIceCandidate;
+  var _oco=_origRTC.createOffer,_oca=_origRTC.createAnswer;
   _defFn(_origRTC,'createOffer',_oco,function(th,a,og){
     return og.apply(th,a).then(function(offer){
       if(offer&&offer.sdp){offer.sdp=_filterSDP(offer.sdp);}
@@ -23,11 +26,11 @@ if(typeof RTCPeerConnection!=='undefined'){
       return answer;
     });
   });
-  _defFn(_origRTC,'addIceCandidate',_oaic,function(th,a,og){
-    var c=a[0];
-    if(c&&c.candidate&&String(c.candidate).indexOf('typ host')!==-1){return Promise.resolve();}
-    return og.apply(th,a);
-  });
+  // addIceCandidate stays native: REMOTE candidates name the peer, not this
+  // host, so dropping them hid nothing — it only skipped native validation
+  // (no InvalidStateError before a remote description) and cut peers whose
+  // only candidates are host ones (LAN peers, ICE-lite media servers reached
+  // through the proxied relay).
   // Local candidate events — the page's own enumeration vector. Installed at
   // the native locations (EventTarget.prototype already owns add/removeEvent
   // Listener; proxy over the native keeps the descriptor shape and the
