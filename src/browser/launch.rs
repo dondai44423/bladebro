@@ -257,6 +257,7 @@ impl Browser {
                     if !endpoint_owned_by_pid(port, child.id()) {
                         if Instant::now() >= deadline {
                             platform::kill_child_tree(&mut child);
+                            stop_profile_processes(&profile, false);
                             return Err(BladeError::Other(
                                 "the debug endpoint on this port is not served by the browser process — refusing it (possible local port hijack)".into(),
                             ));
@@ -282,6 +283,7 @@ impl Browser {
                         .await;
                         if let Err(error) = prepared {
                             platform::shutdown_child(&mut child);
+                            stop_profile_processes(&profile, false);
                             profile.cleanup();
                             return Err(error);
                         }
@@ -308,6 +310,9 @@ impl Browser {
                 Err(_) => {
                     match child.try_wait() {
                         Ok(Some(status)) => {
+                            // The launcher is gone, but a sandboxed helper
+                            // it started may not be (Flatpak portal spawns).
+                            stop_profile_processes(&profile, false);
                             return Err(BladeError::Other(format!(
                                 "Chrome exited during startup: {status}{}",
                                 chrome_stderr_tail()
@@ -322,6 +327,7 @@ impl Browser {
                     }
                     if Instant::now() >= deadline {
                         platform::kill_child_tree(&mut child);
+                        stop_profile_processes(&profile, false);
                         return Err(BladeError::Other(format!(
                             "Chrome debug endpoint not responding after 20s{}",
                             chrome_stderr_tail()

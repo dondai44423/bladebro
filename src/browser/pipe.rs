@@ -255,6 +255,7 @@ impl Browser {
                     eprintln!("[bladebro] Chrome ready: {product} (pipe transport)");
                     if let Err(error) = super::compat::prepare_incognito(&client).await {
                         platform::shutdown_child(&mut child);
+                        stop_profile_processes(&profile, false);
                         profile.cleanup();
                         return Err(error);
                     }
@@ -276,6 +277,9 @@ impl Browser {
                 Err(_) => {
                     match child.try_wait() {
                         Ok(Some(status)) => {
+                            // Same as the WS lane: a sandboxed helper can
+                            // outlive the launcher (Flatpak portal spawns).
+                            stop_profile_processes(&profile, false);
                             return Err(BladeError::Other(format!(
                                 "Chrome exited during startup: {status}{}",
                                 super::launch::chrome_stderr_tail()
@@ -290,6 +294,7 @@ impl Browser {
                     }
                     if Instant::now() >= deadline {
                         platform::kill_child_tree(&mut child);
+                        stop_profile_processes(&profile, false);
                         return Err(BladeError::Other(format!(
                             "Chrome pipe not responding after 20s{}",
                             super::launch::chrome_stderr_tail()

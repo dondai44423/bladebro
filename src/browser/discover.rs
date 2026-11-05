@@ -365,6 +365,47 @@ pub(crate) fn endpoint_owned_by_own_browser(port: u16) -> bool {
     false
 }
 
+/// Live processes of this user whose command line carries exactly
+/// `--user-data-dir=<dir>` (the spelling `flags` passes). Teardown uses it to
+/// reach browser processes that left the launcher's process group — Flatpak's
+/// portal spawns Chromium's zygote and utility sandboxes in its own session.
+/// A session dir is unique to one bladebro process, so a match is ours; the
+/// token must end at a separator so `sess-1` never matches `sess-10`.
+#[cfg(target_os = "linux")]
+pub(crate) fn processes_on_user_data_dir(dir: &std::path::Path) -> Vec<u32> {
+    let needle = format!("--user-data-dir={}", dir.display()).into_bytes();
+    let uid = unsafe { libc::getuid() };
+    let me = std::process::id();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    procs
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|&pid| pid != me && process_uid(pid) == Some(uid))
+        .filter(|&pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| cmdline_has_token(&cmdline, &needle))
+        })
+        .collect()
+}
+
+/// `needle` as a whole argument. Chromium rewrites its argv into one
+/// space-joined string (see `looks_like_chromium`), so a space separates
+/// arguments as well as the kernel's NUL.
+#[cfg(target_os = "linux")]
+fn cmdline_has_token(cmdline: &[u8], needle: &[u8]) -> bool {
+    let sep = |b: Option<&u8>| matches!(b, None | Some(0) | Some(b' '));
+    cmdline
+        .windows(needle.len())
+        .enumerate()
+        .any(|(at, window)| {
+            window == needle
+                && (at == 0 || sep(cmdline.get(at - 1)))
+                && sep(cmdline.get(at + needle.len()))
+        })
+}
+
 #[cfg(target_os = "linux")]
 fn pid_holds_socket(pid: u32, inode: u64) -> bool {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
