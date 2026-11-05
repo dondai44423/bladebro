@@ -108,6 +108,13 @@ impl InterceptState {
     }
 
     pub fn set_page_url(&self, url: &str) {
+        // An empty url is the unanswered capture (a busy or mid-transition
+        // page returned nothing), not a page on no domain. Resetting to ""
+        // would pause third-party tracker blocking (unknown origin never
+        // blocks) until the next answered read; the page has not changed.
+        if url.is_empty() {
+            return;
+        }
         let host = url_host(url);
         let domain = registrable_domain(&host);
         if let Ok(mut d) = self.page_domain.write() {
@@ -596,6 +603,25 @@ mod tests {
             r,
             ""
         ));
+    }
+
+    /// `recapture()` passes every capture's url here, including the
+    /// unanswered one (url ""). That read observed nothing, so the tracker
+    /// baseline must stay on the last answered page.
+    #[test]
+    fn unanswered_read_keeps_the_tracker_baseline() {
+        let st = InterceptState::default();
+        st.set_page_url("https://news.example.com/story");
+        st.set_page_url(&crate::page::PageCapture::unanswered().url);
+        assert_eq!(st.page_domain(), "example.com");
+        assert!(should_block(
+            "Script",
+            "https://www.google-analytics.com/a.js",
+            BLOCK_TRACKERS,
+            &st.page_domain()
+        ));
+        st.set_page_url("https://shop.test/");
+        assert_eq!(st.page_domain(), "shop.test");
     }
 
     #[test]
