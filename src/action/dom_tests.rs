@@ -329,6 +329,90 @@ ok(r && r.box && r.box[1] >= 0 && r.box[1] + r.box[3] <= 600, 'the box is inside
     );
 }
 
+// ---- L6: select is honest about what it changed ----
+#[test]
+fn native_select_refuses_disabled_and_reads_back() {
+    let body = r#"
+const d = use(page({},
+  h('select', {id: 'locked', 'aria-label': 'Locked choice', disabled: '', rect: [0, 0, 200, 30]}, h('option', {value: 'alpha'}, 'Alpha'), h('option', {value: 'beta'}, 'Beta')),
+  h('select', {id: 'plan', 'aria-label': 'Plan choice', rect: [0, 40, 200, 30]}, h('option', {value: 'free'}, 'Free'), h('option', {value: 'pro', disabled: ''}, 'Pro'), h('option', {value: 'team'}, 'Team')),
+  h('select', {id: 'sticky', 'aria-label': 'Sticky choice', rect: [0, 80, 200, 30]}, h('option', {value: 'one'}, 'One'), h('option', {value: 'two'}, 'Two')),
+  h('select', {id: 'dup', 'aria-label': 'Shared values', rect: [0, 120, 200, 30]}, h('option', {value: ''}, 'Choose'), h('option', {value: ''}, 'None'))));
+let r = __LOCKED__();
+ok(r && r.ok === false && /disabled/.test(r.reason), 'a disabled select is refused', r);
+eq(d.getElementById('locked').value, 'alpha', 'the disabled select is unchanged');
+r = __PRO__();
+ok(r && r.ok === false && /disabled/.test(r.reason), 'a disabled option is refused', r);
+eq(d.getElementById('plan').value, 'free', 'the plan is unchanged');
+r = __TEAM__();
+ok(r && r.ok === true && r.text === 'Team', 'an enabled option is selected and read back', r);
+eq(d.getElementById('plan').value, 'team', 'the plan changed');
+// A page that vetoes the change (resets it in its change handler).
+const st = d.getElementById('sticky');
+st.addEventListener('change', () => { st.value = 'one'; });
+r = __STICKY__();
+ok(r && r.ok === false && r.text === 'One', 'a vetoed selection is reported with what the select shows', r);
+// Options sharing a value: the requested one is selected, not the first.
+r = __DUP__();
+ok(r && r.ok === true && r.text === 'None' && d.getElementById('dup').selectedIndex === 1, 'the requested option of a shared value is selected', r);
+"#;
+    run(
+        "l6_native",
+        body,
+        &[
+            (
+                "__LOCKED__",
+                sig("|combobox|Locked choice|1", "select", Some("Beta")),
+            ),
+            (
+                "__PRO__",
+                sig("|combobox|Plan choice|1", "select", Some("Pro")),
+            ),
+            (
+                "__TEAM__",
+                sig("|combobox|Plan choice|1", "select", Some("Team")),
+            ),
+            (
+                "__STICKY__",
+                sig("|combobox|Sticky choice|1", "select", Some("Two")),
+            ),
+            (
+                "__DUP__",
+                sig("|combobox|Shared values|1", "select", Some("None")),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn select_on_a_custom_combobox_writes_nothing() {
+    let body = r#"
+const d = use(page({},
+  h('div', {id: 'fake', role: 'combobox', 'aria-label': 'Fruit picker', tabindex: '0', rect: [0, 0, 200, 30]}, 'choose'),
+  h('input', {id: 'auto', role: 'combobox', 'aria-label': 'City search', rect: [0, 40, 200, 30]})));
+let r = __FAKE__();
+ok(r && r.ok === false && r.reason === 'not a native select', 'a div combobox is not claimed as selected', r);
+ok(!('value' in d.getElementById('fake')), 'no expando value was written');
+r = __AUTO__();
+ok(r && r.ok === false && r.reason === 'text combobox', 'a text combobox is routed to typing, not assigned', r);
+eq(d.getElementById('auto').value, '', 'no untrusted value was assigned');
+"#;
+    run(
+        "l6_custom",
+        body,
+        &[
+            (
+                "__FAKE__",
+                sig("|combobox|Fruit picker|1", "select", Some("banana")),
+            ),
+            (
+                "__AUTO__",
+                sig("|combobox|City search|1", "select", Some("Paris")),
+            ),
+        ],
+    );
+}
+
 // ---- A-iframe: frame offsets start at the iframe's content box ----
 #[test]
 fn frame_offsets_include_the_iframe_border_and_padding() {

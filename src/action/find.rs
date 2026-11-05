@@ -670,11 +670,25 @@ pub(super) fn find_sig_expr(
         + ";var _tpr=_th.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _tsd=Object.getOwnPropertyDescriptor(_tpr,'value');if(_tsd&&_tsd.set){_tsd.set.call(_th,_tx);}else{_th.value=_tx;}_th.dispatchEvent(new Event('input',{bubbles:true}));_th.dispatchEvent(new Event('change',{bubbles:true}));return{ok:true,text:_read(_th)};}"
         + "if(mode==='select'){"
         + "if(n.tagName==='SELECT'){"
+        // L6: only what a user could pick is picked, and the pick is read
+        // back. A disabled select/option used to change anyway and read
+        // "selected"; a page that vetoes the change in its handlers is
+        // reported with what the select actually shows.
+        + "var _dis=function(e){try{return e.matches(':disabled');}catch(_e){return !!e.disabled;}};if(_dis(n))return{ok:false,reason:'select disabled'};"
         + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.label.trim()===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.label.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
-        + "if(match){n.value=match.value;n.dispatchEvent(new Event('change',{bubbles:true}));n.dispatchEvent(new Event('input',{bubbles:true}));return{ok:true};}"
-        + "var __lo=[...n.options].slice(0,80).map(o=>{var t=(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦');var v=(o.value||'').trim().split('|').join('¦');if(t&&v&&t!==v)return t+'='+v;return t||(v?'='+v:'');}).filter(Boolean);return{ok:false,reason:'option not found in select',options:__lo,ototal:n.options.length};"
+        + "var __lo=function(en){var oo=[...n.options].filter(o=>!en||!_dis(o));return{options:oo.slice(0,80).map(o=>{var t=(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦');var v=(o.value||'').trim().split('|').join('¦');if(t&&v&&t!==v)return t+'='+v;return t||(v?'='+v:'');}).filter(Boolean),ototal:oo.length};};"
+        + "if(match){if(_dis(match)){var _le=__lo(true);return{ok:false,reason:'option disabled',options:_le.options,ototal:_le.ototal};}"
+        // By index: two options may share a value, and assigning .value
+        // always picks the first of them.
+        + "n.selectedIndex=match.index;n.dispatchEvent(new Event('change',{bubbles:true}));n.dispatchEvent(new Event('input',{bubbles:true}));"
+        + "var _cur=n.options[n.selectedIndex];var _ct=_cur?String(_cur.label||_cur.text||'').trim():'';if(n.selectedIndex!==match.index)return{ok:false,reason:'selection rejected',text:_ct};return{ok:true,text:_ct};}"
+        + "var _la=__lo(false);return{ok:false,reason:'option not found in select',options:_la.options,ototal:_la.ototal};"
         + "}"
-        + "n.value=" + &text_js + ";n.dispatchEvent(new Event('change',{bubbles:true}));n.dispatchEvent(new Event('input',{bubbles:true}));return{ok:true};}"
+        // Not a native select: assigning .value showed nothing a user could
+        // see (a div combobox kept its text) or wrote an untrusted value (an
+        // input combobox). Nothing is written; the caller says what to do.
+        + "if(tgt&&(tgt.tagName==='INPUT'||tgt.tagName==='TEXTAREA'))return{ok:false,reason:'text combobox'};"
+        + "return{ok:false,reason:'not a native select'};}"
         + if mode == "inspect" { include_str!("js/inspect.js") } else { "" }
         + "if(mode==='read'){var txt=n.innerText||n.textContent||'';if(!txt&&('value' in n)&&n.value)txt=n.value;return{ok:true,text:txt.slice(0,5000)};}"
         + "if(mode==='hover'){n.scrollIntoView({block:'center'});_reoff();const rect=n.getBoundingClientRect();const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;const top=doc.elementFromPoint(cx,cy);const isTopmost=top===n||n.contains(top);return{ok:true,box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],isTopmost:isTopmost};}"

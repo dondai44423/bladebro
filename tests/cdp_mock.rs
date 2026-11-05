@@ -532,3 +532,50 @@ async fn clear_of_a_vanished_target_touches_no_other_field() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn select_on_a_text_combobox_types_instead_of_assigning() {
+    // L6: `select`/`fill` on an <input role=combobox> used to assign .value
+    // from script (untrusted input events, no readback) and report
+    // "selected". It now goes through the trusted typing path.
+    let respond: Responder = Box::new(|method, expression| {
+        if method == "Runtime.evaluate" && expression.contains(",\"prepare\",null,") {
+            json!({"result":{"result":{"type":"object","value":{"ok":true,"box":[10,10,80,30],"disabled":false,"text":"","hostKind":"input","hostIsTgt":true,"sel":0,"tgtMissing":false}}}})
+        } else if method == "Runtime.evaluate" && expression.starts_with("((sig,mode,text,frame)=>")
+        {
+            json!({"result":{"result":{"type":"object","value":{"ok":true,"text":"Paris","hostKind":"input","hostIsTgt":true,"sel":0,"tgtMissing":false}}}})
+        } else if method == "Runtime.evaluate" {
+            page_basics(expression)
+        } else {
+            json!({"result":{}})
+        }
+    });
+    let (cdp, log, server) = scripted_page(respond).await;
+    let (mut lpm, ref_id) = one_element_model("input", "combobox", "City search");
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        bladebro::action::perform(
+            &cdp,
+            &mut lpm,
+            &bladebro::action::Action::Select {
+                ref_id,
+                option: "Paris".into(),
+            },
+            &std::sync::Arc::new(std::sync::Mutex::new(None)),
+        ),
+    )
+    .await
+    .unwrap();
+    let log = log.lock().unwrap().clone();
+    assert!(
+        !log.iter().any(|m| m == "find:select"),
+        "assigned through the select path: {log:?}"
+    );
+    assert!(
+        log.iter().any(|m| m == "Input.dispatchKeyEvent"),
+        "no trusted keys: {log:?}"
+    );
+    let verdict = result.expect("typed").1;
+    assert!(verdict.starts_with("outcome: typed \"Paris\""), "{verdict}");
+    server.abort();
+}

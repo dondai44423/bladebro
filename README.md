@@ -231,7 +231,7 @@ Input actions return an **outcome verdict + page delta**; explicit reads/eval re
 | `scroll` | `act scroll dy=800` | Smooth, eased wheel events |
 | `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
 | `press` | `act press key=Enter` / `key=Control+a` | Real key event; full chords (`Control+a`, `Meta+Enter`, `Shift+Tab`) |
-| `select` | `act select e4 option="Nepal"` | Dropdown by option text or value |
+| `select` | `act select e4 option="Nepal"` | Native dropdown by option text or value, read back; a text combobox is typed into |
 | `read` | `act read e5` | Live text/control value, toggle state and select choices; `--format json` for structured data |
 | `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
 | `clear` | `act clear e3` | Empty an input or rich editor |

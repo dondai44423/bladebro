@@ -83,6 +83,26 @@ pub async fn perform_with_network(
     route: Option<&crate::page::RouteEpoch>,
     last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> Result<(PageDelta, String)> {
+    // L6: a text-input combobox (an autocomplete <input role=combobox>) has
+    // no options to pick. `select`/`fill` on it type the text through the
+    // trusted, read-back typing path instead of assigning an untrusted
+    // .value no user could produce (the verdict then says "typed").
+    let routed;
+    let action = match action {
+        Action::Select { ref_id, option }
+            if lpm.element(ref_id).is_some_and(|e| {
+                e.raw.role == "combobox" && matches!(e.raw.tag.as_str(), "input" | "textarea")
+            }) =>
+        {
+            routed = Action::Type {
+                ref_id: ref_id.clone(),
+                text: option.clone(),
+            };
+            &routed
+        }
+        _ => action,
+    };
+
     // Resolve ref → (sig, frame) for ref-targeted actions.
     let sig_frame = match action.ref_id() {
         Some(ref_id) => Some(resolve_ref(lpm, ref_id)?),
@@ -564,12 +584,44 @@ pub async fn perform_with_network(
             let found = find_by_sig(cdp, sig, frame, "select", Some(option)).await?;
             if !found.ok {
                 let reason = found.reason.as_deref().unwrap_or("not found");
-                if reason == "option not found in select" {
+                // L6: refusals the page made plain - nothing was changed, and
+                // a heal would only repeat them.
+                match reason {
+                    "select disabled" => {
+                        return Err(BladeError::NotInteractable(format!(
+                            "{ref_id} is disabled; selection unchanged"
+                        )))
+                    }
+                    "selection rejected" => {
+                        return Err(BladeError::Other(format!(
+                            "{ref_id}: the page rejected \"{option}\" - the select still shows \"{}\"",
+                            clip(found.text.as_deref().unwrap_or(""), 40)
+                        )))
+                    }
+                    "text combobox" => {
+                        return Err(BladeError::NotInteractable(format!(
+                            "{ref_id} is a text combobox, not a <select>: type the text (act type {ref_id} \"{option}\"), then click the matching suggestion"
+                        )))
+                    }
+                    "not a native select" => {
+                        return Err(BladeError::NotInteractable(format!(
+                            "{ref_id} is a custom combobox, not a <select>; nothing was selected - click it to open the list, then click the option \"{option}\""
+                        )))
+                    }
+                    _ => {}
+                }
+                if reason == "option not found in select" || reason == "option disabled" {
                     // #21: the PICK failed, not the element. List the real
                     // live options so one retry succeeds, and don't raise
                     // ElementNotFound — the DOM-drift heal would retry the
-                    // same losing pick and drop this list on the way.
-                    let mut msg = format!("{ref_id} ({sig}) — option \"{option}\" not found");
+                    // same losing pick and drop this list on the way. A
+                    // disabled option lists the enabled ones.
+                    let what = if reason == "option disabled" {
+                        "is disabled"
+                    } else {
+                        "not found"
+                    };
+                    let mut msg = format!("{ref_id} ({sig}) — option \"{option}\" {what}");
                     let live = found.options.clone().unwrap_or_default();
                     if !live.is_empty() {
                         let hidden = found
@@ -580,7 +632,7 @@ pub async fn perform_with_network(
                         if hidden > 0 {
                             msg.push_str(&format!(" (+{hidden} more)"));
                         }
-                    } else if let Some(opts) = &el.raw.options {
+                    } else if let (Some(opts), "not found") = (&el.raw.options, what) {
                         // Fallback: the captured copy (covers frames the
                         // live read couldn't reach).
                         let (tokens, hidden) = opts.tokens(80);
