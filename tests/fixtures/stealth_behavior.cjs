@@ -199,5 +199,49 @@ async function rtcSdp() {
   assert.equal(native.aic, 1, 'remote host candidates reach the native method');
   console.log('SDP candidate-line removal and native addIceCandidate checks passed');
 }
-const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp };
+async function noise() {
+  class CanvasRenderingContext2D {
+    constructor(canvas) { this.canvas = canvas; }
+    getImageData() { return { data: Uint8ClampedArray.from(this.canvas.px) }; }
+    putImageData(img) { this.canvas.px = Array.from(img.data); this.canvas.writes++; }
+    clearRect() { this.canvas.px = [0, 0, 0, 0]; }
+    drawImage(src) { if (!(src instanceof HTMLCanvasElement)) throw new TypeError('source'); this.canvas.px = src.px.slice(); }
+  }
+  class HTMLCanvasElement {
+    constructor() { this.width = 300; this.height = 150; this.kind = null; this.ctx = null; this.contexts = 0; this.px = [0, 0, 0, 0]; this.writes = 0; }
+    getContext(kind) {
+      if (this.kind === null) { this.kind = kind; this.contexts++; this.ctx = kind === '2d' ? new CanvasRenderingContext2D(this) : { kind }; }
+      return this.kind === kind ? this.ctx : null;
+    }
+    toDataURL() { if (!(this instanceof HTMLCanvasElement)) throw new TypeError('Illegal invocation'); return 'data:' + this.px.join(','); }
+  }
+  const channel = new Float32Array(8);
+  class AudioBuffer { getChannelData(i) { if (i !== 0) throw new RangeError('channel index'); return channel; } }
+  const an = 3;
+  install('noise.js', { HTMLCanvasElement, CanvasRenderingContext2D, AudioBuffer, cn: 1, cn2: 1, an,
+    document: { createElement: () => new HTMLCanvasElement() } });
+  const fresh = new HTMLCanvasElement();
+  fresh.toDataURL();
+  assert.equal(fresh.contexts, 0, 'toDataURL must not create a rendering context');
+  assert.ok(fresh.getContext('webgl'), 'a later getContext(webgl) still succeeds');
+  const painted = new HTMLCanvasElement();
+  painted.getContext('2d');
+  painted.px = [10, 20, 30, 255];
+  const first = painted.toDataURL();
+  assert.equal(first, 'data:11,21,30,255', 'painted 2D canvases get the seeded offset');
+  assert.equal(painted.toDataURL(), first, 'once');
+  const gl = new HTMLCanvasElement();
+  gl.getContext('webgl');
+  gl.px = [1, 2, 3, 255];
+  assert.equal(gl.toDataURL(), 'data:1,2,3,255', 'WebGL canvases are left alone');
+  assert.equal(gl.contexts, 1);
+  assert.throws(() => HTMLCanvasElement.prototype.toDataURL.call({}), TypeError);
+  const buf = new AudioBuffer();
+  for (let i = 0; i < 5; i++) buf.getChannelData(0);
+  assert.equal(channel[0], Math.fround(an * 1e-7), 'audio offset applied once per channel buffer, no drift');
+  assert.equal(channel[1], 0);
+  assert.throws(() => buf.getChannelData(1), RangeError);
+  console.log('canvas context-free noise and idempotent audio noise checks passed');
+}
+const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp, noise };
 (scenarios[process.argv[2]] || permissions)().catch(error => { console.error(error); process.exitCode = 1; });

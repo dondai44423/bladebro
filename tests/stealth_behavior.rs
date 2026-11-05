@@ -35,3 +35,8 @@ fn rtc_icecandidate_listeners_keep_native_dedupe_and_removal() {
 fn rtc_sdp_filter_removes_whole_lines_and_remote_candidates_stay_native() {
     regression("rtc-sdp");
 }
+
+#[test]
+fn noise_never_creates_a_canvas_context_and_audio_offset_is_idempotent() {
+    regression("noise");
+}
