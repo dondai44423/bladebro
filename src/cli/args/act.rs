@@ -67,9 +67,23 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
                         }
                     }
                 }
-                "nth" | "timeout" | "max" => {
+                // limit: paginate's per-page item cap (MCP `limit`), like
+                // see's --limit.
+                "nth" | "timeout" | "max" | "limit" => {
                     let v: u64 = take_num(args, &mut i, flag)?;
                     j[flag] = json!(v);
+                }
+                // The read kind for paginate/extract (MCP `extract`). Help
+                // and the paginate usage error advertised it, but the
+                // parser rejected it as an unknown flag.
+                "extract" => {
+                    let v = take_value(args, &mut i, flag)?;
+                    if !matches!(v.as_str(), "auto" | "links" | "forms" | "json") {
+                        return Err(BladeError::Usage(format!(
+                            "--extract must be auto|links|forms|json, got '{v}'"
+                        )));
+                    }
+                    j["extract"] = json!(v);
                 }
                 "dx" | "dy" => {
                     let v: i64 = take_num(args, &mut i, flag)?;
@@ -419,7 +433,14 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             }
             if pos.len() > 1 || j.get("next").is_none() {
                 return Err(BladeError::Usage(
-                    "paginate needs --next CSS or text=Next, with optional --max/--extract".into(),
+                    "paginate needs --next CSS or text=Next, with optional --max/--extract/--limit"
+                        .into(),
+                ));
+            }
+            if j["extract"].as_str() == Some("json") && j.get("template").is_none() {
+                return Err(BladeError::Usage(
+                    "paginate --extract json needs --template '<json>' (or use --extract auto)"
+                        .into(),
                 ));
             }
         }

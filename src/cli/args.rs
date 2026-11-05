@@ -454,6 +454,54 @@ mod tests {
         }
     }
 
+    /// `help act` and paginate's own usage error advertise --extract, and the
+    /// MCP act schema has extract + limit, but the parser rejected both as
+    /// unknown flags (`act paginate --next .n --extract links` → exit 2).
+    #[test]
+    fn act_paginate_takes_extract_and_limit() {
+        let v = parse_act_args(&a(&[
+            "paginate",
+            "--next",
+            ".n",
+            "--extract",
+            "links",
+            "--limit",
+            "5",
+            "--max",
+            "3",
+        ]))
+        .unwrap();
+        assert_eq!(v["next"], ".n");
+        assert_eq!(v["extract"], "links");
+        assert_eq!(v["limit"], 5);
+        assert_eq!(v["max"], 3);
+        let v = parse_act_args(&a(&["paginate", "text=Next"])).unwrap();
+        assert_eq!(v["next"], "text=Next");
+        assert!(v.get("extract").is_none(), "the handler defaults to auto");
+
+        let e = parse_act_args(&a(&["paginate", ".n", "--extract", "tables"])).unwrap_err();
+        assert!(e.to_string().contains("--extract must be"), "{e}");
+        assert!(parse_act_args(&a(&["paginate", ".n", "--limit", "x"])).is_err());
+        let e = parse_act_args(&a(&["paginate", ".n", "--extract", "json"])).unwrap_err();
+        assert!(e.to_string().contains("--template"), "{e}");
+        let v = parse_act_args(&a(&[
+            "paginate",
+            ".n",
+            "--extract",
+            "json",
+            "--template",
+            "{\"items\":{\"container\":\"li\",\"fields\":{\"t\":\"a\"}}}",
+        ]))
+        .unwrap();
+        assert_eq!(v["extract"], "json");
+        assert!(v["template"].is_object());
+        // The same flag also selects `act extract`'s kind.
+        assert_eq!(
+            parse_act_args(&a(&["extract", "--extract", "forms"])).unwrap()["extract"],
+            "forms"
+        );
+    }
+
     #[test]
     fn act_dialog_arms_by_kind_with_answer_fields() {
         let v = parse_act_args(&a(&[

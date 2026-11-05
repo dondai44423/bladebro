@@ -246,6 +246,8 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--js": "eval expression (@file or - for scripts)",
                 "--submit": "fill: submit button ref or text",
                 "--next": "paginate: CSS selector or text=Next (also label=/ref=)",
+                "--extract": "paginate: read kind per page — auto (default) | links | forms | json (needs --template)",
+                "--limit": "paginate: per-page extraction item limit",
                 "--body": "download: HTTP body, <=32MiB/30s, no browser cookies; honors HTTP(S) BLADE_PROXY",
                 "--sort": "Reddit post extract: confidence|top|new|controversial|old|qa",
                 "--slim": "verdict-only successful actions; batch/run inherit, reads/errors retained",
@@ -587,7 +589,8 @@ ACTIONS
   scroll <dx> <dy>         hover <target>            navigate <url> [--block]
   upload <target> <path>   download <url> [--path]  wait <condition> [value]
   eval <js> [--ref]        collect <url> [--max N]   read <ref|label>
-  paginate <next> [--max N] [--extract auto]  bounded read/advance, retains pages
+  paginate <next> [--max N] [--extract auto|links|forms|json] [--limit N]
+                           bounded read/advance, retains pages
   download <url> --body   save an HTTP body without browser cookies (HTTP(S) proxy honored)
   extract [auto|links|forms|json]   structured data (same as 'see extract …')
   dialog <alert|confirm|prompt|beforeunload|any|clear> [--accept true|false]
@@ -598,7 +601,7 @@ ACTIONS
 
 UNIVERSAL FLAGS (mirror the MCP schema — accepted on every action)
   --ref --label --text --selector --role --nth --key --url --option --condition --timeout
-  --next --body --sort --dx --dy --js --submit --block --slim --format  (per-action: --path, --max, --x/--y…)
+  --next --body --sort --dx --dy --js --submit --block --slim --format  (per-action: --path, --max, --extract, --limit, --x/--y…)
 
 Multi-word values don't need quotes: 'act click Sign in' works. Big JSON
 payloads: @file or - (stdin). Unknown flags fail loudly (exit 2). Key chords: 'act press Control+a'.
