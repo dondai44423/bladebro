@@ -6,7 +6,7 @@ import { tmpdir, constants as osConstants } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const root = resolve('npm/bladebro');
@@ -83,6 +83,43 @@ try {
     check('binary killed by SIGPIPE makes the launcher exit 128+SIGPIPE, not 0', pipe.status === 128 + osConstants.signals.SIGPIPE);
     fake('kill -s TERM $$\n');
     check('binary killed by SIGTERM kills the launcher by SIGTERM', launch().signal === 'SIGTERM');
+    // A trapping fake: each forwarded signal exits with its own status, so the
+    // check proves both delivery to the binary and status propagation back.
+    fake([
+      "trap 'kill $! 2>/dev/null; exit 42' TERM",
+      "trap 'kill $! 2>/dev/null; exit 43' INT",
+      "trap 'kill $! 2>/dev/null; exit 44' HUP",
+      'echo "ready $$"',
+      'while :; do sleep 1 & wait $!; done',
+    ].join('\n') + '\n');
+    for (const [signal, status] of [['SIGTERM', 42], ['SIGINT', 43], ['SIGHUP', 44]]) {
+      const proc = spawn(process.execPath, [join(isolated, 'bin.js')], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let binaryPid;
+      const exited = new Promise(done => proc.on('exit', (code, sig) => done({ code, sig })));
+      const ready = new Promise((done, fail) => {
+        proc.stdout.on('data', chunk => {
+          out += chunk;
+          const m = /ready (\d+)/.exec(out);
+          if (m) { binaryPid = Number(m[1]); done(); }
+        });
+        exited.then(() => fail(new Error('launcher exited before the fake binary was ready: ' + out)));
+      });
+      const watchdog = setTimeout(() => proc.kill('SIGKILL'), 10000);
+      try {
+        await ready;
+        proc.kill(signal);
+        const { code, sig } = await exited;
+        let orphaned = false;
+        try { process.kill(binaryPid, 0); orphaned = true; } catch {}
+        if (code !== status || orphaned) process.stderr.write(`${signal} to launcher: launcher code=${code} signal=${sig}, binary ${orphaned ? 'still running (orphaned)' : 'gone'}\n`);
+        check(`${signal} to the launcher reaches the binary and its exit status comes back`, code === status && !orphaned);
+      } finally {
+        clearTimeout(watchdog);
+        if (binaryPid) try { process.kill(binaryPid, 'SIGKILL'); } catch {}
+        proc.stdout.destroy(); proc.stderr.destroy();
+      }
+    }
   }
   console.log(`DSH package probe: ${checks} checks passed`);
 } finally { rmSync(scratch, { recursive: true, force: true }); }
