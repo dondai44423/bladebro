@@ -10,19 +10,10 @@ impl Page {
     /// navigate steps, and the CLI `nav` command.
     pub async fn navigate(&mut self, url: &str) -> Result<PageDelta> {
         self.activate().await?;
-        // S4+S5: track action timing for pacing + idle hum.
-        self.is_busy
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let result = self.navigate_inner(url).await;
-        self.is_busy
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        self.last_action_epoch
-            .store(now, std::sync::atomic::Ordering::Relaxed);
-        result
+        // S4+S5: track action timing for pacing + idle hum. The guard also
+        // clears the flag when a caller's timeout drops this future.
+        let _busy = BusyGuard::new(&self.is_busy, &self.last_action_epoch);
+        self.navigate_inner(url).await
     }
 
     async fn navigate_inner(&mut self, url: &str) -> Result<PageDelta> {
