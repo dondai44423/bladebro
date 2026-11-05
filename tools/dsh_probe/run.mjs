@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 
 const runtime = resolve(process.env.DSH_RUNTIME || 'work/dsh/runtime');
 const host = createRequire(join(runtime, 'package.json'));
@@ -33,8 +34,12 @@ const plugin = await import(pathToFileURL(host.resolve('bladebro/dsh-plugin.mjs'
 const { resolveBinary } = host('bladebro/binary.cjs');
 let checks = 0;
 let lastCall;
+const diagnostic = value => JSON.stringify(value, (key, value) =>
+  key === 'data' && typeof value === 'string' && value.length > 256
+    ? { base64_chars: value.length, sha256: createHash('sha256').update(Buffer.from(value, 'base64')).digest('hex') }
+    : value);
 function check(label, value) {
-  if (!value && lastCall) console.error('Last tool call:', JSON.stringify(lastCall));
+  if (!value && lastCall) console.error('Last tool call:', diagnostic(lastCall));
   assert.ok(value, label); checks++; console.log(`PASS ${label}`);
 }
 async function until(predicate) {
@@ -148,9 +153,16 @@ try {
   const agent = { options: { provider: 'fixture', model: 'vision' }, session: { requestHeader: () => undefined } };
   result = await call('vision', { marks: true }, { agent });
   const image = result.content.find(c => c.type === 'image');
-  check('vision becomes a native durable image attachment', !result.isError && image?.attachment?.mediaType === 'image/png');
+  // The host can normalize an opaque screenshot to JPEG or an alpha image
+  // to WebP. Verify stored bytes against its declared format, not source PNG.
+  const signatures = {
+    'image/png': bytes => bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])),
+    'image/jpeg': bytes => bytes.subarray(0, 3).equals(Buffer.from([255,216,255])),
+    'image/webp': bytes => bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP',
+  };
+  check('vision becomes a native durable image attachment', !result.isError && Object.hasOwn(signatures, image?.attachment?.mediaType));
   const saved = await ctx.attachments.readImage(image.attachment);
-  check('stored attachment contains real PNG bytes', Buffer.from(saved.data).subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])));
+  check('stored attachment contains valid image bytes', signatures[image.attachment.mediaType](Buffer.from(saved.data)));
   result = await call('state', { op: 'not-an-operation' });
   check('invalid operation is a native tool error', result.isError === true && text(result).length > 0);
   const abort = new AbortController(); abort.abort();

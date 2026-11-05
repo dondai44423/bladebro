@@ -9,6 +9,8 @@ import { once } from 'node:events';
 assert.ok(process.env.CHROME_PATH, 'CHROME_PATH must identify this fixture browser');
 const home = await mkdtemp(join(tmpdir(), 'bb-stock-cdp-'));
 const args = [`--user-data-dir=${home}`, '--remote-debugging-port=0', '--no-first-run', '--no-default-browser-check', 'about:blank'];
+const injectionPath = process.argv[2];
+if (injectionPath) args.unshift('--enable-unsafe-swiftshader', '--ignore-gpu-blocklist');
 if (process.platform === 'linux') args.unshift('--headless=new');
 const child = spawn(process.env.CHROME_PATH, args, { stdio: ['ignore', 'ignore', 'pipe'] });
 let stderr = '';
@@ -60,6 +62,22 @@ try {
   assert.equal((await send('Runtime.evaluate', { expression: 'document.body.innerText', returnByValue: true })).result.value, 'Stock browser fixture');
   await send('Runtime.evaluate', { expression: "(()=>{const g=document.createElement('canvas').getContext('webgl');return g?g.getParameter(g.RENDERER):null})()", returnByValue: true });
   console.log('STOCK CDP 4/4');
+  if (injectionPath) {
+    await send('Page.enable', {});
+    await send('Page.addScriptToEvaluateOnNewDocument', { source: await readFile(injectionPath, 'utf8'), runImmediately: true });
+    let listener;
+    const loaded = new Promise(resolve => {
+      listener = event => { if (JSON.parse(event.data).method === 'Page.loadEventFired') resolve(); };
+      socket.addEventListener('message', listener);
+    });
+    try {
+      await send('Page.navigate', { url: 'data:text/html,<h1>Injected browser fixture</h1>' });
+      await bounded(loaded, 10000, 'injected load');
+    } finally { socket.removeEventListener('message', listener); }
+    assert.equal((await send('Runtime.evaluate', { expression: 'document.body.innerText', returnByValue: true })).result.value, 'Injected browser fixture');
+    await send('Runtime.evaluate', { expression: "(()=>{const g=document.createElement('canvas').getContext('webgl');const e=g?.getExtension('WEBGL_debug_renderer_info');return e?g.getParameter(e.UNMASKED_RENDERER_WEBGL):null})()", returnByValue: true });
+    console.log('INJECTED CDP 9/9');
+  }
 } catch (error) {
   console.error('Stock Chrome stderr:', stderr);
   throw error;

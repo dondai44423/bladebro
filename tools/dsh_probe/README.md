@@ -15,7 +15,8 @@ its inference entry throws. No credentials or paid API are needed.
 
 Assertions cover exact live schemas/descriptions, all five tools, an exact
 Unicode form POST and server receipt, hidden text exclusion, Unicode storage,
-a real PNG in the native durable attachment store, honest errors, permission
+a real screenshot in the native durable attachment store (declared PNG/JPEG/WebP
+format checked against saved bytes), honest errors, permission
 and cancellation gates, failed handshake cleanup, duplicate namespace refusal,
 MCP-child crash/reconnect without mutation replay, unload and re-enable.
 Child tracking instruments Node's spawn only to observe/kill owned fixture
@@ -29,6 +30,8 @@ checks stock CDP evaluation, DOM layout reads and WebGL access with disposable
 data. It adds no driver patches and makes no stealth claim. On failed Mac CI,
 this and a separate DSH run with `BLADE_WEBGL=real` diagnose browser/driver
 boundaries. Diagnostic passes cannot turn the failed required job green.
+An optional script-path argument registers that exact generated injection in a
+second isolated Chrome, then verifies navigation, layout and WebGL readback.
 
 Run `node tools/dsh_probe/package.mjs` for portable package/resolver boundaries
 (all five mapped platforms plus unsupported platforms, paths, config and missing

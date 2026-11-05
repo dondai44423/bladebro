@@ -125,13 +125,18 @@ jobs:
           node tools/dsh_probe/package.mjs
           export DSH_RUNTIME=target/dsh-runtime
           export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
+          export BLADE_DUMP_INJECT="$RUNNER_TEMP/bladebro-inject.js"
+          export BLADE_DBG_WORKERS=1
+          export NAV_TIMING=1
           node tools/dsh_probe/run.mjs
           node tools/dsh_probe/run.mjs
 
       - name: Diagnose macOS stock browser after failure
         if: failure() && startsWith(matrix.os, 'macos-')
         timeout-minutes: 2
-        run: node tools/dsh_probe/stock-browser.mjs
+        run: |
+          node tools/dsh_probe/stock-browser.mjs
+          node tools/dsh_probe/stock-browser.mjs "$RUNNER_TEMP/bladebro-inject.js"
 
       - name: Diagnose macOS without WebGL masking after failure
         if: failure() && startsWith(matrix.os, 'macos-')
