@@ -128,6 +128,8 @@ fn push_item(bits: &mut PageBits, entry_id: &str, item_content: Option<&Value>) 
     }
 }
 
+/// One parsed response page (TweetDetail or timeline; `focal` is only ever
+/// set for TweetDetail).
 pub(super) struct ThreadPage {
     pub(super) focal: Option<T>,
     pub(super) tweets: Vec<T>,
@@ -159,15 +161,20 @@ pub(super) fn parse_thread_page(j: &Value, focal_id: &str) -> ThreadPage {
     }
 }
 
-/// Parse one timeline page → (tweets, bottom cursor, terminated).
-pub(super) fn parse_timeline_page(j: &Value) -> (Vec<T>, Option<String>, bool) {
+/// Parse one timeline page (no focal tweet).
+pub(super) fn parse_timeline_page(j: &Value) -> ThreadPage {
     let bits = collect_page(j);
     let tweets = bits
         .items
         .iter()
         .filter_map(|(_, ic)| tweet_from_item(ic))
         .collect();
-    (tweets, bits.bottom_cursor, bits.terminated)
+    ThreadPage {
+        focal: None,
+        tweets,
+        bottom_cursor: bits.bottom_cursor,
+        terminated: bits.terminated,
+    }
 }
 
 /// Extract a tweet from a TimelineTweet itemContent. Handles the visibility

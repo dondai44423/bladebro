@@ -181,8 +181,11 @@ pub async fn extract(page: &Page, kind: &str, cap: usize) -> Result<XPayload> {
 mod tests {
     use super::*;
 
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::Arc;
+
     use super::dom::dom_items_from_json;
-    use super::fetch::depth_of;
+    use super::fetch::{depth_of, thread_walk, timeline_walk};
     use super::gql::parse_gql_url;
     use super::parse::{collect_page, format_x_date, parse_thread_page, T};
 
@@ -192,6 +195,163 @@ mod tests {
     }
 
     const FOCAL: &str = "2103157082937844131";
+
+    // ── Cursor walks against canned pages ─────────────────────────────────
+    // A fake CDP endpoint answers each in-page fetch (`Runtime.evaluate`)
+    // with the next canned reply, so the real walk loop runs end to end.
+
+    /// One canned answer: `Ok((status, body))`, or a CDP error (the page
+    /// went away mid-walk).
+    type Reply = std::result::Result<(i64, String), &'static str>;
+
+    /// Serve `replies` in order; the counter says how many were requested.
+    async fn fake_cdp(replies: Vec<Reply>) -> (CdpSession, Arc<AtomicUsize>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = served.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for reply in replies {
+                let Some(Ok(request)) = socket.next().await else {
+                    return;
+                };
+                let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+                assert_eq!(request["method"], "Runtime.evaluate");
+                let answer = match reply {
+                    Ok((s, t)) => {
+                        json!({"id": request["id"], "result": {"result": {"value": {"s": s, "t": t}}}})
+                    }
+                    Err(message) => {
+                        json!({"id": request["id"], "error": {"code": -32000, "message": message}})
+                    }
+                };
+                counter.fetch_add(1, SeqCst);
+                socket
+                    .send(Message::Text(answer.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            // Out of replies: hang up, so an extra request fails loudly.
+        });
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        (CdpSession::root(client), served)
+    }
+
+    fn template(op: &str) -> GqlTemplate {
+        GqlTemplate {
+            qid: "qid".into(),
+            op: op.into(),
+            url: String::new(),
+            params: Vec::new(),
+            variables: json!({}),
+            headers: Vec::new(),
+        }
+    }
+
+    fn tweet(id: &str, author: &str, reply_to: Option<&str>) -> Value {
+        json!({"__typename": "Tweet", "rest_id": id,
+            "core": {"user_results": {"result": {"core": {"screen_name": author, "name": author}}}},
+            "legacy": {"full_text": format!("tweet {id}"),
+                "created_at": "Thu Sep 24 16:18:18 +0000 2026",
+                "in_reply_to_status_id_str": reply_to,
+                "reply_count": 0, "retweet_count": 0, "favorite_count": 0}})
+    }
+
+    fn tweet_entry(t: Value) -> Value {
+        json!({"entryId": format!("tweet-{}", t["rest_id"].as_str().unwrap_or_default()),
+            "content": {"entryType": "TimelineTimelineItem",
+                "itemContent": {"itemType": "TimelineTweet", "tweet_results": {"result": t}}}})
+    }
+
+    fn cursor_entry(kind: &str, value: &str) -> Value {
+        json!({"entryId": format!("cursor-{}-{value}", kind.to_ascii_lowercase()),
+            "content": {"entryType": "TimelineTimelineCursor", "cursorType": kind, "value": value}})
+    }
+
+    fn add_entries(entries: Vec<Value>) -> Value {
+        json!({"type": "TimelineAddEntries", "entries": entries})
+    }
+
+    fn terminate_bottom() -> Value {
+        json!({"type": "TimelineTerminateTimeline", "direction": "Bottom"})
+    }
+
+    /// `n` tweet entries with ids `<prefix>000…`, replying to `reply_to`.
+    fn tweets(prefix: &str, n: usize, reply_to: Option<&str>) -> Vec<Value> {
+        (0..n)
+            .map(|i| tweet_entry(tweet(&format!("{prefix}{i:03}"), "someone", reply_to)))
+            .collect()
+    }
+
+    fn thread_body(instructions: Vec<Value>) -> String {
+        json!({"data": {"threaded_conversation_with_injections_v2": {"instructions": instructions}}})
+            .to_string()
+    }
+
+    fn search_body(instructions: Vec<Value>) -> String {
+        json!({"data": {"search_by_raw_query": {"search_timeline": {"timeline": {
+            "instructions": instructions}}}}})
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_terminated_walk_cut_at_the_cap_is_not_complete() {
+        // 25 replies and a Bottom terminate on the first page, limit 10: the
+        // timeline ended, but the cap cut drops 15 real replies.
+        let mut entries = vec![tweet_entry(tweet(FOCAL, "op", None))];
+        entries.extend(tweets("7", 25, Some(FOCAL)));
+        let body = thread_body(vec![add_entries(entries), terminate_bottom()]);
+        let (cdp, served) = fake_cdp(vec![Ok((200, body))]).await;
+        let p = thread_walk(
+            &cdp,
+            &template("TweetDetail"),
+            FOCAL,
+            10,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("thread walk");
+        assert_eq!(served.load(SeqCst), 1);
+        assert_eq!(p.count, 10);
+        assert!(!p.complete, "15 replies were cut — not the whole thread");
+        assert!(
+            p.note
+                .as_deref()
+                .is_some_and(|n| n.contains("capped at 10")),
+            "the cut is named: {:?}",
+            p.note
+        );
+
+        // Same for a timeline whose only page also ends it.
+        let mut page = tweets("8", 30, None);
+        page.push(cursor_entry("Bottom", "c1"));
+        let body = search_body(vec![add_entries(page), terminate_bottom()]);
+        let (cdp, _) = fake_cdp(vec![Ok((200, body))]).await;
+        let p = timeline_walk(
+            &cdp,
+            &template("SearchTimeline"),
+            "search",
+            10,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("timeline walk");
+        assert_eq!(p.count, 10);
+        assert!(!p.complete, "20 posts were cut — not the whole timeline");
+        assert!(
+            p.note
+                .as_deref()
+                .is_some_and(|n| n.contains("capped at 10")),
+            "{:?}",
+            p.note
+        );
+    }
 
     #[test]
     fn fixture_parses_the_complete_page() {
