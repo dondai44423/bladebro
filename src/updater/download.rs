@@ -27,9 +27,13 @@ const FIRST_CHECKSUMMED_TAG: &str = "3.3.0";
 const MAX_BINARY_SIZE: u64 = 500_000_000;
 const MAX_CHECKSUM_BYTES: usize = 16 * 1024;
 
-/// Is checksum verification mandatory for this target tag?
+/// Is checksum verification mandatory for this target tag? A tag that is
+/// not a version cannot be shown to predate checksum uploads, so it is
+/// required (fail-closed) — it used to parse as version [] and sort below
+/// FIRST_CHECKSUMMED_TAG, i.e. warn-and-skip.
 pub fn checksum_required(tag: &str) -> bool {
-    super::version::compare_versions(tag, FIRST_CHECKSUMMED_TAG) != std::cmp::Ordering::Less
+    !super::version::is_version_tag(tag)
+        || super::version::compare_versions(tag, FIRST_CHECKSUMMED_TAG) != std::cmp::Ordering::Less
 }
 
 /// Parse a checksum file body: `<hash>  <filename>` or just `<hash>`.
