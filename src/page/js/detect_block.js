@@ -2,12 +2,18 @@
 // Cloudflare interstitial: the title is the strongest signal. A bare
 // turnstile/challenge-platform SCRIPT is NOT — sites embed Turnstile
 // widgets in ordinary forms. Only call it a block when the title matches
-// or the classic challenge form is present or (widget present AND the
-// page is nearly empty — a real interstitial). The widget is a CLASS
-// (`<div class="cf-turnstile">`); there is no cf-turnstile element.
+// or the classic challenge form is present or (challenge script AND the
+// page is nearly empty — a real interstitial).
 if(t.includes('just a moment'))return 'cloudflare';
 if(q('#challenge-form'))return 'cloudflare';
-if(q('.cf-turnstile')||q('script[src*=challenge-platform]')){if(bl<800)return 'cloudflare';return null;}
+if(q('script[src*=challenge-platform]')){if(bl<800)return 'cloudflare';return null;}
+// A Turnstile WIDGET (a class, `<div class="cf-turnstile">`; there is no
+// cf-turnstile element) is a wall only on a nearly empty page that has no
+// field of its own and whose widget is still unsolved. Login, signup and
+// contact forms embed the same widget and are just as small; a solved
+// widget keeps its div, so without the token check nav's self-solve poll
+// would never see the wall clear.
+if(bl<800&&q('.cf-turnstile')&&!(q('input:not([type=hidden]):not([type=submit]):not([type=button])')||q('textarea')||q('select'))){const r=d.querySelector('input[name=cf-turnstile-response]');if(!(r&&r.value))return 'cloudflare';}
 if(q('iframe[src*=captcha-delivery]')&&bl<1200)return 'datadome';
 if(bl<1200&&body.includes('datadome')&&q('iframe'))return 'datadome';
 if((q('#px-captcha')||q('script[src*=px-captcha]'))&&bl<1500)return 'perimeterx';
