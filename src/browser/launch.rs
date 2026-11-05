@@ -131,6 +131,22 @@ impl Browser {
     ) -> Result<(Self, Option<String>)> {
         let timing = std::env::var("NAV_TIMING").is_ok();
         let t0 = std::time::Instant::now();
+        // M18: Proxy support via BLADE_PROXY env var. Validated first, before
+        // a profile, display or process exists: a malformed or credentialed
+        // value fails the launch with a redacted reason instead of silently
+        // producing a broken-proxy browser. The raw value may embed
+        // credentials — only the redacted display form ever reaches stderr.
+        let proxy = match crate::browser::proxy::env_browser_proxy() {
+            Ok(p) => p,
+            Err(reason) => {
+                return Err(BladeError::Other(format!(
+                    "invalid BLADE_PROXY value: {reason} (value redacted)"
+                )));
+            }
+        };
+        if let Some(spec) = &proxy {
+            eprintln!("[bladebro] using proxy: {}", spec.display);
+        }
         let chrome_path = find_chrome()?;
         let extra = super::compat::agent_extra_flags()?;
         let profile = crate::session_profile::SessionProfile::create()?;
@@ -164,22 +180,6 @@ impl Browser {
         set_launched_headless(!headful);
         set_launched_no_sandbox(no_sandbox);
 
-        // M18: Proxy support via BLADE_PROXY env var. Validated here even
-        // when nothing logs: a malformed value fails the launch with a
-        // redacted reason instead of silently producing a broken-proxy
-        // browser. The raw value may embed credentials — only the redacted
-        // display form ever reaches stderr.
-        let proxy = match crate::browser::proxy::env_blade_proxy() {
-            Ok(p) => p,
-            Err(reason) => {
-                return Err(BladeError::Other(format!(
-                    "invalid BLADE_PROXY value: {reason} (value redacted)"
-                )));
-            }
-        };
-        if let Some(spec) = &proxy {
-            eprintln!("[bladebro] using proxy: {}", spec.display);
-        }
         // Power-user escape hatch: append raw Chrome flags. Useful for
         // diagnosing GL/WebGL backend issues on odd displays and for
         // users who need a specific Chromium switch. Whitespace-split.
@@ -398,9 +398,9 @@ impl Browser {
         set_launched_pipe(false);
 
         // Real-lane proxy: validated the same way as the managed lane (a
-        // malformed value fails loudly, redacted); the real lane does not
-        // log the endpoint, so nothing here can leak credentials.
-        let proxy = match crate::browser::proxy::env_blade_proxy() {
+        // malformed or credentialed value fails loudly, redacted); the real
+        // lane does not log the endpoint.
+        let proxy = match crate::browser::proxy::env_browser_proxy() {
             Ok(p) => p,
             Err(reason) => {
                 return Err(BladeError::Other(format!(

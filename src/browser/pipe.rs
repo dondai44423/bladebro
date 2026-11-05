@@ -118,6 +118,20 @@ impl Browser {
         use std::os::unix::process::CommandExt;
         use tokio::net::unix::pipe;
 
+        // M18: Proxy support via BLADE_PROXY env var. Validated + redacted
+        // exactly like the WS lane (first, before any profile, display or
+        // process exists) — same failure mode, same log guarantee.
+        let proxy = match crate::browser::proxy::env_browser_proxy() {
+            Ok(p) => p,
+            Err(reason) => {
+                return Err(BladeError::Other(format!(
+                    "invalid BLADE_PROXY value: {reason} (value redacted)"
+                )));
+            }
+        };
+        if let Some(spec) = &proxy {
+            eprintln!("[bladebro] using proxy: {}", spec.display);
+        }
         let chrome_path = find_chrome()?;
         let extra = super::compat::agent_extra_flags()?;
         let profile = crate::session_profile::SessionProfile::create()?;
@@ -142,19 +156,6 @@ impl Browser {
         set_launched_headless(!headful);
         set_launched_no_sandbox(no_sandbox);
 
-        // M18: Proxy support via BLADE_PROXY env var. Validated + redacted
-        // exactly like the WS lane — same failure mode, same log guarantee.
-        let proxy = match crate::browser::proxy::env_blade_proxy() {
-            Ok(p) => p,
-            Err(reason) => {
-                return Err(BladeError::Other(format!(
-                    "invalid BLADE_PROXY value: {reason} (value redacted)"
-                )));
-            }
-        };
-        if let Some(spec) = &proxy {
-            eprintln!("[bladebro] using proxy: {}", spec.display);
-        }
         // Power-user escape hatch (same as the WS path — this used to be
         // WS-only, another quiet lane divergence).
         set_launched_pipe(true);

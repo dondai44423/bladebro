@@ -1,17 +1,20 @@
 //! BLADE_PROXY parsing: validated, redacted proxy descriptors.
 //!
-//! The raw value may embed credentials (`http://user:pass@host:port`). When
-//! valid it is still handed to Chrome as-is — but it must NEVER reach a log
-//! line, error message or diagnostic. Every read site goes through
-//! [`env_blade_proxy`], which validates the shape and returns a redacted
-//! display string alongside the raw server value; validation errors describe
-//! the problem without echoing any part of the value.
+//! The raw value may embed credentials (`http://user:pass@host:port`). It
+//! must NEVER reach a log line, error message or diagnostic. Every read site
+//! goes through [`env_blade_proxy`], which validates the shape and returns a
+//! redacted display string alongside the raw server value; validation errors
+//! describe the problem without echoing any part of the value. Browser
+//! launches read it through [`env_browser_proxy`], which additionally refuses
+//! credentials: Chrome cannot use them (see there). Only the HTTP body
+//! download, whose client authenticates the proxy itself, accepts them.
 
 /// What Chrome receives vs what logs may show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxySpec {
-    /// The value handed to Chrome's `--proxy-server`. May contain
-    /// credentials — never log this field.
+    /// The raw value: Chrome's `--proxy-server` (never with credentials —
+    /// [`env_browser_proxy`] refuses those) or the body-download client's
+    /// proxy URL. May contain credentials — never log this field.
     pub server: String,
     /// Redacted endpoint for logs/diagnostics: scheme/host/port only, any
     /// credentials replaced by a fixed marker. Never contains the raw value.
@@ -27,6 +30,31 @@ pub fn env_blade_proxy() -> Result<Option<ProxySpec>, String> {
     match std::env::var("BLADE_PROXY") {
         Ok(v) if !v.is_empty() => parse_blade_proxy(&v).map(Some),
         _ => Ok(None),
+    }
+}
+
+/// `BLADE_PROXY` for a browser launch: [`env_blade_proxy`], minus the one
+/// shape Chrome cannot take. `--proxy-server` has no credential syntax — a
+/// `user:pass@` value made every page load fail with
+/// ERR_NO_SUPPORTED_PROXIES while the launch looked healthy — and a browser
+/// command line is readable by every local user. Chrome only authenticates
+/// a proxy by answering its challenge (`Fetch.authRequired`), which would
+/// mean pausing every request of every target; refusing up front is the
+/// honest answer. The reason names the alternatives.
+pub fn env_browser_proxy() -> Result<Option<ProxySpec>, String> {
+    browser_proxy(env_blade_proxy()?)
+}
+
+fn browser_proxy(spec: Option<ProxySpec>) -> Result<Option<ProxySpec>, String> {
+    match spec {
+        Some(s) if s.has_credentials => Err(
+            "embedded user:pass credentials are not supported for the browser (Chrome's \
+             --proxy-server cannot authenticate with them and would expose them in its \
+             command line); use an IP-allowlisted proxy endpoint, or a local forwarding \
+             proxy that adds the credentials"
+                .to_string(),
+        ),
+        other => Ok(other),
     }
 }
 
@@ -205,6 +233,21 @@ mod tests {
             assert!(!err.contains("ftp"), "reason leaked scheme: {err}");
             assert!(err.len() < 120, "reason should be short: {err}");
         }
+    }
+
+    #[test]
+    fn browser_launches_refuse_credentials_without_echoing_them() {
+        for raw in [
+            "http://user:SEKRITPW@proxy.example.com:8888",
+            "socks5://u:p@ss@127.0.0.1:1080",
+        ] {
+            let err = browser_proxy(Some(parse_blade_proxy(raw).unwrap())).unwrap_err();
+            assert!(err.contains("credentials are not supported"), "{err}");
+            assert!(!err.contains("SEKRITPW") && !err.contains("p@ss"), "{err}");
+        }
+        let plain = parse_blade_proxy("http://127.0.0.1:8888").unwrap();
+        assert_eq!(browser_proxy(Some(plain.clone())).unwrap(), Some(plain));
+        assert_eq!(browser_proxy(None).unwrap(), None);
     }
 
     #[test]

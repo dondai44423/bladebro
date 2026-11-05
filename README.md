@@ -635,7 +635,7 @@ Everything optional; configuration is environment variables.
 | `BLADE_WEBGL` | `auto` | `spoof` / `real` / `auto` |
 | `BLADE_MEDIA` | `auto` | `patch` / `real` / `auto` |
 | `BLADE_NOISE` | unset | `1` = canvas/audio fingerprint noise (see gotchas) |
-| `BLADE_PROXY` | none | Proxy URL — also enables WebRTC ICE filtering + the non-proxied-UDP launch policy, so the real IP stays out of ICE candidates |
+| `BLADE_PROXY` | none | Proxy URL — also enables WebRTC ICE filtering + the non-proxied-UDP launch policy, so the real IP stays out of ICE candidates. No embedded `user:pass@`: Chrome cannot authenticate with them, so the launch refuses them — use an IP-allowlisted endpoint or a local forwarding proxy that adds the credentials |
 | `BLADE_CONSENT` | `reject` | Consent banners: `accept` / `reject` / `off` |
 
 **Behavior & ops**
