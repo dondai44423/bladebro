@@ -399,7 +399,15 @@ mod xvfb_tests {
         }
     }
 
-    fn orphan_display() -> OrphanDisplay {
+    /// The test spawns `Xvfb` from PATH. CI installs it; where it is absent
+    /// the scenario cannot be staged, which is not a reaper failure.
+    fn orphan_display() -> Option<OrphanDisplay> {
+        let on_path = std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("Xvfb").is_file()));
+        if !on_path {
+            eprintln!("Xvfb not on PATH — skipping orphan-display reaper test");
+            return None;
+        }
         let number = (150..200)
             .find(|n| {
                 !Path::new(&format!("/tmp/.X{n}-lock")).exists()
@@ -433,7 +441,7 @@ mod xvfb_tests {
             pid.to_string(),
         )
         .unwrap();
-        display
+        Some(display)
     }
 
     #[test]
@@ -450,7 +458,9 @@ mod xvfb_tests {
 
     #[test]
     fn xvfb_reaper_requires_a_dead_blade_claim() {
-        let display = orphan_display();
+        let Some(display) = orphan_display() else {
+            return;
+        };
         let lock = display.root.join(format!(".X{}-lock", display.number));
         let claim = display
             .root
