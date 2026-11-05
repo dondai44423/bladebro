@@ -7,7 +7,9 @@
 //! The same holds when a termination signal (Ctrl-C) reaches an in-process
 //! run's process group mid-launch: the browser and Xvfb each run in their own
 //! group, so bladebro dying on the signal's default action used to orphan
-//! them instead of cleaning up.
+//! them instead of cleaning up. A signal the run
+//! inherited as ignored (`nohup`, a non-interactive shell's `cmd &`) must stay
+//! ignored: the command finishes as it did before signals were caught.
 #![cfg(unix)]
 
 use std::io::Write;
@@ -44,6 +46,56 @@ fn lingering_browser(root: &Path) -> (PathBuf, PathBuf) {
         format!(
             "#!/bin/sh\necho $$ >> '{p}'\nsleep 60 &\necho $! >> '{p}'\nsleep 1\nexit 1\n",
             p = pids.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (fake, pids)
+}
+
+/// A stand-in browser that serves just enough of the DevTools HTTP endpoint
+/// (python3, on the `--remote-debugging-port` it is handed) for the launch to
+/// succeed: `/json/version` answers and `/json` lists no targets, so the GL
+/// ladder walks its stages and keeps the last one. Once the launch's GL probe
+/// has listed targets, the next `/json/version` (`probe`'s first request)
+/// writes `running` and takes 3s to answer: the command itself, not the
+/// launch, is in flight. Records its pid like the other stand-ins.
+fn endpoint_browser(root: &Path) -> (PathBuf, PathBuf) {
+    let pids = root.join("helpers.pid");
+    let running = root.join("running");
+    let fake = root.join("fake-chrome");
+    std::fs::write(
+        &fake,
+        format!(
+            r#"#!/usr/bin/env python3
+import http.server, json, os, sys, time
+port = int(next(a for a in sys.argv if a.startswith('--remote-debugging-port=')).split('=', 1)[1])
+with open({pids:?}, 'a') as f:
+    f.write('%d\n' % os.getpid())
+listed = []
+class Endpoint(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/json/version':
+            if listed:
+                with open({running:?}, 'a') as f:
+                    f.write('run\n')
+                time.sleep(3)
+            body = {{'Browser': 'FakeChrome/1.0', 'Protocol-Version': '1.3'}}
+        else:
+            listed.append(self.path)
+            body = []
+        data = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def log_message(self, *args):
+        pass
+http.server.ThreadingHTTPServer(('127.0.0.1', port), Endpoint).serve_forever()
+"#,
+            pids = pids.to_string_lossy(),
+            running = running.to_string_lossy(),
         ),
     )
     .unwrap();
@@ -160,38 +212,73 @@ fn display_leftovers(pid: u32) -> Vec<i32> {
     survivors
 }
 
-/// SIGINT to an in-process run's process group while its browser is still
-/// starting (the user's Ctrl-C): bladebro must not die on the spot. It has to
-/// outlive the signal long enough to tear down the browser tree, the profile
-/// and the virtual display it started.
-fn interrupt_mid_launch(name: &str, args: &[&str]) {
+/// The browser and its forked helper are up: the launch is waiting on the
+/// debug endpoint (`lingering_browser`).
+fn launching(root: &Path) -> bool {
+    std::fs::read_to_string(root.join("helpers.pid"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+        >= 2
+}
+
+/// The launch is done and the command's own request is in flight
+/// (`endpoint_browser`).
+fn running(root: &Path) -> bool {
+    root.join("running").exists()
+}
+
+struct SignalledRun {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+/// Start an in-process run the way a shell starts a job: in its own process
+/// group, with the `ignored` signals handed down as SIG_IGN (what `nohup`
+/// does for SIGHUP, and a non-interactive shell's `cmd &` for SIGINT). Once
+/// `ready`, send each of `signals` to that group (the user's Ctrl-C). Whatever
+/// the outcome, nothing the run started may be left: not the browser tree,
+/// not the profile, not the virtual display.
+fn signal_run(
+    name: &str,
+    browser: fn(&Path) -> (PathBuf, PathBuf),
+    args: &[&str],
+    ignored: &'static [libc::c_int],
+    ready: fn(&Path) -> bool,
+    signals: &[libc::c_int],
+) -> SignalledRun {
     let _serial = serial();
-    let (root, temp, fake, pids) = scenario_with(name, lingering_browser);
+    let (root, temp, fake, pids) = scenario_with(name, browser);
+    let outlog = root.join("stdout.log");
     let errlog = root.join("stderr.log");
-    let mut child = base_command(&root, &fake, &temp)
-        .args(args)
+    let mut cmd = base_command(&root, &fake, &temp);
+    cmd.args(args)
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .process_group(0)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::fs::File::create(&errlog).unwrap())
-        .spawn()
-        .unwrap();
-    let recorded = || {
-        std::fs::read_to_string(&pids)
-            .unwrap_or_default()
-            .lines()
-            .count()
-    };
-    // The browser and its helper are up; the launch is waiting on the
-    // debug endpoint.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while recorded() < 2 && Instant::now() < deadline {
+        .stdout(std::fs::File::create(&outlog).unwrap())
+        .stderr(std::fs::File::create(&errlog).unwrap());
+    // SAFETY: signal(2) is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            for &sig in ignored {
+                libc::signal(sig, libc::SIG_IGN);
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !ready(&root) && Instant::now() < deadline && child.try_wait().unwrap().is_none() {
         std::thread::sleep(Duration::from_millis(25));
     }
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGINT);
+    let was_ready = ready(&root);
+    for &sig in signals {
+        unsafe {
+            libc::kill(-(child.id() as i32), sig);
+        }
     }
     let deadline = Instant::now() + Duration::from_secs(60);
     let status = loop {
@@ -207,18 +294,43 @@ fn interrupt_mid_launch(name: &str, args: &[&str]) {
     };
     let (profiles, survivors) = leftovers(&temp, &pids);
     let display = display_leftovers(child.id());
+    let stdout = std::fs::read_to_string(&outlog).unwrap_or_default();
     let stderr = std::fs::read_to_string(&errlog).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        was_ready,
+        "the run never reached the signal point\n{stderr}"
+    );
     let status =
-        status.unwrap_or_else(|| panic!("bladebro still running 60s after SIGINT\n{stderr}"));
+        status.unwrap_or_else(|| panic!("bladebro still running 60s after {signals:?}\n{stderr}"));
     assert!(
         survivors.is_empty() && profiles.is_empty() && display.is_empty(),
-        "SIGINT mid-launch left browser processes {survivors:?}, display processes {display:?} and profiles {profiles:?} ({status:?})\n{stderr}"
+        "signals {signals:?} left browser processes {survivors:?}, display processes {display:?} and profiles {profiles:?} ({status:?})\n{stderr}"
+    );
+    SignalledRun {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
+/// SIGINT while the browser is still starting: bladebro must not die on the
+/// spot. It has to outlive the signal long enough to tear down the browser
+/// tree, the profile and the virtual display it started.
+fn interrupt_mid_launch(name: &str, args: &[&str]) {
+    let run = signal_run(
+        name,
+        lingering_browser,
+        args,
+        &[],
+        launching,
+        &[libc::SIGINT],
     );
     assert_eq!(
-        status.signal(),
+        run.status.signal(),
         None,
-        "bladebro died of the signal instead of cleaning up\n{stderr}"
+        "bladebro died of the signal instead of cleaning up\n{}",
+        run.stderr
     );
 }
 
@@ -280,4 +392,31 @@ fn sigint_mid_launch_of_a_one_shot_command_leaves_nothing_behind() {
 #[test]
 fn sigint_mid_launch_of_probe_leaves_nothing_behind() {
     interrupt_mid_launch("sigint-probe", &["probe"]);
+}
+
+/// Under `nohup` (SIGHUP ignored) or as a non-interactive shell's background
+/// job (SIGINT ignored) those signals never ended bladebro; catching them must
+/// not start to. The run finishes normally.
+#[test]
+fn signals_ignored_on_entry_stay_ignored() {
+    let run = signal_run(
+        "nohup",
+        endpoint_browser,
+        &["probe"],
+        &[libc::SIGHUP, libc::SIGINT],
+        running,
+        &[libc::SIGHUP, libc::SIGINT],
+    );
+    assert!(
+        run.status.success(),
+        "an ignored signal aborted the run ({:?})\n{}",
+        run.status,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("nothing to drive"),
+        "probe did not finish\nstdout: {}\nstderr: {}",
+        run.stdout,
+        run.stderr
+    );
 }

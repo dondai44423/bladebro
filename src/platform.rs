@@ -1163,6 +1163,12 @@ pub fn isolate_owned_child(cmd: &mut std::process::Command) {
 /// Listening starts in [`TerminationSignal::listen`]. From then on these
 /// signals no longer end the process by themselves, and one that arrives
 /// before [`TerminationSignal::recv`] is awaited (mid-launch, say) is kept.
+///
+/// A signal the process inherited as ignored stays ignored and is not
+/// listened for: `nohup` hands down SIGHUP that way, and a non-interactive
+/// shell's `cmd &` does the same for SIGINT. Installing a handler would
+/// replace SIG_IGN, and such a run would then be aborted by a hangup or an
+/// interrupt it was started to survive.
 pub struct TerminationSignal {
     #[cfg(unix)]
     streams: Vec<tokio::signal::unix::Signal>,
@@ -1177,13 +1183,12 @@ impl TerminationSignal {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
-            let kinds = [
-                SignalKind::terminate(),
-                SignalKind::interrupt(),
-                SignalKind::hangup(),
-            ];
             Self {
-                streams: kinds.into_iter().filter_map(|k| signal(k).ok()).collect(),
+                streams: [libc::SIGTERM, libc::SIGINT, libc::SIGHUP]
+                    .into_iter()
+                    .filter(|&sig| !signal_ignored(sig))
+                    .filter_map(|sig| signal(SignalKind::from_raw(sig)).ok())
+                    .collect(),
             }
         }
         #[cfg(windows)]
@@ -1233,6 +1238,18 @@ impl TerminationSignal {
             )),
             result = work => result,
         }
+    }
+}
+
+/// True when `sig`'s current disposition is SIG_IGN (read-only query).
+#[cfg(unix)]
+fn signal_ignored(sig: libc::c_int) -> bool {
+    // SAFETY: a null new action makes sigaction(2) only report the current
+    // one into `current`, a valid, zero-initialised struct.
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(sig, std::ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
     }
 }
 
