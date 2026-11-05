@@ -244,6 +244,11 @@ impl Browser {
 /// each failed attempt (up to three per launch) left a `bladebro-chrome-*`
 /// profile in the temp dir, and a failed status poll dropped the child
 /// without killing anything.
+///
+/// The cleanup is synchronous, as the incognito path's always was: a failed
+/// attempt blocks its runtime worker for up to ~3s (the SIGTERM grace) plus
+/// the profile cleanup, which syncs a seasoned profile back to its template
+/// when BLADE_FRESH is unset.
 struct LaunchGuard {
     profile: Option<crate::session_profile::SessionProfile>,
     child: Option<Child>,
