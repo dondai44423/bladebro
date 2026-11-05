@@ -117,8 +117,24 @@ try {
   check('native form fill succeeds', !result.isError);
   await until(() => posts.length === 1);
   check('server received exact Unicode exactly once', posts[0] === unicode && posts.length === 1);
-  result = await call('run', { steps: [{ action: 'see', mode: 'content' }] });
-  check('run surfaces server-side receipt', !result.isError && text(result).includes('DSH_RECEIPT_1'));
+  // Server acceptance precedes the browser consuming the response and
+  // rendering it. Verify the visible acknowledgement, not that race window.
+  result = await call('run', { format: 'json', steps: [
+    { action: 'wait', condition: 'text', text: 'DSH_RECEIPT_1', timeout: 10 },
+    { action: 'see', mode: 'content' },
+  ] });
+  let receipt;
+  try {
+    receipt = JSON.parse(text(result));
+    if (receipt && Object.hasOwn(receipt, 'data') && Object.hasOwn(receipt, 'note')) receipt = receipt.data;
+  } catch { /* Keep the original tool payload in the failure diagnostic. */ }
+  const receiptVisible = !result.isError && receipt?.status === 'completed' &&
+    receipt.results?.length === 2 && receipt.results.every(step => step.status === 'ok') &&
+    receipt.results[1].output.includes('DSH_RECEIPT_1');
+  if (!receiptVisible) {
+    console.error('Receipt readback:', JSON.stringify({ posts, result }));
+  }
+  check('run surfaces server-side receipt', receiptVisible);
   const agent = { options: { provider: 'fixture', model: 'vision' }, session: { requestHeader: () => undefined } };
   result = await call('vision', { marks: true }, { agent });
   const image = result.content.find(c => c.type === 'image');
