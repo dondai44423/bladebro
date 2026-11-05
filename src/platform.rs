@@ -996,7 +996,7 @@ pub(crate) fn owns_browser_process(child: u32, browser: u32) -> bool {
         }
         #[cfg(target_os = "linux")]
         {
-            namespaced_pid_in_group(child, browser)
+            namespaced_pid_owned(child, browser)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -1013,10 +1013,13 @@ pub(crate) fn owns_browser_process(child: u32, browser: u32) -> bool {
 /// Flatpak runs the browser inside bubblewrap's own pid namespace, so CDP
 /// reports the browser's pid as seen in the sandbox (2 under Flatpak) — on
 /// the host that number is an unrelated process. Accept it only when a
-/// process in our owned group is namespaced and carries exactly that pid in
-/// its innermost namespace (`NSpid:` lists outermost first).
+/// process we launched is namespaced and carries exactly that pid in its
+/// innermost namespace (`NSpid:` lists outermost first). "We launched" is
+/// our owned group or, because Flatpak moves bwrap into a group of its own
+/// when a wrapper script starts it, our process tree — the same subtree the
+/// launch gate requires to hold the debug endpoint.
 #[cfg(target_os = "linux")]
-fn namespaced_pid_in_group(pgid: u32, ns_pid: u32) -> bool {
+fn namespaced_pid_owned(child: u32, ns_pid: u32) -> bool {
     let Ok(procs) = std::fs::read_dir("/proc") else {
         return false;
     };
@@ -1024,8 +1027,8 @@ fn namespaced_pid_in_group(pgid: u32, ns_pid: u32) -> bool {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
             return false;
         };
+        // The NSpid match is cheap and rare, so it filters before any walk.
         pid > 1
-            && unsafe { libc::getpgid(pid) } == pgid as i32
             && std::fs::read_to_string(format!("/proc/{pid}/status"))
                 .ok()
                 .and_then(|status| {
@@ -1039,7 +1042,42 @@ fn namespaced_pid_in_group(pgid: u32, ns_pid: u32) -> bool {
                     (ids.len() > 1).then(|| ids[ids.len() - 1])
                 })
                 == Some(ns_pid)
+            && (unsafe { libc::getpgid(pid) } == child as i32
+                || pid_within_process_tree(pid as u32, child))
     })
+}
+
+/// True when `pid` is `root` or a direct/indirect child of it, walking
+/// /proc's parent links. Bounded so a corrupt or racing chain cannot loop;
+/// an unreadable parent fails closed.
+#[cfg(target_os = "linux")]
+pub(crate) fn pid_within_process_tree(mut pid: u32, root: u32) -> bool {
+    // Real launch chains are short (AppRun → wrapper → browser → helper;
+    // Flatpak: export → bwrap → sandbox init → browser). A deeper chain is
+    // not evidence of ownership.
+    for _ in 0..64 {
+        if pid == root {
+            return true;
+        }
+        if pid <= 1 {
+            return false;
+        }
+        pid = proc_ppid(pid);
+    }
+    false
+}
+
+/// Parent pid of a process (0 when /proc is unreadable or unparseable).
+#[cfg(target_os = "linux")]
+fn proc_ppid(pid: u32) -> u32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    // Format: pid (comm) state ppid ... — comm can contain spaces/parens,
+    // so parse after the last ')'.
+    stat.rsplit(')')
+        .next()
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Force-kill an owned browser's whole process group without a graceful
@@ -1238,6 +1276,80 @@ mod tests {
         assert!(
             !foreign,
             "a namespaced pid outside the spawned process group must not count as ours"
+        );
+    }
+
+    /// A forking launcher (a shell wrapper around a Flatpak export) leads our
+    /// group, but Flatpak moves bwrap into a process group of its own
+    /// (measured: wrapper pgid N, bwrap and the browser pgid N+1). The
+    /// browser is still in the process tree we spawned — the same proof the
+    /// launch gate accepts — so its sandbox pid must still count as ours.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_pid_in_a_regrouped_descendant_of_the_launcher_is_owned() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        // setsid regroups the namespace launcher while it stays the wrapper's
+        // child; both shells report a pid so the test can clean up and check.
+        let script = "setsid unshare --user --map-root-user --pid --fork \
+                      sh -c 'sleep 30 & echo ns $!; wait' & echo host $!; wait";
+        let Ok(mut wrapper) = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+        else {
+            eprintln!("sh unavailable; skipping regrouped-launcher ownership test");
+            return;
+        };
+        let (mut ns_pid, mut host_pid) = (None, None);
+        let mut lines = BufReader::new(wrapper.stdout.take().expect("wrapper stdout")).lines();
+        for line in lines.by_ref().take(2).map_while(|l| l.ok()) {
+            match line.split_once(' ') {
+                Some(("ns", pid)) => ns_pid = pid.trim().parse::<u32>().ok(),
+                Some(("host", pid)) => host_pid = pid.trim().parse::<i32>().ok(),
+                _ => {}
+            }
+        }
+        let cleanup = |wrapper: &mut Child| {
+            if let Some(group) = host_pid.filter(|p| *p > 1) {
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                }
+            }
+            shutdown_child(wrapper);
+        };
+        let Some(ns_pid) = ns_pid else {
+            cleanup(&mut wrapper);
+            eprintln!("unprivileged pid namespaces or setsid unavailable; skipping");
+            return;
+        };
+
+        let mut unrelated = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn unrelated process");
+
+        let owned = owns_browser_process(wrapper.id(), ns_pid);
+        let foreign = owns_browser_process(unrelated.id(), ns_pid);
+        cleanup(&mut wrapper);
+        shutdown_child(&mut unrelated);
+
+        assert!(
+            owned,
+            "a namespaced browser regrouped below our launcher is still ours"
+        );
+        assert!(
+            !foreign,
+            "a launcher that did not start the namespaced browser must not claim it"
         );
     }
 

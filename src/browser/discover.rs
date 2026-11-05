@@ -294,41 +294,9 @@ pub(crate) fn endpoint_owned_by_pid(port: u16, pid: u32) -> bool {
             return false;
         };
         candidate != pid
-            && pid_within_process_tree(candidate, pid)
+            && platform::pid_within_process_tree(candidate, pid)
             && pid_holds_socket(candidate, ino)
     })
-}
-
-/// True when `pid` is `root` or a direct/indirect child of it, walking
-/// /proc's parent links. Bounded so a corrupt or racing chain cannot loop;
-/// an unreadable parent fails closed.
-#[cfg(target_os = "linux")]
-fn pid_within_process_tree(mut pid: u32, root: u32) -> bool {
-    // Real launch chains are short (AppRun → wrapper → browser → helper).
-    // A deeper chain is not evidence of ownership.
-    for _ in 0..64 {
-        if pid == root {
-            return true;
-        }
-        if pid <= 1 {
-            return false;
-        }
-        pid = proc_ppid(pid);
-    }
-    false
-}
-
-/// Parent pid of a process (0 when /proc is unreadable or unparseable).
-#[cfg(target_os = "linux")]
-fn proc_ppid(pid: u32) -> u32 {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-    // Format: pid (comm) state ppid ... — comm can contain spaces/parens,
-    // so parse after the last ')'.
-    stat.rsplit(')')
-        .next()
-        .and_then(|rest| rest.split_whitespace().nth(1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0)
 }
 
 /// True when ANY live process of this uid holds the loopback listener for
@@ -587,7 +555,7 @@ mod tests {
             .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
             .find(|pid| {
                 *pid != wrapper.id()
-                    && pid_within_process_tree(*pid, wrapper.id())
+                    && crate::platform::pid_within_process_tree(*pid, wrapper.id())
                     && pid_holds_socket(*pid, inode)
             })
             .expect("forked listener pid");
