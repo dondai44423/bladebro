@@ -462,68 +462,128 @@ impl Page {
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
-        if let Some(profile) = profiles.get(&domain) {
-            if let Some(ref tz) = profile.tz {
-                let _ = self
-                    .cdp
-                    .send(
-                        "Emulation.setTimezoneOverride",
-                        Some(serde_json::json!({ "timezoneId": tz })),
-                    )
-                    .await;
-                eprintln!("[bladebro] domain profile {domain}: tz={tz}");
+        // Every field resolves for EVERY domain: the profile's value, else the
+        // session baseline (BLADE_TZ / BLADE_LOCALE). Applying only what a
+        // profile set left the previous domain's tz/locale on every later
+        // site, and a profile omitting `locale` swapped the injection back
+        // while the CDP locale stayed - navigator.language and Intl then
+        // disagreed (the mismatch the coherence swap below exists to stop).
+        let want = Emulation::for_domain(profiles.get(&domain), &Emulation::session());
+        // Recorded only once CDP accepted it: a rejected override (an
+        // invalid tz name in profiles.json) is retried, never assumed.
+        if want.tz != self.emulation.tz {
+            // An empty timezoneId clears the override (the browser's own zone).
+            let tz = want.tz.as_deref().unwrap_or("");
+            match self
+                .cdp
+                .send(
+                    "Emulation.setTimezoneOverride",
+                    Some(serde_json::json!({ "timezoneId": tz })),
+                )
+                .await
+            {
+                Ok(_) => {
+                    eprintln!(
+                        "[bladebro] domain profile {domain}: tz={}",
+                        want.tz.as_deref().unwrap_or("(browser default)")
+                    );
+                    self.emulation.tz = want.tz.clone();
+                }
+                Err(e) => eprintln!("[bladebro] WARNING: {domain}: timezone override failed: {e}"),
             }
-            if let Some(ref locale) = profile.locale {
-                let _ = self
-                    .cdp
-                    .send(
-                        "Emulation.setLocaleOverride",
-                        Some(serde_json::json!({ "locale": locale })),
+        }
+        if want.locale != self.emulation.locale {
+            // Keep Accept-Language in sync — it was set once at attach;
+            // a swapped locale with a stale header is a cross-layer
+            // mismatch fingerprint. No locale: both overrides cleared.
+            let (locale_params, headers) = match want.locale.as_deref() {
+                Some(locale) => {
+                    let base = locale.split('-').next().unwrap_or(locale);
+                    (
+                        serde_json::json!({ "locale": locale }),
+                        serde_json::json!({ "Accept-Language": format!("{locale},{base};q=0.9") }),
                     )
-                    .await;
-                // Keep Accept-Language in sync — it was set once at attach;
-                // a swapped locale with a stale header is a cross-layer
-                // mismatch fingerprint.
-                let base = locale.split('-').next().unwrap_or(locale);
-                let _ = self
-                    .cdp
-                    .send(
-                        "Network.setExtraHTTPHeaders",
-                        Some(serde_json::json!({
-                            "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
-                        })),
-                    )
-                    .await;
-                eprintln!("[bladebro] domain profile {domain}: locale={locale}");
+                }
+                None => (serde_json::json!({}), serde_json::json!({})),
+            };
+            let applied = self
+                .cdp
+                .send("Emulation.setLocaleOverride", Some(locale_params))
+                .await;
+            let _ = self
+                .cdp
+                .send(
+                    "Network.setExtraHTTPHeaders",
+                    Some(serde_json::json!({ "headers": headers })),
+                )
+                .await;
+            match applied {
+                Ok(_) => {
+                    eprintln!(
+                        "[bladebro] domain profile {domain}: locale={}",
+                        want.locale.as_deref().unwrap_or("(browser default)")
+                    );
+                    self.emulation.locale = want.locale.clone();
+                }
+                Err(e) => eprintln!("[bladebro] WARNING: {domain}: locale override failed: {e}"),
             }
+        }
 
-            // S11 coherence: navigator.language comes from the INJECTED
-            // script, not the CDP override. If the injection bakes a
-            // different locale, navigator.language and Intl disagree — a
-            // fingerprint-visible mismatch. Swap the registration (remove
-            // + re-add, never stack) so both layers speak the same locale.
-            let want_locale = profile
-                .locale
-                .clone()
-                .or_else(|| std::env::var("BLADE_LOCALE").ok().filter(|s| !s.is_empty()));
-            if want_locale != self.active_locale {
-                if let Some(id) = self.stealth_script_id.take() {
-                    let _ = self
-                        .cdp
-                        .send(
-                            "Page.removeScriptToEvaluateOnNewDocument",
-                            Some(serde_json::json!({ "identifier": id })),
-                        )
-                        .await;
-                }
-                match crate::stealth::apply_stealth(&self.cdp, profile.locale.as_deref()).await {
-                    Ok(id) => {
-                        self.stealth_script_id = Some(id);
-                        self.active_locale = want_locale;
-                    }
-                    Err(e) => eprintln!("[bladebro] WARNING: locale swap injection failed: {e}"),
-                }
+        // S11 coherence: navigator.language comes from the INJECTED
+        // script, not the CDP override. If the injection bakes a
+        // different locale, navigator.language and Intl disagree — a
+        // fingerprint-visible mismatch. Swap the registration (remove
+        // + re-add, never stack) so both layers speak the same locale.
+        if want.locale != self.active_locale {
+            if let Some(id) = self.stealth_script_id.take() {
+                let _ = self
+                    .cdp
+                    .send(
+                        "Page.removeScriptToEvaluateOnNewDocument",
+                        Some(serde_json::json!({ "identifier": id })),
+                    )
+                    .await;
             }
+            match crate::stealth::apply_stealth(&self.cdp, want.locale.as_deref()).await {
+                Ok(id) => {
+                    self.stealth_script_id = Some(id);
+                    self.active_locale = want.locale.clone();
+                }
+                Err(e) => eprintln!("[bladebro] WARNING: locale swap injection failed: {e}"),
+            }
+        }
+    }
+}
+
+/// S11: the timezone and locale a page emulates over CDP (None = no
+/// override: the browser's own value).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Emulation {
+    tz: Option<String>,
+    locale: Option<String>,
+}
+
+impl Emulation {
+    /// The session baseline attach applies: BLADE_TZ / BLADE_LOCALE.
+    pub(crate) fn session() -> Self {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        Self {
+            tz: env("BLADE_TZ"),
+            locale: env("BLADE_LOCALE"),
+        }
+    }
+
+    /// What a navigation to a domain emulates: its profile's fields, and the
+    /// session baseline for each field the profile omits (or for a domain
+    /// without a profile) — never a value left over from the last domain.
+    fn for_domain(profile: Option<&DomainProfile>, base: &Emulation) -> Self {
+        Self {
+            tz: profile
+                .and_then(|p| p.tz.clone())
+                .or_else(|| base.tz.clone()),
+            locale: profile
+                .and_then(|p| p.locale.clone())
+                .or_else(|| base.locale.clone()),
         }
     }
 }
@@ -1002,7 +1062,7 @@ fn normalize_url(value: &str) -> String {
 mod tests {
     use super::{
         already_here, error_page_failure, extract_domain, landed, nav_params_note, normalize_url,
-        query_params, validate_nav_url,
+        query_params, validate_nav_url, DomainProfile, Emulation,
     };
     use serde_json::json;
 
@@ -1081,6 +1141,43 @@ mod tests {
             error_page_failure("http://h/", "net::ERR_ABORTED", None, false),
             None
         );
+    }
+
+    /// P7: per-domain tz/locale are reverted, not inherited. A domain without
+    /// a profile, or a profile omitting a field, runs with the session
+    /// baseline for that field — never the previous domain's value (which
+    /// leaked to every later site, and split navigator.language from Intl).
+    #[test]
+    fn domain_emulation_reverts_fields_the_profile_does_not_set() {
+        let none = Emulation::default();
+        let tokyo_de = DomainProfile {
+            tz: Some("Asia/Tokyo".into()),
+            locale: Some("de-DE".into()),
+        };
+        let full = Emulation::for_domain(Some(&tokyo_de), &none);
+        assert_eq!(full.tz.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(full.locale.as_deref(), Some("de-DE"));
+        // Next domain has no profile: back to the browser's own values.
+        assert_eq!(Emulation::for_domain(None, &none), none);
+        // Next domain sets tz only: the locale reverts with it, so the CDP
+        // locale and the injected navigator.language stay one value.
+        let tz_only = DomainProfile {
+            tz: Some("Australia/Sydney".into()),
+            locale: None,
+        };
+        let next = Emulation::for_domain(Some(&tz_only), &none);
+        assert_eq!(next.tz.as_deref(), Some("Australia/Sydney"));
+        assert_eq!(next.locale, None);
+        // The session baseline (BLADE_TZ / BLADE_LOCALE) is what "revert"
+        // means when one is set.
+        let session = Emulation {
+            tz: Some("Europe/Paris".into()),
+            locale: Some("fr-FR".into()),
+        };
+        assert_eq!(Emulation::for_domain(None, &session), session);
+        let next = Emulation::for_domain(Some(&tz_only), &session);
+        assert_eq!(next.tz.as_deref(), Some("Australia/Sydney"));
+        assert_eq!(next.locale.as_deref(), Some("fr-FR"));
     }
 
     #[test]

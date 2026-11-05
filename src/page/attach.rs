@@ -180,6 +180,12 @@ impl Page {
             }
         };
         let active_locale = std::env::var("BLADE_LOCALE").ok().filter(|s| !s.is_empty());
+        // What the S6 block above put on this target (none on the real lane).
+        let emulation = if crate::realbrowser::real_lane() {
+            super::navigate::Emulation::default()
+        } else {
+            super::navigate::Emulation::session()
+        };
         wait_for_load(&cdp, Duration::from_secs(10)).await?;
 
         // D22: Worker GL spoof — inject the GL spoof into Worker contexts too.
@@ -974,6 +980,7 @@ impl Page {
             worker_task,
             stealth_script_id,
             active_locale,
+            emulation,
             intercept,
             intercept_task: Some(intercept_task),
             downloads,

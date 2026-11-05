@@ -212,6 +212,10 @@ pub struct Page {
     stealth_script_id: Option<crate::stealth::ScriptId>,
     /// Locale the current injection bakes in (None = no override).
     active_locale: Option<String>,
+    /// Timezone/locale currently overridden over CDP (S11): a per-domain
+    /// profile's values are reverted by the next domain that does not set
+    /// them, so this is what the next navigation diffs against.
+    emulation: navigate::Emulation,
     /// Request-interception state shared with the Fetch task
     /// (block-class bitmask + page domain for third-party checks).
     intercept: intercept::InterceptState,
