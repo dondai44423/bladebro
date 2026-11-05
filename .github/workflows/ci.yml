@@ -15,12 +15,21 @@ on:
     branches: [main]
     paths-ignore: *docs-ignore
 
+# A newer push to the same PR supersedes the older run; it only wastes (scarce) native runners.
+# Never cancel main/dispatch runs: the release gate reads the exact head's result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 5
 
 jobs:
   lint-test-build:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -74,19 +83,11 @@ jobs:
           echo "CHROME_PATH=$chrome" >> "$GITHUB_ENV"
           "$chrome" --version
 
-      - name: Cache cargo registry
-        uses: actions/cache@v6
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-registry-
-
-      - name: Cache cargo build
-        uses: actions/cache@v6
-        with:
-          path: target
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.rust-version }}-cargo-build-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.rust-version }}-cargo-build-
+          cache-on-failure: true
+          key: ${{ matrix.os }}
 
       - name: Format check
         run: cargo fmt --check
