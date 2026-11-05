@@ -70,6 +70,13 @@ async fn sub_fires(sub: &mut crate::cdp::SessionSubscription, method: &str) -> b
         match sub.recv().await {
             Ok(ev) if ev.method == method => return true,
             Ok(_) => continue,
+            // A closed bus (browser gone) never fires. Park instead of
+            // returning, so a select over two subscriptions can't read the
+            // closure as one of its events; callers bound this wait with a
+            // timeout and their next command reports the closed transport.
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                std::future::pending::<()>().await
+            }
             Err(_) => return false,
         }
     }
@@ -969,4 +976,36 @@ pub async fn perform_with_network(
         scroll_report.as_ref(),
     );
     Ok((delta, verdict))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::WebSocketStream;
+
+    #[tokio::test]
+    async fn a_closed_event_bus_never_reads_as_a_fired_event() {
+        // The click path selects nav vs dialog subscriptions: if a closed
+        // bus resolved `sub_fires`, a dead browser would pick an arm at
+        // random (e.g. "dialog opened"). It must park until the timeout.
+        let (near, far) = tokio::io::duplex(1024);
+        let ws = WebSocketStream::from_raw_socket(near, Role::Client, None).await;
+        drop(far);
+        let client = crate::cdp::CdpClient::from_socket(ws).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !client.is_closed() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("reader must notice the dead socket");
+        let mut sub = CdpSession::root(client).subscribe();
+        let fired = tokio::time::timeout(
+            Duration::from_millis(100),
+            sub_fires(&mut sub, "Page.javascriptDialogOpening"),
+        )
+        .await;
+        assert!(fired.is_err(), "closed bus resolved sub_fires: {fired:?}");
+    }
 }

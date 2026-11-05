@@ -72,7 +72,12 @@ type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpOutcome>>>>;
 pub struct CdpClient {
     writer_tx: mpsc::Sender<Message>,
     pending: PendingMap,
-    events_tx: broadcast::Sender<CdpEvent>,
+    /// Weak on purpose: the reader task owns the only strong sender, so the
+    /// bus closes with the transport and every subscriber and `wait_for`
+    /// sees `Closed` at once. A strong sender here kept the bus open for as
+    /// long as any client clone lived, so after the browser died waiters
+    /// ran out their full deadlines and subscriber loops never ended.
+    events_tx: broadcast::WeakSender<CdpEvent>,
     next_id: Arc<AtomicU64>,
     /// Set when the reader task ends (browser died / socket closed).
     /// drain_pending runs ONCE at reader exit — sends registered afterward
@@ -108,6 +113,7 @@ impl CdpClient {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (events_tx, _events_rx) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let events_weak = events_tx.downgrade();
         let (writer_tx, writer_rx) = mpsc::channel::<Message>(256);
         let next_id = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -131,7 +137,6 @@ impl CdpClient {
         // Reader: parse frames, route responses to pending callers, fan out events.
         {
             let pending = pending.clone();
-            let events_tx = events_tx.clone();
             let closed_reader = closed.clone();
             tokio::spawn(async move {
                 let mut stream = stream;
@@ -159,13 +164,15 @@ impl CdpClient {
 
                 closed_reader.store(true, Ordering::Relaxed);
                 drain_pending(&pending);
+                // The only strong sender: dropping it closes the bus.
+                drop(events_tx);
             });
         }
 
         Ok(Self {
             writer_tx,
             pending,
-            events_tx,
+            events_tx: events_weak,
             next_id,
             closed,
         })
@@ -188,6 +195,7 @@ impl CdpClient {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (events_tx, _events_rx) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let events_weak = events_tx.downgrade();
         let (writer_tx, writer_rx) = mpsc::channel::<Message>(256);
         let next_id = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -216,7 +224,6 @@ impl CdpClient {
         // Reader: accumulate bytes until NUL, parse, route.
         {
             let pending = pending.clone();
-            let events_tx = events_tx.clone();
             let closed_reader = closed.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(reader);
@@ -249,13 +256,15 @@ impl CdpClient {
                 }
                 closed_reader.store(true, Ordering::Relaxed);
                 drain_pending(&pending);
+                // The only strong sender: dropping it closes the bus.
+                drop(events_tx);
             });
         }
 
         Ok(Self {
             writer_tx,
             pending,
-            events_tx,
+            events_tx: events_weak,
             next_id,
             closed,
         })
@@ -341,7 +350,12 @@ impl CdpClient {
 
     /// Subscribe to the event stream. Multiple subscribers are supported.
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
-        self.events_tx.subscribe()
+        match self.events_tx.upgrade() {
+            Some(tx) => tx.subscribe(),
+            // Transport already gone: a receiver whose sender is dropped
+            // reports Closed on its first recv.
+            None => broadcast::channel(1).1,
+        }
     }
 
     /// Has the transport been closed (Chrome died or pipe broke)?
@@ -352,7 +366,8 @@ impl CdpClient {
 
     /// Wait for the next event whose method equals `method`, up to `deadline`.
     ///
-    /// Other events are skipped. A lagged bus is recovered transparently.
+    /// Other events are skipped. A lagged bus is recovered transparently; a
+    /// closed transport ends the wait with [`BladeError::Closed`] at once.
     pub fn wait_for(
         &self,
         method: &str,
@@ -612,7 +627,7 @@ mod reliability_tests {
         let client = CdpClient {
             writer_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
-            events_tx,
+            events_tx: events_tx.downgrade(),
             next_id: Arc::new(AtomicU64::new(0)),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -794,5 +809,68 @@ mod reliability_tests {
             Some(17 << 20)
         );
         assert!(!client.is_closed());
+    }
+
+    #[tokio::test]
+    async fn event_waiters_wake_with_closed_when_the_browser_dies() {
+        // Regression: the client kept its own broadcast sender alive, so the
+        // bus never closed — after the browser died every waiter ran out its
+        // full deadline (10 s in navigate) and subscriber loops never ended.
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        use tokio_tungstenite::WebSocketStream;
+        let (near, far) = tokio::io::duplex(64 * 1024);
+        let client_ws = WebSocketStream::from_raw_socket(near, Role::Client, None).await;
+        let browser = WebSocketStream::from_raw_socket(far, Role::Server, None).await;
+        let client = CdpClient::from_socket(client_ws).unwrap();
+        let session = crate::cdp::CdpSession::child(client.clone(), "S1");
+        let client_wait = client.wait_for("Page.frameNavigated", Duration::from_secs(5));
+        let session_wait = session.wait_for("Page.frameNavigated", Duration::from_secs(5));
+        let mut sub = session.subscribe();
+
+        let started = std::time::Instant::now();
+        drop(browser); // the browser dies: the socket hits EOF
+        let (a, b) = tokio::join!(client_wait, session_wait);
+        assert!(
+            matches!(a, Err(BladeError::Closed)),
+            "client wait_for: {a:?}"
+        );
+        assert!(
+            matches!(b, Err(BladeError::Closed)),
+            "session wait_for: {b:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let next = timeout(Duration::from_secs(1), sub.recv()).await;
+        assert!(
+            matches!(next, Ok(Err(broadcast::error::RecvError::Closed))),
+            "subscriber loop must see Closed: {next:?}"
+        );
+        // A waiter created after the death fails at once, too.
+        let late = timeout(
+            Duration::from_secs(1),
+            client.wait_for("Page.loadEventFired", Duration::from_secs(5)),
+        )
+        .await;
+        assert!(
+            matches!(late, Ok(Err(BladeError::Closed))),
+            "late wait_for: {late:?}"
+        );
+        assert!(client.is_closed());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipe_lane_event_waiters_wake_with_closed_when_the_browser_dies() {
+        use tokio::net::unix::pipe;
+        let (browser_out, client_in) = pipe::pipe().unwrap();
+        let (client_out, _browser_in) = pipe::pipe().unwrap();
+        let client = CdpClient::from_pipe(client_in, client_out).unwrap();
+        let wait = client.wait_for("Page.frameNavigated", Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        drop(browser_out); // Chrome exited: its CDP output pipe hits EOF
+        let res = wait.await;
+        assert!(
+            matches!(res, Err(BladeError::Closed)),
+            "pipe wait_for: {res:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
