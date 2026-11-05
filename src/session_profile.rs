@@ -276,20 +276,7 @@ impl SessionProfile {
             create_ephemeral_profile_dir()?
         };
 
-        // SECURITY: 0700 — the profile contains cookies and localStorage.
-        // Plain create_dir_all gave umask perms (755 on default setups).
-        create_private_profile_dir(&dir)?;
-
-        if seasoned {
-            // Copy the seasoned template in (returning-visitor
-            // trust). Best-effort: locked/missing files skip.
-            let template = platform::blade_dir().join("profile");
-            if template.is_dir() {
-                copy_profile(&template, &dir);
-            }
-        }
-        std::fs::write(dir.join(".blade-owner"), std::process::id().to_string())
-            .map_err(|e| BladeError::Other(format!("cannot mark profile ownership: {e}")))?;
+        Self::prepare_owned_dir(&platform::blade_dir(), &dir, seasoned)?;
 
         Ok(Self {
             dir,
@@ -297,6 +284,34 @@ impl SessionProfile {
             seasoned,
             real_root: None,
         })
+    }
+
+    /// Make `dir` this process's private profile under the agent-lane data
+    /// root `root`: seeded from `root/profile` when seasoned, then marked
+    /// with our pid. `root` is passed in, not re-resolved (see
+    /// [`Self::sync_back_only_at`]).
+    fn prepare_owned_dir(root: &Path, dir: &Path, seasoned: bool) -> Result<()> {
+        // Only our own `sess-<pid>` can be an earlier same-pid process's
+        // leftover; an ephemeral dir was created exclusively a moment ago.
+        if dir == own_session_dir(root) {
+            rescue_same_pid_leftover(root, dir, None)?;
+        }
+        // SECURITY: 0700 — the profile contains cookies and localStorage.
+        // Plain create_dir_all gave umask perms (755 on default setups).
+        create_private_profile_dir(dir)?;
+        note_created_here(dir);
+
+        if seasoned {
+            // Copy the seasoned template in (returning-visitor
+            // trust). Best-effort: locked/missing files skip.
+            let template = root.join("profile");
+            if template.is_dir() {
+                copy_profile(&template, dir);
+            }
+        }
+        std::fs::write(dir.join(".blade-owner"), std::process::id().to_string())
+            .map_err(|e| BladeError::Other(format!("cannot mark profile ownership: {e}")))?;
+        Ok(())
     }
 
     /// Create a real-lane session profile (clone mechanism): copy the
@@ -307,16 +322,16 @@ impl SessionProfile {
     /// still ages through the sole-survivor sync-back.
     pub fn create_real(root: &Path) -> Result<Self> {
         reap_orphans();
-        let dir = root
-            .join("profiles")
-            .join(format!("sess-{}", std::process::id()));
+        let dir = own_session_dir(root);
+        rescue_same_pid_leftover(root, &dir, Some(root))?;
         if dir.exists() {
-            // PID reuse after a crash: never copy on top of a stale dir.
+            // An earlier session of this same process: never copy on top.
             create_private_profile_dir(&dir)?;
             std::fs::remove_dir_all(&dir)
                 .map_err(|e| BladeError::Other(format!("cannot replace stale profile: {e}")))?;
         }
         create_private_profile_dir(&dir)?;
+        note_created_here(&dir);
         let template = root.join("template");
         if template.is_dir() {
             copy_profile(&template, &dir);
@@ -648,9 +663,46 @@ fn template_lock_stale(lock: &Path) -> bool {
 
 /// This process's session profile dir.
 fn session_dir() -> PathBuf {
-    platform::blade_dir()
-        .join("profiles")
+    own_session_dir(&platform::blade_dir())
+}
+
+/// This process's session dir under a data root (`root/profiles/sess-<pid>`).
+fn own_session_dir(root: &Path) -> PathBuf {
+    root.join("profiles")
         .join(format!("sess-{}", std::process::id()))
+}
+
+/// Session dirs this process created. `sess-<pid>` is unique only among
+/// LIVE processes: our name on a dir that is not in here was left by an
+/// earlier process with the same pid.
+static CREATED_HERE: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn note_created_here(dir: &Path) {
+    let mut created = CREATED_HERE.lock().unwrap_or_else(|e| e.into_inner());
+    if !created.iter().any(|d| d == dir) {
+        created.push(dir.to_path_buf());
+    }
+}
+
+/// An earlier process with our pid crashed (a container restart reuses the
+/// entrypoint's pid; plain pid reuse does the rest) and left `dir`. The
+/// reaper skips our own pid, so this is the one chance to stop its browser
+/// and sync its state back before the new session replaces it — reusing it
+/// would copy the template over the crashed session's cookies.
+fn rescue_same_pid_leftover(root: &Path, dir: &Path, real_root: Option<&Path>) -> Result<()> {
+    let leftover = std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
+        && !CREATED_HERE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|d| d == dir);
+    if !leftover || reap::reap_dead_session(root, dir, real_root) {
+        return Ok(());
+    }
+    Err(BladeError::Other(format!(
+        "session profile {} is still in use by a browser left running by an earlier bladebro process with this pid; close that browser, then retry",
+        dir.display()
+    )))
 }
 
 /// Root of a real-lane session dir (`<root>/profiles/sess-<pid>` →
@@ -942,6 +994,42 @@ mod tests {
             old_acquired,
             "a live pid behind an hour-old marker is pid reuse, not a copier"
         );
+    }
+
+    #[test]
+    fn crashed_session_with_this_pid_is_rescued_not_overwritten() {
+        // A fixed pid + persistent data dir: an earlier incarnation of THIS
+        // pid crashed and left `sess-<pid>`. The reaper skips our own pid,
+        // so preparing the new session is the only chance to rescue it.
+        let root = std::env::temp_dir().join(format!("blade-same-pid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("profile/Default")).unwrap();
+        std::fs::write(root.join("profile/Default/Cookies"), "template").unwrap();
+        let dir = root
+            .join("profiles")
+            .join(format!("sess-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Default")).unwrap();
+        std::fs::write(dir.join(".blade-owner"), std::process::id().to_string()).unwrap();
+        std::fs::write(dir.join("Default/Cookies"), "crashed-session").unwrap();
+
+        SessionProfile::prepare_owned_dir(&root, &dir, true).unwrap();
+        let rescued = std::fs::read_to_string(root.join("profile/Default/Cookies")).unwrap();
+        let seeded = std::fs::read_to_string(dir.join("Default/Cookies")).unwrap();
+
+        // A second launch in the SAME process lifetime reuses its own dir:
+        // nothing of ours is synced or replaced mid-life.
+        std::fs::write(dir.join("Default/Cookies"), "this-lifetime").unwrap();
+        SessionProfile::prepare_owned_dir(&root, &dir, true).unwrap();
+        let template_after_reuse =
+            std::fs::read_to_string(root.join("profile/Default/Cookies")).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(
+            rescued, "crashed-session",
+            "the crashed session's state must reach the template"
+        );
+        assert_eq!(seeded, "crashed-session");
+        assert_eq!(template_after_reuse, "crashed-session");
     }
 
     #[test]
