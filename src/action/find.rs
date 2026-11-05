@@ -564,12 +564,17 @@ pub(super) fn find_sig_expr(
     Ok("((sig,mode,text,frame)=>{".to_string()
         + "const d=document;if(!d||!d.body)return null;"
         + &JS_PREAMBLE
-        + "let doc=d;let ox=0,oy=0;"
+        + "let doc=d;let ox=0,oy=0;const _frs=[];"
         + "for(let i=0;i<frame.length;i++){"
         + "const ifs=doc.querySelectorAll('iframe');const f=ifs[frame[i]];"
         + "if(!f)return{ok:false,reason:'frame gone'};"
         + "try{doc=f.contentDocument;if(!doc)return{ok:false,reason:'frame inaccessible'};}catch(e){return{ok:false,reason:'cross-origin'};}"
-        + "const ir=f.getBoundingClientRect();ox+=ir.x;oy+=ir.y;}"
+        + "_frs.push(f);}"
+        // A frame's content starts inside its border and padding: offsetting
+        // by the border box put every in-frame box ~2px up-left (the default
+        // iframe border), enough to miss a tiny target. Re-measured after
+        // any scroll - scrolling an in-frame target moves its frames too.
+        + "var _reoff=function(){ox=0;oy=0;for(var i=0;i<_frs.length;i++){var f=_frs[i];var ir=f.getBoundingClientRect();var cs=null;try{cs=getComputedStyle(f);}catch(_e){}ox+=ir.x+(f.clientLeft||0)+((cs&&parseFloat(cs.paddingLeft))||0);oy+=ir.y+(f.clientTop||0)+((cs&&parseFloat(cs.paddingTop))||0);}};_reoff();"
         + "const all=deepAll(doc,sel);"
         + "const fps=frame.join(',');const counts={};"
         // Editing-host helpers, shared by prepare/clear/check/selhost/type:
@@ -614,7 +619,15 @@ pub(super) fn find_sig_expr(
         + "const s=fps+'|'+r+'|'+nm+'|'+counts[key];"
         + "if(s==="
         + &sig_js
-        + "){if(!vis(n)){if(mode==='state')return{ok:true,state:stateOf(n)};var _vd=(mode==='check'||mode==='prepare'||mode==='focus')?_hiddenHost(n):null;if(_vd){if(mode!=='check'){_vd.scrollIntoView({block:'center'});_vd.focus();}if(mode==='focus')return{ok:true};return{ok:true,text:_read(_vd),hostKind:(_ced(_vd)?'ce':((_vd.tagName)?_vd.tagName.toLowerCase():'')),hostIsTgt:false,sel:_selLen(_vd),tgtMissing:true};}return{ok:false,reason:'element hidden'};}if(mode==='state')return{ok:true,state:stateOf(n)};const rect=n.getBoundingClientRect();"
+        + "){if(!vis(n)){if(mode==='state')return{ok:true,state:stateOf(n)};var _vd=(mode==='check'||mode==='prepare'||mode==='focus')?_hiddenHost(n):null;if(_vd){if(mode!=='check'){_vd.scrollIntoView({block:'center'});_vd.focus();}if(mode==='focus')return{ok:true};return{ok:true,text:_read(_vd),hostKind:(_ced(_vd)?'ce':((_vd.tagName)?_vd.tagName.toLowerCase():'')),hostIsTgt:false,sel:_selLen(_vd),tgtMissing:true};}return{ok:false,reason:'element hidden'};}if(mode==='state')return{ok:true,state:stateOf(n)};"
+        // L5: a click target whose center lies outside the viewport is
+        // scrolled into view (centered, like hover and prepare) BEFORE it is
+        // measured. Off-screen, elementFromPoint returns null, the target
+        // read as covered and the untrusted js lane fired first
+        // (event.isTrusted=false on every below-the-fold click). Instant, so
+        // a smooth-scrolling page cannot leave the box mid-flight.
+        + "if(mode==='box'){var _sr=n.getBoundingClientRect();var _sw=doc.defaultView||window;var _sx=_sr.x+_sr.width/2,_sy=_sr.y+_sr.height/2;if(_sx<0||_sy<0||_sx>=_sw.innerWidth||_sy>=_sw.innerHeight||_sx+ox<0||_sy+oy<0||_sx+ox>=window.innerWidth||_sy+oy>=window.innerHeight){try{n.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});}catch(_e){n.scrollIntoView({block:'center',inline:'nearest'});}_reoff();}}"
+        + "const rect=n.getBoundingClientRect();"
         + "const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;"
         + "const top=doc.elementFromPoint(cx,cy);"
         + "const isTopmost=top===n||n.contains(top);"
@@ -637,7 +650,7 @@ pub(super) fn find_sig_expr(
         + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!((lp(n)||n).disabled),isTopmost:_ltopOk,hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),leaf:_lred,top_desc:_ltop};}"
         // The resolved host gets focus when focusing the target left it
         // elsewhere (a wrapper's inner field): keys go where we read back.
-        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();var _ph=_hostOf(tgt);if(_ph&&_ph!==tgt&&_ph!==doc.activeElement){try{_ph.focus();}catch(_e){}}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false,away:_away(_ph,tgt)};}"
+        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});_reoff();tgt.focus();var _ph=_hostOf(tgt);if(_ph&&_ph!==tgt&&_ph!==doc.activeElement){try{_ph.focus();}catch(_e){}}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false,away:_away(_ph,tgt)};}"
         + "if(mode==='focus'){var _fc=tgt;try{if(tgt.tabIndex<0){var _cd=tgt.querySelector('[tabindex],button,a[href],input,select,textarea');if(_cd)_fc=_cd;}}catch(_e){}try{_fc.focus();}catch(_e){}var _fo=false;try{_fo=(_fc.getRootNode().activeElement===_fc)||(document.activeElement===_fc);}catch(_e){}return{ok:true,focused:_fo};}"
         + "if(mode==='clear'){var _ch=_hostOf(tgt);if(!_ch)return{ok:false,reason:'no editable host'};if(_ced(_ch)){_clr(_ch);}else if('value' in _ch){var _cpr=_ch.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _cd=Object.getOwnPropertyDescriptor(_cpr,'value');if(_cd&&_cd.set){_cd.set.call(_ch,'');}else{_ch.value='';}_ch.dispatchEvent(new Event('input',{bubbles:true}));_ch.dispatchEvent(new Event('change',{bubbles:true}));}else{return{ok:false,reason:'not an editable field'};}return{ok:true,text:_read(_ch)};}"
         // js-fallback click (W1): a bare n.click() fires ONE click event and
@@ -664,7 +677,7 @@ pub(super) fn find_sig_expr(
         + "n.value=" + &text_js + ";n.dispatchEvent(new Event('change',{bubbles:true}));n.dispatchEvent(new Event('input',{bubbles:true}));return{ok:true};}"
         + if mode == "inspect" { include_str!("js/inspect.js") } else { "" }
         + "if(mode==='read'){var txt=n.innerText||n.textContent||'';if(!txt&&('value' in n)&&n.value)txt=n.value;return{ok:true,text:txt.slice(0,5000)};}"
-        + "if(mode==='hover'){n.scrollIntoView({block:'center'});const rect=n.getBoundingClientRect();const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;const top=doc.elementFromPoint(cx,cy);const isTopmost=top===n||n.contains(top);return{ok:true,box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],isTopmost:isTopmost};}"
+        + "if(mode==='hover'){n.scrollIntoView({block:'center'});_reoff();const rect=n.getBoundingClientRect();const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;const top=doc.elementFromPoint(cx,cy);const isTopmost=top===n||n.contains(top);return{ok:true,box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],isTopmost:isTopmost};}"
         + "return{ok:false,reason:'unknown mode'};}}"
         // No element carries the sig. The one legitimate re-adoption: an
         // unlabelled contenteditable is NAMED BY ITS OWN TEXT, so our own

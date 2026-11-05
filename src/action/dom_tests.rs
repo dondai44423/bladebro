@@ -31,13 +31,16 @@ fn run(name: &str, body: &str, exprs: &[(&str, String)]) {
     );
 }
 
-/// find-by-sig in the top document, wrapped as a JS thunk so the case
-/// decides when it runs.
-fn sig(sig: &str, mode: &str, text: Option<&str>) -> String {
+/// find-by-sig, wrapped as a JS thunk so the case decides when it runs.
+fn sig_in(sig: &str, mode: &str, text: Option<&str>, frame: &[usize]) -> String {
     format!(
         "(() => {})",
-        find_sig_expr(sig, mode, text, &[]).expect("find-sig expr builds")
+        find_sig_expr(sig, mode, text, frame).expect("find-sig expr builds")
     )
+}
+
+fn sig(sig: &str, mode: &str, text: Option<&str>) -> String {
+    sig_in(sig, mode, text, &[])
 }
 
 // ---- L2: input actions adopt only the addressed field's own editor ----
@@ -300,5 +303,49 @@ ok(r && r.leaf === true, 'the redirect is flagged', r);
         "l3_wrapper",
         body,
         &[("__WRAP__", sig("|button|Account menu|1", "box", None))],
+    );
+}
+
+// ---- L5: offscreen targets are scrolled into view before lanes are chosen ----
+#[test]
+fn offscreen_target_is_scrolled_into_view_before_lane_choice() {
+    let body = r#"
+const d = use(page({vw: 800, vh: 600, h: 3000},
+  h('button', {id: 'top', rect: [10, 10, 100, 30]}, 'Top button'),
+  h('button', {id: 'below', rect: [10, 2400, 100, 30]}, 'Below fold')));
+let r = __TOP__();
+ok(r && r.ok && r.isTopmost === true && d.scrolls === 0, 'a visible target never scrolls the page', r);
+r = __BELOW__();
+ok(r && r.ok && r.isTopmost === true, 'below the fold: measured after scrolling into view, so the trusted mouse lane is chosen', r);
+ok(r && r.box && r.box[1] >= 0 && r.box[1] + r.box[3] <= 600, 'the box is inside the viewport', r);
+"#;
+    run(
+        "l5_offscreen",
+        body,
+        &[
+            ("__TOP__", sig("|button|Top button|1", "box", None)),
+            ("__BELOW__", sig("|button|Below fold|1", "box", None)),
+        ],
+    );
+}
+
+// ---- A-iframe: frame offsets start at the iframe's content box ----
+#[test]
+fn frame_offsets_include_the_iframe_border_and_padding() {
+    let body = r#"
+const inner = page({vw: 300, vh: 200},
+  h('button', {id: 'tiny', 'aria-label': 'Tiny corner', rect: [0, 0, 8, 8]}));
+const d = use(page({},
+  h('iframe', {id: 'f', rect: [40, 40, 328, 228], style: {paddingLeft: '12px', paddingTop: '12px'}, props: {contentDocument: inner, clientLeft: 2, clientTop: 2}})));
+const r = __TINY__();
+eq(r && r.box, [54, 54, 8, 8], 'box = iframe border box + border + padding + element offset');
+"#;
+    run(
+        "iframe_offset",
+        body,
+        &[(
+            "__TINY__",
+            sig_in("0|button|Tiny corner|1", "box", None, &[0]),
+        )],
     );
 }
