@@ -660,6 +660,76 @@ console.log(JSON.stringify((0, eval)(S)));
         );
     }
 
+    /// Inline SVG children report LOWERCASE tagNames (`svg`, `style`), so
+    /// skip lists written against uppercase HTML names never matched them:
+    /// SVG `<style>` CSS and `<title>` text leaked into `see content`,
+    /// markdown, text conditions and link names. Runs the REAL readers
+    /// against one stub DOM.
+    #[test]
+    fn svg_children_stay_out_of_text_reads() {
+        let content = super::content::content_expr(8000);
+        let markdown = super::content::markdown_expr(8000, None).expect("markdown expr builds");
+        let js = [
+            r#"
+const view = { getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }) };
+globalThis.getComputedStyle = view.getComputedStyle;
+globalThis.location = { href: 'http://fixture.test/a', hostname: 'fixture.test', pathname: '/a' };
+const doc = { defaultView: view, title: '' };
+const anim = (v) => Object.create({ get baseVal() { return v; } });
+const T = (s) => ({ nodeType: 3, textContent: s });
+const E = (tag, kids, extra) => {
+  const e = Object.assign({
+    nodeType: 1, tagName: tag, childNodes: kids, children: kids.filter(k => k.nodeType === 1),
+    hidden: false, id: '', className: '', ownerDocument: doc, shadowRoot: null, parentElement: null,
+    attrs: {}, getAttribute(k) { return this.attrs[k] === undefined ? null : this.attrs[k]; },
+    hasAttribute(k) { return k in this.attrs; }, closest() { return null; },
+  }, extra || {});
+  for (const k of e.children) k.parentElement = e;
+  return e;
+};
+// SVG-namespace elements: lowercase tagName, no `hidden`, className is an
+// SVGAnimatedString.
+const S = (tag, kids) => E(tag, kids, { hidden: undefined, className: anim('') });
+const icon = () => S('svg', [S('style', [T('.cls-1{fill:none;stroke:red}')]), S('title', [T('SVGTITLELEAK')]), S('rect', [])]);
+// Icon link: the SVG carries only presentation CSS, so the name is the text.
+const link = E('A', [S('svg', [S('style', [T('.ic{fill:blue}')]), S('rect', [])]), T('Search')], { attrs: { href: '/search' }, href: 'http://fixture.test/search', innerText: 'Search' });
+const body = E('BODY', [E('P', [T('Body text here.')]), icon(), E('P', [link])], { innerHTML: 'x', innerText: 'Body text here. Search' });
+doc.body = body;
+doc.querySelector = () => null;
+doc.querySelectorAll = () => [];
+globalThis.document = doc;
+let fail = 0;
+const clean = (label, s) => {
+  if (!/Body text here/.test(s) || /cls-1|\.ic\{|SVGTITLELEAK/.test(s)) { fail = 1; console.log('FAIL', label, JSON.stringify(s)); }
+};
+"#,
+            "clean('content', ",
+            content.as_str(),
+            ");\nclean('markdown', ",
+            markdown.as_str(),
+            ");\n",
+            super::JS_READ_TREE,
+            "\nconst parts = []; walkReadTree(body, n => { if (n.nodeType === 3) parts.push(n.textContent); });\nclean('read-tree', parts.join(' '));\n",
+            super::JS_LABEL_CACHE,
+            super::JS_NAME_FN,
+            r#"
+const nm = name(link, false);
+if (nm !== 'Search') { fail = 1; console.log('FAIL name', JSON.stringify(nm)); }
+if (!fail) console.log('svg skip fixtures pass');
+process.exit(fail);
+"#,
+        ]
+        .concat();
+        if let Some(out) = node_exec("svg-skip-fixtures", &js) {
+            assert!(
+                out.status.success(),
+                "SVG children leaked into a text read:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
     #[test]
     fn shadow_awareness_and_condition_scripts_are_valid_js() {
         node_check("extract-basic", include_str!("js/extract_basic.js"));

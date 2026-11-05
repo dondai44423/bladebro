@@ -12,7 +12,9 @@ function walkReadTree(root, visit) {
     }
     if (n.nodeType !== 1 && n.nodeType !== 9 && n.nodeType !== 11) continue;
     if (n.nodeType === 1) {
-      if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG|META|LINK)$/.test(n.tagName) || n.hidden) continue;
+      // Case-insensitive: inline SVG children report lowercase tagNames, so
+      // an uppercase-only match let SVG <style> CSS into text conditions.
+      if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG|META|LINK)$/i.test(n.tagName) || n.hidden) continue;
       const style = n.ownerDocument.defaultView.getComputedStyle(n);
       if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
       if (visit(n) === false) return;
