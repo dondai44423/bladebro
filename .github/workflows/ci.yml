@@ -61,7 +61,10 @@ jobs:
           mkdir -p "$mount"
           hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
           trap 'hdiutil detach "$mount"' EXIT
-          app="$mount/Google Chrome.app"
+          # DMG Finder/resource-fork metadata is not valid on signed code.
+          # Copy without that metadata, then verify the actual installed bytes.
+          app="$RUNNER_TEMP/Google Chrome.app"
+          ditto --noextattr --norsrc "$mount/Google Chrome.app" "$app"
           codesign --verify --deep --strict "$app"
           codesign --verify -R='anchor apple generic and certificate leaf[subject.OU] = "EQHXZ8M8AV"' "$app"
           # Only replace the disposable GitHub runner's preinstalled browser.
