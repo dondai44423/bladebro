@@ -247,8 +247,26 @@ pub fn effective_mode(cfg: &Config, user_data_root: &Path) -> Mode {
     }
 }
 
-/// Import-on-first-use for the clone lane — shared by `rb on` and the
-/// launch path so their behavior cannot drift apart.
+/// Import unless the clone already holds the selected profile's user-data
+/// root — shared by `rb on` and the launch path so their behavior cannot
+/// drift apart. Without the root check, `rb profile` pointing into another
+/// user-data dir launched the OLD root's clone with the new profile's
+/// directory name: the agent browsed as the wrong identity.
+pub fn ensure_current_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<()> {
+    if template_matches(&spec.id, &profile.root) {
+        return Ok(());
+    }
+    if let Some(old) = template_source(&spec.id).filter(|_| has_template(&spec.id)) {
+        eprintln!(
+            "{} the clone holds {old}, but the selected profile lives in {} — re-importing",
+            crate::ui::dim("[realbrowser]"),
+            profile.root.display()
+        );
+    }
+    ensure_import(spec, profile).map(|_| ())
+}
+
+/// Import (or re-import) the selected profile's root into the clone.
 pub fn ensure_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<ImportStats> {
     if let Some(owner) = profile_in_use(&profile.root) {
         eprintln!(

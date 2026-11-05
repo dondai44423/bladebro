@@ -155,13 +155,12 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
 
         "on" => {
             if cfg.enabled {
-                // Already on: still self-heal a missing clone (e.g. after
-                // `rb forget`) so the next launch never imports mid-run.
+                // Already on: still self-heal a missing or stale clone (after
+                // `rb forget`, or `rb profile` into another user-data root) so
+                // the next launch never imports mid-run.
                 if let Ok((spec, profile)) = rb::resolve_selection(&cfg) {
-                    if rb::effective_mode(&cfg, &profile.root) == rb::Mode::Clone
-                        && !rb::has_template(&spec.id)
-                    {
-                        rb::ensure_import(&spec, &profile)?;
+                    if rb::effective_mode(&cfg, &profile.root) == rb::Mode::Clone {
+                        rb::ensure_current_import(&spec, &profile)?;
                     }
                 }
                 if json_mode {
@@ -182,8 +181,8 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             }
             // Import now (clone lane) so problems surface HERE, not inside a
             // later agent run.
-            if mode == rb::Mode::Clone && !rb::has_template(&spec.id) {
-                rb::ensure_import(&spec, &profile)?;
+            if mode == rb::Mode::Clone {
+                rb::ensure_current_import(&spec, &profile)?;
             }
             cfg.enabled = true;
             rb::save_config(&cfg)?;

@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 struct Fixture(PathBuf);
@@ -43,6 +43,10 @@ impl Fixture {
 
     fn rb_root(&self) -> PathBuf {
         self.0.join("blade/realbrowser/helium")
+    }
+
+    fn identity(&self) -> String {
+        std::fs::read_to_string(self.rb_root().join("template/Default/identity")).unwrap()
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -87,6 +91,48 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+fn second_root(f: &Fixture) -> PathBuf {
+    let b = f.0.join("other-user-data");
+    std::fs::create_dir_all(b.join("Default")).unwrap();
+    std::fs::write(b.join("Default/Preferences"), "{}").unwrap();
+    std::fs::write(b.join("Default/identity"), "B").unwrap();
+    b
+}
+
+fn s(p: &Path) -> &str {
+    p.to_str().unwrap()
+}
+
+#[test]
+fn selecting_a_profile_in_another_user_data_root_reimports_the_clone() {
+    // The clone template is keyed by browser id only. Pointing `rb profile`
+    // at a different user-data root used to keep the OLD root's clone and
+    // launch it with the new profile's directory name: the agent browsed as
+    // the wrong identity.
+    let f = Fixture::new();
+    let b = second_root(&f);
+    f.cli(&["on"]);
+    assert_eq!(f.identity(), "A");
+
+    // Already on: the self-heal import must notice the root change.
+    f.cli(&["profile", s(&b.join("Default"))]);
+    f.cli(&["on"]);
+    assert_eq!(f.identity(), "B", "clone still holds the old root");
+    assert_eq!(f.cli(&["status"])["source"], s(&b));
+
+    // Off → on with the original root selected again.
+    f.cli(&["profile", "auto"]);
+    f.cli(&["off"]);
+    f.cli(&["on"]);
+    assert_eq!(f.identity(), "A", "clone still holds the second root");
+
+    // Same root, another profile key: the clone already holds every profile
+    // of the root, so nothing is re-imported (agent-made state survives).
+    std::fs::write(f.rb_root().join("template/Default/agent-state"), "kept").unwrap();
+    f.cli(&["on"]);
+    assert!(f.rb_root().join("template/Default/agent-state").is_file());
 }
 
 #[test]

@@ -68,12 +68,12 @@ pub use self::profiles::{
     profile_in_use, profile_owner_pid, same_dir, ProfileInfo,
 };
 pub use self::select::{
-    effective_mode, ensure_import, resolve_selection, session_drifted, sole_root_id,
-    validate_binary_override,
+    effective_mode, ensure_current_import, ensure_import, resolve_selection, session_drifted,
+    sole_root_id, validate_binary_override,
 };
 pub use self::template::{
     forget, has_template, human_bytes, import_template, live_clone_sessions, root_for,
-    source_meta_path, template_dir, template_source, template_stats, ImportStats,
+    source_meta_path, template_dir, template_matches, template_source, template_stats, ImportStats,
 };
 
 // ── Lane switch ─────────────────────────────────────────────────────────

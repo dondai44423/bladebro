@@ -134,6 +134,16 @@ pub fn template_source(id: &str) -> Option<String> {
     v.get("source").and_then(|s| s.as_str()).map(String::from)
 }
 
+/// True when the clone template for `id` exists AND was imported from the
+/// user-data root `root`. The template is keyed by browser id only, so a
+/// profile selected in ANOTHER root (`rb profile <abs path>`) must not reuse
+/// it. Missing provenance counts as a mismatch: nothing then proves whose
+/// profile the clone holds.
+pub fn template_matches(id: &str, root: &Path) -> bool {
+    has_template(id)
+        && template_source(id).is_some_and(|src| super::same_dir(Path::new(&src), root))
+}
+
 /// Pids of live bladebro processes running a clone session of `id`. Refreshing
 /// under one gets its stale copy synced back over the import; wiping under
 /// one deletes the profile its browser is running on.
