@@ -406,7 +406,7 @@ impl SessionProfile {
         }
         let marker = root.join(".template.lock");
         if marker.exists() {
-            if !template_lock_stale(&marker) {
+            if !template_lock_stale(&marker) && !marker_superseded_by_guard(&marker) {
                 return None;
             }
             std::fs::remove_file(&marker).ok()?;
@@ -588,6 +588,31 @@ impl SessionProfile {
     }
 }
 
+/// How long one template copy may plausibly hold the lock marker.
+const TEMPLATE_LOCK_GRACE_SECS: u64 = 120;
+
+/// Called with the OS guard held, which no 4.1+ holder can share: a marker
+/// naming a live pid can then only be a pre-4.1 copier (marker only, no OS
+/// lock) mid-copy. A marker naming THIS pid is not that — this process holds
+/// no other guard, so it is an earlier incarnation's corpse (pid reuse: a
+/// container entrypoint gets the same pid every boot). Nor is one older than
+/// a copy takes: the live pid behind it was reused. Either way, left alone
+/// it fails every sync-back (logins stop persisting) and every `rb import`.
+fn marker_superseded_by_guard(marker: &Path) -> bool {
+    let text = std::fs::read_to_string(marker).unwrap_or_default();
+    let mut it = text.split_whitespace();
+    if it.next().and_then(|p| p.parse::<u32>().ok()) == Some(std::process::id()) {
+        return true;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    it.next()
+        .and_then(|ts| ts.parse::<u64>().ok())
+        .is_some_and(|ts| now.saturating_sub(ts) > TEMPLATE_LOCK_GRACE_SECS)
+}
+
 /// Is the template-copy lock stale (owner dead or older than a grace
 /// period)? A crashed holder must never block sync-backs forever.
 fn template_lock_stale(lock: &Path) -> bool {
@@ -604,7 +629,7 @@ fn template_lock_stale(lock: &Path) -> bool {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                return now.saturating_sub(ts) > 120;
+                return now.saturating_sub(ts) > TEMPLATE_LOCK_GRACE_SECS;
             }
             true
         }
@@ -615,7 +640,7 @@ fn template_lock_stale(lock: &Path) -> bool {
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.elapsed().ok())
-                .map(|age| age.as_secs() > 120)
+                .map(|age| age.as_secs() > TEMPLATE_LOCK_GRACE_SECS)
                 .unwrap_or(true)
         }
     }
@@ -853,6 +878,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn template_guard_supersedes_a_leftover_marker_naming_this_pid() {
+        // A holder crashed mid-copy and left its marker; the restart reused
+        // its pid (a container entrypoint gets the same pid every boot).
+        // Holding the OS guard proves no 4.1+ process holds the lock, and
+        // this process holds no other guard: the marker is a corpse.
+        let root =
+            std::env::temp_dir().join(format!("blade-template-ownpid-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(".template.lock"),
+            format!("{} {}\n", std::process::id(), unix_now()),
+        )
+        .unwrap();
+        let lock = SessionProfile::acquire_lock_at(&root);
+        let acquired = lock.is_some();
+        drop(lock);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(
+            acquired,
+            "a marker naming this pid must not wedge sync-back forever"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn template_guard_bounds_a_live_foreign_marker_to_the_copy_grace() {
+        // pid reuse: the marker names a pid that a later, unrelated process
+        // now holds. A pre-4.1 copier (marker only, no OS lock) mid-copy
+        // still wins; one that old was never a copy in progress.
+        let root =
+            std::env::temp_dir().join(format!("blade-template-reused-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut unrelated = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let marker = root.join(".template.lock");
+        std::fs::write(&marker, format!("{} {}\n", unrelated.id(), unix_now())).unwrap();
+        let fresh = SessionProfile::acquire_lock_at(&root).is_some();
+        std::fs::write(
+            &marker,
+            format!("{} {}\n", unrelated.id(), unix_now() - 3600),
+        )
+        .unwrap();
+        let old = SessionProfile::acquire_lock_at(&root);
+        let old_acquired = old.is_some();
+        drop(old);
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(!fresh, "a fresh live marker is a pre-4.1 copy in progress");
+        assert!(
+            old_acquired,
+            "a live pid behind an hour-old marker is pid reuse, not a copier"
+        );
+    }
+
     #[test]
     fn template_guard_excludes_concurrent_handles_and_recovers_after_drop() {
         let root =
@@ -880,12 +971,11 @@ mod tests {
         std::fs::create_dir_all(root.join("profile")).unwrap();
         std::fs::write(root.join(".profile.sync/in-progress"), "copying").unwrap();
         std::fs::write(root.join(".profile.old/last-good"), "backup").unwrap();
-        std::fs::write(
-            root.join(".template.lock"),
-            format!("{} 1", std::process::id()),
-        )
-        .unwrap();
+        // Another live transaction holds the template lock (a separate
+        // handle: the OS guard excludes it like another process).
+        let held = SessionProfile::acquire_lock_at(&root).unwrap();
         reap_orphans_at(&root);
+        drop(held);
         let survived = root.join(".profile.sync/in-progress").exists()
             && root.join(".profile.old/last-good").exists();
         std::fs::remove_dir_all(root).unwrap();
