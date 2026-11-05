@@ -128,6 +128,9 @@ pub async fn perform_with_network(
     // G09: observable toggle state around a coordinate click (see ClickCoord).
     let mut coord_toggle: Option<ToggleProbe> = None;
 
+    // Upload: why the readback could not prove the page holds the file.
+    let mut upload_unverified: Option<String> = None;
+
     // Start listening for navigation before dispatching. Eager
     // subscribe — a lazy wait_for would miss events fired synchronously
     // during dispatch (see sub_fires).
@@ -996,6 +999,18 @@ pub async fn perform_with_network(
                 })),
             )
             .await?;
+            // The command succeeds for any path string; only a read in the
+            // page proves the file arrived.
+            let source = std::path::Path::new(path.as_str());
+            match super::upload::readback(cdp, &object_id, source).await {
+                super::upload::UploadCheck::Delivered => {}
+                super::upload::UploadCheck::Unverified(why) => upload_unverified = Some(why),
+                super::upload::UploadCheck::Undelivered(what) => {
+                    return Err(BladeError::Other(format!(
+                        "upload of {path} not delivered: {what}. A sandboxed browser (Flatpak, Snap) reads only files it was given access to."
+                    )))
+                }
+            }
         }
     }
 
@@ -1091,6 +1106,10 @@ pub async fn perform_with_network(
         edit_report.as_ref(),
         scroll_report.as_ref(),
     );
+    let verdict = match upload_unverified {
+        Some(why) => format!("{verdict} - readback unverified: {why}"),
+        None => verdict,
+    };
     Ok((delta, verdict))
 }
 
