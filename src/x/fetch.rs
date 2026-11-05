@@ -308,8 +308,11 @@ async fn walk(
             None => parse_timeline_page(&j),
         };
         let mut new_items = 0usize;
-        if w.focal.is_none() {
+        if w.focal.is_none() && parsed.focal.is_some() {
             w.focal = parsed.focal;
+            // The focal post is new content too: a status with no replies
+            // has nothing else on its only page.
+            new_items += 1;
         }
         for t in parsed.tweets {
             if seen.insert(t.id.clone()) {
@@ -318,15 +321,41 @@ async fn walk(
             }
         }
         pages += 1;
-        if parsed.terminated || new_items == 0 {
+        // `complete` is claimed only on X's own end signals: a Bottom
+        // terminate, or a page carrying nothing but cursors (how search and
+        // profile timelines run out).
+        if parsed.terminated || parsed.entries == 0 {
             w.complete = true;
+            break;
+        }
+        if new_items == 0 {
+            // Content (ads, modules, repeats) but not one new post: the
+            // walk stops, and must not read as the end of the timeline.
+            w.note = Some(format!(
+                "x: page {pages} brought no new posts (ads/repeats only) — stopped; partial results"
+            ));
             break;
         }
         match parsed.bottom_cursor {
             Some(c) if cursor.as_deref() != Some(c.as_str()) => cursor = Some(c),
-            // No fresh cursor: there is nothing further to fetch.
-            _ => {
+            Some(_) => {
+                w.note = Some(format!(
+                    "x: the cursor stopped advancing after {pages} page(s) — partial results"
+                ));
+                break;
+            }
+            // A conversation's last TweetDetail page simply carries no
+            // Bottom cursor.
+            None if focal_id.is_some() => {
                 w.complete = true;
+                break;
+            }
+            // Timelines carry one on every page (it is how X pages them):
+            // posts without one mean the page shape was not understood.
+            None => {
+                w.note = Some(format!(
+                    "x: no continuation cursor on page {pages} — partial results"
+                ));
                 break;
             }
         }

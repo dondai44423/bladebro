@@ -31,6 +31,11 @@ pub(super) struct PageBits {
     items: Vec<(String, Value)>,
     bottom_cursor: Option<String>,
     pub(super) terminated: bool,
+    /// Non-cursor entries and module items on the page (tweets, ads,
+    /// tombstones, unknown kinds). Zero means the page carried nothing but
+    /// cursors — X's end-of-timeline page — as opposed to a page whose
+    /// content was all filtered out.
+    pub(super) entries: usize,
 }
 
 /// Walk one graphql response page: find the instructions array, collect
@@ -41,6 +46,7 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
         items: Vec::new(),
         bottom_cursor: None,
         terminated: false,
+        entries: 0,
     };
     let Some(instructions) = find_instructions(j) else {
         return bits;
@@ -55,11 +61,15 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
                     }
                 }
             }
+            // Later pages of SearchTimeline (and other timelines) deliver
+            // their Top/Bottom cursors by replacing the previous cursor
+            // entries instead of adding new ones; missing this ended the
+            // walk after two pages as if the timeline were exhausted.
+            "TimelineReplaceEntry" => walk_entry(&mut bits, ins.pointer("/entry/content")),
             "TimelineAddToModule" => {
                 if let Some(arr) = ins.get("moduleItems").and_then(|e| e.as_array()) {
                     for it in arr {
-                        let eid = it.get("entryId").and_then(|e| e.as_str()).unwrap_or("");
-                        push_item(&mut bits, eid, it.pointer("/item/itemContent"));
+                        module_item(&mut bits, it);
                     }
                 }
             }
@@ -96,26 +106,50 @@ fn walk_entry(bits: &mut PageBits, content: Option<&Value>) {
     let Some(c) = content else { return };
     match c.get("entryType").and_then(|t| t.as_str()).unwrap_or("") {
         "TimelineTimelineItem" => {
+            let ic = c.get("itemContent");
+            // X also ships timeline cursors wrapped as an item.
+            if let Some(cur) = ic.filter(|ic| is_cursor(ic)) {
+                timeline_cursor(bits, cur);
+                return;
+            }
+            bits.entries += 1;
             let eid = c.get("entryId").and_then(|e| e.as_str()).unwrap_or("");
-            push_item(bits, eid, c.get("itemContent"));
+            push_item(bits, eid, ic);
         }
         "TimelineTimelineModule" => {
             if let Some(items) = c.get("items").and_then(|i| i.as_array()) {
                 for it in items {
-                    let eid = it.get("entryId").and_then(|e| e.as_str()).unwrap_or("");
-                    push_item(bits, eid, it.pointer("/item/itemContent"));
+                    module_item(bits, it);
                 }
             }
         }
-        "TimelineTimelineCursor" => {
-            let ct = c.get("cursorType").and_then(|t| t.as_str()).unwrap_or("");
-            if ct == "Bottom" {
-                if let Some(v) = c.get("value").and_then(|v| v.as_str()) {
-                    bits.bottom_cursor = Some(v.to_string());
-                }
-            }
+        "TimelineTimelineCursor" => timeline_cursor(bits, c),
+        _ => bits.entries += 1,
+    }
+}
+
+/// One item of a module (a conversation thread, a profile conversation…).
+/// Cursors inside a module page that module, never the timeline.
+fn module_item(bits: &mut PageBits, it: &Value) {
+    let ic = it.pointer("/item/itemContent");
+    if ic.is_some_and(is_cursor) {
+        return;
+    }
+    bits.entries += 1;
+    let eid = it.get("entryId").and_then(|e| e.as_str()).unwrap_or("");
+    push_item(bits, eid, ic);
+}
+
+fn is_cursor(v: &Value) -> bool {
+    v.get("cursorType").is_some()
+}
+
+/// A top-level cursor: the Bottom one continues the timeline.
+fn timeline_cursor(bits: &mut PageBits, c: &Value) {
+    if c.get("cursorType").and_then(|t| t.as_str()) == Some("Bottom") {
+        if let Some(v) = c.get("value").and_then(|v| v.as_str()) {
+            bits.bottom_cursor = Some(v.to_string());
         }
-        _ => {}
     }
 }
 
@@ -135,6 +169,8 @@ pub(super) struct ThreadPage {
     pub(super) tweets: Vec<T>,
     pub(super) bottom_cursor: Option<String>,
     pub(super) terminated: bool,
+    /// See [`PageBits::entries`].
+    pub(super) entries: usize,
 }
 
 /// Parse one TweetDetail page: the focal tweet (its own entry) and every
@@ -158,6 +194,7 @@ pub(super) fn parse_thread_page(j: &Value, focal_id: &str) -> ThreadPage {
         tweets,
         bottom_cursor: bits.bottom_cursor,
         terminated: bits.terminated,
+        entries: bits.entries,
     }
 }
 
@@ -174,6 +211,7 @@ pub(super) fn parse_timeline_page(j: &Value) -> ThreadPage {
         tweets,
         bottom_cursor: bits.bottom_cursor,
         terminated: bits.terminated,
+        entries: bits.entries,
     }
 }
 

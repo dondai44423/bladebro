@@ -417,6 +417,136 @@ mod tests {
         .is_err());
     }
 
+    fn replace_cursor(kind: &str, value: &str) -> Value {
+        let entry = cursor_entry(kind, value);
+        json!({"type": "TimelineReplaceEntry", "entry_id_to_replace": entry["entryId"],
+            "entry": entry})
+    }
+
+    #[tokio::test]
+    async fn replaced_cursor_entries_keep_the_timeline_walking() {
+        // SearchTimeline's later pages swap their cursors in with
+        // TimelineReplaceEntry; the walk must follow them to the empty page
+        // that actually ends the timeline.
+        let mut first = tweets("1", 10, None);
+        first.push(cursor_entry("Top", "t1"));
+        first.push(cursor_entry("Bottom", "c1"));
+        let later = |prefix: &str, next: &str| {
+            search_body(vec![
+                add_entries(tweets(prefix, 10, None)),
+                replace_cursor("Top", "t"),
+                replace_cursor("Bottom", next),
+            ])
+        };
+        let end = search_body(vec![
+            add_entries(Vec::new()),
+            replace_cursor("Top", "t"),
+            replace_cursor("Bottom", "c4"),
+        ]);
+        let (cdp, served) = fake_cdp(vec![
+            Ok((200, search_body(vec![add_entries(first)]))),
+            Ok((200, later("2", "c2"))),
+            Ok((200, later("3", "c3"))),
+            Ok((200, end)),
+        ])
+        .await;
+        let p = timeline_walk(
+            &cdp,
+            &template("SearchTimeline"),
+            "search",
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("timeline walk");
+        assert_eq!(served.load(SeqCst), 4, "every page is fetched");
+        assert_eq!(p.count, 30);
+        assert!(p.complete, "the empty page ends the timeline: {:?}", p.note);
+        assert!(p.note.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_walk_that_stops_without_an_end_signal_is_not_complete() {
+        let first = || {
+            let mut e = tweets("1", 5, None);
+            e.push(cursor_entry("Bottom", "c1"));
+            search_body(vec![add_entries(e)])
+        };
+        // An ads-only page: it carries content, just no new post.
+        let promoted = json!({"entryId": "promoted-tweet-9000",
+            "content": {"entryType": "TimelineTimelineItem", "itemContent": {
+                "itemType": "TimelineTweet",
+                "tweet_results": {"result": tweet("9000", "brand", None)},
+                "promotedMetadata": {"impressionId": "x"}}}});
+        let ads = search_body(vec![add_entries(vec![
+            promoted,
+            cursor_entry("Bottom", "c2"),
+        ])]);
+        // X hands back the cursor it was just sent.
+        let mut stuck = tweets("2", 5, None);
+        stuck.push(cursor_entry("Bottom", "c1"));
+        let stuck = search_body(vec![add_entries(stuck)]);
+        // Posts, but no continuation cursor anywhere on the page.
+        let lost = search_body(vec![add_entries(tweets("3", 5, None))]);
+        for (second, named) in [
+            (ads, "no new posts"),
+            (stuck, "cursor stopped advancing"),
+            (lost, "no continuation cursor"),
+        ] {
+            let (cdp, served) = fake_cdp(vec![Ok((200, first())), Ok((200, second))]).await;
+            let p = timeline_walk(
+                &cdp,
+                &template("SearchTimeline"),
+                "search",
+                100,
+                &mut Budget::new(),
+            )
+            .await
+            .expect("timeline walk");
+            assert_eq!(served.load(SeqCst), 2);
+            assert!(!p.complete, "{named}: X never said the timeline ended");
+            assert!(
+                p.note.as_deref().is_some_and(|n| n.contains(named)),
+                "{named}: {:?}",
+                p.note
+            );
+        }
+
+        // A conversation's last page simply carries no Bottom cursor: that
+        // one is the real end.
+        let mut last = vec![tweet_entry(tweet(FOCAL, "op", None))];
+        last.extend(tweets("4", 3, Some(FOCAL)));
+        let (cdp, _) = fake_cdp(vec![Ok((200, thread_body(vec![add_entries(last)])))]).await;
+        let p = thread_walk(
+            &cdp,
+            &template("TweetDetail"),
+            FOCAL,
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("thread walk");
+        assert_eq!(p.count, 3);
+        assert!(p.complete, "{:?}", p.note);
+
+        // A status nobody replied to: its only page is the focal post.
+        let only = thread_body(vec![add_entries(vec![tweet_entry(tweet(
+            FOCAL, "op", None,
+        ))])]);
+        let (cdp, _) = fake_cdp(vec![Ok((200, only))]).await;
+        let p = thread_walk(
+            &cdp,
+            &template("TweetDetail"),
+            FOCAL,
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("thread walk");
+        assert_eq!(p.count, 0);
+        assert!(p.complete, "no replies is the whole thread: {:?}", p.note);
+    }
+
     #[test]
     fn fixture_parses_the_complete_page() {
         let j = fixture();
