@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.7] - 2026-11-05
+
 ### Added
 - Agent control inspection: `act read format=json` returns live field values, checked/indeterminate and ARIA state, and select choices with selection/disabled state. Text reads use current textarea values. Large reads offload complete JSON; option lists disclose their 80-choice bound.
 - Native selects accept their displayed option labels even when those labels differ from inner text. Inspection reports disabled state inherited from a fieldset.
@@ -2152,7 +2154,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.6...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.7...HEAD
+[4.6.7]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.7
 [4.6.6]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.6
 [4.6.5]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.5
 [4.6.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.4
