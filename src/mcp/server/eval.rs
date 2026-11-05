@@ -160,6 +160,9 @@ pub async fn handle_eval(
                 )));
             }
             if !ref_id.is_empty() {
+                if v.get("__blade_undef").and_then(|b| b.as_bool()) == Some(true) {
+                    return format_eval_undefined(json_out);
+                }
                 if let Some(inner) = v.get("__blade_result") {
                     let inner = inner.clone();
                     return format_eval_value(&inner, json_out).await;
@@ -247,7 +250,11 @@ fn ref_eval_expressions(candidates: &[&str], sig: &str, frame: &[usize]) -> Resu
     // sig is page-controlled (an accessible name), and a literal
     // "{candidate}" in it used to be rewritten too, so the element could
     // never be found (or the expression no longer parsed).
-    let tail = ");})(el);return{__blade_result:result===undefined?null:result}})(".to_string()
+    // CDP awaitPromise only awaits a TOP-LEVEL Promise: one returned inside
+    // the envelope serialized as {}. Await it here (an async function uses
+    // the intrinsic Promise, never a page-replaced window.Promise), and flag
+    // undefined, which JSON cannot carry, so it reads like the no-ref path.
+    let tail = ");})(el);return(async()=>{const r=await result;return{__blade_result:r===undefined?null:r,__blade_undef:r===undefined};})();})(".to_string()
         + &sig_js
         + ","
         + &frame_js
@@ -397,6 +404,31 @@ mod ref_eval_tests {
         let label = "Insert {candidate} here";
         let out = eval_on_button("el.getAttribute('aria-label')", label);
         assert_eq!(out["__blade_result"], label, "{out}");
+    }
+
+    #[test]
+    fn ref_eval_awaits_returned_promises_and_keeps_undefined() {
+        // awaitPromise only awaits a TOP-LEVEL Promise; wrapped in the ref
+        // envelope it serialized as {} (the same JS without ref returned the
+        // value), and undefined came back as a plain null.
+        let out = eval_on_button("Promise.resolve(el.getAttribute('aria-label'))", "Go");
+        assert_eq!(out["__blade_result"], "Go", "{out}");
+        let out = eval_on_button("new Promise(r=>setTimeout(()=>r(7),5))", "Go");
+        assert_eq!(out["__blade_result"], 7, "{out}");
+        for undefined in ["undefined", "Promise.resolve()"] {
+            let out = eval_on_button(undefined, "Go");
+            assert_eq!(out["__blade_undef"], true, "{undefined}: {out}");
+        }
+        let out = eval_on_button("null", "Go");
+        assert!(
+            out["__blade_result"].is_null() && out["__blade_undef"] != true,
+            "{out}"
+        );
+        let out = eval_on_button("Promise.reject(new Error('boom'))", "Go");
+        assert!(
+            out["thrown"].as_str().unwrap_or("").contains("boom"),
+            "{out}"
+        );
     }
 }
 
