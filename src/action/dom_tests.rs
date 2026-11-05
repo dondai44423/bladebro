@@ -452,3 +452,21 @@ eq([p.elx, p.elLeft], ['div#car', 300], 'the horizontal scroller under the wheel
         &[("__PROBE__", scroll_probe_expr(400.0, 300.0))],
     );
 }
+
+// ---- A-ws: value fields read back exactly ----
+#[test]
+fn value_field_readback_keeps_whitespace() {
+    let body = r#"
+const d = use(page({}, h('input', {id: 'f', 'aria-label': 'Name field', rect: [0, 0, 200, 30]})));
+const f = d.getElementById('f');
+f.value = '  x';
+f.focus();
+const r = __CHECK__();
+eq(r && r.text, '  x', 'a value field is read back verbatim, not whitespace-normalized');
+"#;
+    run(
+        "ws_readback",
+        body,
+        &[("__CHECK__", sig("|textbox|Name field|1", "check", None))],
+    );
+}

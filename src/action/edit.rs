@@ -74,6 +74,19 @@ pub(super) fn norm_text(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Does a host's readback show exactly the typed text? Value fields
+/// (input/textarea) read back verbatim, so they must match exactly:
+/// normalizing whitespace on both sides read "  x" typed into a field that
+/// trims as verified (A-ws). A rich editor's innerText reflows whitespace
+/// (nbsp runs, block newlines), so it compares normalized.
+pub(super) fn readback_matches(host_kind: &str, got: &str, want: &str) -> bool {
+    if matches!(host_kind, "input" | "textarea") {
+        got == want
+    } else {
+        norm_text(got) == norm_text(want)
+    }
+}
+
 /// Readback of the effective editing host via the "check" mode. `None`
 /// when the eval itself fails - callers treat that as "unverified", never
 /// as "empty".
@@ -285,8 +298,7 @@ pub(super) async fn finalize_edit(
     }
     match rep.kind {
         EditKind::Type => {
-            let want = norm_text(&rep.text);
-            rep.verified = norm_text(&final_text) == want;
+            rep.verified = readback_matches(&rep.host_kind, &final_text, &rep.text);
             if !rep.verified {
                 // Visible-but-wrong states can be corrected safely; value
                 // fields are readable by construction; blind CE readbacks
@@ -304,12 +316,12 @@ pub(super) async fn finalize_edit(
                                 .as_ref()
                                 .and_then(|c| c.text.clone())
                                 .unwrap_or_default();
-                            if norm_text(&final_text) == want {
+                            if readback_matches(&rep.host_kind, &final_text, &rep.text) {
                                 break;
                             }
                         }
                         rep.corrected = true;
-                        rep.verified = norm_text(&final_text) == want;
+                        rep.verified = readback_matches(&rep.host_kind, &final_text, &rep.text);
                     }
                 }
             }
@@ -385,6 +397,14 @@ pub(super) fn type_verdict_text(
             s.push_str(" (settled late)");
         }
         s
+    } else if !got.is_empty() && got == want {
+        // Same words, different whitespace: the page trimmed or reformatted
+        // what was typed - not the exact value asked for.
+        format!(
+            "outcome: typed \"{}\" → value=\"{}\" (whitespace differs: the page reformatted the input)",
+            clip(text, 40),
+            clip(&rep.final_text, 40)
+        )
     } else if !got.is_empty() && got.contains(&want) {
         let why = if rep.pre_cleared {
             "content changed after typing (late restore?)"

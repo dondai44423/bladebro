@@ -475,13 +475,18 @@ pub async fn perform_with_network(
             let _ = type_text(cdp, text).await;
             // Readback with a bounded poll: framework editors (and late
             // drafts) can surface their content after the keystrokes return.
-            let want = norm_text(text);
+            // Value fields compare exactly (see `readback_matches`).
+            let kind_of = |c: &Option<FoundElement>| {
+                c.as_ref()
+                    .and_then(|c| c.host_kind.clone())
+                    .unwrap_or_default()
+            };
             let mut last = check_editor(cdp, sig, frame).await;
             let mut branch_text = last
                 .as_ref()
                 .and_then(|c| c.text.clone())
                 .unwrap_or_default();
-            if norm_text(&branch_text) != want {
+            if !readback_matches(&kind_of(&last), &branch_text, text) {
                 for _ in 0..6u8 {
                     tokio::time::sleep(Duration::from_millis(120)).await;
                     last = check_editor(cdp, sig, frame).await;
@@ -489,7 +494,7 @@ pub async fn perform_with_network(
                         .as_ref()
                         .and_then(|c| c.text.clone())
                         .unwrap_or_default();
-                    if norm_text(&branch_text) == want {
+                    if readback_matches(&kind_of(&last), &branch_text, text) {
                         break;
                     }
                 }
@@ -498,11 +503,8 @@ pub async fn perform_with_network(
             // did not register at all. Never for contenteditables - a DOM
             // write desyncs a framework editor's internal state.
             let mut set_via_js = false;
-            if norm_text(&branch_text) != want {
-                let kind = last
-                    .as_ref()
-                    .and_then(|c| c.host_kind.clone())
-                    .unwrap_or_default();
+            if !readback_matches(&kind_of(&last), &branch_text, text) {
+                let kind = kind_of(&last);
                 if (kind == "input" || kind == "textarea")
                     && norm_text(&branch_text) == norm_text(&pre_read)
                 {
@@ -514,12 +516,12 @@ pub async fn perform_with_network(
                             .as_ref()
                             .and_then(|c| c.text.clone())
                             .unwrap_or_default();
-                        set_via_js = norm_text(&branch_text) == want;
+                        set_via_js = readback_matches(&kind_of(&last), &branch_text, text);
                     }
                 }
             }
             let host = last.as_ref();
-            let verified = norm_text(&branch_text) == want;
+            let verified = readback_matches(&kind_of(&last), &branch_text, text);
             edit_report = Some(EditReport {
                 kind: EditKind::Type,
                 text: text.clone(),

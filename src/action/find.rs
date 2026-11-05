@@ -585,7 +585,10 @@ pub(super) fn find_sig_expr(
         + "var _ced=function(e){return !!(e&&(e.isContentEditable||(e.getAttribute&&e.getAttribute('contenteditable')==='true')));};"
         + "var _clr=function(e){try{var _s=window.getSelection();_s.selectAllChildren(e);document.execCommand('delete',false);}catch(_e){}e.dispatchEvent(new Event('input',{bubbles:true}));};"
         + "var _tvr=function(v){return String(v==null?'':v).replace(/\\s+/g,' ').trim();};"
-        + "var _read=function(e){if(!e)return '';if('value' in e&&typeof e.value==='string')return _tvr(e.value);return _tvr(e.innerText||e.textContent||'');};"
+        // Value fields read back verbatim (A-ws): a normalized readback hid
+        // a page that trimmed or collapsed what was typed. Rich editors
+        // reflow whitespace in innerText, so theirs stays normalized.
+        + "var _read=function(e){if(!e)return '';if('value' in e&&typeof e.value==='string')return e.value;return _tvr(e.innerText||e.textContent||'');};"
         + "var _isd=function(e){return !!(e&&(_ced(e)||((e.tagName==='INPUT'||e.tagName==='TEXTAREA')&&e.type!=='hidden')));};"
         // Ownership (L2): an editor is the target's own when it IS the
         // target, sits inside or around it (composed tree: a custom

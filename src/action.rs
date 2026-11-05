@@ -851,6 +851,35 @@ mod action_tests {
     }
 
     #[test]
+    fn value_fields_verify_exact_whitespace() {
+        // A-ws: "  x" typed into a field that trims reads back "x"; the
+        // normalized comparison called that verified.
+        use super::edit::{readback_matches, type_verdict_text, EditKind, EditReport};
+        assert!(!readback_matches("input", "x", "  x"));
+        assert!(!readback_matches("textarea", "a b", "a  b"));
+        assert!(readback_matches("input", "  x", "  x"));
+        // Rich editors reflow whitespace in innerText: still normalized.
+        assert!(readback_matches("ce", "a b", "a\u{a0} b"));
+        let rep = EditReport {
+            kind: EditKind::Type,
+            text: "  x".into(),
+            final_text: "x".into(),
+            branch_text: "x".into(),
+            host_kind: "input".into(),
+            host_is_tgt: true,
+            tgt_missing: false,
+            pre_text_len: 0,
+            pre_cleared: true,
+            verified: false,
+            set_via_js: false,
+            corrected: true,
+        };
+        let v = type_verdict_text("e1", "  x", &rep, &crate::page::LivePageModel::new());
+        assert!(v.contains("whitespace differs"), "{v}");
+        assert!(!v.contains("late restore"), "{v}");
+    }
+
+    #[test]
     fn verdicts_never_outclaim_the_readback() {
         use super::edit::{clear_verdict_text, type_verdict_text, EditKind, EditReport};
         let lpm = crate::page::LivePageModel::new();
