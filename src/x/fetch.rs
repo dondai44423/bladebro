@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use super::gql::{build_url, fetch_api, Budget};
-use super::parse::{cut_chars, parse_thread_page, parse_timeline_page, T};
+use super::parse::{cut_chars, no_timeline_reason, parse_thread_page, parse_timeline_page, T};
 use super::*;
 
 fn focal_id_from_url(url: &str) -> Option<String> {
@@ -320,6 +320,24 @@ async fn walk(
             Some(f) => parse_thread_page(&j, f),
             None => parse_timeline_page(&j),
         };
+        if !parsed.timeline {
+            // A 200 without timeline instructions (X's graphql errors body,
+            // an unknown shape) parses to zero entries, which must not read
+            // as the cursors-only page that ends a timeline.
+            let why = no_timeline_reason(&j);
+            if pages == 0 {
+                // Nothing harvested yet: an error lets the caller fall back,
+                // where an empty payload would claim an empty timeline.
+                return Err(BladeError::Other(format!(
+                    "x: response carried no timeline ({why})"
+                )));
+            }
+            w.note = Some(format!(
+                "x: page {} carried no timeline ({why}) — partial results",
+                pages + 1
+            ));
+            break;
+        }
         let mut new_items = 0usize;
         if w.focal.is_none() && parsed.focal.is_some() {
             w.focal = parsed.focal;

@@ -31,10 +31,16 @@ pub(super) struct PageBits {
     items: Vec<(String, Value)>,
     bottom_cursor: Option<String>,
     pub(super) terminated: bool,
+    /// The page carried timeline instructions (entries added, replaced,
+    /// pinned or terminated). A 200 body without them — X's graphql errors
+    /// body (`{"errors":[…],"data":{}}`), or a shape this walker does not
+    /// know — says nothing about where the timeline ends.
+    pub(super) timeline: bool,
     /// Non-cursor entries and module items on the page (tweets, ads,
-    /// tombstones, unknown kinds). Zero means the page carried nothing but
-    /// cursors — X's end-of-timeline page — as opposed to a page whose
-    /// content was all filtered out.
+    /// tombstones, unknown kinds). Zero on a page that carried a timeline
+    /// (see `timeline`) means it held nothing but cursors — X's
+    /// end-of-timeline page — as opposed to a page whose content was all
+    /// filtered out. A page without a timeline also counts zero.
     pub(super) entries: usize,
     /// Cursors that are neither Top nor Bottom — the "Show replies" (ShowMore)
     /// cursor closing a conversation module, "Show more replies"
@@ -50,6 +56,7 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
         items: Vec::new(),
         bottom_cursor: None,
         terminated: false,
+        timeline: false,
         entries: 0,
         collapsed: 0,
     };
@@ -58,6 +65,16 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
     };
     for ins in instructions {
         let ty = ins.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        // Only instructions that deliver or end the timeline count: an
+        // instructions array holding just a cache clear is no end signal.
+        bits.timeline |= matches!(
+            ty,
+            "TimelineAddEntries"
+                | "TimelineReplaceEntry"
+                | "TimelinePinEntry"
+                | "TimelineAddToModule"
+                | "TimelineTerminateTimeline"
+        );
         match ty {
             "TimelineAddEntries" => {
                 if let Some(entries) = ins.get("entries").and_then(|e| e.as_array()) {
@@ -189,6 +206,8 @@ pub(super) struct ThreadPage {
     pub(super) tweets: Vec<T>,
     pub(super) bottom_cursor: Option<String>,
     pub(super) terminated: bool,
+    /// See [`PageBits::timeline`].
+    pub(super) timeline: bool,
     /// See [`PageBits::entries`].
     pub(super) entries: usize,
     /// See [`PageBits::collapsed`].
@@ -216,6 +235,7 @@ pub(super) fn parse_thread_page(j: &Value, focal_id: &str) -> ThreadPage {
         tweets,
         bottom_cursor: bits.bottom_cursor,
         terminated: bits.terminated,
+        timeline: bits.timeline,
         entries: bits.entries,
         collapsed: bits.collapsed,
     }
@@ -234,8 +254,18 @@ pub(super) fn parse_timeline_page(j: &Value) -> ThreadPage {
         tweets,
         bottom_cursor: bits.bottom_cursor,
         terminated: bits.terminated,
+        timeline: bits.timeline,
         entries: bits.entries,
         collapsed: bits.collapsed,
+    }
+}
+
+/// Why a 200 body carried no timeline, for the note: X's first graphql
+/// error message when it sent one.
+pub(super) fn no_timeline_reason(j: &Value) -> String {
+    match j.pointer("/errors/0/message").and_then(|m| m.as_str()) {
+        Some(m) => format!("graphql errors: {}", cut_chars(m, 160)),
+        None => "unrecognized response".into(),
     }
 }
 

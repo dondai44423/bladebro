@@ -550,6 +550,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_page_without_timeline_instructions_is_not_the_end() {
+        // X answers some replays HTTP 200 with a graphql errors body and no
+        // timeline at all: that says nothing about where the timeline ends.
+        let errors = || {
+            json!({"errors": [{"message": "Timeout: Unspecified", "code": 29}], "data": {}})
+                .to_string()
+        };
+        let mut first = vec![tweet_entry(tweet(FOCAL, "op", None))];
+        first.extend(tweets("7", 5, Some(FOCAL)));
+        first.push(cursor_entry("Bottom", "c1"));
+        let first = thread_body(vec![add_entries(first)]);
+        for (second, named) in [
+            (errors(), "(graphql errors: Timeout: Unspecified)"),
+            // A shape the walker does not know at all.
+            (json!({"data": {}}).to_string(), "(unrecognized response)"),
+        ] {
+            let (cdp, served) = fake_cdp(vec![Ok((200, first.clone())), Ok((200, second))]).await;
+            let p = thread_walk(
+                &cdp,
+                &template("TweetDetail"),
+                FOCAL,
+                100,
+                &mut Budget::new(),
+            )
+            .await
+            .expect("page 1 landed");
+            assert_eq!(served.load(SeqCst), 2);
+            assert_eq!(p.count, 5, "page 1's replies survive");
+            assert!(!p.complete, "X never said the thread ended: {:?}", p.note);
+            assert!(
+                p.note
+                    .as_deref()
+                    .is_some_and(|n| n.contains("page 2 carried no timeline") && n.contains(named)),
+                "{named}: {:?}",
+                p.note
+            );
+        }
+
+        // Timelines too.
+        let mut first = tweets("8", 5, None);
+        first.push(cursor_entry("Bottom", "c1"));
+        let (cdp, served) = fake_cdp(vec![
+            Ok((200, search_body(vec![add_entries(first)]))),
+            Ok((200, errors())),
+        ])
+        .await;
+        let p = timeline_walk(
+            &cdp,
+            &template("SearchTimeline"),
+            "search",
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("timeline page 1 survives");
+        assert_eq!(served.load(SeqCst), 2);
+        assert_eq!(p.count, 5);
+        assert!(!p.complete, "X never said the timeline ended: {:?}", p.note);
+        assert!(
+            p.note
+                .as_deref()
+                .is_some_and(|n| n
+                    .contains("page 2 carried no timeline (graphql errors: Timeout: Unspecified)")),
+            "{:?}",
+            p.note
+        );
+
+        // On the first page it stays an error, so the caller falls back to
+        // the rendered page instead of returning an empty, "complete" result.
+        let (cdp, _) = fake_cdp(vec![Ok((200, errors()))]).await;
+        let e = thread_walk(
+            &cdp,
+            &template("TweetDetail"),
+            FOCAL,
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .err()
+        .expect("thread: first-page errors body is an error")
+        .to_string();
+        assert!(
+            e.contains("Timeout: Unspecified"),
+            "the cause is named: {e}"
+        );
+        let (cdp, _) = fake_cdp(vec![Ok((200, errors()))]).await;
+        let e = timeline_walk(
+            &cdp,
+            &template("SearchTimeline"),
+            "search",
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .err()
+        .expect("timeline: first-page errors body is an error")
+        .to_string();
+        assert!(
+            e.contains("Timeout: Unspecified"),
+            "the cause is named: {e}"
+        );
+    }
+
+    #[tokio::test]
     async fn collapsed_reply_branches_keep_a_thread_incomplete() {
         // The captured page holds three conversation modules that end in a
         // "Show replies" (ShowMore) cursor; the replies behind them are not
