@@ -114,41 +114,152 @@ fn reap_session_root(root: &Path, real_root: Option<&Path>) {
         if !owner_dead {
             continue;
         }
-        kill_orphan_chrome(&dir);
-        // Sync the dead session's state (cookies, localStorage) back to the
-        // template BEFORE removing it. Without this, sessions killed without
-        // graceful shutdown lose all their state — the reaper just deleted
-        // the dir.
-        match real_root {
-            Some(real_root) => SessionProfile::sync_back_real(real_root, &dir),
-            None => SessionProfile::sync_back_only_at(root, &dir),
+        if reap_dead_session(root, &dir, real_root) {
+            eprintln!("[bladebro] reaped dead session profile {name}");
+        } else {
+            eprintln!(
+                "[bladebro] dead session profile {name} is still in use by a running browser; left in place (retried on next launch)"
+            );
         }
-        let _ = std::fs::remove_dir_all(&dir);
-        eprintln!("[bladebro] reaped dead session profile {name}");
     }
 }
 
-/// Kill the orphaned Chrome holding a dead session's profile. The pid is
-/// verified to be Chrome AND to mention THIS profile dir — a recycled pid
-/// must never be killed.
-fn kill_orphan_chrome(dir: &Path) {
-    if let Some(chrome_pid) = read_singleton_pid(dir) {
-        if platform::process_alive(chrome_pid)
-            && platform::process_is_chrome(chrome_pid)
-            && process_uses_dir(chrome_pid, dir)
-        {
-            platform::kill_process_graceful(chrome_pid);
-            for _ in 0..20 {
-                if !platform::process_alive(chrome_pid) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            if platform::process_alive(chrome_pid) {
-                platform::kill_process_force(chrome_pid);
-            }
+/// Reap one dead session dir: stop its orphaned browser, sync its state
+/// (cookies, localStorage) back to the template, then delete it — without
+/// the sync, sessions killed without a graceful shutdown lose all their
+/// state. Returns false, touching nothing, when the profile could not be
+/// freed: a sync copies a live browser's torn, unflushed databases over the
+/// template, and the delete pulls the profile out from under it.
+pub(super) fn reap_dead_session(root: &Path, dir: &Path, real_root: Option<&Path>) -> bool {
+    if !kill_orphan_chrome(dir) {
+        return false;
+    }
+    match real_root {
+        Some(real_root) => SessionProfile::sync_back_real(real_root, dir),
+        None => SessionProfile::sync_back_only_at(root, dir),
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    true
+}
+
+/// Stop the orphaned browser on a dead session's profile; true once no
+/// process runs on it any more. A pid is only killed when it is a
+/// Chromium-family browser whose argv names THIS profile — a recycled pid
+/// must never be killed. SIGTERM first: Chrome flushes cookies/storage on
+/// it, and the sync-back right after copies what it flushed.
+fn kill_orphan_chrome(dir: &Path) -> bool {
+    let targets = orphan_browser_pids(dir);
+    if targets.is_empty() {
+        return !profile_in_use(dir);
+    }
+    let runs_on = |pid: u32| platform::process_alive(pid) && process_uses_dir(pid, dir);
+    for &pid in &targets {
+        platform::kill_process_graceful(pid);
+    }
+    wait_until(|| !targets.iter().any(|&pid| runs_on(pid)));
+    for &pid in &targets {
+        if runs_on(pid) {
+            platform::kill_process_force(pid);
         }
     }
+    // Renderers and sandbox launchers exit after their browser.
+    wait_until(|| !profile_in_use(dir))
+}
+
+/// Poll `done` for up to 2 s; its final answer.
+fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+    for _ in 0..20 {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    done()
+}
+
+/// Browser processes to stop for a dead session: the SingletonLock pid when
+/// it is a Chromium browser running on `dir`, plus (Linux) every Chromium
+/// browser process whose argv names `dir` as its user-data-dir. The scan is
+/// what finds a sandboxed browser: Flatpak runs Chromium in its own pid
+/// namespace, so SingletonLock holds the in-sandbox pid (measured:
+/// `steamdeck-2`), never the host pid. Child processes (`--type=…`) are left
+/// to exit with their browser — killing the storage service first would
+/// lose the very flush SIGTERM asks for.
+fn orphan_browser_pids(dir: &Path) -> Vec<u32> {
+    let singleton = read_singleton_pid(dir).filter(|&pid| {
+        platform::process_alive(pid)
+            && platform::process_is_chrome(pid)
+            && process_uses_dir(pid, dir)
+    });
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let scanned: Vec<u32> = processes_naming_dir(dir)
+        .into_iter()
+        .filter(|(pid, cmdline)| {
+            let child = cmdline
+                .split(|b| *b == 0 || *b == b' ')
+                .any(|arg| arg.starts_with(b"--type="));
+            Some(*pid) != singleton && !child && platform::cmdline_is_chromium(cmdline)
+        })
+        .map(|(pid, _)| pid)
+        .collect();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let scanned: Vec<u32> = Vec::new();
+    singleton.into_iter().chain(scanned).collect()
+}
+
+/// Does any process still run on this profile? Something we could not
+/// identify as a browser (so did not kill) counts: deleting a profile from
+/// under it is exactly the failure this guards. Shared with `doctor`.
+pub(crate) fn profile_in_use(dir: &Path) -> bool {
+    if read_singleton_pid(dir)
+        .is_some_and(|pid| platform::process_alive(pid) && process_uses_dir(pid, dir))
+    {
+        return true;
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if !processes_naming_dir(dir).is_empty() {
+        return true;
+    }
+    false
+}
+
+/// Every other process whose argv names `dir` as its user-data-dir, with
+/// its raw cmdline.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn processes_naming_dir(dir: &Path) -> Vec<(u32, Vec<u8>)> {
+    let me = std::process::id();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    procs
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            if pid == me {
+                return None;
+            }
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            cmdline_names_user_data_dir(&cmdline, dir).then_some((pid, cmdline))
+        })
+        .collect()
+}
+
+/// Does this command line (NUL- or space-separated) pass exactly `dir` as
+/// `--user-data-dir`? Exact, not a substring: `sess-12` must never match a
+/// live `sess-123`'s browser.
+#[cfg(any(unix, test))]
+fn cmdline_names_user_data_dir(cmdline: &[u8], dir: &Path) -> bool {
+    let needle = format!("--user-data-dir={}", dir.display());
+    let needle = needle.as_bytes();
+    let bounded = |b: Option<&u8>| matches!(b, None | Some(0) | Some(b' '));
+    cmdline
+        .windows(needle.len())
+        .enumerate()
+        .any(|(at, window)| {
+            window == needle
+                && bounded(at.checked_sub(1).and_then(|i| cmdline.get(i)))
+                && bounded(cmdline.get(at + needle.len()))
+        })
 }
 
 /// Restore/clean a realbrowser template after a crashed import or sync
@@ -197,14 +308,13 @@ fn read_singleton_pid(dir: &Path) -> Option<u32> {
     }
 }
 
-/// Does process `pid` have `dir` in its command line?
+/// Does process `pid` run with `dir` as its user-data-dir?
 /// Guards against killing a recycled pid.
 fn process_uses_dir(pid: u32, dir: &Path) -> bool {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-            .map(|c| c.contains(&dir.display().to_string()))
-            .unwrap_or(false)
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|c| cmdline_names_user_data_dir(&c, dir))
     }
     #[cfg(target_os = "macos")]
     {
@@ -212,8 +322,7 @@ fn process_uses_dir(pid: u32, dir: &Path) -> bool {
         std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "command="])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&dir.display().to_string()))
-            .unwrap_or(false)
+            .is_ok_and(|o| cmdline_names_user_data_dir(o.stdout.trim_ascii_end(), dir))
     }
     #[cfg(windows)]
     {
@@ -578,9 +687,182 @@ mod xvfb_tests {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod orphan_browser_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// A dead session (owner pid can never exist) under a private root, plus
+    /// a template whose content proves whether a sync-back happened.
+    fn dead_session(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("blade-orphan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("profile/Default")).unwrap();
+        std::fs::write(root.join("profile/Default/Cookies"), "template").unwrap();
+        let dir = root.join("profiles/sess-999999998");
+        std::fs::create_dir_all(dir.join("Default")).unwrap();
+        std::fs::write(dir.join(".blade-owner"), "999999998").unwrap();
+        std::fs::write(dir.join("Default/Cookies"), "session").unwrap();
+        (root, dir)
+    }
+
+    /// A live process whose first /proc cmdline entry is `argv0` — with
+    /// spaces, the shape Chromium leaves after rewriting its argv into one
+    /// space-joined string (measured on Flatpak Chromium's browser process).
+    /// `sh` + a blocking builtin: multi-call binaries (coreutils on NixOS)
+    /// dispatch on argv[0] and would exit at once.
+    /// spawn() returns once the child is inside execve, before the kernel
+    /// has published its new argv: wait until /proc shows it.
+    fn holder(argv0: &str) -> Child {
+        let child = Command::new("sh")
+            .arg0(argv0)
+            .args(["-c", "read -r _"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+        let cmdline = format!("/proc/{}/cmdline", child.id());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !std::fs::read(&cmdline).is_ok_and(|c| c.starts_with(argv0.as_bytes())) {
+            assert!(Instant::now() < deadline, "argv never published");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child
+    }
+
+    fn singleton_lock(dir: &Path, target: &str) {
+        std::os::unix::fs::symlink(target, dir.join("SingletonLock")).unwrap();
+    }
+
+    fn exited_within(child: &mut Child, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn finish(mut child: Child, root: &Path) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reaper_stops_a_rewritten_argv_orphan_before_syncing() {
+        let (root, dir) = dead_session("rewritten");
+        let mut chrome = holder(&format!(
+            "/app/chromium/chrome --enable-features=Foo --user-data-dir={}",
+            dir.display()
+        ));
+        singleton_lock(&dir, &format!("host-{}", chrome.id()));
+        reap_orphans_at(&root);
+        let stopped = exited_within(&mut chrome, Duration::from_secs(5));
+        let template = std::fs::read_to_string(root.join("profile/Default/Cookies"));
+        let removed = !dir.exists();
+        finish(chrome, &root);
+        assert!(stopped, "the orphaned browser must be stopped");
+        assert_eq!(template.unwrap(), "session", "state rescued after the stop");
+        assert!(removed);
+    }
+
+    #[test]
+    fn reaper_stops_an_orphan_whose_lock_names_a_sandbox_pid() {
+        // Flatpak runs Chromium in its own pid namespace: SingletonLock holds
+        // the in-sandbox pid (measured: `steamdeck-2`), never the host pid.
+        let (root, dir) = dead_session("sandboxed");
+        let mut chrome = holder(&format!(
+            "/app/chromium/chrome --user-data-dir={}",
+            dir.display()
+        ));
+        singleton_lock(&dir, "steamdeck-2");
+        reap_orphans_at(&root);
+        let stopped = exited_within(&mut chrome, Duration::from_secs(5));
+        let template = std::fs::read_to_string(root.join("profile/Default/Cookies"));
+        finish(chrome, &root);
+        assert!(stopped, "the orphan must be found by its user-data-dir");
+        assert_eq!(template.unwrap(), "session");
+    }
+
+    #[test]
+    fn reaper_never_syncs_or_deletes_a_profile_it_could_not_free() {
+        let (root, dir) = dead_session("held");
+        let mut other = holder(&format!(
+            "blade-test-holder --user-data-dir={}",
+            dir.display()
+        ));
+        singleton_lock(&dir, &format!("host-{}", other.id()));
+        reap_orphans_at(&root);
+        let alive = !exited_within(&mut other, Duration::from_millis(200));
+        let template = std::fs::read_to_string(root.join("profile/Default/Cookies"));
+        let session = std::fs::read_to_string(dir.join("Default/Cookies"));
+        finish(other, &root);
+        assert!(alive, "an unidentified process is never killed");
+        assert_eq!(
+            session.ok().as_deref(),
+            Some("session"),
+            "a profile still in use must not be deleted"
+        );
+        assert_eq!(
+            template.unwrap(),
+            "template",
+            "a live profile must not be synced"
+        );
+    }
+}
+
 #[cfg(test)]
 mod template_recovery_tests {
     use super::*;
+
+    #[test]
+    fn user_data_dir_match_is_exact() {
+        let dir = Path::new("/home/u/.blade/profiles/sess-12");
+        let cases: &[(&[u8], bool)] = &[
+            (
+                b"chrome\0--user-data-dir=/home/u/.blade/profiles/sess-12\0",
+                true,
+            ),
+            (
+                b"chrome --user-data-dir=/home/u/.blade/profiles/sess-12 --x",
+                true,
+            ),
+            (
+                b"chrome --user-data-dir=/home/u/.blade/profiles/sess-12",
+                true,
+            ),
+            // A live neighbour whose name extends ours is not ours.
+            (
+                b"chrome --user-data-dir=/home/u/.blade/profiles/sess-123 --x",
+                false,
+            ),
+            (
+                b"chrome --database=/home/u/.blade/profiles/sess-12/Crashpad",
+                false,
+            ),
+            (
+                b"chrome --x--user-data-dir=/home/u/.blade/profiles/sess-12",
+                false,
+            ),
+        ];
+        for &(cmdline, expected) in cases {
+            assert_eq!(
+                cmdline_names_user_data_dir(cmdline, dir),
+                expected,
+                "{:?}",
+                String::from_utf8_lossy(cmdline)
+            );
+        }
+    }
     #[test]
     fn real_sync_backup_recovers_but_incomplete_import_is_discarded() {
         let root = std::env::temp_dir().join(format!("blade-real-swap-{}", std::process::id()));
