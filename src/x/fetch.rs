@@ -206,10 +206,14 @@ struct Walk {
     complete: bool,
     /// Why the walk stopped early, when it did.
     note: Option<String>,
-    /// Thread only: reply sections X left collapsed behind a cursor
-    /// ("Show replies", "Show more replies"). They are not replayed, so
-    /// the replies behind them are missing from the harvest.
+    /// Thread only: reply sections X left collapsed behind a cursor. They
+    /// are not replayed, so the replies behind them are missing from the
+    /// harvest. `collapsed`: the rest of one reply's branch ("Show
+    /// replies"), readable from that reply's own status page.
     collapsed: usize,
+    /// `hidden`: replies to the post itself ("Show more replies", "Show
+    /// probable spam"), under no harvested reply.
+    hidden: usize,
 }
 
 impl Walk {
@@ -231,11 +235,17 @@ impl Walk {
         }
         if self.collapsed > 0 {
             notes.push(format!(
-                "x: {} collapsed reply section(s) ('Show replies') not fetched — the replies behind them are missing; open a reply's url to read its branch",
+                "x: {} collapsed reply section(s) ('Show replies') not fetched — the replies behind them are missing (open a reply's url to read its branch)",
                 self.collapsed
             ));
         }
-        let complete = self.complete && !cut && self.collapsed == 0;
+        if self.hidden > 0 {
+            notes.push(format!(
+                "x: {} hidden reply section(s) ('Show more replies' / 'Show probable spam') not fetched — the replies behind them are missing",
+                self.hidden
+            ));
+        }
+        let complete = self.complete && !cut && self.collapsed == 0 && self.hidden == 0;
         (complete, (!notes.is_empty()).then(|| notes.join("; ")))
     }
 }
@@ -257,6 +267,7 @@ async fn walk(
         complete: false,
         note: None,
         collapsed: 0,
+        hidden: 0,
     };
     let mut seen: HashSet<String> = HashSet::new();
     let mut cursor: Option<String> = None;
@@ -355,6 +366,7 @@ async fn walk(
         // own walk is whole without the threads it previews.
         if focal_id.is_some() {
             w.collapsed += parsed.collapsed;
+            w.hidden += parsed.hidden;
         }
         pages += 1;
         // `complete` is claimed only on X's own end signals: a Bottom

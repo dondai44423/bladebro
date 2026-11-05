@@ -42,10 +42,15 @@ pub(super) struct PageBits {
     /// end-of-timeline page — as opposed to a page whose content was all
     /// filtered out. A page without a timeline also counts zero.
     pub(super) entries: usize,
-    /// Cursors that are neither Top nor Bottom — the "Show replies" (ShowMore)
-    /// cursor closing a conversation module, "Show more replies"
-    /// (ShowMoreThreads…) — each hiding replies the walk does not fetch.
+    /// Module cursors that are neither Top nor Bottom — the "Show replies"
+    /// (ShowMore) cursor closing a conversation module — each hiding part of
+    /// one reply's branch that the walk does not fetch.
     pub(super) collapsed: usize,
+    /// Top-level cursors that are neither Top nor Bottom — "Show more
+    /// replies" (ShowMoreThreads), "Show probable spam"
+    /// (ShowMoreThreadsPrompt) — each hiding replies to the post itself,
+    /// under no harvested reply.
+    pub(super) hidden: usize,
 }
 
 /// Walk one graphql response page: find the instructions array, collect
@@ -59,6 +64,7 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
         timeline: false,
         entries: 0,
         collapsed: 0,
+        hidden: 0,
     };
     let Some(instructions) = find_instructions(j) else {
         return bits;
@@ -186,7 +192,7 @@ fn timeline_cursor(bits: &mut PageBits, c: &Value) {
             }
         }
         "Top" => {}
-        _ => bits.collapsed += 1,
+        _ => bits.hidden += 1,
     }
 }
 
@@ -212,6 +218,8 @@ pub(super) struct ThreadPage {
     pub(super) entries: usize,
     /// See [`PageBits::collapsed`].
     pub(super) collapsed: usize,
+    /// See [`PageBits::hidden`].
+    pub(super) hidden: usize,
 }
 
 /// Parse one TweetDetail page: the focal tweet (its own entry) and every
@@ -238,6 +246,7 @@ pub(super) fn parse_thread_page(j: &Value, focal_id: &str) -> ThreadPage {
         timeline: bits.timeline,
         entries: bits.entries,
         collapsed: bits.collapsed,
+        hidden: bits.hidden,
     }
 }
 
@@ -257,6 +266,7 @@ pub(super) fn parse_timeline_page(j: &Value) -> ThreadPage {
         timeline: bits.timeline,
         entries: bits.entries,
         collapsed: bits.collapsed,
+        hidden: bits.hidden,
     }
 }
 

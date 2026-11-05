@@ -12,8 +12,8 @@
 //! - status pages → the whole conversation (TweetDetail): the focal tweet
 //!   plus every reply and nested reply the ranking returns, cursor-paginated
 //!   while the timeline is not terminated, thread-ordered with depth.
-//!   Sections X collapses behind a "Show replies" cursor are not expanded;
-//!   they keep `complete` false, with a note.
+//!   Sections X collapses behind a cursor ("Show replies", "Show more
+//!   replies") are not expanded; they keep `complete` false, with a note.
 //! - profile / search / home → the timeline (UserTweets / SearchTimeline /
 //!   HomeTimeline), cursor-paginated to the requested cap.
 //!
@@ -680,6 +680,62 @@ mod tests {
         assert!(
             !note.contains("capped"),
             "nothing was cut at the cap: {note}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_top_level_replies_are_named_apart_from_collapsed_branches() {
+        // A "Show replies" cursor closes one reply's branch (a module item);
+        // "Show more replies" / "Show probable spam" hide replies to the post
+        // itself (top-level cursors, item-wrapped or bare). Only the first
+        // kind is readable from a reply's url.
+        let cursor_item = |kind: &str, value: &str| json!({"itemType": "TimelineTimelineCursor", "cursorType": kind, "value": value});
+        let branch = json!({"entryId": "conversationthread-7000", "content": {
+        "entryType": "TimelineTimelineModule", "items": [
+            {"entryId": "conversationthread-7000-tweet-7000", "item": {"itemContent": {
+                "itemType": "TimelineTweet",
+                "tweet_results": {"result": tweet("7000", "someone", Some(FOCAL))}}}},
+            {"entryId": "conversationthread-7000-cursor-showmore-sm1",
+                "item": {"itemContent": cursor_item("ShowMore", "sm1")}},
+        ]}});
+        let more = json!({"entryId": "cursor-showmorethreads-smt1", "content": {
+            "entryType": "TimelineTimelineItem",
+            "itemContent": cursor_item("ShowMoreThreads", "smt1")}});
+        let spam = cursor_entry("ShowMoreThreadsPrompt", "smtp1");
+        let body = thread_body(vec![
+            add_entries(vec![
+                tweet_entry(tweet(FOCAL, "op", None)),
+                branch,
+                more,
+                spam,
+            ]),
+            terminate_bottom(),
+        ]);
+        let (cdp, _) = fake_cdp(vec![Ok((200, body))]).await;
+        let p = thread_walk(
+            &cdp,
+            &template("TweetDetail"),
+            FOCAL,
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("thread walk");
+        assert_eq!(p.count, 1);
+        assert!(!p.complete);
+        let note = p.note.unwrap_or_default();
+        let parts: Vec<&str> = note.split("; ").collect();
+        assert_eq!(parts.len(), 2, "{note}");
+        assert!(
+            parts[0].starts_with("x: 1 collapsed reply section(s) ('Show replies')")
+                && parts[0].contains("open a reply's url"),
+            "{note}"
+        );
+        assert!(
+            parts[1].starts_with(
+                "x: 2 hidden reply section(s) ('Show more replies' / 'Show probable spam')"
+            ) && !parts[1].contains("reply's url"),
+            "no reply's url leads to replies hidden under the post: {note}"
         );
     }
 
