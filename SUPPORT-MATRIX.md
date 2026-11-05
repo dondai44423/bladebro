@@ -25,7 +25,7 @@ probes. The linked PR run reached both profile-mode suites on all desktops.
 Release gates require green CI and reached assertions for the exact release
 commit; local cross builds do not substitute for those runs.
 
-The native Mac job uses the supported standard `macos-15-intel` pool after
+The native Mac job uses the supported standard `macos-26-intel` pool after
 repeated ARM64 allocation failures cancelled jobs before their first step.
 Both Mac architectures remain distribution targets. Build caches include
 `runner.arch`, keeping compiled Rust and native integration files separate

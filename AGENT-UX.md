@@ -67,3 +67,14 @@ format refusal before effects, and complete oversized run readback. Native
 Linux/macOS/Windows CI runs it in normal and incognito profiles. The release
 also includes the [prior reliability audit](RELIABILITY-AUDIT.md), its persistence
 regressions, and the existing action/stealth/distribution release gates.
+
+## Small-target input reliability
+
+Addressed native clicks retain fractional hitboxes and adapt the endpoint and
+pre-click tremors to the control size. Previously, unbounded Gaussian offsets
+could land outside a small checkbox; rounding could also miss a subpixel target.
+The input is still dispatched once. `tiny_click.py` verifies exact event counts
+and trusted activation on tiny buttons and fractional-pixel checkboxes in both
+profile modes. The stress fixture reproduced zero successful hits on the old
+binary and twenty on the corrected implementation. This is targeted regression
+evidence, not a universal site-success measurement.

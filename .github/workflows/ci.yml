@@ -27,7 +27,7 @@ jobs:
         # macos-latest routes to the ARM64 pool; repeated allocation failures
         # prevented even starting the release gate. Keep full native Mac tests
         # on the supported standard Intel pool. Both Mac targets still ship.
-        os: [ubuntu-latest, macos-15-intel, windows-latest]
+        os: [ubuntu-latest, macos-26-intel, windows-latest]
         rust-version: ["stable"]
 
     steps:
@@ -149,6 +149,14 @@ jobs:
           export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
           POLISH_OUT=work/persistence-1.json python tools/reliability_probe/persistence.py
           POLISH_OUT=work/persistence-2.json python tools/reliability_probe/persistence.py
+
+      - name: Tiny native targets — no miss or replay
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
+          BLADE_INCOGNITO=0 POLISH_OUT=work/tiny-native.json python tools/reliability_probe/tiny_click.py
+          BLADE_INCOGNITO=1 POLISH_OUT=work/tiny-incognito.json python tools/reliability_probe/tiny_click.py
 
       - name: Agent control reads and structured runs — native browser
         timeout-minutes: 5

@@ -590,7 +590,7 @@ pub(super) fn find_sig_expr(
         + "var tgt=n;if(n.getAttribute&&n.getAttribute('role')==='combobox'&&n.tagName!=='SELECT'){var ii=n.querySelector('textarea,input:not([type=hidden])');if(ii)tgt=ii;}"
         + "if(mode==='box'){"
         + "function _lnb(e){return !!(e&&e.tagName&&(e.tagName==='BUTTON'||e.tagName==='A'||e.tagName==='SELECT'||e.tagName==='TEXTAREA'||(e.tagName==='INPUT'&&e.type!=='hidden'))&&(e.tagName!=='A'||!!e.href));}"
-        + "function _lbx(e){var _lr=e.getBoundingClientRect();return [Math.round(_lr.x+ox)||0,Math.round(_lr.y+oy)||0,Math.round(_lr.width)||0,Math.round(_lr.height)||0];}"
+        + "function _lbx(e){var _lr=e.getBoundingClientRect();return [_lr.x+ox,_lr.y+oy,_lr.width,_lr.height];}"
         + LEAF_TARGET_JS
         + "var _lcbx=_lClick[0]+_lClick[2]/2,_lcby=_lClick[1]+_lClick[3]/2;var _lfc=doc.elementFromPoint(_lcbx-ox,_lcby-oy);"
         + "var _desc=function(e){if(!e)return null;var t=e.tagName.toLowerCase();var idd=(e.getAttribute&&e.getAttribute('id'))?('#'+e.getAttribute('id')):'';var cl=(typeof e.className==='string'&&e.className.trim())?('.'+e.className.trim().split(/\\s+/).slice(0,2).join('.')):'';var ala=(e.getAttribute&&(e.getAttribute('aria-label')||e.getAttribute('title')))||'';var tx=(e.textContent||'').replace(/\\s+/g,' ').trim().slice(0,30);return t+idd+cl+(ala?(' ['+ala+']'):(tx?(' \"'+tx+'\"'):''));};"
