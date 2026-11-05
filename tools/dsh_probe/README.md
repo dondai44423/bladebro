@@ -20,6 +20,15 @@ and cancellation gates, failed handshake cleanup, duplicate namespace refusal,
 MCP-child crash/reconnect without mutation replay, unload and re-enable.
 Child tracking instruments Node's spawn only to observe/kill owned fixture
 processes. The production plugin uses DSH's unmodified MCP supervisor.
+Failed tool assertions retain the last fixture call, elapsed time and full result.
+Receipt checks wait for visible acknowledgement and require completed structured
+steps, so an error containing the expected text cannot pass.
+
+`CHROME_PATH=/absolute/browser node tools/dsh_probe/stock-browser.mjs` separately
+checks stock CDP evaluation, DOM layout reads and WebGL access with disposable
+data. It adds no driver patches and makes no stealth claim. On failed Mac CI,
+this and a separate DSH run with `BLADE_WEBGL=real` diagnose browser/driver
+boundaries. Diagnostic passes cannot turn the failed required job green.
 
 Run `node tools/dsh_probe/package.mjs` for portable package/resolver boundaries
 (all five mapped platforms plus unsupported platforms, paths, config and missing

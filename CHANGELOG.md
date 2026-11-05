@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional `run format=json` reports completion, stopped step, per-step status and retained observations with recovery context. Nested observations remain text; individual read formats are explicit. Invalid formats fail before any effect.
 
 ### Fixed
+- Browser startup errors retain the negotiated MCP result dialect and stay silent for notifications. New-protocol clients receive the actual startup failure instead of a missing-`resultType` protocol error; guidance confirms the tool was not dispatched.
 - Keep humanized pointer endpoints and tremors inside addressed controls, retaining fractional hitboxes. Unbounded click offsets could miss small checkboxes; input is still dispatched once without replay.
 - Keep the full native macOS CI gate on the supported Intel pool after repeated ARM64 runner-allocation failures; partition compiled build caches by CPU architecture. Both Mac distribution targets remain required.
 - Owned Chrome shutdown requests a confirmed-owned browser's graceful close before bounded process-tree cleanup, preserving localStorage across stop/MCP EOF while retaining forked-launcher cleanup.
