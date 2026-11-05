@@ -29,7 +29,8 @@ use super::{request_version, shape_result, SUPPORTED_VERSIONS};
 /// The agent never sees "browser connection closed".
 ///
 /// Lifecycle guarantees (the reliability contract):
-/// - stdin EOF (client gone) → Chrome shut down, profile synced, exit.
+/// - stdin EOF or a failed stdout write (client gone) → Chrome shut
+///   down, profile synced, exit.
 /// - SIGTERM/SIGINT/SIGHUP → same graceful teardown, at any moment: a
 ///   tool call in flight is cancelled (see `call_tool`); a launch finishes
 ///   first (cancelling it could orphan the half-started Chrome).
@@ -97,8 +98,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         Ok(line) => line,
                         Err(e) => {
                             let resp = json!({"jsonrpc":"2.0", "id":null, "error":{"code":-32700, "message":format!("Parse error: invalid UTF-8: {e}")}});
-                            writeln!(out, "{resp}")?;
-                            out.flush()?;
+                            if !send(&mut out, &resp) { break; }
                             continue;
                         }
                     },
@@ -123,9 +123,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                             "id": null,
                             "error": { "code": -32700, "message": format!("Parse error: {e}") }
                         });
-                        let resp_str = serde_json::to_string(&resp)?;
-                        writeln!(out, "{resp_str}")?;
-                        out.flush()?;
+                        if !send(&mut out, &resp) { break; }
                         continue;
                     }
                 };
@@ -138,9 +136,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         "id": if msg.is_object() { msg.get("id").cloned() } else { None },
                         "error": { "code": -32600, "message": "Invalid Request: expected an object with a string 'method'" }
                     });
-                    let resp_str = serde_json::to_string(&resp)?;
-                    writeln!(out, "{resp_str}")?;
-                    out.flush()?;
+                    if !send(&mut out, &resp) { break; }
                     continue;
                 }
 
@@ -164,9 +160,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                 "data": { "supportedVersions": SUPPORTED_VERSIONS },
                             }
                         });
-                        let resp_str = serde_json::to_string(&resp)?;
-                        writeln!(out, "{resp_str}")?;
-                        out.flush()?;
+                        if !send(&mut out, &resp) { break; }
                         continue;
                     }
                 };
@@ -183,8 +177,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                             }
                             let mut result = json!({"content":[{"type":"text","text":text}],"isError":true});
                             shape_result(&mut result, version);
-                            writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id,"result":result}))?;
-                            out.flush()?;
+                            if !send(&mut out, &json!({"jsonrpc":"2.0","id":id,"result":result})) { break; }
                         }
                         continue;
                     }
@@ -322,8 +315,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                         });
                                         // This early return bypasses the normal result shaping.
                                         shape_result(&mut result, version);
-                                        writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id,"result":result}))?;
-                                        out.flush()?;
+                                        if !send(&mut out, &json!({"jsonrpc":"2.0","id":id,"result":result})) { break; }
                                     }
                                     continue;
                                 }
@@ -346,8 +338,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                     "isError": true,
                                 });
                                 shape_result(&mut result, version);
-                                let _ = writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id_retry,"result":result}))
-                                    .and_then(|_| out.flush());
+                                send(&mut out, &json!({"jsonrpc":"2.0","id":id_retry,"result":result}));
                             }
                             break;
                         };
@@ -580,9 +571,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                     if is_notification {
                         continue;
                     }
-                    let resp_str = serde_json::to_string(&resp)?;
-                    writeln!(out, "{resp_str}")?;
-                    out.flush()?;
+                    if !send(&mut out, &resp) { break; }
                 }
             }
             _ = idle_check.tick() => {
@@ -678,6 +667,26 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
 async fn recover_dead_tab(page: &mut Page) -> Result<()> {
     let new_id = page.open_tab_target("about:blank").await?;
     page.switch_tab(&new_id).await
+}
+
+/// Write one JSON-RPC message line. `false` means the client is gone
+/// (EPIPE, closed pipe): the caller breaks to the graceful teardown, exactly
+/// like stdin EOF. Returning the error with `?` used to skip that teardown —
+/// owned Chrome dropped without its Browser.close flush, no login snapshot,
+/// no knowledge sync — whenever a client died before its response was due.
+fn send(out: &mut impl Write, msg: &Value) -> bool {
+    match writeln!(out, "{msg}").and_then(|_| out.flush()) {
+        Ok(()) => true,
+        Err(e) => {
+            // Not eprintln!: the dead client may have taken stderr with it,
+            // and a panic here would skip the teardown all the same.
+            let _ = writeln!(
+                std::io::stderr(),
+                "[bladebro] stdout write failed ({e}) — client gone, shutting down Chrome gracefully"
+            );
+            false
+        }
+    }
 }
 
 /// The verdict for a call cut short by a termination signal. Its effect is

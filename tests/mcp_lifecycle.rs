@@ -6,6 +6,9 @@
 //! 1. A SIGTERM that lands mid-call must not be lost (it used to be: the
 //!    signal listeners only existed while the loop sat idle, so the host's
 //!    SIGTERM did nothing and the host had to SIGKILL).
+//! 2. A client that disappears mid-call (stdout closed → EPIPE on the
+//!    response) must end the session like stdin EOF does, not as an I/O
+//!    error that returns past the teardown.
 //!
 //! No Chrome involved: `--port` points the server at a TCP endpoint that
 //! accepts and never answers, so the first tools/call sits in target
@@ -120,4 +123,28 @@ fn sigterm_during_a_tool_call_is_not_lost() {
         "signal teardown must exit 0: {status:?}\n{err}"
     );
     assert!(err.contains("termination signal"), "{err}");
+}
+
+#[test]
+fn client_gone_mid_call_still_tears_down() {
+    let home = tmp_home("epipe");
+    let (port, accepted) = silent_endpoint();
+    let mut child = spawn_mcp(&home, port);
+    start_call(&mut child, &accepted);
+    // The client dies mid-call: both of its pipe ends close. The pending
+    // response write then fails with EPIPE.
+    drop(child.stdin.take());
+    drop(child.stdout.take());
+    let status = wait_exit(&mut child, 20);
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let err = stderr_of(&mut child);
+    let _ = std::fs::remove_dir_all(&home);
+    let status = status.unwrap_or_else(|| panic!("server outlived its client\n{err}"));
+    assert!(
+        status.success(),
+        "a vanished client must end the session through the teardown (exit 0), not an I/O error: {status:?}\n{err}"
+    );
 }
