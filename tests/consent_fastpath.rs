@@ -22,6 +22,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 const ACCEPT: &str = "#onetrust-accept-btn-handler";
 const REJECT: &str = "#onetrust-reject-all-handler";
+const DIDOMI_REJECT: &str = "#didomi-notice-disagree-button";
 
 /// One visible button per id, all inside a cookie dialog.
 const PAGE_STUB: &str = r#"
@@ -232,4 +233,26 @@ fn unlisted_stored_selector_is_not_replayed() {
     assert_all_ran(&evals);
     assert_eq!(got.as_deref(), Some(REJECT));
     assert_eq!(clicked(&evals), [REJECT]);
+}
+
+/// The fast path itself: a learned selector for the current policy is
+/// clicked by ONE cheap expression and the full ladder never runs. The page
+/// offers the ladder's first choice too, so a fallback is visible: the
+/// ladder would press onetrust, the replay presses the learned didomi button.
+/// Since v3.0.14 the replay expression was a SyntaxError (`(()={` without
+/// `=>`), so every visit silently paid the full ladder.
+#[test]
+fn learned_selector_is_replayed_without_the_ladder() {
+    let Some((got, evals)) = run_case(None, &[&REJECT[1..], &DIDOMI_REJECT[1..]], DIDOMI_REJECT)
+    else {
+        return;
+    };
+    assert_all_ran(&evals);
+    assert_eq!(got.as_deref(), Some(DIDOMI_REJECT));
+    assert_eq!(clicked(&evals), [DIDOMI_REJECT]);
+    assert_eq!(
+        evals.len(),
+        1,
+        "the stored selector matched, yet the full ladder still ran"
+    );
 }

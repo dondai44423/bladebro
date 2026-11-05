@@ -138,7 +138,7 @@ pub async fn dismiss_consent_with_stored(
         // A stale or poisoned selector falls through to full detection
         // instead of clicking.
         let expr = format!(
-            "(()={{const b=document.querySelector({sel_json});if(b&&b.offsetWidth+b.offsetHeight>0){{const d=b.closest('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');if(d&&/cookie|consent|gdpr/.test((d.textContent||'').toLowerCase())){{b.click();return {sel_json};}}}}return null;}})()"
+            "(()=>{{const b=document.querySelector({sel_json});if(b&&b.offsetWidth+b.offsetHeight>0){{const d=b.closest('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');if(d&&/cookie|consent|gdpr/.test((d.textContent||'').toLowerCase())){{b.click();return {sel_json};}}}}return null;}})()"
         );
         let res = cdp
             .send(
