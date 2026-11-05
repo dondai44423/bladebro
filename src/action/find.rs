@@ -61,6 +61,11 @@ pub(super) struct FoundElement {
     /// remounted it); `text`/`hostKind` still describe the live editor.
     #[serde(default, rename = "tgtMissing")]
     pub(super) tgt_missing: Option<bool>,
+    /// "prepare": the target did not take focus and another editable field
+    /// still holds it (named by its label, never its value) - typed keys
+    /// would land there.
+    #[serde(default)]
+    pub(super) away: Option<String>,
     /// Live options of a select whose pick failed (#21): `text` or
     /// `text=value` tokens, capped at 80.
     #[serde(default)]
@@ -565,17 +570,39 @@ pub(super) fn find_sig_expr(
         + "const fps=frame.join(',');const counts={};"
         // Editing-host helpers, shared by prepare/clear/check/selhost/type:
         // every input path resolves the EFFECTIVE editing host first - the
-        // focused editor when a framework moved focus (facade composers),
-        // else the addressed element or its inner editable field.
+        // addressed element's OWN editor when a framework moved focus into
+        // it (facade composers), else the addressed element or its inner
+        // editable field.
         + "var _ced=function(e){return !!(e&&(e.isContentEditable||(e.getAttribute&&e.getAttribute('contenteditable')==='true')));};"
         + "var _clr=function(e){try{var _s=window.getSelection();_s.selectAllChildren(e);document.execCommand('delete',false);}catch(_e){}e.dispatchEvent(new Event('input',{bubbles:true}));};"
         + "var _tvr=function(v){return String(v==null?'':v).replace(/\\s+/g,' ').trim();};"
         + "var _read=function(e){if(!e)return '';if('value' in e&&typeof e.value==='string')return _tvr(e.value);return _tvr(e.innerText||e.textContent||'');};"
         + "var _isd=function(e){return !!(e&&(_ced(e)||((e.tagName==='INPUT'||e.tagName==='TEXTAREA')&&e.type!=='hidden')));};"
-        + "var _hostOf=function(t){var a=doc.activeElement;if(_isd(a))return a;if(t&&t.querySelector){var ii=_ced(t)?null:t.querySelector('textarea,input:not([type=hidden]),[contenteditable]:not([contenteditable=false])');if(ii)return ii;}return t;};"
+        // Ownership (L2): an editor is the target's own when it IS the
+        // target, sits inside or around it (composed tree: a custom
+        // element's shadow input counts), or is a rich editor
+        // (contenteditable) mounted in the target's own wrapper - the facade
+        // composer class. Any other field (a sibling input, the same form,
+        // whatever holds focus) has its own ref: adopting it typed a password
+        // into the focused email field and called it "the live editor". A
+        // body/html wrapper owns nothing - every editor would qualify.
+        + "var _cin=function(t,e){for(var x=e,i=0;x&&i<60;i++){if(x===t)return true;x=x.parentNode||x.host||null;}return false;};"
+        + "var _rel=function(t,e){return !!(t&&e&&(e===t||_cin(t,e)||_cin(e,t)));};"
+        + "var _own=function(t,e){if(_rel(t,e))return true;var w=t&&t.parentNode;return !!(w&&w!==doc.body&&w!==doc.documentElement&&w.contains&&_ced(e)&&w.contains(e));};"
+        // A disabled target never hands its keys to a wrapper editor: focus
+        // stayed wherever it was, and that is not the target's doing.
+        + "var _hostOf=function(t){var a=doc.activeElement;if(_isd(a)&&(_rel(t,a)||(!t.disabled&&_own(t,a))))return a;if(t&&t.querySelector){var ii=_ced(t)?null:t.querySelector('textarea,input:not([type=hidden]),[contenteditable]:not([contenteditable=false])');if(ii)return ii;}return t;};"
         + "var _selLen=function(h){try{if(h&&('selectionStart' in h)&&'value' in h)return Math.abs((h.selectionEnd||0)-(h.selectionStart||0));var s=doc.getSelection&&doc.getSelection();return (s&&!s.isCollapsed)?String(s).length:0;}catch(_e){return 0;}};"
-        + "var _nearish=function(n,a){if(!n||!a)return false;if(n.contains(a)||a.contains(n))return true;try{var f1=n.closest?n.closest('form'):null;if(f1&&f1===(a.closest?a.closest('form'):null))return true;}catch(_e){}var p=n.parentElement;for(var i=0;i<4&&p;i++){if(p.contains(a))return true;p=p.parentElement;}return false;};"
-        + "var _hiddenHost=function(n){var a=doc.activeElement;if(a&&a!==n&&_isd(a)&&vis(a)&&_nearish(n,a))return a;var p=n.parentElement;for(var i=0;i<3&&p;i++){var q=p.querySelectorAll('[contenteditable]:not([contenteditable=false]),textarea,input:not([type=hidden])');for(var j=0;j<q.length;j++){var r=q[j];if(r!==n&&_isd(r)&&vis(r))return r;}p=p.parentElement;}return null;};"
+        // A hidden target hands off only to its own visible editor: the
+        // focused one, else the single candidate in its wrapper (two would be
+        // a guess).
+        + "var _hiddenHost=function(n){var a=doc.activeElement;if(a&&a!==n&&_isd(a)&&vis(a)&&_own(n,a))return a;var w=n.parentNode;if(!w||!w.querySelectorAll||w===doc.body||w===doc.documentElement)return null;var q=w.querySelectorAll('[contenteditable]:not([contenteditable=false]),textarea,input:not([type=hidden])');var hit=null;for(var j=0;j<q.length;j++){var r=q[j];if(r!==n&&_isd(r)&&vis(r)&&_own(n,r)){if(hit)return null;hit=r;}}return hit;};"
+        // Where typed keys would actually go when that is neither the host
+        // nor the target: the deep focused editable (a disabled or inert
+        // target leaves focus on whatever field had it). Named by label or
+        // id, never by content: a rich editor's or textarea's text IS its
+        // value.
+        + "var _away=function(h,t){var a=doc.activeElement;for(var g=0;g<20&&a&&a.shadowRoot&&a.shadowRoot.activeElement;g++)a=a.shadowRoot.activeElement;if(!_isd(a)||_rel(h,a)||_rel(t,a))return null;var nm='';try{nm=(_ced(a)||a.tagName==='TEXTAREA')?String((a.getAttribute&&(a.getAttribute('aria-label')||a.getAttribute('placeholder')))||'').trim():name(a,false);}catch(_e){}return a.tagName.toLowerCase()+(a.id?('#'+String(a.id).slice(0,30)):'')+(nm?(' \"'+nm.slice(0,40)+'\"'):'');};"
         + "for(let i=0;i<all.length;i++){const n=all[i];"
         + "const r=role(n);if(r==='hidden')continue;"
         + "const nm=name(n,false);"
@@ -604,7 +631,9 @@ pub(super) fn find_sig_expr(
         + "var _ltopOk=(_lfc===n)||_cmpAnc(n,_lfc)||_cmpAnc(_lfc,n);"
         + "var _ltop=_ltopOk?null:(_lfc?_desc(_lfc):'outside the viewport');"
         + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!((lp(n)||n).disabled),isTopmost:_ltopOk,hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),top_desc:_ltop};}"
-        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();var _ph=_hostOf(tgt);const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false};}"
+        // The resolved host gets focus when focusing the target left it
+        // elsewhere (a wrapper's inner field): keys go where we read back.
+        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();var _ph=_hostOf(tgt);if(_ph&&_ph!==tgt&&_ph!==doc.activeElement){try{_ph.focus();}catch(_e){}}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false,away:_away(_ph,tgt)};}"
         + "if(mode==='focus'){var _fc=tgt;try{if(tgt.tabIndex<0){var _cd=tgt.querySelector('[tabindex],button,a[href],input,select,textarea');if(_cd)_fc=_cd;}}catch(_e){}try{_fc.focus();}catch(_e){}var _fo=false;try{_fo=(_fc.getRootNode().activeElement===_fc)||(document.activeElement===_fc);}catch(_e){}return{ok:true,focused:_fo};}"
         + "if(mode==='clear'){var _ch=_hostOf(tgt);if(!_ch)return{ok:false,reason:'no editable host'};if(_ced(_ch)){_clr(_ch);}else if('value' in _ch){var _cpr=_ch.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _cd=Object.getOwnPropertyDescriptor(_cpr,'value');if(_cd&&_cd.set){_cd.set.call(_ch,'');}else{_ch.value='';}_ch.dispatchEvent(new Event('input',{bubbles:true}));_ch.dispatchEvent(new Event('change',{bubbles:true}));}else{return{ok:false,reason:'not an editable field'};}return{ok:true,text:_read(_ch)};}"
         // js-fallback click (W1): a bare n.click() fires ONE click event and
@@ -633,7 +662,15 @@ pub(super) fn find_sig_expr(
         + "if(mode==='read'){var txt=n.innerText||n.textContent||'';if(!txt&&('value' in n)&&n.value)txt=n.value;return{ok:true,text:txt.slice(0,5000)};}"
         + "if(mode==='hover'){n.scrollIntoView({block:'center'});const rect=n.getBoundingClientRect();const cx=rect.x+rect.width/2;const cy=rect.y+rect.height/2;const top=doc.elementFromPoint(cx,cy);const isTopmost=top===n||n.contains(top);return{ok:true,box:[Math.round(rect.x+ox)||0,Math.round(rect.y+oy)||0,Math.round(rect.width)||0,Math.round(rect.height)||0],isTopmost:isTopmost};}"
         + "return{ok:false,reason:'unknown mode'};}}"
-        + "if(mode==='check'||mode==='prepare'){var _a3=doc.activeElement;var _h3=_isd(_a3)?_a3:null;if(_h3){if(mode==='prepare')_h3.focus();return{ok:true,text:_read(_h3),hostKind:(_ced(_h3)?'ce':((_h3.tagName)?_h3.tagName.toLowerCase():'')),hostIsTgt:false,sel:_selLen(_h3),tgtMissing:true};}}"
+        // No element carries the sig. The one legitimate re-adoption: an
+        // unlabelled contenteditable is NAMED BY ITS OWN TEXT, so our own
+        // edit moves its sig mid-action; it is still the focused editor of
+        // the same role. A labelled editor or a native field keeps a stable
+        // name, so a miss there means the target is gone - report it (heal
+        // re-resolves) instead of handing over whatever field has focus.
+        // prepare never adopts: it runs before our edits, so a miss there is
+        // the page's doing.
+        + "if(mode==='check'){var _a3=doc.activeElement;try{if(_isd(_a3)&&_ced(_a3)&&role(_a3)===String(sig).split('|')[1]&&name(_a3,false)===textNoScripts(_a3).trim().replace(/\\s+/g,' ').slice(0,120))return{ok:true,text:_read(_a3),hostKind:'ce',hostIsTgt:false,sel:_selLen(_a3),tgtMissing:true};}catch(_e){}}"
         + "return{ok:false,reason:'not found'};})("
         + &sig_js
         + ","

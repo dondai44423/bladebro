@@ -407,17 +407,27 @@ pub async fn perform_with_network(
             // may move focus into it - typing then lands where a human's
             // would, and every readback below resolves the effective host.
             let focus = find_by_sig(cdp, sig, frame, "prepare", None).await?;
-            let pre = check_editor(cdp, sig, frame).await;
-            if !focus.ok
-                && pre
-                    .as_ref()
-                    .and_then(|p| p.host_kind.clone())
-                    .unwrap_or_default()
-                    .is_empty()
-            {
-                // The addressed element is gone and no live editor took over.
+            if !focus.ok {
+                // The addressed element is gone (or hidden with no editor of
+                // its own). Never fall back to whatever holds focus - that
+                // typed a password into the focused email field (L2). Heal
+                // re-resolves the ref.
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
             }
+            // Keys go wherever focus is. A target that could not take it
+            // (disabled, inert, covered) leaves focus on another field, and
+            // typing would fill THAT field - refuse before any key.
+            if focus.disabled == Some(true) {
+                return Err(BladeError::NotInteractable(format!(
+                    "{ref_id} is disabled; no keys typed"
+                )));
+            }
+            if let Some(other) = focus.away.as_deref() {
+                return Err(BladeError::NotInteractable(format!(
+                    "{ref_id} did not take focus ({other} holds it); no keys typed - the field may be inert or covered"
+                )));
+            }
+            let pre = check_editor(cdp, sig, frame).await;
             let pre_read = pre
                 .as_ref()
                 .and_then(|p| p.text.clone())
@@ -498,6 +508,12 @@ pub async fn perform_with_network(
         }
         Action::Clear { ref_id } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
+            // The addressed element must still exist: the readback's drift
+            // fallback (an unlabelled editor renamed by our own edit) must
+            // never let a clear empty some other field that holds focus.
+            if !find_by_sig(cdp, sig, frame, "state", None).await?.ok {
+                return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
+            }
             // Verified clear: the ladder (setter -> trusted keys -> JS path)
             // reads back at every rung; the report carries the truth into
             // the verdict - a clear that did not empty the field never

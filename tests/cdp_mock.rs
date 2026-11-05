@@ -315,3 +315,220 @@ async fn capture_surfaces_a_dead_connection_instead_of_an_empty_page() {
         ),
     }
 }
+
+// ---- scripted page: drives `action::perform` end to end without a browser ----
+
+type Responder = Box<dyn Fn(&str, &str) -> Value + Send + 'static>;
+
+const FIND_MODES: [&str; 11] = [
+    "box", "prepare", "check", "focus", "clear", "selhost", "type", "select", "click", "state",
+    "hover",
+];
+
+/// Serve one connection, answering every request with `respond(method,
+/// expression)` (a `{"result":..}` or `{"error":..}` body; the id is added
+/// here) and logging each method name.
+async fn scripted_page(
+    respond: Responder,
+) -> (
+    CdpSession,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = log.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        while let Some(Ok(message)) = ws.next().await {
+            let Ok(text) = message.to_text() else {
+                continue;
+            };
+            let Ok(request) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            let method = request["method"].as_str().unwrap_or("").to_string();
+            let expression = request["params"]["expression"].as_str().unwrap_or("");
+            let mut response = respond(&method, expression);
+            response["id"] = request["id"].clone();
+            // find-by-sig calls are logged with their mode ("find:select").
+            let entry = match FIND_MODES
+                .iter()
+                .find(|m| expression.contains(&format!(",\"{m}\",")))
+            {
+                Some(m) if expression.starts_with("((sig,mode,text,frame)=>") => {
+                    format!("find:{m}")
+                }
+                _ => method,
+            };
+            seen.lock().unwrap().push(entry);
+            if ws
+                .send(Message::Text(response.to_string().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let client = CdpClient::connect(&format!("ws://{address}"))
+        .await
+        .unwrap();
+    (CdpSession::root(client), log, server)
+}
+
+/// A model holding one element, as a capture would mint it.
+fn one_element_model(tag: &str, role: &str, name: &str) -> (bladebro::page::LivePageModel, String) {
+    let mut lpm = bladebro::page::LivePageModel::new();
+    lpm.ingest(bladebro::page::PageCapture {
+        url: "http://fixture.test/".into(),
+        title: String::new(),
+        ready_state: "complete".into(),
+        muts: 0,
+        elements: vec![bladebro::page::perception::RawElement {
+            tag: tag.into(),
+            role: role.into(),
+            name: name.into(),
+            element_type: None,
+            value: None,
+            options: None,
+            disabled: false,
+            checked: None,
+            href: None,
+            placeholder: None,
+            required: false,
+            has_popup: false,
+            landmark: None,
+            box_: [10.0, 10.0, 80.0, 30.0],
+            sig: format!("|{role}|{name}|1"),
+            frame: Vec::new(),
+            shadow: false,
+            fingerprint: 0,
+            pending: false,
+            ctx: String::new(),
+        }],
+    });
+    let ref_id = lpm.elements()[0].ref_id.clone();
+    (lpm, ref_id)
+}
+
+/// Page-side answers shared by the scripted cases: an empty settled page.
+fn page_basics(expression: &str) -> Value {
+    if expression.contains("cap(d,[],0,0)") {
+        json!({"result":{"result":{"type":"object","value":{"url":"http://fixture.test/","readyState":"complete","elements":[]}}}})
+    } else {
+        json!({"result":{"result":{"type":"object","value":null}}})
+    }
+}
+
+#[tokio::test]
+async fn type_never_presses_keys_when_the_target_cannot_take_them() {
+    // L2: keys go wherever focus is. A target that is disabled, that left
+    // focus on another field, or that is gone (while some other editor is
+    // focused) must be refused BEFORE any key - the old flow typed a
+    // password into the focused email field and called it "the live editor".
+    let cases: [(&str, Value, Value); 3] = [
+        (
+            "disabled",
+            json!({"ok":true,"box":[10,10,80,30],"disabled":true,"text":"","hostKind":"input","hostIsTgt":true,"sel":0,"tgtMissing":false}),
+            json!({"ok":true,"text":"","hostKind":"input","hostIsTgt":true,"sel":0,"tgtMissing":false}),
+        ),
+        (
+            "input#email \"Email\"",
+            json!({"ok":true,"box":[10,10,80,30],"disabled":false,"text":"","hostKind":"input","hostIsTgt":true,"sel":0,"tgtMissing":false,"away":"input#email \"Email\""}),
+            json!({"ok":true,"text":"","hostKind":"input","hostIsTgt":true,"sel":0,"tgtMissing":false}),
+        ),
+        (
+            "element not found",
+            json!({"ok":false,"reason":"not found"}),
+            json!({"ok":true,"text":"","hostKind":"ce","hostIsTgt":false,"sel":0,"tgtMissing":true}),
+        ),
+    ];
+    for (want, prepare, check) in cases {
+        let respond: Responder = Box::new(move |method, expression| {
+            if method == "Runtime.evaluate" && expression.contains(",\"prepare\",null,") {
+                json!({"result":{"result":{"type":"object","value":prepare.clone()}}})
+            } else if method == "Runtime.evaluate"
+                && expression.starts_with("((sig,mode,text,frame)=>")
+            {
+                json!({"result":{"result":{"type":"object","value":check.clone()}}})
+            } else if method == "Runtime.evaluate" {
+                page_basics(expression)
+            } else {
+                json!({"result":{}})
+            }
+        });
+        let (cdp, log, server) = scripted_page(respond).await;
+        let (mut lpm, ref_id) = one_element_model("input", "textbox", "Locked password");
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            bladebro::action::perform(
+                &cdp,
+                &mut lpm,
+                &bladebro::action::Action::Type {
+                    ref_id,
+                    text: "hunter2".into(),
+                },
+                &std::sync::Arc::new(std::sync::Mutex::new(None)),
+            ),
+        )
+        .await
+        .unwrap();
+        let keys = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.as_str() == "Input.dispatchKeyEvent" || m.as_str() == "Input.insertText")
+            .count();
+        assert_eq!(keys, 0, "{want}: keys were dispatched; result {result:?}");
+        let err = result.expect_err(want).to_string();
+        assert!(err.contains(want), "{want}: {err}");
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn clear_of_a_vanished_target_touches_no_other_field() {
+    // L2: the readback may re-adopt a focused unlabelled editor (its sig
+    // drifts with its own text). A clear whose target is gone must stop at
+    // not-found instead of emptying whatever editor holds focus.
+    let respond: Responder = Box::new(|method, expression| {
+        if method == "Runtime.evaluate" && expression.contains(",\"state\",null,") {
+            json!({"result":{"result":{"type":"object","value":{"ok":false,"reason":"not found"}}}})
+        } else if method == "Runtime.evaluate" && expression.starts_with("((sig,mode,text,frame)=>")
+        {
+            json!({"result":{"result":{"type":"object","value":{"ok":true,"text":"someone else's draft","hostKind":"ce","hostIsTgt":false,"sel":0,"tgtMissing":true}}}})
+        } else if method == "Runtime.evaluate" {
+            page_basics(expression)
+        } else {
+            json!({"result":{}})
+        }
+    });
+    let (cdp, log, server) = scripted_page(respond).await;
+    let (mut lpm, ref_id) = one_element_model("div", "textbox", "Notes");
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        bladebro::action::perform(
+            &cdp,
+            &mut lpm,
+            &bladebro::action::Action::Clear { ref_id },
+            &std::sync::Arc::new(std::sync::Mutex::new(None)),
+        ),
+    )
+    .await
+    .unwrap();
+    let keys = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "Input.dispatchKeyEvent")
+        .count();
+    assert_eq!(keys, 0, "keys were dispatched; result {result:?}");
+    assert!(
+        matches!(result, Err(BladeError::ElementNotFound(_))),
+        "{result:?}"
+    );
+    server.abort();
+}
