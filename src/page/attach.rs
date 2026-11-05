@@ -864,15 +864,13 @@ impl Page {
                             }
                         }
                     }
-                    // A client-side route change: the url has moved but the
-                    // previous route's DOM is still mounted. Arm the guard so
-                    // the next read waits for the swap instead of answering
-                    // with the old route's content.
+                    // A main-frame client-side route change: the url has moved
+                    // but the previous route's DOM is still mounted. Arm the
+                    // guard so the next read waits for the swap instead of
+                    // answering with the old route's content (iframes' own
+                    // same-document moves are ignored there).
                     Some(Ok(ev)) if ev.method == "Page.navigatedWithinDocument" => {
-                        route_t.note_nav();
-                        if ev.params.get("frameId").and_then(Value::as_str)
-                            == Some(main_frame.as_str())
-                        {
+                        if route_t.on_navigated_within_document(&ev.params, &main_frame) {
                             if let Ok(mut log) = net_log_t.lock() {
                                 log.clear();
                             }
