@@ -234,7 +234,16 @@ fn act_fields(args: &Value) -> Result<()> {
         }
         _ => {}
     }
-    if matches!(action, "type" | "clear" | "select" | "read" | "upload") {
+    if action == "upload" {
+        // The handler resolves only ref/selector to the file input; a label
+        // used to pass here and fail after url= pre-navigation/earlier steps.
+        if !["ref", "selector"].iter().any(|k| nonempty(args, k)) {
+            return Err(BladeError::Usage(
+                "upload requires ref or selector (the file input; label is not resolved for uploads)"
+                    .into(),
+            ));
+        }
+    } else if matches!(action, "type" | "clear" | "select" | "read") {
         if !["ref", "label", "selector"]
             .iter()
             .any(|k| nonempty(args, k))
@@ -707,6 +716,22 @@ mod tests {
         ] {
             assert!(run(&json!({"steps":[ok]})).is_ok(), "{ok}");
         }
+    }
+
+    #[test]
+    fn upload_requires_the_addressing_its_handler_resolves() {
+        // The upload handler resolves only ref/selector. label used to pass
+        // validation and fail after url= pre-navigation and earlier steps.
+        let upload = json!({"action":"upload","label":"Resume","text":"cv.pdf"});
+        assert!(act(&upload).is_err());
+        let err = run(&json!({"steps":[{"action":"eval","js":"window.count++"}, upload]}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ref or selector"), "{err}");
+        assert!(
+            act(&json!({"action":"upload","selector":"input[type=file]","text":"cv.pdf"})).is_ok()
+        );
+        assert!(act(&json!({"action":"upload","ref":"e3","text":"cv.pdf"})).is_ok());
     }
 
     #[test]
