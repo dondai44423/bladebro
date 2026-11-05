@@ -40,3 +40,8 @@ fn rtc_sdp_filter_removes_whole_lines_and_remote_candidates_stay_native() {
 fn noise_never_creates_a_canvas_context_and_audio_offset_is_idempotent() {
     regression("noise");
 }
+
+#[test]
+fn console_capture_runs_no_page_code_and_is_bounded() {
+    regression("console");
+}

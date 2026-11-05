@@ -194,7 +194,74 @@ if(screen.pixelDepth!==24){_defGet(_sp2,'pixelDepth',_ogs(_sp2,'pixelDepth'),fun
 try{
 var _uk=Symbol.for('q');
 var _uxa=[];
-function _uxp(l,a){try{var p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.push(typeof v==='string'?v:JSON.stringify(v));}catch(e){p.push(String(v));}}_uxa.push({l:l,m:p.join(' ').slice(0,400),t:Date.now()});if(_uxa.length>200)_uxa.shift();}catch(e){}}
+// Entry serializer. Plain data (primitives, arrays and objects of data
+// properties, typed arrays) reads exactly as JSON.stringify wrote it, but the
+// walk runs no page code — accessors show as "(...)" instead of being invoked,
+// toJSON is honoured only for native Date/URL (through captured natives), DOM
+// nodes and windows read as their [object Tag] — and it stops once the
+// 400-char entry is full. JSON.stringify fired page getters/toJSON on every
+// logged argument (page-observable: the console trap the protocol layer exists
+// to avoid) and serialized the whole value before the cut (~20 ms per log of a
+// large array).
+var _uj=JSON.stringify,_uks=Object.keys,_ud=Object.getOwnPropertyDescriptor,_uia=Array.isArray,_ura=Reflect.apply,_unow=Date.now;
+var _uhi=Function.prototype[Symbol.hasInstance],_uho=Object.prototype.hasOwnProperty,_uts=Object.prototype.toString;
+var _uD=Date,_udt=Date.prototype.getTime,_udi=Date.prototype.toISOString;
+var _uU=(typeof URL!=='undefined'&&typeof URL.prototype.toJSON==='function')?URL:null;
+var _uN=typeof Node!=='undefined'?Node:null,_uW=typeof Window!=='undefined'?Window:null;
+var _uav=ArrayBuffer.isView,_uDV=DataView,_utl=_ud(Object.getPrototypeOf(Uint8Array.prototype),'length').get;
+var _uend={};
+function _uxs(v){
+  var out='',work=0,stk=[];
+  function put(s){out+=s;if(out.length>400)throw _uend;}
+  function tick(){if(++work>2000)throw _uend;}
+  function tag(x){return (_uN&&_ura(_uhi,_uN,[x]))||(_uW&&_ura(_uhi,_uW,[x]))?_ura(_uts,x,[]):null;}
+  // false = a value JSON omits (undefined, functions, symbols)
+  function val(x){
+    var t=typeof x,d,i,n;
+    if(t==='string'){put(_uj(x.length>400?x.slice(0,400):x));return true;}
+    if(t==='number'){put(_uj(x));return true;}
+    if(t==='boolean'){put(x?'true':'false');return true;}
+    if(x===null){put('null');return true;}
+    if(t==='bigint')throw new TypeError('BigInt');
+    if(t!=='object')return false;
+    if(_ura(_uhi,_uD,[x])){var tv=_ura(_udt,x,[]);put(tv===tv?_uj(_ura(_udi,x,[])):'null');return true;}
+    if(_uU&&_ura(_uhi,_uU,[x])){put(_uj(_ura(_uU.prototype.toJSON,x,[])));return true;}
+    var tg=tag(x);if(tg){put(_uj(tg));return true;}
+    for(i=0;i<stk.length;i++)if(stk[i]===x)throw new TypeError('cyclic');
+    stk[stk.length]=x;
+    if(_uia(x)){
+      put('[');
+      for(i=0,n=x.length;i<n;i++){tick();if(i)put(',');d=_ud(x,i);if(!d)put('null');else if(!_ura(_uho,d,['value']))put('"(...)"');else if(!val(d.value))put('null');}
+      put(']');
+    }else if(_uav(x)&&!_ura(_uhi,_uDV,[x])){
+      put('{');
+      for(i=0,n=_ura(_utl,x,[]);i<n;i++){tick();put((i?',"':'"')+i+'":');val(x[i]);}
+      put('}');
+    }else{
+      put('{');
+      var ks=_uks(x),first=true;
+      for(i=0;i<ks.length;i++){
+        tick();d=_ud(x,ks[i]);if(!d)continue;
+        var data=_ura(_uho,d,['value']);
+        if(data){var vt=typeof d.value;if(vt==='undefined'||vt==='function'||vt==='symbol')continue;}
+        put((first?'':',')+_uj(ks[i])+':');first=false;
+        if(data)val(d.value);else put('"(...)"');
+      }
+      put('}');
+    }
+    stk.length--;
+    return true;
+  }
+  try{
+    if(typeof v==='object'&&v!==null){var tg0=tag(v);if(tg0)return tg0;}
+    return val(v)?out:undefined;
+  }catch(e){
+    if(e===_uend)return out;
+    // Where JSON.stringify throws (a cycle, a BigInt) the capture always fell back to String(v).
+    return typeof v==='bigint'?String(v):_uia(v)?'[object Array]':'[object Object]';
+  }
+}
+function _uxp(l,a){try{var m='';for(var i=0;i<a.length&&m.length<400;i++){var v=a[i],s=typeof v==='string'?v:_uxs(v);m+=(i?' ':'')+(s===undefined?'':s.length>400?s.slice(0,400):s);}_uxa.push({l:l,m:m.slice(0,400),t:_unow()});if(_uxa.length>200)_uxa.shift();}catch(e){}}
 ['log','info','warn','error','debug'].forEach(function(m){
   var _cp=Object.getPrototypeOf(console);
   var _own=Object.getOwnPropertyDescriptor(console,m);

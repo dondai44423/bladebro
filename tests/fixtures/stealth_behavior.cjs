@@ -243,5 +243,37 @@ async function noise() {
   assert.throws(() => buf.getChannelData(1), RangeError);
   console.log('canvas context-free noise and idempotent audio noise checks passed');
 }
-const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp, noise };
+// The console capture in the assembled core + tail.
+async function consoleCapture() {
+  const core = fs.readFileSync(path.join(root, 'src/stealth/js/stealth_core.js'), 'utf8')
+    .replace('__SEED__', '7').replace('__PROXY_HELPERS__', () => helpers)
+    + fs.readFileSync(path.join(root, 'src/stealth/js/stealth_tail.js'), 'utf8');
+  const { ctx, g } = mockWindow();
+  vm.runInContext(core, ctx);
+  const ring = g[Symbol.for('q')];
+  const last = () => ring[ring.length - 1].m;
+  vm.runInContext('var fired=0,tj=0;console.log({get x(){fired++;return 1;}},[{get y(){fired++;return 2;}}]);console.log({toJSON:function(){tj++;return 1;}});', ctx);
+  assert.equal(g.fired, 0, 'logging must not invoke page getters');
+  assert.equal(g.tj, 0, 'logging must not invoke page toJSON');
+  vm.runInContext('console.log({a:1,get b(){return 2;}})', ctx);
+  assert.equal(last(), '{"a":1,"b":"(...)"}', 'accessors are shown, not invoked');
+  // Plain values read exactly as the JSON.stringify capture wrote them.
+  const old = c => vm.runInContext(`(function(){var a=[${c}],p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.push(typeof v==='string'?v:JSON.stringify(v));}catch(e){p.push(String(v));}}return p.join(' ').slice(0,400);})()`, ctx);
+  for (const c of ['1', "'str'", 'true', 'null', 'undefined', '-0', 'NaN', 'Infinity', '1.5e300', '10n',
+    "({a:1,b:[1,2,{c:'x\"y\\n\\u2028'}],d:null,e:true,f:-2.5})", '[1,[2,[3,[]]],{}]',
+    "({u:undefined,f:function(){},s:Symbol('s'),k:1})", "[undefined,function(){},Symbol('t'),2]", '[,1]',
+    'new Date(0)', 'new Date(NaN)', '({d:new Date(86400000)})', "'a', 1, {x:[1]}, undefined, 'b'",
+    "({'k\"ey':'v'})", '(function(){var o=Object.create(null);o.z=1;return o;})()', 'new Uint8Array([1,2])',
+    'new Error("x")', 'new Map([[1,2]])', '({a:1n})', '(function(){var o={a:1};o.self=o;return o;})()',
+    "'x'.repeat(500)", "{s:'y'.repeat(500)}", "'a'.repeat(399), 'tail'"]) {
+    vm.runInContext(`console.log(${c})`, ctx);
+    assert.equal(last(), old(c), c);
+  }
+  // Bounded: a large value costs a few hundred property reads, not all of them.
+  vm.runInContext('var reads=0,big=[];for(var i=0;i<200000;i++)big.push({i:i,s:"xxxxxxxx"});var pbig=new Proxy(big,{get:function(t,k,r){reads++;return Reflect.get(t,k,r);},getOwnPropertyDescriptor:function(t,k){reads++;return Reflect.getOwnPropertyDescriptor(t,k);}});console.log(pbig);', ctx);
+  assert.equal(last(), vm.runInContext('JSON.stringify(big).slice(0,400)', ctx), 'same first 400 chars');
+  assert.ok(g.reads < 1000, `logging a 200k-element array read ${g.reads} properties`);
+  console.log('console capture: no page code, plain values unchanged, bounded work');
+}
+const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp, noise, console: consoleCapture };
 (scenarios[process.argv[2]] || permissions)().catch(error => { console.error(error); process.exitCode = 1; });
