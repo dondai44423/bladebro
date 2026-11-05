@@ -44,11 +44,9 @@ const EVENT_BUS_CAPACITY: usize = 16384;
 /// its slot count; without a byte bound, page-authored bulk payloads
 /// (WebSocket frames, SSE data, oversized URLs) are retained up to
 /// capacity-fold while any subscriber lags (16384 × 1 MB ≈ 16 GiB).
-/// Consumers match on `method` and read small identity fields via `.get()`
-/// accessors that degrade to defaults, so stripping oversized params
-/// preserves event delivery (attach/dialog/download/network tracking)
-/// while capping worst-case ring retention at
-/// EVENT_BUS_CAPACITY × MAX_EVENT_BYTES.
+/// Oversized params are shrunk to fit (see [`shrink_oversized_event`]),
+/// keeping the small identity fields consumers read, which caps
+/// worst-case ring retention at EVENT_BUS_CAPACITY × MAX_EVENT_BYTES.
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 
 /// The result delivered to a pending command caller.
@@ -384,68 +382,73 @@ impl CdpClient {
     }
 }
 
-/// Shrink an oversized event's `params` to its small identity fields.
-/// Bulk payloads (WS/SSE frame data, headers, long URLs) have no consumer
-/// in the driver; the fields tracking consumers read are kept so attach/
-/// dialog/download/network bookkeeping degrades gracefully at worst.
-fn shrink_oversized_event(method: &str, params: &mut Value) {
-    use serde_json::Map;
-    let trunc = |v: &Value, cap: usize| -> Option<Value> {
-        v.as_str()
-            .map(|s| Value::String(crate::platform::truncate_utf8(s, cap).to_string()))
-    };
-    let mut keep = Map::new();
-    match method {
-        "Network.requestWillBeSent" => {
-            if let Some(id) = params.get("requestId") {
-                keep.insert("requestId".into(), id.clone());
-            }
-            if let Some(ty) = params.get("type") {
-                keep.insert("type".into(), ty.clone());
-            }
-            if let Some(req) = params.get("request") {
-                let mut r = Map::new();
-                if let Some(m) = req.get("method") {
-                    r.insert("method".into(), m.clone());
-                }
-                if let Some(u) = trunc(req.get("url").unwrap_or(&Value::Null), 4096) {
-                    r.insert("url".into(), u);
-                }
-                keep.insert("request".into(), Value::Object(r));
+/// Shrink an oversized event's `params` under [`MAX_EVENT_BYTES`] without
+/// losing the identity fields consumers key on (`sessionId` of an
+/// auto-attached target, a download's `guid`, a paused request's
+/// `requestId`, `frame.parentId`, ...). A per-method whitelist missed every
+/// event it did not name: an attach with a long data: URL arrived as `{}`
+/// and its `waitForDebuggerOnStart` target stayed paused forever.
+///
+/// Identity fields are short and shallow; the bulk is long page-authored
+/// strings (data: URLs, frame payloads, post bodies) or big nested lists
+/// and maps (headers, cookies, stack frames). So long strings are capped
+/// first, then containers below the top levels are dropped, each step
+/// harsher than the last, until the params fit.
+fn shrink_oversized_event(params: &mut Value) {
+    // (deepest container level kept, per-string byte cap); `params` is
+    // level 0. 4096 keeps the URL length the network tracker always got.
+    const STEPS: [(usize, usize); 4] = [(usize::MAX, 4096), (1, 4096), (1, 512), (0, 512)];
+    for (max_depth, cap) in STEPS {
+        clip_event_value(params, 0, max_depth, cap);
+        if encodes_within(params, MAX_EVENT_BYTES) {
+            return;
+        }
+    }
+    *params = Value::Object(serde_json::Map::new());
+}
+
+/// Truncate strings longer than `cap` bytes and drop arrays/objects nested
+/// deeper than `max_depth`, in place.
+fn clip_event_value(v: &mut Value, depth: usize, max_depth: usize, cap: usize) {
+    let too_deep = |c: &Value| depth >= max_depth && (c.is_array() || c.is_object());
+    match v {
+        Value::String(s) => {
+            let keep = crate::platform::truncate_utf8(s, cap).len();
+            s.truncate(keep);
+        }
+        Value::Array(items) => {
+            items.retain(|c| !too_deep(c));
+            for c in items {
+                clip_event_value(c, depth + 1, max_depth, cap);
             }
         }
-        "Network.responseReceived" => {
-            if let Some(id) = params.get("requestId") {
-                keep.insert("requestId".into(), id.clone());
-            }
-            if let Some(status) = params.get("response").and_then(|r| r.get("status")) {
-                keep.insert(
-                    "response".into(),
-                    serde_json::json!({ "status": status.clone() }),
-                );
+        Value::Object(map) => {
+            map.retain(|_, c| !too_deep(c));
+            for c in map.values_mut() {
+                clip_event_value(c, depth + 1, max_depth, cap);
             }
         }
-        "Network.loadingFinished" | "Network.loadingFailed" => {
-            if let Some(id) = params.get("requestId") {
-                keep.insert("requestId".into(), id.clone());
-            }
-            if let Some(err) = trunc(params.get("errorText").unwrap_or(&Value::Null), 512) {
-                keep.insert("errorText".into(), err);
-            }
-        }
-        "Page.javascriptDialogOpening" => {
-            if let Some(ty) = params.get("type") {
-                keep.insert("type".into(), ty.clone());
-            }
-            if let Some(msg) = trunc(params.get("message").unwrap_or(&Value::Null), 2048) {
-                keep.insert("message".into(), msg);
-            }
-        }
-        // WS/SSE frames and everything else have no consumer — an empty
-        // identity set is safe and nothing bulk is retained.
         _ => {}
     }
-    *params = Value::Object(keep);
+}
+
+/// Does `v` serialize to at most `limit` bytes? Stops at the limit instead
+/// of buffering the whole encoding.
+fn encodes_within(v: &Value, limit: usize) -> bool {
+    struct Budget(usize);
+    impl std::io::Write for Budget {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(buf.len())
+                .ok_or(std::io::ErrorKind::WriteZero)?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Budget(limit), v).is_ok()
 }
 
 /// Route one decoded JSON text frame: responses go to their pending caller,
@@ -487,7 +490,7 @@ fn route_cdp_text(
                 // small identity fields and drop the bulk payloads nobody
                 // consumes.
                 if text.len() > MAX_EVENT_BYTES {
-                    shrink_oversized_event(&ev.method, &mut ev.params);
+                    shrink_oversized_event(&mut ev.params);
                 }
                 let _ = events_tx.send(ev);
             }
@@ -555,9 +558,10 @@ mod reliability_tests {
         let ev = rx.recv().await.unwrap();
         assert_eq!(ev.method, "Network.webSocketFrameReceived");
         assert!(
-            ev.params.as_object().map(|o| o.is_empty()).unwrap_or(false),
+            encoded(&ev.params) <= MAX_EVENT_BYTES,
             "bulk payload must not be retained"
         );
+        assert_eq!(ev.params["requestId"], "r1");
         // A small event passes through untouched.
         let small = "{\"method\":\"Page.javascriptDialogOpening\",\"params\":{\"type\":\"alert\",\"message\":\"hi\"}}";
         assert!(route_cdp_text(small, &pending, &events_tx));
@@ -630,5 +634,113 @@ mod reliability_tests {
             matches!(result, Ok(Err(BladeError::Timeout(_)))),
             "a peer that never upgrades must time out: {result:?}"
         );
+    }
+    /// Route one event frame and return what reached the bus.
+    async fn routed(event: serde_json::Value) -> CdpEvent {
+        let (events_tx, mut rx) = broadcast::channel(8);
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let text = event.to_string();
+        assert!(text.len() > MAX_EVENT_BYTES, "fixture must be oversized");
+        assert!(route_cdp_text(&text, &pending, &events_tx));
+        rx.recv().await.unwrap()
+    }
+
+    fn encoded(v: &Value) -> usize {
+        serde_json::to_vec(v).unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn oversized_events_keep_the_identity_fields_consumers_read() {
+        // Regression: an oversized event outside a four-method whitelist
+        // reached the bus with params = {}.
+        let big = "x".repeat(20 * 1024);
+
+        // Auto-attached worker with a long data: URL — without sessionId the
+        // attach handler skips it and the target stays paused forever.
+        let ev = routed(serde_json::json!({
+            "method": "Target.attachedToTarget", "sessionId": "PAGE",
+            "params": {"sessionId": "W1", "waitingForDebugger": true,
+                "targetInfo": {"targetId": "T1", "type": "worker", "url": format!("data:text/javascript,{big}")}}
+        }))
+        .await;
+        assert_eq!(ev.params["sessionId"], "W1", "{}", ev.params);
+        assert_eq!(ev.params["targetInfo"]["type"], "worker", "{}", ev.params);
+
+        // Download of a large data: URL — guid ties progress events to it.
+        let ev = routed(serde_json::json!({
+            "method": "Page.downloadWillBegin",
+            "params": {"frameId": "F1", "guid": "G1", "url": format!("data:text/csv,{big}"), "suggestedFilename": "report.csv"}
+        }))
+        .await;
+        assert_eq!(ev.params["guid"], "G1", "{}", ev.params);
+        assert_eq!(
+            ev.params["suggestedFilename"], "report.csv",
+            "{}",
+            ev.params
+        );
+
+        // A subframe navigating to a long URL must still read as a subframe.
+        let ev = routed(serde_json::json!({
+            "method": "Page.frameNavigated",
+            "params": {"type": "Navigation", "frame": {"id": "F2", "parentId": "F1", "loaderId": "L1",
+                "url": format!("https://a.test/?q={big}"), "securityOrigin": "https://a.test", "mimeType": "text/html"}}
+        }))
+        .await;
+        assert_eq!(ev.params["frame"]["parentId"], "F1", "{}", ev.params);
+        assert!(ev.params["frame"]["url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("https://a.test/?q=x")));
+
+        // A paused request with a large body — without requestId the
+        // interception task cannot continue it and the request hangs.
+        let ev = routed(serde_json::json!({
+            "method": "Fetch.requestPaused",
+            "params": {"requestId": "interception-1", "frameId": "F1", "resourceType": "XHR",
+                "request": {"url": "https://a.test/upload", "method": "POST", "headers": {"Content-Type": "text/plain"}, "postData": big}}
+        }))
+        .await;
+        assert_eq!(ev.params["requestId"], "interception-1", "{}", ev.params);
+        assert_eq!(ev.params["resourceType"], "XHR");
+        assert_eq!(ev.params["request"]["url"], "https://a.test/upload");
+    }
+
+    #[tokio::test]
+    async fn shrunk_events_stay_within_the_byte_bound() {
+        let long = "y".repeat(5 * 1024);
+        // Structural bulk (a big header map / cookie list) is dropped below
+        // the levels identity fields live on.
+        let headers: serde_json::Map<String, Value> = (0..200)
+            .map(|i| (format!("x-h{i}"), Value::String("v".repeat(400))))
+            .collect();
+        let cookies: Vec<Value> =
+            (0..500).map(|i| serde_json::json!({"cookie": {"name": format!("c{i}"), "value": "v".repeat(64)}})).collect();
+        let ev = routed(serde_json::json!({
+            "method": "Fetch.requestPaused",
+            "params": {"requestId": "r9", "resourceType": "Fetch",
+                "request": {"url": "https://a.test/x", "method": "GET", "headers": headers}}
+        }))
+        .await;
+        assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
+        assert_eq!(ev.params["requestId"], "r9");
+        assert_eq!(ev.params["request"]["url"], "https://a.test/x");
+        let ev = routed(serde_json::json!({
+            "method": "Network.requestWillBeSentExtraInfo",
+            "params": {"requestId": "r10", "associatedCookies": cookies}
+        }))
+        .await;
+        assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
+        assert_eq!(ev.params["requestId"], "r10");
+        // Pathological shapes still end inside the bound.
+        let wide: serde_json::Map<String, Value> = (0..100)
+            .map(|i| (format!("k{i}"), Value::String(long.clone())))
+            .collect();
+        let ev = routed(serde_json::json!({"method": "X.wide", "params": wide})).await;
+        assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
+        let numbers: Vec<Value> = (0..20_000).map(Value::from).collect();
+        let ev = routed(
+            serde_json::json!({"method": "X.numbers", "params": {"id": 1, "args": numbers}}),
+        )
+        .await;
+        assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
     }
 }
