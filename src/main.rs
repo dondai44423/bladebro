@@ -84,11 +84,11 @@ fn exit_immediately(code: i32) -> ! {
 fn print_error(e: &bladebro::BladeError) {
     let msg = e.to_string();
     let styled = if matches!(e, bladebro::BladeError::Usage(_)) {
-        ui::yellow(&msg)
+        ui::err::yellow(&msg)
     } else {
-        ui::red(&msg)
+        ui::err::red(&msg)
     };
-    eprintln!("{} {styled}", ui::dim("bladebro:"));
+    eprintln!("{} {styled}", ui::err::dim("bladebro:"));
 }
 
 /// The `--json` failure object — the same shape run_cli prints.
@@ -242,8 +242,11 @@ fn run(args: Vec<String>, json_mode: bool) -> Result<()> {
                 "unknown command `{cmd}`{suggestion} (run `bladebro help` for the command list)"
             ));
         }
-        eprintln!("{} unknown command `{cmd}`{suggestion}", ui::red("✗"));
-        eprintln!("  {}", ui::dim("run `bladebro help` for the command list"));
+        eprintln!("{} unknown command `{cmd}`{suggestion}", ui::err::red("✗"));
+        eprintln!(
+            "  {}",
+            ui::err::dim("run `bladebro help` for the command list")
+        );
         std::process::exit(2);
     }
 

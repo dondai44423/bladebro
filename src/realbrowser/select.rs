@@ -257,12 +257,12 @@ pub fn ensure_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<Import
             "{} your browser ({owner}) is open — importing its profile now. The \
              copy may miss the last few writes (SQLite snapshot); the source is never written \
              to. `bladebro rb refresh` with the browser closed gives a clean copy.",
-            crate::ui::dim("[realbrowser]")
+            crate::ui::err::dim("[realbrowser]")
         );
     }
     eprintln!(
         "{} importing {} profile `{}` ({})...",
-        crate::ui::dim("[realbrowser]"),
+        crate::ui::err::dim("[realbrowser]"),
         spec.name,
         profile.name,
         profile.path.display()
@@ -270,7 +270,7 @@ pub fn ensure_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<Import
     let stats = import_template(&spec.id, &profile.root)?;
     eprintln!(
         "{} imported {} files ({}) in {}ms",
-        crate::ui::dim("[realbrowser]"),
+        crate::ui::err::dim("[realbrowser]"),
         stats.files,
         human_bytes(stats.bytes),
         stats.ms

@@ -165,3 +165,103 @@ fn non_utf8_argument_is_a_usage_error() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("argument 4 is not valid UTF-8"));
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// A pseudo-terminal pair: (master, slave). None where the host has no pty.
+#[cfg(target_os = "linux")]
+fn open_pty() -> Option<(std::fs::File, std::fs::File)> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::OpenOptionsExt;
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if master < 0 {
+            return None;
+        }
+        let master = std::fs::File::from_raw_fd(master);
+        let fd = master.as_raw_fd();
+        let mut name = [0 as libc::c_char; 128];
+        if libc::grantpt(fd) != 0
+            || libc::unlockpt(fd) != 0
+            || libc::ptsname_r(fd, name.as_mut_ptr(), name.len()) != 0
+        {
+            return None;
+        }
+        let path = std::ffi::CStr::from_ptr(name.as_ptr())
+            .to_str()
+            .ok()?
+            .to_owned();
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(path)
+            .ok()?;
+        Some((master, slave))
+    }
+}
+
+/// Styling is decided per stream. stderr used to follow STDOUT's terminal
+/// state: `bladebro nav x 2>err.log` on a terminal wrote ANSI codes into
+/// the log, while a terminal stderr behind `| jq` stayed plain.
+#[cfg(target_os = "linux")]
+#[test]
+fn stderr_styling_follows_stderr_not_stdout() {
+    let home = home("color");
+    let colorable = |cmd: &mut Command| {
+        cmd.env_remove("BLADE_PLAIN")
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env("TERM", "xterm");
+    };
+
+    // stdout on a terminal, stderr into a file: the file stays plain.
+    let Some((master, slave)) = open_pty() else {
+        eprintln!("no pty on this host; skipping");
+        return;
+    };
+    let mut cmd = command(&home);
+    colorable(&mut cmd);
+    let out = cmd
+        .arg("nva")
+        .stdout(slave)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    drop(cmd);
+    drop(master);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown command `nva`"), "{err}");
+    assert!(
+        !err.contains('\x1b'),
+        "ANSI written to a non-terminal stderr: {err:?}"
+    );
+
+    // stdout into a pipe, stderr on a terminal: the terminal gets styling.
+    let (mut master, slave) = open_pty().expect("pty available above");
+    let mut cmd = command(&home);
+    colorable(&mut cmd);
+    let status = cmd
+        .arg("nva")
+        .stdout(Stdio::piped())
+        .stderr(slave)
+        .status()
+        .unwrap();
+    // Close our copy of the slave (the Command owns it): with the child
+    // gone too, the read below ends with EIO once the output is drained.
+    drop(cmd);
+    assert_eq!(status.code(), Some(2));
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match std::io::Read::read(&mut master, &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => seen.extend_from_slice(&buf[..n]),
+        }
+    }
+    let err = String::from_utf8_lossy(&seen);
+    assert!(err.contains("unknown command `nva`"), "{err:?}");
+    assert!(
+        err.contains("\x1b[31m"),
+        "terminal stderr lost its styling: {err:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}

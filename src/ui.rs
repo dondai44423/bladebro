@@ -10,7 +10,12 @@
 //!    recordings, docs).
 //! 3. `NO_COLOR` set (the de-facto convention) → OFF.
 //! 4. `TERM=dumb` → OFF.
-//! 5. otherwise ON exactly when stdout is a terminal.
+//! 5. otherwise ON exactly when the stream being written is a terminal.
+//!
+//! stdout and stderr decide separately: text bound for stderr uses the
+//! [`err`] painters. `bladebro nav x 2>err.log` on a terminal must not write
+//! ANSI codes into the log, and `bladebro nav x | jq` still colors the error
+//! lines that reach the terminal.
 //!
 //! Nothing here is platform-specific: on Windows, Rust's std enables VT
 //! processing on the console when it is supported (Windows Terminal, modern
@@ -46,18 +51,28 @@ fn decide(tty: bool, plain: bool, forced: bool, no_color: bool, term_dumb: bool)
     tty
 }
 
-/// Is styled output enabled for this process? Computed once.
+/// The verdict for a stream whose terminal state is `tty`.
+fn decide_for(tty: bool) -> bool {
+    decide(
+        tty,
+        env_set("BLADE_PLAIN"),
+        env_on("CLICOLOR_FORCE"),
+        env_set("NO_COLOR"),
+        std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false),
+    )
+}
+
+/// Is styled output enabled on stdout? Computed once.
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        decide(
-            std::io::stdout().is_terminal(),
-            env_set("BLADE_PLAIN"),
-            env_on("CLICOLOR_FORCE"),
-            env_set("NO_COLOR"),
-            std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false),
-        )
-    })
+    *ON.get_or_init(|| decide_for(std::io::stdout().is_terminal()))
+}
+
+/// Is styled output enabled on stderr? Computed once, from stderr's OWN
+/// terminal state — it used to follow stdout's.
+pub fn err_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| decide_for(std::io::stderr().is_terminal()))
 }
 
 fn paint_c(sgr: &str, s: &str, color: bool) -> String {
@@ -98,6 +113,22 @@ pub fn cyan(s: &str) -> String {
 
 pub fn bold_cyan(s: &str) -> String {
     paint("1;36", s)
+}
+
+/// Painters for text written to stderr (error lines, diagnostics): styled
+/// only when stderr itself is a terminal.
+pub mod err {
+    pub fn dim(s: &str) -> String {
+        super::paint_c("2", s, super::err_enabled())
+    }
+
+    pub fn red(s: &str) -> String {
+        super::paint_c("31", s, super::err_enabled())
+    }
+
+    pub fn yellow(s: &str) -> String {
+        super::paint_c("33", s, super::err_enabled())
+    }
 }
 
 /// One aligned `label  value` row: the label is dim and padded on the PLAIN
