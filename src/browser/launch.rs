@@ -187,7 +187,8 @@ impl Browser {
 
         // Power-user escape hatch: append raw Chrome flags. Useful for
         // diagnosing GL/WebGL backend issues on odd displays and for
-        // users who need a specific Chromium switch. Whitespace-split.
+        // users who need a specific Chromium switch. Shell-style split
+        // (`flags::split_chrome_flags`).
         let args = launch_args(&LaunchCfg {
             stage,
             headful,
@@ -405,9 +406,7 @@ impl Browser {
                 )));
             }
         };
-        let extra: Vec<String> = std::env::var("BLADE_CHROME_FLAGS")
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default();
+        let extra = super::flags::env_chrome_flags()?;
 
         let mut last_err = None;
         // A quick clean exit means Chrome handed the command line to an

@@ -649,7 +649,7 @@ Everything optional; configuration is environment variables.
 | `BLADE_CMD_TIMEOUT` | `300` | How long the CLI waits for a daemon response, seconds |
 | `BLADE_IDLE_TIMEOUT` | `600` | Daemon idle time before Chrome shuts down, seconds |
 | `BLADE_TRANSPORT` | ws | MCP transport: WebSocket by default (native `webdriver=false`); `pipe` opts into the zero-port pipe (its automation flag is masked) |
-| `BLADE_CHROME_FLAGS` | none | Extra Chrome launch flags |
+| `BLADE_CHROME_FLAGS` | none | Extra Chrome launch flags, split shell-style (`--user-agent="… (X11; …)"` stays one flag; backslashes are literal). `--enable-features`/`--disable-features` lists merge with the built-in ones |
 | `BLADE_INCOGNITO` | `auto` | Agent lane only: `1` uses incognito compatibility, `0` disables automatic compatibility; restart the client/daemon after changing |
 | `BLADE_LANE` | auto | `real` forces the real-browser lane for this process (same as `rb on`) |
 | `BLADE_RB_DEBUG` | — | `1` surfaces the browser's own stderr on real-lane launches |
