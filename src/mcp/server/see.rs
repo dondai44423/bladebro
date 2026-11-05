@@ -14,6 +14,19 @@ use super::resolve::miss_diag_note;
 /// content type, the viewer's embed element, or a .pdf URL.
 const PDF_STATE_EXPR: &str = "(()=>{try{const ct=(document.contentType||'').toLowerCase();if(ct==='application/pdf')return 'pdf';const emb=document.querySelector('embed[type=\"application/pdf\"],embed[type*=\"pdf\" i]');if(emb)return 'pdf-embed';const u=(location.href||'').split(/[?#]/)[0].toLowerCase();if(u.endsWith('.pdf'))return 'pdf-url';return '';}catch(e){return '';}})()";
 
+/// `see changes=true format=json`. An unanswered read carries the last
+/// answered url and empty lists, which reads exactly like "nothing changed";
+/// `"unanswered":true` (present only then) says nothing was observed.
+fn changes_json(delta: &crate::page::PageDelta) -> Value {
+    let mut value = json!({"url":delta.url,"title":delta.title,"phase":delta.phase,"navigated":delta.navigated,
+        "added":delta.added.iter().map(|e| json!({"ref":e.ref_id,"role":e.raw.role,"name":e.raw.name})).collect::<Vec<_>>(),
+        "removed":delta.removed,"changed":delta.changed.iter().map(|(r,c)| json!({"ref":r,"value":c.value,"disabled":c.disabled,"checked":c.checked})).collect::<Vec<_>>(),"rebound":delta.rebound});
+    if delta.unanswered {
+        value["unanswered"] = json!(true);
+    }
+    value
+}
+
 /// Evaluate [`PDF_STATE_EXPR`]; best-effort (None on any hiccup).
 async fn pdf_document_state(page: &Page) -> Option<String> {
     let res = page
@@ -110,9 +123,7 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     {
         let delta = page.recapture().await?;
         return if json_out {
-            let value = json!({"url":delta.url,"title":delta.title,"phase":delta.phase,"navigated":delta.navigated,
-                "added":delta.added.iter().map(|e| json!({"ref":e.ref_id,"role":e.raw.role,"name":e.raw.name})).collect::<Vec<_>>(),
-                "removed":delta.removed,"changed":delta.changed.iter().map(|(r,c)| json!({"ref":r,"value":c.value,"disabled":c.disabled,"checked":c.checked})).collect::<Vec<_>>(),"rebound":delta.rebound}).to_string();
+            let value = changes_json(&delta).to_string();
             if value.len() > 12000 {
                 let path = crate::artifacts::write_artifact(&value, "json")?;
                 Ok(json!({"artifact":path,"bytes":value.len(),"next_offset":0}).to_string())
@@ -518,5 +529,31 @@ mod pdf_read_tests {
         assert!(!m.contains('\u{2014}'), "no em-dash in agent-facing text");
         // A viewer error must not invalidate the download path claim.
         assert!(m.contains("does not affect the download path"));
+    }
+}
+
+#[cfg(test)]
+mod changes_json_tests {
+    use super::changes_json;
+    use crate::page::{LivePageModel, PageCapture};
+
+    /// An unanswered read showed the old url, phase "loading" and empty
+    /// lists with no other signal: indistinguishable from "no change".
+    #[test]
+    fn unanswered_read_is_flagged_and_answered_reads_are_unchanged() {
+        let page = |url: &str| PageCapture {
+            url: url.into(),
+            title: "Fixture".into(),
+            ready_state: "complete".into(),
+            muts: 0,
+            elements: Vec::new(),
+        };
+        let mut lpm = LivePageModel::new();
+        lpm.ingest(page("https://a.test/"));
+        let quiet = changes_json(&lpm.ingest(page("https://a.test/")));
+        assert!(quiet.get("unanswered").is_none(), "{quiet}");
+        let busy = changes_json(&lpm.ingest(PageCapture::unanswered()));
+        assert_eq!(busy["unanswered"], true, "{busy}");
+        assert_eq!(busy["url"], "https://a.test/");
     }
 }
