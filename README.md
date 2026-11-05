@@ -301,7 +301,7 @@ Cookie and storage reads preserve complete values. Large reads return a JSON art
 ]}
 ```
 
-Plans are validated before their first effect, including later steps and unchosen branches. Fix malformed arguments rather than marking them optional. Plans allow up to 1,000 static steps and 32 nesting levels; `while max` is 0–100 (default 10). Every `while` needs a `steps` array. `url` on `if`, `while` or `wait` navigates once before evaluating that step. Runtime failure does not undo completed effects; inspect the failed destination before repeating input. A failed batch stops its enclosing run.
+Plans are validated before their first effect, including later steps and unchosen branches. Fix malformed arguments rather than marking them optional. Plans allow up to 1,000 static steps and 32 nesting levels; `while max` is 0–100 (default 10). Every `while` needs an exit test (`text`, `selector` or `js`) and a `steps` array. `url` on `if`, `while` or `wait` navigates once before evaluating that step. Runtime failure does not undo completed effects; inspect the failed destination before repeating input. A failed batch stops its enclosing run.
 
 Use instead of `act batch` when you need branching (`if`/`else`), loops (`while`), or state ops that change tabs. `see` steps read inline — nav + loop + read across pages in ONE call. Steps take `optional: true` (a runtime failure is reported and execution continues locally, including inside branches and loops), and `wait` accepts an `else: [...]` fallback branch when its condition times out.
 

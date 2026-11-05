@@ -528,14 +528,11 @@ fn sequence(args: &Value, key: &str, batch: bool, depth: usize, count: &mut usiz
             let action = step.get("action").and_then(Value::as_str).unwrap_or("");
             match action {
                 "if" | "while" if !batch => {
-                    super::run::condition_from_args(
-                        step,
-                        if action == "while" {
-                            "element"
-                        } else {
-                            "settle"
-                        },
-                    )?;
+                    if action == "while" {
+                        super::run::while_condition(step)?;
+                    } else {
+                        super::run::condition_from_args(step, "settle")?;
+                    }
                     if action == "while"
                         && step
                             .get("max")
@@ -685,6 +682,30 @@ mod tests {
             json!({"action":"fill","submit":true,"fields":[{"label":"Name","text":"good"}]}),
         ] {
             assert!(act(&args).is_err(), "{args}");
+        }
+    }
+
+    #[test]
+    fn while_without_an_exit_test_is_rejected_before_effects() {
+        // No condition/text/js/selector used to default to an empty element
+        // needle, which every visible element matches: the body ran `max`
+        // times with no exit test after the earlier steps had already run.
+        let effect = json!({"action":"eval","js":"window.count++"});
+        let loop_ = json!({"action":"while","steps":[{"action":"click","text":"Load more"}]});
+        let err = run(&json!({"steps":[effect, loop_]}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("step 2") && err.contains("while"), "{err}");
+        let nested = json!({"action":"if","js":"true","then":[loop_]});
+        assert!(run(&json!({"steps":[effect, nested]})).is_err());
+        for ok in [
+            json!({"action":"while","text":"Load more","steps":[]}),
+            json!({"action":"while","condition":"element","text":"Load more","steps":[]}),
+            json!({"action":"while","selector":".more","steps":[]}),
+            json!({"action":"while","js":"window.more","steps":[]}),
+            json!({"action":"while","condition":"settle","max":3,"steps":[]}),
+        ] {
+            assert!(run(&json!({"steps":[ok]})).is_ok(), "{ok}");
         }
     }
 
