@@ -897,6 +897,8 @@ const cases = [
   ["challenge", {t:"Reddit", x:"", s:{"input[name=js_challenge]":1}}, "js-challenge"],
   ["challenge_token", {t:"Reddit", x:"", s:{"input[name=jsc_token]":1}}, "js-challenge"],
   ["cloudflare", {t:"Just a moment...", x:"Verifying you are human", s:{}}, "cloudflare"],
+  ["turnstile_wall", {t:"", x:"Verify you are human by completing the action below.", s:{".cf-turnstile":1}}, "cloudflare"],
+  ["turnstile_in_form", {t:"Contact us", x:"Write to our support team about orders, returns and invoices. ".repeat(20), s:{".cf-turnstile":1}}, null],
   ["normal", {t:"GitHub", x:"Lots of ordinary content", s:{}}, null],
   ["reddit_humanity", {t:"Reddit - Prove your humanity", x:"Prove your humanity We're committed to safety and security. But not for bots.", h:"www.reddit.com", s:{".g-recaptcha":1}}, "reddit-humanity"],
   ["reddit_humanity_other_host", {t:"Reddit - Prove your humanity", x:"Prove your humanity We're committed to safety and security. But not for bots.", h:"example.com", s:{".g-recaptcha":1}}, "recaptcha"],

@@ -3,10 +3,11 @@
 // turnstile/challenge-platform SCRIPT is NOT — sites embed Turnstile
 // widgets in ordinary forms. Only call it a block when the title matches
 // or the classic challenge form is present or (widget present AND the
-// page is nearly empty — a real interstitial).
+// page is nearly empty — a real interstitial). The widget is a CLASS
+// (`<div class="cf-turnstile">`); there is no cf-turnstile element.
 if(t.includes('just a moment'))return 'cloudflare';
 if(q('#challenge-form'))return 'cloudflare';
-if(q('cf-turnstile')||q('script[src*=challenge-platform]')){if(bl<800)return 'cloudflare';return null;}
+if(q('.cf-turnstile')||q('script[src*=challenge-platform]')){if(bl<800)return 'cloudflare';return null;}
 if(q('iframe[src*=captcha-delivery]')&&bl<1200)return 'datadome';
 if(bl<1200&&body.includes('datadome')&&q('iframe'))return 'datadome';
 if((q('#px-captcha')||q('script[src*=px-captcha]'))&&bl<1500)return 'perimeterx';
