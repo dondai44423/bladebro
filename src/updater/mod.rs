@@ -124,6 +124,8 @@ async fn update(args: &[String]) -> Result<()> {
     };
     ui::step(2, 4, &format!("Downloading {download_label}..."));
 
+    // `binary_path` owns the temp file: every return below drops it and
+    // removes the file (a failed verify or swap used to leave it behind).
     let binary_path = download::download_binary(&latest).await?;
     ui::info(&format!(
         "Downloaded {:.1} MB",
@@ -139,7 +141,6 @@ async fn update(args: &[String]) -> Result<()> {
     match download::verify_binary_runs(&binary_path).await {
         Ok(()) => ui::info("Binary starts: confirmed"),
         Err(e) => {
-            download::cleanup_tmp(&binary_path.path);
             return Err(BladeError::Other(format!(
                 "downloaded binary failed verification: {e}\n\
                  The binary may be for the wrong architecture or corrupted.\n\
@@ -155,9 +156,6 @@ async fn update(args: &[String]) -> Result<()> {
         "Backed up previous version to {}",
         backup.display()
     ));
-
-    // Clean up temp file.
-    download::cleanup_tmp(&binary_path.path);
 
     ui::success(&format!("Updated to {}", latest.tag()));
     ui::hint("Restart your MCP client to use the new version.");
