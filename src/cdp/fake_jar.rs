@@ -3,7 +3,10 @@
 //!
 //! - `Network.setCookie(s)` reports success for an already-expired cookie
 //!   but stores nothing (it only evicts an existing cookie of that key);
-//! - `SameSite=None` without `Secure` is refused;
+//! - `SameSite=None` without `Secure` is refused, silently in a batch;
+//! - a cookie Chrome cannot build at all (a `__Secure-`/`__Host-` name
+//!   without `Secure`) fails the whole `Network.setCookies` call with
+//!   -32602 "Invalid cookie fields", and `Network.setCookie` likewise;
 //! - `Network.deleteCookies` with `domain` matches that domain exactly
 //!   (`fixture.test` does not delete a `.fixture.test` cookie);
 //! - `Storage.getCookies` / `Network.getCookies` return the jar;
@@ -54,6 +57,15 @@ fn host_of(url: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A cookie Chrome rejects while parsing the CookieParam.
+fn unbuildable(p: &Value) -> bool {
+    let name = p["name"].as_str().unwrap_or_default();
+    (name.starts_with("__Secure-") || name.starts_with("__Host-"))
+        && !p["secure"].as_bool().unwrap_or(false)
+}
+
+const INVALID_FIELDS: (i64, &str) = (-32602, "Invalid cookie fields");
+
 /// Store one CookieParam the way Chrome does; false = refused.
 fn set_one(jar: &mut Vec<Value>, p: &Value) -> bool {
     let secure = p["secure"].as_bool().unwrap_or(false);
@@ -84,12 +96,22 @@ fn set_one(jar: &mut Vec<Value>, p: &Value) -> bool {
     true
 }
 
-fn answer(jar: &Mutex<Vec<Value>>, origin: &str, method: &str, params: &Value) -> Value {
+fn answer(
+    jar: &Mutex<Vec<Value>>,
+    origin: &str,
+    method: &str,
+    params: &Value,
+) -> Result<Value, (i64, &'static str)> {
     let mut jar = jar.lock().unwrap();
-    match method {
+    Ok(match method {
+        "Network.setCookie" if unbuildable(params) => return Err(INVALID_FIELDS),
         "Network.setCookie" => json!({ "success": set_one(&mut jar, params) }),
         "Network.setCookies" => {
-            for cookie in params["cookies"].as_array().into_iter().flatten() {
+            let cookies = params["cookies"].as_array().cloned().unwrap_or_default();
+            if cookies.iter().any(unbuildable) {
+                return Err(INVALID_FIELDS);
+            }
+            for cookie in &cookies {
                 set_one(&mut jar, cookie);
             }
             json!({})
@@ -122,7 +144,7 @@ fn answer(jar: &Mutex<Vec<Value>>, origin: &str, method: &str, params: &Value) -
             json!({ "result": { "value": value } })
         }
         _ => json!({}),
-    }
+    })
 }
 
 /// Start the double on a loopback WebSocket and return a root session to it.
@@ -138,8 +160,12 @@ pub(crate) async fn start(origin: &str, cookies: Vec<Value>) -> (CdpSession, Fak
         while let Some(Ok(Message::Text(text))) = ws.next().await {
             let request: Value = serde_json::from_str(&text).unwrap();
             let method = request["method"].as_str().unwrap_or_default();
-            let result = answer(&served, &origin, method, &request["params"]);
-            let reply = json!({ "id": request["id"], "result": result });
+            let reply = match answer(&served, &origin, method, &request["params"]) {
+                Ok(result) => json!({ "id": request["id"], "result": result }),
+                Err((code, message)) => {
+                    json!({ "id": request["id"], "error": { "code": code, "message": message } })
+                }
+            };
             if ws
                 .send(Message::Text(reply.to_string().into()))
                 .await
