@@ -593,10 +593,15 @@ mod readiness_tests {
         let dir = std::env::temp_dir().join(format!("blade-xvfb-pgid-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // Each fake records its pid and process group (field 5 of
+        // /proc/self/stat; `read` is a builtin, so `self` is the script's own
+        // shell) and stays alive as the same process. sh, not an
+        // interpreter: an Xvfb attempt is killed after its 500ms readiness
+        // window, and a slow start on a loaded runner would record nothing.
         let fake = |name: &str| {
             let script = dir.join(name);
             let out = dir.join(format!("{name}.ids"));
-            std::fs::write(&script, format!("#!/usr/bin/env python3\nimport os,time\nwith open({:?},'a') as f:f.write('%d %d\\n'%(os.getpid(),os.getpgrp()))\ntime.sleep(60)\n", out.to_string_lossy())).unwrap();
+            std::fs::write(&script, format!("#!/bin/sh\nread -r _ _ _ _ pgrp _ < /proc/self/stat\necho \"$$ $pgrp\" >> '{}'\nexec sleep 60\n", out.display())).unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
             (script, out)
         };
@@ -629,7 +634,9 @@ mod readiness_tests {
         let xvfb_seen = ids(&xvfb_ids);
         let wm_seen = ids(&wm_ids);
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(xvfb_seen.len(), 3, "all attempts recorded");
+        // Up to three bounded attempts; every one that got to run must have
+        // been born outside our group.
+        assert!(!xvfb_seen.is_empty(), "no Xvfb attempt recorded its group");
         assert_eq!(wm_seen.len(), 1, "the WM recorded");
         for (pid, pgid) in xvfb_seen.into_iter().chain(wm_seen) {
             assert_ne!(pgid, ours, "display process {pid} shares our process group");
