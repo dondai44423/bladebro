@@ -204,196 +204,15 @@ impl Page {
         //   used to kill the handler, freezing every later worker.
         let worker_gl = crate::stealth::worker_gl_spoof(active_locale.as_deref());
         if worker_gl.is_some() || crate::stealth::has_full_script() {
-            let _ = cdp
-                .send(
-                    "Target.setAutoAttach",
-                    Some(serde_json::json!({
-                        "autoAttach": true,
-                        "flatten": true,
-                        "waitForDebuggerOnStart": true
-                    })),
+            worker_task = Some(
+                start_auto_attach(
+                    &cdp,
+                    worker_gl,
+                    crate::stealth::full_script(),
+                    std::env::var("BLADE_DBG_WORKERS").is_ok(),
                 )
-                .await;
-            let client = cdp.client().clone();
-            let worker_script = worker_gl.clone();
-            let full_script = crate::stealth::full_script();
-            let dbg = std::env::var("BLADE_DBG_WORKERS").is_ok();
-            worker_task = Some(tokio::spawn(async move {
-                let sub = client.subscribe();
-                let mut rx = sub;
-                loop {
-                    match rx.recv().await {
-                        Ok(event) if event.method == "Target.attachedToTarget" => {
-                            let target_info = event.params.get("targetInfo");
-                            let target_type = target_info
-                                .and_then(|t| t.get("type"))
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let session_id = event
-                                .params
-                                .get("sessionId")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if session_id.is_empty() {
-                                continue;
-                            }
-                            if dbg {
-                                eprintln!("[workers] attach type={target_type} sid={session_id}");
-                            }
-                            // SECURITY: handle each attach in its OWN task. A
-                            // sequential handler parked in a per-attach send
-                            // (e.g. a busy-looping service worker eating the
-                            // 3s eval timeout) froze this loop's recv(),
-                            // pinning the broadcast ring's retention window at
-                            // capacity (16384 × per-event bytes of
-                            // page-authored events) and dropping attach/
-                            // dialog events — the exact failure the
-                            // EVENT_BUS_CAPACITY comment warns about. The
-                            // loop itself now only ever awaits recv();
-                            // per-target ordering (resume → eval → resume) is
-                            // preserved inside the task, and tasks are
-                            // bounded by the same 3–5s/30s command timeouts.
-                            let client = client.clone();
-                            let worker_script = worker_script.clone();
-                            let full_script = full_script.clone();
-                            tokio::spawn(async move {
-                                let worker_session = CdpSession::child(client, session_id);
-                                // Runtime.evaluate against a PAUSED service
-                                // worker deadlocks — its execution context
-                                // only exists once the script runs — and the
-                                // 30s command timeout then froze the old
-                                // sequential handler (every later target
-                                // stayed paused; live effect: hung SW
-                                // registration and CreepJS's worker card
-                                // reading `blocked`). Service workers are
-                                // resumed FIRST, then patched best-effort.
-                                let is_sw = target_type == "service_worker";
-                                if is_sw {
-                                    let res = worker_session
-                                        .send("Runtime.runIfWaitingForDebugger", None)
-                                        .await;
-                                    if dbg {
-                                        eprintln!(
-                                            "[workers] resume(sw-first) {target_type}: {}",
-                                            if res.is_ok() {
-                                                "ok".to_string()
-                                            } else {
-                                                format!("ERR {:?}", res.err())
-                                            }
-                                        );
-                                    }
-                                }
-                                match target_type.as_str() {
-                                    "worker" | "shared_worker" => {
-                                        if let Some(ref script) = worker_script {
-                                            // Bounded: a pathological target
-                                            // must not stall the pipeline.
-                                            let res = worker_session
-                                                .send_with_timeout(
-                                                    "Runtime.evaluate",
-                                                    Some(serde_json::json!({
-                                                        "expression": script,
-                                                        "returnByValue": true,
-                                                    })),
-                                                    std::time::Duration::from_secs(5),
-                                                )
-                                                .await;
-                                            if dbg {
-                                                eprintln!(
-                                                    "[workers] eval {target_type}: {}",
-                                                    if res.is_ok() {
-                                                        "ok".to_string()
-                                                    } else {
-                                                        format!("ERR {:?}", res.err())
-                                                    }
-                                                );
-                                            }
-                                        }
-                                    }
-                                    "service_worker" => {
-                                        // Already resumed above. The SW realm
-                                        // has no WebGL; this only matters for
-                                        // the locale patch — best-effort,
-                                        // bounded.
-                                        if let Some(ref script) = worker_script {
-                                            let res = worker_session
-                                                .send_with_timeout(
-                                                    "Runtime.evaluate",
-                                                    Some(serde_json::json!({
-                                                        "expression": script,
-                                                        "returnByValue": true,
-                                                    })),
-                                                    std::time::Duration::from_secs(3),
-                                                )
-                                                .await;
-                                            if dbg {
-                                                eprintln!(
-                                                    "[workers] eval {target_type}: {}",
-                                                    if res.is_ok() {
-                                                        "ok".to_string()
-                                                    } else {
-                                                        format!("ERR {:?}", res.err())
-                                                    }
-                                                );
-                                            }
-                                        }
-                                    }
-                                    "iframe" | "oopif" => {
-                                        // Full stealth into out-of-process
-                                        // frames: document_start semantics via
-                                        // evaluate before resume, so the
-                                        // frame's scripts run against the
-                                        // patched environment.
-                                        if let Some(ref script) = full_script {
-                                            let _ = worker_session
-                                                .send_with_timeout(
-                                                    "Runtime.evaluate",
-                                                    Some(serde_json::json!({
-                                                        "expression": script,
-                                                        "returnByValue": true,
-                                                    })),
-                                                    std::time::Duration::from_secs(5),
-                                                )
-                                                .await;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                // ALWAYS resume — an unresumed target stays
-                                // frozen. (Service workers were already
-                                // resumed above.)
-                                if !is_sw {
-                                    let res = worker_session
-                                        .send("Runtime.runIfWaitingForDebugger", None)
-                                        .await;
-                                    if dbg {
-                                        eprintln!(
-                                            "[workers] resume {target_type}: {}",
-                                            if res.is_ok() {
-                                                "ok".to_string()
-                                            } else {
-                                                format!("ERR {:?}", res.err())
-                                            }
-                                        );
-                                    }
-                                }
-                            });
-                        }
-                        Ok(_) => {}
-                        // Lagged: we skipped events but the connection is
-                        // alive. Continue — never leave future targets paused.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            if dbg {
-                                eprintln!("[workers] LAGGED {n} events dropped");
-                            }
-                            continue;
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }));
+                .await,
+            );
         }
 
         // M17: Set download behavior so downloads don't hang the browser.
@@ -995,6 +814,213 @@ impl Page {
     }
 }
 
+/// Turn on flat auto-attach (`waitForDebuggerOnStart`) for `cdp`'s target and
+/// spawn the handler that patches and resumes every target Chrome attaches
+/// (see the D22 / v3.9 notes in `Page::attach`). The handle is stored on the
+/// Page and aborted on Drop.
+async fn start_auto_attach(
+    cdp: &CdpSession,
+    worker_script: Option<String>,
+    full_script: Option<String>,
+    dbg: bool,
+) -> tokio::task::JoinHandle<()> {
+    // Subscribe BEFORE turning auto-attach on: Chrome attaches the targets
+    // that already exist (and any created meanwhile) before it replies, so a
+    // subscription taken after the reply missed them - running workers went
+    // unpatched (live: page de-DE, worker en-US after open-tab) and one
+    // created paused in that window stayed paused forever. And this page's
+    // own session view, not the client-wide bus: in pipe mode every Page
+    // shares one connection, and Chrome tags each attach with the session
+    // whose auto-attach produced it, so a client-wide handler patched and
+    // resumed other pages' targets too (twice, while two Pages coexist).
+    let mut rx = cdp.subscribe();
+    let _ = cdp
+        .send(
+            "Target.setAutoAttach",
+            Some(serde_json::json!({
+                "autoAttach": true,
+                "flatten": true,
+                "waitForDebuggerOnStart": true
+            })),
+        )
+        .await;
+    let client = cdp.client().clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) if event.method == "Target.attachedToTarget" => {
+                    let target_info = event.params.get("targetInfo");
+                    let target_type = target_info
+                        .and_then(|t| t.get("type"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let session_id = event
+                        .params
+                        .get("sessionId")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if session_id.is_empty() {
+                        continue;
+                    }
+                    if dbg {
+                        eprintln!("[workers] attach type={target_type} sid={session_id}");
+                    }
+                    // SECURITY: handle each attach in its OWN task. A
+                    // sequential handler parked in a per-attach send
+                    // (e.g. a busy-looping service worker eating the
+                    // 3s eval timeout) froze this loop's recv(),
+                    // pinning the broadcast ring's retention window at
+                    // capacity (16384 × per-event bytes of
+                    // page-authored events) and dropping attach/
+                    // dialog events — the exact failure the
+                    // EVENT_BUS_CAPACITY comment warns about. The
+                    // loop itself now only ever awaits recv();
+                    // per-target ordering (resume → eval → resume) is
+                    // preserved inside the task, and tasks are
+                    // bounded by the same 3–5s/30s command timeouts.
+                    let client = client.clone();
+                    let worker_script = worker_script.clone();
+                    let full_script = full_script.clone();
+                    tokio::spawn(async move {
+                        let worker_session = CdpSession::child(client, session_id);
+                        // Runtime.evaluate against a PAUSED service
+                        // worker deadlocks — its execution context
+                        // only exists once the script runs — and the
+                        // 30s command timeout then froze the old
+                        // sequential handler (every later target
+                        // stayed paused; live effect: hung SW
+                        // registration and CreepJS's worker card
+                        // reading `blocked`). Service workers are
+                        // resumed FIRST, then patched best-effort.
+                        let is_sw = target_type == "service_worker";
+                        if is_sw {
+                            let res = worker_session
+                                .send("Runtime.runIfWaitingForDebugger", None)
+                                .await;
+                            if dbg {
+                                eprintln!(
+                                    "[workers] resume(sw-first) {target_type}: {}",
+                                    if res.is_ok() {
+                                        "ok".to_string()
+                                    } else {
+                                        format!("ERR {:?}", res.err())
+                                    }
+                                );
+                            }
+                        }
+                        match target_type.as_str() {
+                            "worker" | "shared_worker" => {
+                                if let Some(ref script) = worker_script {
+                                    // Bounded: a pathological target
+                                    // must not stall the pipeline.
+                                    let res = worker_session
+                                        .send_with_timeout(
+                                            "Runtime.evaluate",
+                                            Some(serde_json::json!({
+                                                "expression": script,
+                                                "returnByValue": true,
+                                            })),
+                                            std::time::Duration::from_secs(5),
+                                        )
+                                        .await;
+                                    if dbg {
+                                        eprintln!(
+                                            "[workers] eval {target_type}: {}",
+                                            if res.is_ok() {
+                                                "ok".to_string()
+                                            } else {
+                                                format!("ERR {:?}", res.err())
+                                            }
+                                        );
+                                    }
+                                }
+                            }
+                            "service_worker" => {
+                                // Already resumed above. The SW realm
+                                // has no WebGL; this only matters for
+                                // the locale patch — best-effort,
+                                // bounded.
+                                if let Some(ref script) = worker_script {
+                                    let res = worker_session
+                                        .send_with_timeout(
+                                            "Runtime.evaluate",
+                                            Some(serde_json::json!({
+                                                "expression": script,
+                                                "returnByValue": true,
+                                            })),
+                                            std::time::Duration::from_secs(3),
+                                        )
+                                        .await;
+                                    if dbg {
+                                        eprintln!(
+                                            "[workers] eval {target_type}: {}",
+                                            if res.is_ok() {
+                                                "ok".to_string()
+                                            } else {
+                                                format!("ERR {:?}", res.err())
+                                            }
+                                        );
+                                    }
+                                }
+                            }
+                            "iframe" | "oopif" => {
+                                // Full stealth into out-of-process
+                                // frames: document_start semantics via
+                                // evaluate before resume, so the
+                                // frame's scripts run against the
+                                // patched environment.
+                                if let Some(ref script) = full_script {
+                                    let _ = worker_session
+                                        .send_with_timeout(
+                                            "Runtime.evaluate",
+                                            Some(serde_json::json!({
+                                                "expression": script,
+                                                "returnByValue": true,
+                                            })),
+                                            std::time::Duration::from_secs(5),
+                                        )
+                                        .await;
+                                }
+                            }
+                            _ => {}
+                        }
+                        // ALWAYS resume — an unresumed target stays
+                        // frozen. (Service workers were already
+                        // resumed above.)
+                        if !is_sw {
+                            let res = worker_session
+                                .send("Runtime.runIfWaitingForDebugger", None)
+                                .await;
+                            if dbg {
+                                eprintln!(
+                                    "[workers] resume {target_type}: {}",
+                                    if res.is_ok() {
+                                        "ok".to_string()
+                                    } else {
+                                        format!("ERR {:?}", res.err())
+                                    }
+                                );
+                            }
+                        }
+                    });
+                }
+                Ok(_) => {}
+                // Lagged: we skipped events but the connection is
+                // alive. Continue — never leave future targets paused.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    if dbg {
+                        eprintln!("[workers] LAGGED {n} events dropped");
+                    }
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
 /// Per-OS fallback UA for the rare case the version endpoint carried none.
 /// Must name the platform the browser actually runs on — a Linux UA string
 /// injected on macOS/Windows is a first-order tell. (Apple Silicon Macs
@@ -1042,5 +1068,140 @@ fn fallback_platform() -> &'static str {
         {
             "Linux x86_64"
         }
+    }
+}
+
+#[cfg(test)]
+mod auto_attach_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+    use tokio_tungstenite::WebSocketStream;
+
+    type Seen = mpsc::UnboundedReceiver<(String, String)>;
+
+    /// A scripted browser on the far end of an in-memory WebSocket. Every
+    /// command is answered with `{}` and reported as (sessionId, method).
+    /// `Target.setAutoAttach` is answered only after `on_auto_attach` is
+    /// emitted: Chrome attaches already-related targets (and any created
+    /// meanwhile) before it replies. `inject` pushes further events.
+    async fn fake_browser(
+        on_auto_attach: Vec<Value>,
+    ) -> (CdpClient, Seen, mpsc::UnboundedSender<Value>) {
+        let (near, far) = tokio::io::duplex(1 << 20);
+        let client_ws = WebSocketStream::from_raw_socket(near, Role::Client, None).await;
+        let mut browser = WebSocketStream::from_raw_socket(far, Role::Server, None).await;
+        let client = CdpClient::from_socket(client_ws).unwrap();
+        let (seen_tx, seen) = mpsc::unbounded_channel();
+        let (inject, mut injected) = mpsc::unbounded_channel::<Value>();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    frame = browser.next() => {
+                        let Some(Ok(Message::Text(text))) = frame else { return };
+                        let req: Value = serde_json::from_str(text.as_str()).unwrap();
+                        let sid = req["sessionId"].as_str().unwrap_or("").to_string();
+                        let method = req["method"].as_str().unwrap_or("").to_string();
+                        if method == "Target.setAutoAttach" {
+                            for ev in &on_auto_attach {
+                                browser.send(Message::Text(ev.to_string().into())).await.unwrap();
+                            }
+                        }
+                        let reply = json!({"id": req["id"], "sessionId": sid, "result": {}});
+                        browser.send(Message::Text(reply.to_string().into())).await.unwrap();
+                        let _ = seen_tx.send((sid, method));
+                    }
+                    Some(ev) = injected.recv() => {
+                        browser.send(Message::Text(ev.to_string().into())).await.unwrap();
+                    }
+                }
+            }
+        });
+        (client, seen, inject)
+    }
+
+    fn attached(parent: &str, child: &str) -> Value {
+        json!({
+            "method": "Target.attachedToTarget",
+            "sessionId": parent,
+            "params": {
+                "sessionId": child,
+                "targetInfo": {"targetId": child, "type": "worker", "url": "https://a.test/w.js"},
+                "waitingForDebugger": true
+            }
+        })
+    }
+
+    /// Wait for `method` on session `sid`; every command seen on the way is
+    /// appended to `log`.
+    async fn saw(
+        seen: &mut Seen,
+        log: &mut Vec<(String, String)>,
+        sid: &str,
+        method: &str,
+    ) -> bool {
+        let found = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(cmd) = seen.recv().await {
+                let hit = cmd.0 == sid && cmd.1 == method;
+                log.push(cmd);
+                if hit {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        found.unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn a_target_attached_before_the_set_auto_attach_reply_is_resumed() {
+        // Regression: the handler subscribed inside its task, after the
+        // setAutoAttach reply. A target Chrome attached before that reply
+        // (already running, or created in the window) was never patched,
+        // and one created paused stayed paused forever.
+        let (client, mut seen, _inject) = fake_browser(vec![attached("PAGE-A", "W1")]).await;
+        let page = CdpSession::child(client, "PAGE-A");
+        let task = start_auto_attach(&page, Some("1".into()), None, false).await;
+        let mut log = Vec::new();
+        let resumed = saw(&mut seen, &mut log, "W1", "Runtime.runIfWaitingForDebugger").await;
+        task.abort();
+        assert!(resumed, "W1 was never resumed; commands seen: {log:?}");
+    }
+
+    #[tokio::test]
+    async fn only_this_pages_auto_attached_targets_are_handled() {
+        // Regression: the handler listened client-wide. In pipe mode two
+        // live Pages share one connection (switch_tab, the download
+        // fallback), so each patched and resumed the other's targets too.
+        let (client, mut seen, inject) = fake_browser(Vec::new()).await;
+        let page = CdpSession::child(client, "PAGE-A");
+        let task = start_auto_attach(&page, Some("1".into()), None, false).await;
+        let mut log = Vec::new();
+        assert!(saw(&mut seen, &mut log, "PAGE-A", "Target.setAutoAttach").await);
+        inject.send(attached("PAGE-B", "W-OTHER")).unwrap();
+        inject.send(attached("PAGE-A", "W-MINE")).unwrap();
+        assert!(
+            saw(
+                &mut seen,
+                &mut log,
+                "W-MINE",
+                "Runtime.runIfWaitingForDebugger"
+            )
+            .await,
+            "this page's target was not resumed: {log:?}"
+        );
+        // Give a stray handler for the other page's target time to show.
+        while let Ok(Some(cmd)) =
+            tokio::time::timeout(Duration::from_millis(300), seen.recv()).await
+        {
+            log.push(cmd);
+        }
+        task.abort();
+        assert!(
+            !log.iter().any(|(sid, _)| sid == "W-OTHER"),
+            "another page's target was handled by this page: {log:?}"
+        );
     }
 }
