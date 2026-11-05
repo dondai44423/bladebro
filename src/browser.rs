@@ -113,7 +113,29 @@ impl Drop for Browser {
         // Unwinding/failed launches retain the emergency process-tree path.
         platform::finish_child_shutdown(&mut self.child, self.close_requested);
         stop_profile_processes(&self.profile, self.close_requested);
+        // Only now that no page can still read an uploaded file.
+        #[cfg(target_os = "linux")]
+        flatpak::discard_staged_uploads();
         // Xvfb is dropped here too (field order: child first, then xvfb).
+    }
+}
+
+/// The path to hand the browser for an upload of `source`: the file itself,
+/// or a copy staged where a sandboxed (Flatpak) browser this process
+/// launched can read it.
+pub(crate) fn upload_path(source: &std::path::Path) -> Result<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        flatpak::upload_path(source).map_err(|e| {
+            BladeError::Other(format!(
+                "cannot stage {} where the Flatpak browser's sandbox can read it: {e}",
+                source.display()
+            ))
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(source.to_path_buf())
     }
 }
 

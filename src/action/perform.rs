@@ -988,6 +988,10 @@ pub async fn perform_with_network(
                     )))
                 }
             };
+            // A sandboxed (Flatpak) browser cannot open a path outside its
+            // shares; it gets a staged copy it can read.
+            let source = std::path::Path::new(path.as_str());
+            let handed = crate::browser::upload_path(source)?;
             // Set the file on the input. DOM.setFileInputFiles accepts
             // objectId directly — no need to convert to nodeId (which can
             // go stale if the DOM tree hasn't been explicitly requested).
@@ -995,13 +999,12 @@ pub async fn perform_with_network(
                 "DOM.setFileInputFiles",
                 Some(serde_json::json!({
                     "objectId": object_id,
-                    "files": [path],
+                    "files": [handed.to_string_lossy()],
                 })),
             )
             .await?;
             // The command succeeds for any path string; only a read in the
             // page proves the file arrived.
-            let source = std::path::Path::new(path.as_str());
             match super::upload::readback(cdp, &object_id, source).await {
                 super::upload::UploadCheck::Delivered => {}
                 super::upload::UploadCheck::Unverified(why) => upload_unverified = Some(why),
