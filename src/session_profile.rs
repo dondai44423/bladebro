@@ -700,8 +700,8 @@ fn rescue_same_pid_leftover(root: &Path, dir: &Path, real_root: Option<&Path>) -
         return Ok(());
     }
     Err(BladeError::Other(format!(
-        "session profile {} is still in use by a browser left running by an earlier bladebro process with this pid; close that browser, then retry",
-        dir.display()
+        "session profile {d} is still in use by a process (browser or launcher) that an earlier bladebro process with this pid left running; stop the process started with --user-data-dir={d}, then retry",
+        d = dir.display()
     )))
 }
 

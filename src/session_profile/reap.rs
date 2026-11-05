@@ -9,10 +9,15 @@ use crate::platform;
 use super::SessionProfile;
 
 /// Reap the corpses of dead bladebro processes:
-/// 1. Session profile dirs whose owner pid is dead → kill
-///    their orphaned Chrome (via SingletonLock pid), rm dir.
-/// 2. Xvfb lock files (/tmp/.X<n>-lock) whose pid is dead →
-///    remove lock, kill the orphaned Xvfb if still running.
+/// 1. Session profile dirs whose owner pid is dead → stop their
+///    orphaned browser (found by its SingletonLock pid or, on Linux, by
+///    an exact `--user-data-dir` match), verify nothing runs on the
+///    profile any more, sync it back to the template, rm dir. A profile
+///    that could not be freed is left untouched for the next launch.
+/// 2. Display claims (/tmp/.blade-x<n>-claim) whose owner is dead →
+///    remove the claim and a stale Xvfb lock, and kill the display's
+///    Xvfb only if it is an orphan that started with that claim (a
+///    later system or user-service Xvfb on the display is left alone).
 ///
 /// Runs on every Chrome launch. Self-healing: no matter how
 /// bladebro died (SIGKILL, OOM, panic), the next launch
@@ -133,7 +138,7 @@ fn reap_session_root(root: &Path, real_root: Option<&Path>) {
             eprintln!("[bladebro] reaped dead session profile {name}");
         } else {
             eprintln!(
-                "[bladebro] dead session profile {name} is still in use by a running browser; left in place (retried on next launch)"
+                "[bladebro] dead session profile {name} is still in use by a running process (browser or launcher); left in place (retried on next launch)"
             );
         }
     }

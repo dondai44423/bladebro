@@ -570,11 +570,11 @@ fn profile_locks_at(blade_dir: &std::path::Path, custom: Option<&std::path::Path
             name: "Profile locks",
             status: Status::Warn,
             detail: format!(
-                "a browser is still running on dead session {}",
+                "a process (browser or launcher) still runs on dead session {}",
                 running.join(", ")
             ),
             fix: Some(
-                "The next launch stops it before reaping; or close that browser yourself".into(),
+                "The next launch stops a browser on it before reaping; stop any other process started with its --user-data-dir yourself".into(),
             ),
         };
     }
@@ -860,8 +860,9 @@ mod tests {
         let me = std::process::id();
         session(&root, "sess-999999998", 999_999_998); // dead: reaped
         session(&root, &format!("sess-{me}"), me); // live: kept
-                                                   // Never created by bladebro and never reaped: promising otherwise
-                                                   // is a warning that never clears.
+
+        // Never created by bladebro and never reaped: promising otherwise
+        // is a warning that never clears.
         std::fs::create_dir_all(root.join("profiles/pid-999999996")).unwrap();
         std::fs::create_dir_all(root.join("profiles/junk")).unwrap();
         // The reaper also visits real-lane roots.
