@@ -5,11 +5,12 @@
 //! `bladebro-chrome-*` dir under the temp root). Both transports.
 //!
 //! The same holds when a termination signal (Ctrl-C) reaches an in-process
-//! run's process group, mid-launch or while the command runs: the browser and
-//! Xvfb each run in their own group, so bladebro dying on the signal's default
-//! action used to orphan them instead of cleaning up. A signal the run
-//! inherited as ignored (`nohup`, a non-interactive shell's `cmd &`) must stay
-//! ignored: the command finishes as it did before signals were caught.
+//! run's process group, mid-launch or while the command runs: the browser runs
+//! in its own group, so bladebro dying on the signal's default action used to
+//! orphan it instead of cleaning up. A signal the run inherited as ignored
+//! (`nohup`, a non-interactive shell's `cmd &`) must stay ignored: the command
+//! finishes as it did before signals were caught. SIGKILL to the run's group,
+//! which nothing can catch, must still take the virtual display with it.
 #![cfg(unix)]
 
 use std::io::Write;
@@ -440,5 +441,50 @@ fn signals_ignored_on_entry_stay_ignored() {
         "probe did not finish\nstdout: {}\nstderr: {}",
         run.stdout,
         run.stderr
+    );
+}
+
+/// SIGKILL to an in-process run's process group (`timeout -s KILL`, a
+/// harness's killpg, a cancelled CI job) leaves bladebro no chance to clean
+/// up. The virtual display must die with the group, so Xvfb and the window
+/// manager stay in bladebro's process group; a real Chrome then exits on
+/// losing its display. (This stand-in browser does not, and is not what is
+/// checked: it runs in its own group by design and is cleared first.)
+#[test]
+fn sigkill_to_the_process_group_takes_the_virtual_display_with_it() {
+    let _serial = serial();
+    let (root, temp, fake, pids) = scenario_with("sigkill", endpoint_browser);
+    let errlog = root.join("stderr.log");
+    let mut child = base_command(&root, &fake, &temp)
+        .arg("probe")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errlog).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !running(&root) && Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let was_running = running(&root);
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let status = child.wait().unwrap();
+    let _ = leftovers(&temp, &pids);
+    let display = display_leftovers(child.id());
+    let stderr = std::fs::read_to_string(&errlog).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        was_running,
+        "the run never reached the signal point\n{stderr}"
+    );
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{stderr}");
+    assert!(
+        display.is_empty(),
+        "SIGKILL to bladebro's process group left display processes {display:?} running\n{stderr}"
     );
 }

@@ -1156,9 +1156,11 @@ pub fn isolate_owned_child(cmd: &mut std::process::Command) {
 /// Termination signals for a process that owns its browser in-process (the
 /// one-shot CLI, `probe`/`targets`/`audit`): SIGTERM, SIGINT and SIGHUP on
 /// Unix, Ctrl+C on Windows — the set the MCP server shuts down on. Without
-/// a handler the default action ended bladebro alone: the browser runs in its
-/// own process group (`isolate_owned_child`) and so does Xvfb, so a Ctrl-C or
-/// a `timeout` SIGTERM orphaned both instead of closing them.
+/// a handler the default action ended bladebro without ever closing the
+/// browser, which runs in its own process group (`isolate_owned_child`): a
+/// `timeout` SIGTERM orphaned it and Xvfb, and a Ctrl-C to the job's group
+/// took Xvfb down with bladebro and left Chrome to die on losing its display,
+/// unflushed (or orphaned it where there is no Xvfb).
 ///
 /// Listening starts in [`TerminationSignal::listen`]. From then on these
 /// signals no longer end the process by themselves, and one that arrives

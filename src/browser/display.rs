@@ -3,7 +3,6 @@
 
 use super::discover::{find_in_path, find_xvfb};
 use super::*;
-use std::os::unix::process::CommandExt;
 
 /// A virtual X display managed by Xvfb. Killed + cleaned up on Drop.
 /// Linux-only: macOS and Windows have native window servers.
@@ -72,19 +71,12 @@ impl VirtualDisplay {
             };
             let auth_arg = auth_file.to_string_lossy().into_owned();
             let child = Command::new(xvfb_path)
-                // Own process group, like the browser
-                // (`platform::isolate_owned_child`): Ctrl-C on a foreground
-                // `bladebro mcp`/`daemon` (or a harness signalling the
-                // server's group) reaches every process in bladebro's group
-                // at once, and Xvfb exiting on that SIGINT pulled the display
-                // out from under Chrome while `shutdown_gracefully` was still
-                // asking it to flush and close. Its lifetime is ours to end:
-                // every in-process owner (MCP, daemon, one-shot CLI,
-                // probe/targets/audit) turns Ctrl-C and SIGTERM into a
-                // graceful close that ends in Drop killing it; the orphan
-                // reaper covers a bladebro that died without running Drop
-                // (SIGKILL).
-                .process_group(0)
+                // Stays in bladebro's process group, unlike the browser
+                // (`platform::isolate_owned_child`): SIGKILL to that group
+                // (`timeout -s KILL`, a harness's killpg, a cancelled CI job)
+                // runs no Drop, and Xvfb dying with the group is what takes
+                // Chrome down too (it exits on losing its display). In its
+                // own group Xvfb outlived such a kill, and Chrome with it.
                 .args([
                     &format!(":{display_num}"),
                     "-screen",
@@ -196,8 +188,17 @@ fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Chi
         }
         find_in_path(name)
     }
-    let wm = find_bin("xfwm4", &["/usr/bin/xfwm4", "/usr/local/bin/xfwm4"])
-        .and_then(|path| spawn_wm(&path, display_num, xauth));
+    let wm = find_bin("xfwm4", &["/usr/bin/xfwm4", "/usr/local/bin/xfwm4"]).and_then(|path| {
+        let mut cmd = Command::new(path);
+        cmd.args(["--compositor=off", "--replace"])
+            .env("DISPLAY", format!(":{display_num}"))
+            .env("XAUTHORITY", xauth)
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("XDG_SESSION_TYPE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd.spawn().ok()
+    });
     // Declare the taskbar after the WM owns the root and verify the read-back.
     // xfwm4 may still re-publish the full-screen area later (measured: it does
     // — see the fn docs), so this is a best-effort declaration, never a
@@ -223,22 +224,6 @@ fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Chi
         }
     }
     wm
-}
-
-/// Spawn the window manager binary at `path` on the virtual display.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn spawn_wm(path: &str, display_num: u16, xauth: &std::path::Path) -> Option<Child> {
-    let mut cmd = Command::new(path);
-    cmd.args(["--compositor=off", "--replace"])
-        .env("DISPLAY", format!(":{display_num}"))
-        .env("XAUTHORITY", xauth)
-        .env_remove("WAYLAND_DISPLAY")
-        .env_remove("XDG_SESSION_TYPE")
-        // Own process group: same reason as Xvfb (`start_with_path`).
-        .process_group(0)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    cmd.spawn().ok()
 }
 
 /// True once a window manager owns the root window (`_NET_SUPPORTING_WM_CHECK`
@@ -534,19 +519,8 @@ pub(super) fn apply_xvfb_env(cmd: &mut Command, xvfb: &VirtualDisplay) {
 mod readiness_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-
-    /// Tests that create `/tmp/.blade-x*-xauth-<our pid>-*` cookies run one
-    /// at a time: the readiness test's leftover scan cannot tell another
-    /// test's in-flight cookie from its own leak.
-    static AUTH_FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        AUTH_FILES.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     #[test]
     fn a_live_process_without_a_display_socket_is_not_ready() {
-        let _serial = serial();
         let dir = std::env::temp_dir().join(format!("blade-xvfb-ready-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("fake-xvfb");
@@ -583,70 +557,8 @@ mod readiness_tests {
         );
     }
 
-    /// Ctrl-C on a foreground `bladebro mcp`/`daemon` delivers SIGINT to
-    /// bladebro's whole process group. Xvfb and the WM must not be in it:
-    /// Xvfb dying on that SIGINT pulls the display out from under Chrome
-    /// while `shutdown_gracefully` is still asking it to flush and close.
-    #[test]
-    fn display_processes_leave_our_process_group() {
-        let _serial = serial();
-        let dir = std::env::temp_dir().join(format!("blade-xvfb-pgid-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // Each fake records its pid and process group (field 5 of
-        // /proc/self/stat; `read` is a builtin, so `self` is the script's own
-        // shell) and stays alive as the same process. sh, not an
-        // interpreter: an Xvfb attempt is killed after its 500ms readiness
-        // window, and a slow start on a loaded runner would record nothing.
-        let fake = |name: &str| {
-            let script = dir.join(name);
-            let out = dir.join(format!("{name}.ids"));
-            std::fs::write(&script, format!("#!/bin/sh\nread -r _ _ _ _ pgrp _ < /proc/self/stat\necho \"$$ $pgrp\" >> '{}'\nexec sleep 60\n", out.display())).unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-            (script, out)
-        };
-        let ids = |out: &std::path::Path| -> Vec<(i32, i32)> {
-            std::fs::read_to_string(out)
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|l| {
-                    let (a, b) = l.split_once(' ')?;
-                    Some((a.parse().ok()?, b.parse().ok()?))
-                })
-                .collect()
-        };
-        let ours = unsafe { libc::getpgrp() };
-
-        let (xvfb, xvfb_ids) = fake("fake-xvfb");
-        // No socket is ever served, so every bounded attempt is spawned and
-        // reaped; each records the group it was born into.
-        assert!(VirtualDisplay::start_with_path(xvfb.to_str().unwrap()).is_err());
-
-        let (wm, wm_ids) = fake("fake-wm");
-        let mut child = spawn_wm(wm.to_str().unwrap(), 199, &dir.join("xauth")).expect("spawn");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while ids(&wm_ids).is_empty() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-
-        let xvfb_seen = ids(&xvfb_ids);
-        let wm_seen = ids(&wm_ids);
-        std::fs::remove_dir_all(&dir).unwrap();
-        // Up to three bounded attempts; every one that got to run must have
-        // been born outside our group.
-        assert!(!xvfb_seen.is_empty(), "no Xvfb attempt recorded its group");
-        assert_eq!(wm_seen.len(), 1, "the WM recorded");
-        for (pid, pgid) in xvfb_seen.into_iter().chain(wm_seen) {
-            assert_ne!(pgid, ours, "display process {pid} shares our process group");
-            assert_eq!(pgid, pid, "display process {pid} leads its own group");
-        }
-    }
-
     #[test]
     fn auth_file_is_private_and_well_formed() {
-        let _serial = serial();
         let path = write_xvfb_auth_file(199).expect("auth file");
         let meta = std::fs::metadata(&path).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);

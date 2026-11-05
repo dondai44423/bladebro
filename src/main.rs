@@ -340,8 +340,8 @@ fn run() -> Result<()> {
 ///
 /// The same goes for Ctrl-C, SIGTERM and SIGHUP: with `signal` listening
 /// (it does whenever the browser was launched here) they end the command,
-/// not the process. Dying on the default action would orphan Chrome and
-/// Xvfb, which each run in their own process group.
+/// not the process. Dying on the default action would never close Chrome,
+/// which runs in its own process group.
 async fn with_browser_guard<F, Fut>(
     browser: &mut Option<bladebro::browser::Browser>,
     signal: &mut Option<bladebro::platform::TerminationSignal>,

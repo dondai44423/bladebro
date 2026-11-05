@@ -630,8 +630,8 @@ async fn run_tool(
     // error. The real lane's attach mechanism owns nothing — nothing to shut.
     // That includes Ctrl-C, a harness's or `timeout`'s SIGTERM and a closed
     // terminal's SIGHUP: caught from before the launch on, they end the run,
-    // not the process, which would orphan Chrome and Xvfb (each runs in its
-    // own process group). One that lands mid-launch is held until the launch
+    // not the process, which would never close Chrome (it runs in its own
+    // process group). One that lands mid-launch is held until the launch
     // returns: the launch paths are not all safe to drop half-way.
     let mut signal = crate::platform::TerminationSignal::listen();
     let (browser, base) = crate::browser::launch_lane().await?;
