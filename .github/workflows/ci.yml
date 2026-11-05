@@ -109,41 +109,18 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Warm macOS ShareKit/IconServices (cold-VM main-thread stall)
+      - name: Wait for macOS browser input readiness (cold-VM main-thread stall)
         if: startsWith(matrix.os, 'macos-')
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          # Evidence (process samples of Chrome 157 on macos-26-intel): the browser's main thread
-          # blocks in a synchronous IconServices XPC call while AppKit populates the Share menu,
-          # so the first Input.* call times out. The service stays unresponsive for the first
-          # ~15 minutes of a cold runner. Wait for it here, bounded, restarting it between tries,
-          # and record what is wedged; the browser under test then never absorbs the stall.
-          start=$SECONDS
-          for attempt in 1 2 3 4 5 6 7 8; do
-            swift tools/ci/warm-macos-share.swift > "$RUNNER_TEMP/warm.log" 2>&1 &
-            pid=$!
-            for _ in $(seq 1 60); do kill -0 $pid 2>/dev/null || break; sleep 1; done
-            if ! kill -0 $pid 2>/dev/null; then echo "ready after $((SECONDS - start))s (attempt $attempt)"; cat "$RUNNER_TEMP/warm.log"; exit 0; fi
-            echo "attempt $attempt: no reply after 60s (t+$((SECONDS - start))s)"
-            if [[ $attempt == 1 ]]; then
-              sample $pid 1 -file "$RUNNER_TEMP/warm-sample.txt" >/dev/null 2>&1 || true
-              grep -m1 -A12 -E 'IconServices|ISIcon|xpc' "$RUNNER_TEMP/warm-sample.txt" | cut -c1-160 || true
-              launchctl list 2>/dev/null | grep -i -E 'icon|sharing|lsd' || true
-              ps -axo pid,etime,pcpu,comm | grep -i -E 'iconservices|lsd|sharingd|ShareKit' | grep -v grep || true
-            fi
-            kill -9 $pid 2>/dev/null || true
-            killall iconservicesagent 2>/dev/null || true
-            if (( attempt >= 2 )); then sudo killall iconservicesd 2>/dev/null || true; fi
-          done
-          echo "IconServices never answered within the bound; continuing (browser steps will report the real result)"
-          exit 0
+        timeout-minutes: 12
+        run: node tools/ci/mac-browser-ready.mjs
 
       - name: Verify native DSH package and browser lifecycle
         timeout-minutes: 10
         shell: bash
         run: |
           set -e
+          # Hermetic: a cache from an earlier (even failed) attempt must never supply this tree.
+          rm -rf target/dsh-runtime
           npm pack ./npm/bladebro --pack-destination .
           version=$(node -p "require('./npm/bladebro/package.json').version")
           # Test unpublished versions using this job's real native binary.
