@@ -562,9 +562,9 @@ fn shared_fingerprint_never_rebinds() {
     assert_eq!(removed, old, "cards 1-2 left the window");
 }
 
-/// What the fingerprint rebind is FOR: the element's sig moved (its frame
-/// index shifted, or a same-named element ahead of it came or went) while
-/// its structure and name stayed put. The ref follows it.
+/// What the fingerprint rebind is FOR: the element's sig moved because its
+/// frame index shifted, while its structure and name stayed put. The ref
+/// follows it.
 #[test]
 fn fingerprint_rebind_keeps_ref_when_only_position_shifts() {
     let mut lpm = LivePageModel::new();

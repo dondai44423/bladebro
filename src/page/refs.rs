@@ -10,11 +10,16 @@
 //!
 //! Matching strategy (v1): exact signature match first; if a new element's
 //! signature has no exact match but the old element with the same role+name
-//! sits in the same uniquely-fingerprinted slot with a shifted ordinal or
-//! frame, rebind it (the set reordered, not replaced). Only truly novel
+//! sits in the same uniquely-fingerprinted slot under a shifted frame index,
+//! rebind it (the frames reordered, not replaced). Only truly novel
 //! role+name pairs get fresh refs; truly gone ones invalidate — a ref never
-//! moves to an element with a different name (bar a form control named by
-//! its own content, see `same_element`).
+//! follows the fingerprint to an element with a different name (bar a form
+//! control named by its own content, see `same_element`).
+//!
+//! The exact match is by rank among same-named elements, so when one ahead
+//! of an element comes or goes, the ref stays with its rank, i.e. with
+//! whichever element holds that rank now; the fingerprint pass never sees
+//! that case.
 
 use std::collections::HashMap;
 
@@ -122,13 +127,16 @@ pub fn stabilize(
         fresh_vec.push(i);
     }
 
-    // Pass 2: fingerprint rebind (D48). The element's sig moved (its frame
-    // index shifted, a same-named element ahead of it came or went) but its
+    // Pass 2: fingerprint rebind (D48). The element's sig moved because its
+    // frame index shifted (an iframe added or removed ahead of it) but its
     // structural fingerprint is identical — the same element in the same
-    // slot. The fingerprint is a SLOT identity, not an element identity: it
+    // slot. A rank shift among same-named elements never gets here: pass 1
+    // has already given that rank's sig to whichever element holds it now.
+    // The fingerprint is a SLOT identity, not an element identity: it
     // carries no text, so on its own it cannot tell a re-render from new
     // content swapped into the same markup (a result list refreshed in
-    // place). Two guards keep a ref from ever moving to a different element:
+    // place). Two guards keep this pass from ever moving a ref to a
+    // different element:
     // - the fingerprint must be unique on both sides. Identical component
     //   markup hashes alike (a shadow root's chain stops at the root; deep
     //   div soup past 10 levels), and a hash shared by several elements

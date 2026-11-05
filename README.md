@@ -422,7 +422,7 @@ Everything is built from scratch where it counts — the CDP transport, percepti
 
 **The #1 reliability gap in every other agent browser, solved.**
 
-When React, Vue or Angular re-renders a component, the DOM nodes are destroyed and recreated — and every other agent browser loses its refs. Bladebro's refs are anchored to a signature, not a DOM node, so a re-render that keeps an element's name keeps its ref. When the signature itself shifts (its frame index moved, a same-named element ahead of it came or went) but structure and name survive, the ref follows the fingerprint instead of dying.
+When React, Vue or Angular re-renders a component, the DOM nodes are destroyed and recreated — and every other agent browser loses its refs. Bladebro's refs are anchored to a signature, not a DOM node, so a re-render that keeps an element's name keeps its ref. When the signature itself shifts because the element's frame index moved (an iframe was added or removed ahead of it) but structure and name survive, the ref follows the fingerprint instead of dying.
 
 ```
 Before re-render:  e2 button "Buy Now"  sig=0|button|Buy Now|1  fp=0xdeadbeef
