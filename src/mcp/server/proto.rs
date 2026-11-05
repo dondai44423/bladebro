@@ -8,7 +8,7 @@ use crate::error::BladeError;
 use crate::mcp::tools::tools_to_json;
 use crate::page::Page;
 
-use super::{handle_act, handle_run, handle_see, handle_state, handle_vision};
+use super::{handle_act, handle_run, handle_see_tool, handle_state, handle_vision};
 use super::{shape_result, INSTRUCTIONS, PROTOCOL_VERSION, STATELESS_VERSION, SUPPORTED_VERSIONS};
 
 pub(super) fn handle_initialize(id: Option<Value>, params: &Value) -> Value {
@@ -94,7 +94,7 @@ pub async fn handle_tools_call(
 
     let result = match name {
         "act" => handle_act(&args, page).await,
-        "see" => handle_see(&args, page).await,
+        "see" => handle_see_tool(&args, page).await,
         "state" => handle_state(&args, page).await,
         "run" => handle_run(&args, page).await,
         _ => Err(crate::error::BladeError::Other(format!(

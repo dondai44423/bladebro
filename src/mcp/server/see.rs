@@ -47,6 +47,28 @@ fn pdf_read_message(url: &str) -> String {
     )
 }
 
+/// `see` as a tool call (MCP and CLI/daemon): `url=` navigates first, then
+/// reads - the `bladebro see <url>` contract, and what `retry_safe` already
+/// assumes. The MCP dispatch used to skip this and silently read whatever page
+/// was current. Steps and act aliases call [`handle_see`] directly because
+/// they navigate on url= themselves (batch/run see steps, act pre-navigation
+/// for extract/paginate).
+pub async fn handle_see_tool(args: &Value, page: &mut Page) -> Result<String> {
+    super::validate::see(args)?;
+    if let Some(url) = args
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty() && !u.starts_with("--"))
+    {
+        // Manual-control pause: a see with a url navigates first.
+        if crate::realbrowser::input_paused() {
+            return Err(crate::realbrowser::paused_error());
+        }
+        page.navigate(url).await?;
+    }
+    handle_see(args, page).await
+}
+
 pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     super::validate::see(args)?;
     // NOTE (4.4.0): `see` deliberately does NOT reset the act-loop counter.
