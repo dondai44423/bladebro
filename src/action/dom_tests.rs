@@ -311,6 +311,36 @@ ok(d.activeElement === d.getElementById('free'), 'focus moved to the free field'
 
 // ---- L3: leaf-forwarding never trades an actionable target for another ----
 #[test]
+fn interactive_role_without_tabindex_is_clicked_itself() {
+    // The usual React/Vue row: role=button, no tabindex, a listener added
+    // from script (no inline onclick), a nested Delete. The role alone makes
+    // it actionable; forwarding its click to Delete fired Delete.
+    let body = r#"
+const d = use(page({},
+  h('div', {id: 'row', role: 'button', 'aria-label': 'Open message', rect: [0, 0, 400, 60]},
+    'Message subject',
+    h('button', {id: 'del', 'aria-label': 'Delete', rect: [330, 18, 60, 24]}, 'x')),
+  h('div', {id: 'tab', role: 'tab', 'aria-label': 'Inbox', rect: [0, 100, 200, 40]},
+    'Inbox',
+    h('button', {id: 'close', 'aria-label': 'Close tab', rect: [170, 108, 24, 24]}, 'x'))));
+d.getElementById('row').addEventListener('click', () => {});
+let r = __ROW__();
+eq(r && r.box, [0, 0, 400, 60], 'the row is clicked where it is');
+ok(r && !r.leaf, 'no redirect for the row', r);
+r = __TAB__();
+eq(r && r.box, [0, 100, 200, 40], 'a tab is not traded for its close button');
+"#;
+    run(
+        "l3_role_row",
+        body,
+        &[
+            ("__ROW__", sig("|button|Open message|1", "box", None)),
+            ("__TAB__", sig("|tab|Inbox|1", "box", None)),
+        ],
+    );
+}
+
+#[test]
 fn actionable_container_is_clicked_itself() {
     // A clickable row (role=button, focusable, own handler) holding a Delete
     // button: clicking the row's center opens it. Leaf-forwarding used to
@@ -333,9 +363,9 @@ ok(r && !r.leaf && String(r.hit_tgt).indexOf('Open thread') >= 0, 'no redirect i
 
 #[test]
 fn dead_container_still_leaf_forwards_and_says_so() {
-    // The #15 class keeps working: a role=button wrapper (not focusable
-    // itself) around its native button forwards to the control - and the
-    // box result flags the redirect so the verdict can name it.
+    // The #15 class keeps working: a role=button wrapper around its own
+    // same-named native button forwards to the control - and the box result
+    // flags the redirect so the verdict can name it.
     let body = r#"
 const d = use(page({},
   h('div', {id: 'wrap', role: 'button', 'aria-label': 'Account menu', rect: [0, 100, 300, 60]},

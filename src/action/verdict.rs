@@ -916,14 +916,17 @@ pub async fn eval_condition(
 /// account-menu / nav-wrapper no-effect bug (#15).
 ///
 /// L3: an addressed node that is itself actionable (a native control, an
-/// inline handler, or a focusable interactive role) is clicked where it is;
-/// only a same-named inner control may stand in for it (a wrapper around its
-/// own button). Redirecting a clickable thread row onto its nested Delete
-/// button fired Delete. `_lred` flags a redirect so the verdict names it.
+/// inline handler, or an interactive role) is clicked where it is; only a
+/// same-named inner control may stand in for it (a wrapper around its own
+/// button - the #15 class). Redirecting a clickable thread row onto its
+/// nested Delete button fired Delete. The role alone counts: React/Vue rows
+/// carry role=button with neither tabindex nor an inline handler (listeners
+/// are attached from script, invisible here). `_lred` flags a redirect so
+/// the verdict names it.
 pub(super) const LEAF_TARGET_JS: &str = concat!(
     "var _lClick=_lbx(n);var _lht=(n.getAttribute&&(n.getAttribute('aria-label')||n.getAttribute('title')))||'';var _lhr=(n.getAttribute&&n.getAttribute('role'))||n.tagName.toLowerCase();var _lred=false;",
     "var _ltopN=doc.elementFromPoint(cx,cy);var _lNative=_lnb(_ltopN);",
-    "var _lnm=null;try{var _lr0=(n.getAttribute&&n.getAttribute('role'))||'';if(_lnb(n)||typeof n.onclick==='function'||(n.hasAttribute&&n.hasAttribute('onclick'))||(/^(button|link|menuitem|menuitemcheckbox|menuitemradio|tab|option|checkbox|radio|switch|treeitem)$/.test(_lr0)&&n.hasAttribute('tabindex')&&n.tabIndex>=0)){_lnm=String(name(n,false)||'').toLowerCase();}}catch(e){}",
+    "var _lnm=null;try{var _lr0=(n.getAttribute&&n.getAttribute('role'))||'';if(_lnb(n)||typeof n.onclick==='function'||(n.hasAttribute&&n.hasAttribute('onclick'))||(/^(button|link|menuitem|menuitemcheckbox|menuitemradio|tab|option|checkbox|radio|switch|treeitem)$/.test(_lr0))){_lnm=String(name(n,false)||'').toLowerCase();}}catch(e){}",
     "if(!_lNative){var _lbest=null,_lbd=Infinity,_lcands=[];try{_lcands=deepAll(n,'button,a[href],input:not([type=hidden]),select,textarea');}catch(e){}",
     "for(var _lk=0;_lk<_lcands.length;_lk++){var _lc=_lcands[_lk];if(_lnm!==null){var _lcn='';try{_lcn=String(name(_lc,false)||'').toLowerCase();}catch(e){}if(_lcn!==_lnm)continue;}var _lrc=_lc.getBoundingClientRect();if(_lrc.width<2||_lrc.height<2)continue;var _lbn=n.getBoundingClientRect();if(!(_lrc.left<=_lbn.right&&_lrc.right>=_lbn.left))continue;var _lccx=_lrc.x+_lrc.width/2,_lccy=_lrc.y+_lrc.height/2;var _ltc=doc.elementFromPoint(_lccx,_lccy);if(!(_ltc===_lc||(_lc.contains&&_lc.contains(_ltc))))continue;var _ldd=Math.hypot(_lccx-cx,_lccy-cy);if(_ldd<_lbd){_lbd=_ldd;_lbest=_lc;}}",
     "if(_lbest){_lClick=_lbx(_lbest);_lht=(_lbest.getAttribute&&(_lbest.getAttribute('aria-label')||_lbest.textContent||_lbest.getAttribute('title')))||'';_lhr=(_lbest.getAttribute&&_lbest.getAttribute('role'))||_lbest.tagName.toLowerCase();_lred=true;}}",
