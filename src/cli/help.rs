@@ -55,7 +55,7 @@ COMMANDS
   mcp                             MCP server on stdio — add to your agent's client config
   rb on|off [sub]                 real-browser lane: drive YOUR browser (see 'help rb')
   hermes on|off|status             switch Hermes' browser to Bladebro; reversible MCP setup
-  audit                           stealth audit — 61-check suite + boot self-check + drift stamp
+  audit                           stealth audit — vector suite + boot self-check + drift stamp
   update | -u [--check] [--force]  self-update; --rollback restores the previous binary
   doctor | -doc                   system diagnostics (13 checks)
   -v | --version                  version + install method + update status
@@ -373,7 +373,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             "usage": "bladebro audit",
             "tool": null,
             "examples": ["bladebro audit"],
-            "notes": ["stealth audit — 61-check local suite + boot self-check + cross-restart consistency stamp; 61/61 is the bar"]
+            "notes": ["stealth audit — local vector suite + boot self-check + cross-restart consistency stamp; every check must pass (the run prints its own total); any FAIL exits non-zero"]
         }),
         "update" => json!({
             "usage": "bladebro update | -u [--check] [--force]",
@@ -843,12 +843,13 @@ Chrome launches lazily on the first tool call.
 USAGE
   bladebro audit
 
-Runs the local vector suite (tests/vectors.html — 61 checks: the core
-stealth surface, the permissions native-parity battery, GL-coherence
-checks, worker/iframe propagation) plus a boot self-check and a
-cross-restart consistency stamp (canvas/audio/geometry/UA/GL must not
-drift between runs). Run it after any stealth-affecting change; 61/61
-is the bar.
+Runs the local vector suite (tests/vectors.html: the core stealth
+surface, the permissions native-parity battery, GL-coherence checks,
+worker/iframe propagation) plus a boot self-check and a cross-restart
+consistency stamp (canvas/audio/geometry/UA/GL must not drift between
+runs). Run it after any stealth-affecting change; every check must pass —
+the run prints its own total (it depends on platform and profile), and
+any FAIL line exits non-zero.
 "#
         }
         "update" => {
@@ -964,6 +965,43 @@ mod tests {
         );
         assert_eq!(suggest_command("browsers"), Some("rb use"));
         assert_eq!(suggest_command("completely-unrelated"), None);
+    }
+
+    /// The audit total is platform/profile-dependent and printed by the run
+    /// itself (audit.rs); a number pinned in help drifted (help said 61
+    /// while the suite had grown to 111). No help surface may pin one.
+    #[test]
+    fn audit_help_does_not_pin_a_check_count() {
+        fn pins_a_count(text: &str) -> bool {
+            let b = text.as_bytes();
+            (0..b.len()).any(|i| {
+                b[i].is_ascii_digit() && (i == 0 || !b[i - 1].is_ascii_digit()) && {
+                    let end = (i..b.len())
+                        .find(|&j| !b[j].is_ascii_digit())
+                        .unwrap_or(b.len());
+                    let tail = &text[end..];
+                    tail.starts_with("-check")
+                        || tail.starts_with(" checks")
+                        || tail.starts_with(" vectors")
+                        || (tail.starts_with('/')
+                            && tail[1..].starts_with(|c: char| c.is_ascii_digit()))
+                }
+            })
+        }
+        assert!(pins_a_count("a 61-check suite") && pins_a_count("61/61 is the bar"));
+        assert!(!pins_a_count("vector suite + boot self-check"));
+        let manual = help_text();
+        let audit_line = manual
+            .lines()
+            .find(|l| l.trim_start().starts_with("audit "))
+            .expect("manual lists audit");
+        for text in [
+            audit_line.to_string(),
+            command_help_text("audit").unwrap(),
+            command_help_json("audit").unwrap().to_string(),
+        ] {
+            assert!(!pins_a_count(&text), "audit help pins a count: {text}");
+        }
     }
 
     #[test]
