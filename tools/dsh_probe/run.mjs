@@ -32,7 +32,11 @@ const { LlmRuntime, LlmAdapter } = await load('@deepseek-ai/dsh-llm');
 const plugin = await import(pathToFileURL(host.resolve('bladebro/dsh-plugin.mjs')).href);
 const { resolveBinary } = host('bladebro/binary.cjs');
 let checks = 0;
-function check(label, value) { assert.ok(value, label); checks++; console.log(`PASS ${label}`); }
+let lastCall;
+function check(label, value) {
+  if (!value && lastCall) console.error('Last tool call:', JSON.stringify(lastCall));
+  assert.ok(value, label); checks++; console.log(`PASS ${label}`);
+}
 async function until(predicate) {
   const deadline = Date.now() + 15000;
   while (!predicate()) {
@@ -60,10 +64,16 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const url = `http://127.0.0.1:${server.address().port}/`;
 let id = 0;
-const call = (tool, args, extra = {}) => ctx.tools.execute({
-  signal: new AbortController().signal, callId: `probe-${++id}`,
-  name: `mcp__bladebro__${tool}`, arguments: args, ...extra,
-});
+const call = async (tool, args, extra = {}) => {
+  const started = Date.now();
+  const result = await ctx.tools.execute({
+    signal: new AbortController().signal, callId: `probe-${++id}`,
+    name: `mcp__bladebro__${tool}`, arguments: args, ...extra,
+  });
+  // Only this probe's isolated fixture data; preserve errors before cleanup.
+  lastCall = { tool, args, elapsed_ms: Date.now() - started, result };
+  return result;
+};
 const text = r => r.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
 const config = {};
 if (process.env.BLADEBRO) {

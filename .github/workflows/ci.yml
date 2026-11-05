@@ -48,6 +48,29 @@ jobs:
           # Use the browser installed for this fixture, not a runner's Chromium wrapper.
           echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
 
+      - name: Install signed stable Chrome (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Use current stock Chrome, as on Linux, instead of the image's copy.
+          dmg="$RUNNER_TEMP/googlechrome.dmg"
+          mount="$RUNNER_TEMP/chrome-installer"
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --output "$dmg" https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg
+          mkdir -p "$mount"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount"' EXIT
+          app="$mount/Google Chrome.app"
+          codesign --verify --deep --strict "$app"
+          codesign --verify -R='anchor apple generic and certificate leaf[subject.OU] = "EQHXZ8M8AV"' "$app"
+          # Only replace the disposable GitHub runner's preinstalled browser.
+          sudo rm -rf '/Applications/Google Chrome.app'
+          sudo ditto "$app" '/Applications/Google Chrome.app'
+          chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          echo "CHROME_PATH=$chrome" >> "$GITHUB_ENV"
+          "$chrome" --version
+
       - name: Cache cargo registry
         uses: actions/cache@v6
         with:
