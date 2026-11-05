@@ -20,5 +20,6 @@ pub use biometrics::{action_gap, click_target, mouse_path, typing_cadence, Rng};
 pub use hum::spawn_hum;
 pub use inject::STEALTH_SCRIPT_TEMPLATE;
 pub use inject::{
-    apply as apply_stealth, full_script, gl_spoofed, has_full_script, worker_gl_spoof, ScriptId,
+    apply as apply_stealth, full_script, gl_spoofed, has_full_script, normalize_locale,
+    worker_gl_spoof, ScriptId,
 };

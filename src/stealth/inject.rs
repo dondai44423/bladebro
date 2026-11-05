@@ -327,6 +327,25 @@ async fn adaptive_gl_spoof(env: &EnvProbe, cdp: &CdpSession) -> bool {
 /// Legacy alias kept for external references (doc/examples).
 pub const STEALTH_SCRIPT_TEMPLATE: &str = STEALTH_CORE;
 
+/// Normalize a locale to a BCP-47 tag before it is applied anywhere
+/// (injection, worker patches, CDP locale override, Accept-Language), or
+/// `None` when it is unusable. `_` becomes `-`: POSIX-style `en_US` is the
+/// common slip, and `navigator.language` must be BCP-47 — page code like
+/// `new Intl.NumberFormat(navigator.language)` throws RangeError on `en_US`.
+/// Shape: a 2–8 letter language subtag, then 1–8 alphanumeric subtags. The
+/// value is also interpolated into JS string literals, so this is the gate
+/// that keeps a quote or backslash from breaking out and silently killing
+/// the whole stealth injection.
+pub fn normalize_locale(raw: &str) -> Option<String> {
+    let tag = raw.replace('_', "-");
+    let mut subtags = tag.split('-');
+    let lang = subtags.next()?;
+    let lang_ok = (2..=8).contains(&lang.len()) && lang.bytes().all(|b| b.is_ascii_alphabetic());
+    let rest_ok =
+        subtags.all(|s| (1..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()));
+    (lang_ok && rest_ok).then_some(tag)
+}
+
 /// Which conditional segments `apply` decided to install. Assembly is a pure
 /// function of this plan, so the test suite builds and runs the exact page
 /// script without a browser.
@@ -461,19 +480,14 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     let noise = std::env::var("BLADE_NOISE")
         .map(|v| v == "1")
         .unwrap_or(false);
-    // BCP-47 validate: the locale is interpolated into a JS string literal —
-    // a quote or backslash would break out and silently kill the whole
-    // stealth injection. Letters, digits, '-', '_' only.
     // Explicit override (per-domain profile, S11) beats the env var.
     let raw_locale = locale_override
         .map(String::from)
-        .or_else(|| std::env::var("BLADE_LOCALE").ok());
-    let locale = raw_locale.filter(|s| !s.is_empty()).filter(|s| {
-        s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    });
-    if std::env::var("BLADE_LOCALE").is_ok() && locale.is_none() {
-        eprintln!("[stealth] WARNING: BLADE_LOCALE rejected (invalid characters) — locale override skipped");
+        .or_else(|| std::env::var("BLADE_LOCALE").ok())
+        .filter(|s| !s.is_empty());
+    let locale = raw_locale.as_deref().and_then(normalize_locale);
+    if raw_locale.is_some() && locale.is_none() {
+        eprintln!("[stealth] WARNING: locale rejected (BLADE_LOCALE / profiles.json value is not a BCP-47 tag like en-US) — locale override skipped");
     }
     if let Some(ref l) = locale {
         eprintln!("[stealth] registering locale override: {l}");
@@ -667,5 +681,49 @@ mod tests {
         let profile = gpu::test_profile();
         let script = assemble_page_script(&plan(Some(&profile), Some("en-US")));
         run_scenario("page", &script);
+    }
+
+    #[test]
+    fn locale_is_normalized_to_bcp47() {
+        for (raw, want) in [
+            ("en_US", "en-US"),
+            ("pt_BR", "pt-BR"),
+            ("en-US", "en-US"),
+            ("de", "de"),
+            ("zh-Hant-TW", "zh-Hant-TW"),
+            ("es-419", "es-419"),
+            ("zh_Hant_TW", "zh-Hant-TW"),
+        ] {
+            assert_eq!(normalize_locale(raw).as_deref(), Some(want), "{raw:?}");
+        }
+        for bad in [
+            "",
+            "en-US'",
+            "en\\US",
+            "en US",
+            "en--US",
+            "-en",
+            "en-",
+            "e",
+            "123",
+            "en-US.UTF-8",
+            "en-toolongtag",
+        ] {
+            assert_eq!(normalize_locale(bad), None, "{bad:?} must be rejected");
+        }
+    }
+
+    // `navigator.language` (page) and `WorkerNavigator.language` (workers)
+    // must be BCP-47: page code like `new Intl.NumberFormat(navigator.language)`
+    // throws RangeError on `en_US`.
+    #[test]
+    fn injected_locale_is_bcp47_in_page_and_worker_scripts() {
+        let l = normalize_locale("en_US").expect("en_US is a usable locale");
+        let page = assemble_page_script(&plan(None, Some(&l)));
+        assert!(page.contains("var _lang='en-US'"), "page language");
+        assert!(page.contains("['en-US','en']"), "page languages");
+        let worker = build_worker_gl_spoof(&gpu::test_profile(), Some(&l));
+        assert!(worker.contains("var _wl='en-US'"), "worker language");
+        assert!(worker.contains("['en-US','en']"), "worker languages");
     }
 }
