@@ -103,7 +103,7 @@ Match the surrounding code. Specific to this repo:
 - **Owned browser shutdown must flush before process-tree cleanup.** Await `Browser::shutdown_gracefully()` on normal exit, EOF, signal and idle paths. Killing the whole process group first kills Chrome's storage services before localStorage reaches disk. Keep emergency tree cleanup bounded; never close an externally attached browser. `tools/reliability_probe/persistence.py` locks direct/forked CLI and MCP restart behavior.
 - **A running daemon/MCP keeps the old binary inode.** After rebuilding, `bladebro stop` (or restart the MCP server) before testing — otherwise you're still testing the old build.
 - **The MCP lane defaults to the WebSocket transport** (native `navigator.webdriver == false`). `BLADE_TRANSPORT=pipe` is the opt-in zero-port pipe: Chrome then reports `webdriver == true` and needs a mask — keep it opt-in, never a default.
-- **The stealth baseline is Chrome-version-sensitive.** Current audited numbers were measured against Chrome 151 (at v4.0.0). Re-measure on a different Chrome before calling something a regression.
+- **The stealth baseline is Chrome-version-sensitive.** Current audited numbers were measured against Chromium 156 at v4.6.7. Re-measure on a different Chrome before calling something a regression.
 - **Don't point anything at a real browser profile.** Tests and the gate tools isolate themselves with scratch `BLADE_HOME`s — keep that property in anything you add.
 
 Before you say "done": clippy clean → tests pass → the instruments for your change ran green → the PR description says what changed, how it was verified, and before/after numbers for stealth or performance work. That is the definition of done here.

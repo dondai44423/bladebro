@@ -2,11 +2,8 @@
 
 What is verified, on which platform, by which instrument. Every claim below
 points at a re-runnable instrument; everything not verified is listed as a gap.
-No perfect claims. The 4.6.7 work starts from published 4.6.6. Local verification:
-2026-11-04 on Chromium 156.0.8078.79, Arch Linux x86_64. See
-[AGENT-UX.md](AGENT-UX.md) and [RELIABILITY-AUDIT.md](RELIABILITY-AUDIT.md)
-for exact scope; local receipts are under `work/release467/` and the historical
-`work/agent-reliability-20261104/verified/`.
+No perfect claims. Current release: 4.6.7 (2026-11-05). Local verification:
+2026-11-04 on Chromium 156.0.8078.79, Arch Linux x86_64.
 
 ## Platforms
 
@@ -14,23 +11,23 @@ for exact scope; local receipts are under `work/release467/` and the historical
 |---|---|---|
 | Linux x86_64 | strict release Clippy, release tests twice, glibc 2.28 cross build, local npm installs | full local browser floor, audit 111/111 twice, both oracles, five lanes x5 |
 | Linux ARM64 | glibc 2.28 cross build + architecture/ABI inspection | physical ARM64/Pi runtime not run |
-| macOS Intel/Apple Silicon | both cross builds + architecture inspection | native Apple Silicon [agent UX PR CI](https://github.com/dondai44423/bladebro/actions/runs/41848853107); current required CI uses Intel |
-| Windows x86_64 | cross build + strict all-target cross Clippy + PE inspection | native agent UX PR CI, including actual Chrome and persistence/read probes |
+| macOS Intel/Apple Silicon | both cross builds + architecture inspection | native Apple Silicon CI (`macos-26`) runs the contract, persistence and audit probes; darwin-x64 is not executed natively |
+| Windows x86_64 | cross build + strict all-target cross Clippy + PE inspection | native CI, including actual Chrome and persistence/read probes |
 | Android | source-only CI check, no published binary | no Android browser runtime claim |
 
 Rust 1.86.0 passes `cargo check --locked --all-targets` on Linux. Native CI
 (`.github/workflows/ci.yml`) builds/tests Linux, macOS and Windows and drives
-Chrome with package, download, action, agent UX/contract, persistence and audit
-probes. The linked PR run reached both profile-mode suites on all desktops.
-Release gates require green CI and reached assertions for the exact release
-commit; local cross builds do not substitute for those runs.
+Chrome with package, download, action, agent-contract, persistence and audit
+probes. Release gates require green CI and reached assertions for the exact
+release commit; local cross builds do not substitute for those runs.
 
-The native Mac job runs on the standard arm64 `macos-26` pool. The `macos-26-intel`
-image was tried and abandoned: headful Chrome's main thread wedges in a synchronous
-IconServices XPC call (process samples: NSMenu/ShareKit to `ISIconManager`), so `Input.*`
-calls time out for minutes on fresh browser instances, while the identical suite passes every
-assertion on arm64. The darwin-x64 binary is still cross-built and architecture-checked by
-the release script but is not executed natively in CI. Available labels are documented by
+The native Mac job runs on the standard arm64 `macos-26` pool. The
+`macos-26-intel` image was tried and abandoned: headful Chrome's main thread
+wedges in a synchronous IconServices XPC call (process samples: NSMenu/ShareKit
+to `ISIconManager`), so `Input.*` calls time out for minutes on fresh browser
+instances, while the identical suite passes every assertion on arm64. The
+darwin-x64 binary is still cross-built and architecture-checked by the release
+script but is not executed natively in CI. Available labels are documented by
 [GitHub](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job).
 
 The local cross links retain the existing Zig deprecated linker-optimization
@@ -80,6 +77,8 @@ is still needed to remove those toolchain diagnostics without suppression.
 - Other Chromium forks: full engine-specific GUI behavior remains unverified; forked launch and cleanup fixtures use stock Chromium.
 - Scanned/image PDFs: out of scope by design (download hands the bytes to
   host tooling; no OCR layer in the driver).
+- Physical ARM64/Pi browser host and personal Mac/Windows GUI: native desktop
+  CI and the cross artifacts are the recorded coverage.
 
 ## Re-run
 

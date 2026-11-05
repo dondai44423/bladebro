@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Browser startup errors retain the negotiated MCP result dialect and stay silent for notifications. New-protocol clients receive the actual startup failure instead of a missing-`resultType` protocol error; guidance confirms the tool was not dispatched.
 - Keep humanized pointer endpoints and tremors inside addressed controls, retaining fractional hitboxes. Unbounded click offsets could miss small checkboxes; input is still dispatched once without replay.
-- Keep the full native macOS CI gate on the supported Intel pool after repeated ARM64 runner-allocation failures; partition compiled build caches by CPU architecture. Both Mac distribution targets remain required.
+- Run the native macOS CI job on the arm64 `macos-26` pool, and partition compiled build caches by CPU architecture. On the `macos-26-intel` image headful Chrome's main thread wedges in a synchronous IconServices XPC call, timing out `Input.*` for minutes, while the identical suite passes on arm64. darwin-x64 stays cross-built and architecture-checked, and both Mac distribution targets remain required.
 - Owned Chrome shutdown requests a confirmed-owned browser's graceful close before bounded process-tree cleanup, preserving localStorage across stop/MCP EOF while retaining forked-launcher cleanup.
 - Validate malformed calls and complete static plans before Chrome launch, navigation or input. Required fields, types, chords, waits, timeouts and plan bounds fail with actionable guidance.
 - Preserve run/batch reads, cookie/storage values and valid JSON when notices occur; honor nested optional failures and conditional navigation, and stop enclosing runs after failed batches.

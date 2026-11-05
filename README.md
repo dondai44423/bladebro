@@ -98,8 +98,8 @@ dsh plugin --profile web add bladebro
 
 pnpm 11 defaults to a [one-day release-age delay](https://pnpm.io/blog/releases/11.0),
 so an unversioned install immediately after a release can select an older package.
-To select an exact release, append its version, for example `dsh plugin --profile web add bladebro@4.6.6`
-(or enter `bladebro@4.6.6` in Plugins). If your package manager explicitly enforces
+To select an exact release, append its version, for example `dsh plugin --profile web add bladebro@4.6.7`
+(or enter `bladebro@4.6.7` in Plugins). If your package manager explicitly enforces
 a stricter release-age policy, wait for its configured delay. Keep that policy intact.
 
 Restart the profile and start a new chat. Desktop users can install `bladebro`
@@ -457,8 +457,7 @@ Six layers, all on by default, no config needed:
 | Layer | What it does |
 |---|---|
 | **Protocol** | No `Runtime.enable` (defuses the DataDome console trap); CDP over WebSocket by default (native `webdriver=false`) with a zero-port pipe opt-in; isolated world for DOM reads. |
-| **Environment** | UA + Client Hints override (no HeadlessChrome); the lane renders on the real GPU — `--use-angle=gl-egl` headful or headless on Linux, native Metal/D3D11 paths on macOS/Windows — and reports the machine's own WebGL strings in the platform's own ANGLE shape; the adaptive mask only exists for genuinely software hosts; media inventory fallback and headless notification status — `permissions.query` and `getUserMedia` stay native, including argument conversion and rejection timing; installed overrides use Proxies over native originals with native receiver validation, own keys `{length,name}`, no `prototype`, stringifies as native in **every** realm, and refuses the cyclic-prototype torture exactly like a native function (`TypeError: Cyclic __proto__ value` — creepjs's prototype lie engine reads 0). Nothing is fabricated: pages see the platform's real API surface and the display's real geometry. |
-| **Display** | A window manager on the virtual display (xfwm4): real frame extents (`outerWidth > innerWidth`), coherent outer/inner geometry, and the display's truthful work area — `availHeight` is the native value (a panel-less desktop reads `availHeight == height`, exactly like the machine's own session), no geometry getter is patched. Falls back to a self-correcting mask only on WM-less hosts. |
+| **Environment** | UA + Client Hints override (no HeadlessChrome); a window manager on the virtual display (xfwm4) gives real frame extents (`outerWidth > innerWidth`), coherent outer/inner geometry and the display's truthful work area (`availHeight` is the native value — a panel-less desktop reads `availHeight == height`, exactly like the machine's own session; no geometry getter is patched); the lane renders on the real GPU — `--use-angle=gl-egl` headful or headless on Linux, native Metal/D3D11 paths on macOS/Windows — and reports the machine's own WebGL strings in the platform's own ANGLE shape; the adaptive mask only exists for genuinely software hosts; media inventory fallback and headless notification status — `permissions.query` and `getUserMedia` stay native, including argument conversion and rejection timing; installed overrides use Proxies over native originals with native receiver validation, own keys `{length,name}`, no `prototype`, stringifies as native in **every** realm, and refuses the cyclic-prototype torture exactly like a native function (`TypeError: Cyclic __proto__ value` — creepjs's prototype lie engine reads 0). Nothing is fabricated: pages see the platform's real API surface and the display's real geometry. |
 | **Behavior** | Bezier mouse paths with overshoot + correction, `movementX/Y` deltas, micro-tremors, non-zero key-press duration, log-normal typing, idle hum, smooth scroll. |
 | **Coherence** | Per-domain timezone/locale memory, geo-consistent identity, WebRTC fail-closed, stable canvas/audio (noise off by default). |
 | **Residue** | `cdc_` removal, `MutationObserver` for late artifacts, and — deliberately — **no `Function.prototype.toString` patch**: masks are native-shaped by construction, so there is nothing to leak across realms. |
@@ -468,12 +467,12 @@ Six layers, all on by default, no config needed:
 
 | Test | Result |
 |---|---|
-| 61-check local suite + boot self-check + drift stamp (`bladebro audit`) | 61/61 pass, stamps stable |
-| Differential oracle vs stock Chrome on the same display (`tools/diff_oracle`) | 67 probes: identical or documented mask surface in every profile state, **0 divergent** |
-| Real-browser lane vs stock Chrome (`oracle.py --lane real`) | 67 probes: **all identical, 0 expected, 0 divergent** — the lane carries no page patches |
+| 111-check local suite + boot self-check + drift stamp (`bladebro audit`) | 111/111 pass, stamps stable |
+| Differential oracle vs stock Chrome on the same display (`tools/diff_oracle`) | 99 probes: identical or documented mask surface in every profile state, **0 divergent** |
+| Real-browser lane vs stock Chrome (`oracle.py --lane real`) | 99 probes: **all identical, 0 expected, 0 divergent** — the lane carries no page patches |
 | CreepJS | **headless: 0%, stealth: 0%** (stock Chrome on the same lane: 0%/0%) |
 | bot.sannysoft.com | All pass |
-| incolumitas.com | All OK (webdriver=false, no UA leak) |
+| incolumitas.com | No bot detection; its legacy `WEBDRIVER` cell reads the same as stock Chrome |
 | deviceandbrowserinfo.com | “You are human!” — `isBot: false` |
 | PerimeterX/HUMAN (Zillow, Fiverr) | Full page load, no block |
 
@@ -665,7 +664,7 @@ Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME
 | Command | What it does |
 |---|---|
 | `bladebro -doc` / `bladebro doctor` | System check — Chrome, display, profile hygiene, logins, data root, network, version |
-| `bladebro audit` | Stealth audit — 61-check suite + boot self-check + cross-restart drift stamp, against your setup |
+| `bladebro audit` | Stealth audit — 111-check suite + boot self-check + cross-restart drift stamp, against your setup |
 | `bladebro -v` | Version + update status (check only) |
 | `bladebro -u` | Self-update: check, download, SHA-256-verify, swap — non-npm installs |
 | `bladebro --rollback` | Restore the previous version (from the pre-update backup) |

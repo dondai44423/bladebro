@@ -4,6 +4,8 @@ Bladebro against browser-use's public stealth benchmark: **68 of 80 (85%)** prot
 
 This page states only what we can back up. Every number below is either from our recorded run or from browser-use's own published `official_results` files. Any uncertainty is labeled as such, not buried.
 
+Run date: 2026-08-25, on the release current at that date, against Chromium on Linux x86_64.
+
 ## The benchmark
 
 [Stealth Bench V1](https://github.com/browser-use/benchmark) is browser-use's open benchmark for anti-bot evasion. It contains 80 real, production-protected websites across 11 vendors (Cloudflare, PerimeterX, Datadome, reCaptcha, Akamai, hCaptcha, GeeTest, Kasada, Shape, Temu, and custom anti-bot). Each task is: visit the site, interact enough to look like a normal visit, and do not get blocked by a captcha, antibot, or page-loading security check.
