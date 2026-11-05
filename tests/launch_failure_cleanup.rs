@@ -5,9 +5,9 @@
 //! `bladebro-chrome-*` dir under the temp root). Both transports.
 //!
 //! The same holds when a termination signal (Ctrl-C) reaches an in-process
-//! run's process group mid-launch: the browser and Xvfb each run in their own
-//! group, so bladebro dying on the signal's default action used to orphan
-//! them instead of cleaning up. A signal the run
+//! run's process group, mid-launch or while the command runs: the browser and
+//! Xvfb each run in their own group, so bladebro dying on the signal's default
+//! action used to orphan them instead of cleaning up. A signal the run
 //! inherited as ignored (`nohup`, a non-interactive shell's `cmd &`) must stay
 //! ignored: the command finishes as it did before signals were caught.
 #![cfg(unix)]
@@ -392,6 +392,28 @@ fn sigint_mid_launch_of_a_one_shot_command_leaves_nothing_behind() {
 #[test]
 fn sigint_mid_launch_of_probe_leaves_nothing_behind() {
     interrupt_mid_launch("sigint-probe", &["probe"]);
+}
+
+/// Ctrl-C while the command itself runs (the launch is done): the run is
+/// dropped, the browser bladebro launched is closed, and the command fails as
+/// interrupted instead of bladebro dying with Chrome and Xvfb left running.
+#[test]
+fn sigint_while_probe_runs_closes_the_browser_it_launched() {
+    let run = signal_run(
+        "sigint-run",
+        endpoint_browser,
+        &["probe"],
+        &[],
+        running,
+        &[libc::SIGINT],
+    );
+    assert_eq!(run.status.code(), Some(1), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains("interrupted by a termination signal before the command finished"),
+        "{}",
+        run.stderr
+    );
 }
 
 /// Under `nohup` (SIGHUP ignored) or as a non-interactive shell's background
