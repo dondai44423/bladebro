@@ -266,8 +266,12 @@ fn reap_xvfb_at(tmp: &Path) {
         };
         if platform::process_alive(pid) {
             // Alive — but orphaned? The owner died and the system manager
-            // adopted it (see `is_orphaned`).
-            if is_orphaned(pid) && proc_is_xvfb_on_display(pid, n) {
+            // adopted it (see `is_orphaned`). And the claimer's? A system or
+            // user service Xvfb is adopted by the manager too.
+            if is_orphaned(pid)
+                && proc_is_xvfb_on_display(pid, n)
+                && started_with_claim(pid, &claim)
+            {
                 platform::kill_process_force(pid);
                 let _ = std::fs::remove_file(&lock);
                 eprintln!("[bladebro] reaped orphaned Xvfb :{n} (pid {pid})");
@@ -280,7 +284,7 @@ fn reap_xvfb_at(tmp: &Path) {
         // Dead pid: the lock is stale. Remove it, then kill
         // any orphaned Xvfb still bound to this display.
         let _ = std::fs::remove_file(&lock);
-        kill_xvfb_on_display(n);
+        kill_xvfb_on_display(n, &claim);
         let _ = std::fs::remove_file(&claim);
         eprintln!("[bladebro] reaped stale Xvfb display :{n}");
     }
@@ -345,10 +349,52 @@ fn xvfb_cmdline_matches(cmdline: &str, display: u16) -> bool {
         && args.any(|a| a == format!(":{display}"))
 }
 
-/// Kill any Xvfb process serving display `:<n>` whose parent
-/// is dead (orphaned). Identified via /proc cmdline scan.
+/// Did `pid` start no later than `claim` was written (plus slack)?
+/// Bladebro writes its claim and spawns Xvfb milliseconds later, so its
+/// server is never much younger than its claim. One that started well after
+/// a stale claim was launched by someone else — a system or user service
+/// takes a display the dead claimer had freed. Unreadable data never
+/// authorizes a kill.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn kill_xvfb_on_display(display: u16) {
+fn started_with_claim(pid: u32, claim: &Path) -> bool {
+    const SLACK_SECS: f64 = 5.0;
+    let Some(claim_age) = std::fs::metadata(claim)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+    else {
+        return false;
+    };
+    process_age_secs(pid).is_some_and(|age| age + SLACK_SECS >= claim_age.as_secs_f64())
+}
+
+/// Seconds since `pid` started, on the boot clock (`/proc/uptime`'s clock).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn process_age_secs(pid: u32) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Parse after the last ')' (comm may hold spaces/parens): that field is
+    // #3 (state), so #22 (starttime, in clock ticks since boot) is index 19.
+    let start_ticks: f64 = stat
+        .rsplit(')')
+        .next()?
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
+    let uptime: f64 = std::fs::read_to_string("/proc/uptime")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (ticks_per_sec > 0).then(|| uptime - start_ticks / ticks_per_sec as f64)
+}
+
+/// Kill any orphaned Xvfb serving display `:<n>` that started with the dead
+/// owner's `claim`. Identified via /proc cmdline scan.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn kill_xvfb_on_display(display: u16, claim: &Path) {
     let procs = match std::fs::read_dir("/proc") {
         Ok(d) => d,
         Err(_) => return,
@@ -365,7 +411,7 @@ fn kill_xvfb_on_display(display: u16) {
         if !xvfb_cmdline_matches(&cmdline, display) {
             continue;
         }
-        if is_orphaned(pid) {
+        if is_orphaned(pid) && started_with_claim(pid, claim) {
             platform::kill_process_force(pid);
         }
     }
@@ -456,8 +502,42 @@ mod xvfb_tests {
         ));
     }
 
+    /// The tests below share the private test root and pick display numbers
+    /// by probing /tmp: run them one at a time.
+    static DISPLAY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn xvfb_started_after_a_stale_claim_survives() {
+        let _serial = DISPLAY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(display) = orphan_display() else {
+            return;
+        };
+        let lock = display.root.join(format!(".X{}-lock", display.number));
+        let claim = display
+            .root
+            .join(format!(".blade-x{}-claim", display.number));
+        // A dead bladebro left its claim an hour ago; this server (a system
+        // or user service, adopted by the manager) took the display later.
+        std::fs::write(&claim, "2000000000").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&claim)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+        reap_xvfb_at(&display.root);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            proc_is_xvfb_on_display(display.pid, display.number),
+            "an Xvfb that started after the claim was never the claimer's"
+        );
+        assert!(lock.exists(), "its display lock must survive");
+        assert!(!claim.exists(), "the stale claim itself is cleared");
+    }
+
     #[test]
     fn xvfb_reaper_requires_a_dead_blade_claim() {
+        let _serial = DISPLAY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(display) = orphan_display() else {
             return;
         };
