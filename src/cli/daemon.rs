@@ -345,6 +345,7 @@ pub async fn run_daemon() -> Result<()> {
                         "ok": true,
                         "text": with_notes(r.text),
                         "image": r.image,
+                        "image_path": r.image_path,
                         "is_error": r.is_error,
                     }),
                     Err(BladeError::Closed) => {
@@ -369,6 +370,7 @@ pub async fn run_daemon() -> Result<()> {
                                         "ok": true,
                                         "text": with_notes(r.text),
                                         "image": r.image,
+                                        "image_path": r.image_path,
                                         "is_error": r.is_error,
                                     }),
                                     Err(e) => json!({ "ok": false, "error": e.to_string() }),

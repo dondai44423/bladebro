@@ -125,7 +125,10 @@ fn peer_uid_matches_self(fd: std::os::fd::RawFd) -> bool {
 /// Result of a tool dispatch — shared between CLI and daemon.
 pub struct ToolResult {
     pub text: String,
+    /// Base64 PNG (vision) for the client to save.
     pub image: Option<String>,
+    /// PNG the vision handler already saved (oversized captures).
+    pub image_path: Option<String>,
     pub is_error: bool,
 }
 
@@ -150,32 +153,17 @@ pub async fn dispatch(
         }
     }
 
-    // Vision is special — returns a JSON-RPC response with image data.
+    // Vision is special — an image instead of (only) text. Taken from the
+    // capture directly, not re-parsed out of the MCP response: an oversized
+    // screenshot is saved by the handler and comes back as a path, which
+    // the response only mentions in prose (`--json` printed no image_path).
     if tool == "vision" {
-        let result = server::handle_vision(None, args, page).await?;
-        let content = result
-            .get("result")
-            .and_then(|r| r.get("content"))
-            .and_then(|c| c.as_array());
-        let text = content
-            .and_then(|c| c.first())
-            .and_then(|t| t.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
-        let is_error = result
-            .get("result")
-            .and_then(|r| r.get("isError"))
-            .and_then(|e| e.as_bool())
-            .unwrap_or(false);
-        let image = content
-            .and_then(|c| c.get(1))
-            .and_then(|i| i.get("data"))
-            .and_then(|d| d.as_str())
-            .map(String::from);
+        let shot = server::capture_vision(args, page).await?;
         return Ok(ToolResult {
-            text: text.to_string(),
-            image,
-            is_error,
+            text: shot.text,
+            image: shot.image,
+            image_path: shot.image_path,
+            is_error: shot.is_error,
         });
     }
 
@@ -219,6 +207,7 @@ pub async fn dispatch(
             Ok(ToolResult {
                 text,
                 image: None,
+                image_path: None,
                 is_error: false,
             })
         }
@@ -250,6 +239,7 @@ pub async fn dispatch(
             Ok(ToolResult {
                 text,
                 image: None,
+                image_path: None,
                 is_error: true,
             })
         }
@@ -394,10 +384,15 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
         .unwrap_or("")
         .to_string();
     let image = v.get("image").and_then(|i| i.as_str()).map(String::from);
+    let image_path = v
+        .get("image_path")
+        .and_then(|i| i.as_str())
+        .map(String::from);
     let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
     Ok(ToolResult {
         text,
         image,
+        image_path,
         is_error,
     })
 }
@@ -484,6 +479,7 @@ async fn run_cli_inner(
                 &ToolResult {
                     text,
                     image: None,
+                    image_path: None,
                     is_error: false,
                 },
                 json_mode,
@@ -701,33 +697,59 @@ async fn run_connected(tool: &str, args: &Value, base: &str, external: bool) -> 
 
 /// Print a tool result and return the process exit code (0 ok, 1 error).
 fn print_result(result: &ToolResult, json_mode: bool) -> i32 {
-    let code = if result.is_error { 1 } else { 0 };
+    let (out, code) = render_result(result, json_mode);
+    println!("{out}");
+    code
+}
 
+/// The stdout text for a tool result, and its exit code (0 ok, 1 error).
+fn render_result(result: &ToolResult, json_mode: bool) -> (String, i32) {
     // Vision: always persist the PNG and hand back a PATH. The old --json
     // inlined the full base64 (1-2MB for a screenshot) — one vision call
     // could blow an agent's context. The file is the CLI-native artifact;
     // MCP keeps the inline image because the protocol has image content.
-    let image_path = result.image.as_deref().and_then(|img| {
-        base64_decode(img)
-            .and_then(|data| crate::artifacts::write_artifact_bytes(&data, "png").ok())
-    });
+    // An oversized capture arrives already saved (image_path). A PNG that
+    // cannot be decoded or written fails the call: it used to be dropped
+    // silently, reporting ok with no image_path at all.
+    let mut is_error = result.is_error;
+    let mut text = std::borrow::Cow::Borrowed(result.text.as_str());
+    let image_path = match (&result.image_path, &result.image) {
+        (Some(p), _) => Some(p.clone()),
+        (None, Some(img)) => match save_png(img) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                is_error = true;
+                text = format!("{text}\n\u{2717} error: screenshot not saved: {e}").into();
+                None
+            }
+        },
+        (None, None) => None,
+    };
+    let code = if is_error { 1 } else { 0 };
 
-    if json_mode {
+    let out = if json_mode {
         let mut v = json!({
-            "ok": !result.is_error,
-            "is_error": result.is_error,
-            "text": result.text,
+            "ok": !is_error,
+            "is_error": is_error,
+            "text": text,
         });
         if let Some(p) = &image_path {
             v["image_path"] = json!(p);
         }
-        println!("{v}");
+        v.to_string()
     } else if let Some(p) = &image_path {
-        println!("{}\nsaved: {}", crate::ui::style_report(&result.text), p);
+        format!("{}\nsaved: {}", crate::ui::style_report(&text), p)
     } else {
-        println!("{}", crate::ui::style_report(&result.text));
-    }
-    code
+        crate::ui::style_report(&text)
+    };
+    (out, code)
+}
+
+/// Decode a base64 PNG and write it as an artifact; the path on success.
+fn save_png(b64: &str) -> Result<String> {
+    let data = base64_decode(b64)
+        .ok_or_else(|| BladeError::Other("the PNG data is not valid base64".into()))?;
+    crate::artifacts::write_artifact_bytes(&data, "png")
 }
 
 /// Exit the process with `code` after flushing the std streams.
@@ -800,6 +822,64 @@ async fn warm_profile(page: &mut Page) {
         eprintln!(
             "[bladebro] profile warmed ({ok}/{} sites visited)",
             sites.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vision(image: Option<&str>, image_path: Option<&str>) -> ToolResult {
+        ToolResult {
+            text: "screenshot".into(),
+            image: image.map(String::from),
+            image_path: image_path.map(String::from),
+            is_error: false,
+        }
+    }
+
+    /// An oversized capture is saved by the handler and arrives as a path;
+    /// `vision --json | jq -r .image_path` read null for exactly those.
+    #[test]
+    fn vision_json_reports_a_handler_saved_path() {
+        let (out, code) = render_result(&vision(None, Some("/x/blade-1-0001.png")), true);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["image_path"], "/x/blade-1-0001.png");
+        let (out, _) = render_result(&vision(None, Some("/x/blade-1-0001.png")), false);
+        assert!(out.ends_with("\nsaved: /x/blade-1-0001.png"), "{out}");
+    }
+
+    #[test]
+    fn vision_inline_png_is_saved_to_a_file() {
+        let (out, code) = render_result(&vision(Some("iVBORw0KGgo="), None), true);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(code, 0);
+        let path = v["image_path"].as_str().expect("image_path");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A PNG that cannot be saved is a failed call, never `ok` without a path.
+    #[test]
+    fn vision_save_failure_fails_the_call() {
+        let (out, code) = render_result(&vision(Some("not base64!"), None), true);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(code, 1);
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["is_error"], true);
+        assert!(v.get("image_path").is_none());
+        assert!(
+            v["text"]
+                .as_str()
+                .unwrap()
+                .contains("screenshot not saved: the PNG data is not valid base64"),
+            "{v}"
         );
     }
 }
