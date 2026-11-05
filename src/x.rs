@@ -189,7 +189,7 @@ mod tests {
     use super::dom::dom_items_from_json;
     use super::fetch::{depth_of, thread_walk, timeline_walk};
     use super::gql::parse_gql_url;
-    use super::parse::{collect_page, format_x_date, parse_thread_page, T};
+    use super::parse::{collect_page, format_x_date, parse_thread_page, parse_timeline_page, T};
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../tests/fixtures/x_tweet_detail.json"))
@@ -577,6 +577,47 @@ mod tests {
             !note.contains("capped"),
             "nothing was cut at the cap: {note}"
         );
+    }
+
+    #[test]
+    fn pinned_posts_and_whole_retweet_text_are_kept() {
+        // Profile timelines deliver the pinned post through its own
+        // instruction, ahead of the entries.
+        let mut rest = tweets("6", 2, None);
+        rest.push(cursor_entry("Bottom", "c1"));
+        let j = json!({"data": {"user": {"result": {"timeline_v2": {"timeline": {"instructions": [
+            {"type": "TimelineClearCache"},
+            {"type": "TimelinePinEntry", "entry": tweet_entry(tweet("5000", "me", None))},
+            add_entries(rest),
+        ]}}}}}});
+        let ids: Vec<String> = parse_timeline_page(&j)
+            .tweets
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, ["5000", "6000", "6001"], "the pinned post leads");
+
+        // A retweet's own full_text is X's truncated "RT @user: …" stub; the
+        // original rides along whole (sometimes behind the visibility
+        // wrapper).
+        let whole = format!("{}the end", "long original text ".repeat(12));
+        let mut original = tweet("7000", "alice", None);
+        original["legacy"]["full_text"] = json!(whole);
+        for wrapped in [
+            original.clone(),
+            json!({"__typename": "TweetWithVisibilityResults", "tweet": original}),
+        ] {
+            let mut rt = tweet("7001", "bob", None);
+            rt["legacy"]["full_text"] =
+                json!("RT @alice: long original text long original text long origi…");
+            rt["legacy"]["retweeted_status_result"] = json!({"result": wrapped});
+            let page = parse_timeline_page(&json!({"instructions": [
+                add_entries(vec![tweet_entry(rt)])
+            ]}));
+            let t = &page.tweets[0];
+            assert_eq!(t.author, "bob", "the retweeter stays the author");
+            assert_eq!(t.text, format!("RT @alice: {whole}"));
+        }
     }
 
     #[test]

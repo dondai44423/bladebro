@@ -71,6 +71,9 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
             // entries instead of adding new ones; missing this ended the
             // walk after two pages as if the timeline were exhausted.
             "TimelineReplaceEntry" => walk_entry(&mut bits, ins.pointer("/entry/content")),
+            // A profile's pinned post comes in its own instruction, ahead of
+            // the timeline entries — first, as the page shows it.
+            "TimelinePinEntry" => walk_entry(&mut bits, ins.pointer("/entry/content")),
             "TimelineAddToModule" => {
                 if let Some(arr) = ins.get("moduleItems").and_then(|e| e.as_array()) {
                     for it in arr {
@@ -265,16 +268,23 @@ fn tweet_from_item(ic: &Value) -> Option<T> {
         .unwrap_or("")
         .to_string();
     let legacy = tr.get("legacy");
-    let note = tr
-        .pointer("/note_tweet/note_tweet_results/result/text")
-        .and_then(|s| s.as_str());
-    let text_raw = note
-        .or_else(|| {
-            legacy
-                .and_then(|l| l.get("full_text"))
-                .and_then(|s| s.as_str())
-        })
-        .unwrap_or("");
+    // A retweet's own full_text is X's truncated "RT @user: …" stub; the
+    // original rides along whole in retweeted_status_result. Keep the
+    // "RT @user: " shape, with the whole text.
+    let retweet = legacy
+        .and_then(|l| l.pointer("/retweeted_status_result/result"))
+        .map(unwrap_visibility)
+        .and_then(|rt| {
+            let who = rt
+                .pointer("/core/user_results/result/core/screen_name")
+                .or_else(|| rt.pointer("/core/user_results/result/legacy/screen_name"))
+                .and_then(|s| s.as_str())?;
+            Some(format!("RT @{who}: {}", tweet_text(rt)?))
+        });
+    let text_raw = match &retweet {
+        Some(t) => t.as_str(),
+        None => tweet_text(tr).unwrap_or(""),
+    };
     let date = legacy
         .and_then(|l| l.get("created_at"))
         .and_then(|s| s.as_str())
@@ -316,6 +326,13 @@ fn tweet_from_item(ic: &Value) -> Option<T> {
         views,
         media,
     })
+}
+
+/// A tweet's text: the long-form note when present, else legacy full_text.
+fn tweet_text(tr: &Value) -> Option<&str> {
+    tr.pointer("/note_tweet/note_tweet_results/result/text")
+        .or_else(|| tr.pointer("/legacy/full_text"))
+        .and_then(|s| s.as_str())
 }
 
 fn unwrap_visibility(raw: &Value) -> &Value {
