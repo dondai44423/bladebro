@@ -10,7 +10,8 @@
 //! The client side of the daemon channel is guarded too: a delivered command
 //! is never re-run, a live daemon is never declared dead from its reply text,
 //! a command never runs under a daemon whose lane/settings differ from its
-//! own, and an oversized request fails with a message instead of SIGPIPE.
+//! own, and an oversized request fails with a message instead of a bare
+//! "Broken pipe" error.
 //!
 //! Subprocess-based with an isolated BLADE_HOME — no Chrome involved (the
 //! daemon binds lazily; Chrome starts on the first tool call only). Tests
