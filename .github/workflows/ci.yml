@@ -108,6 +108,20 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Warm macOS ShareKit/IconServices (cold-VM main-thread stall)
+        if: startsWith(matrix.os, 'macos-')
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          # Bounded and non-fatal: a stall here is the OS cost the browser tests must not absorb.
+          for attempt in 1 2 3; do
+            swift tools/ci/warm-macos-share.swift > "$RUNNER_TEMP/warm.log" 2>&1 &
+            pid=$!
+            for _ in $(seq 1 90); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+            if kill -0 $pid 2>/dev/null; then kill -9 $pid; echo "attempt $attempt timed out"; else cat "$RUNNER_TEMP/warm.log"; break; fi
+          done
+          true
+
       - name: Verify native DSH package and browser lifecycle
         timeout-minutes: 10
         shell: bash
