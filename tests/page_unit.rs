@@ -517,6 +517,40 @@ assert.equal(wrappedURL('https://www.google.com/goto?url=OPAQUE'),true);
     );
 }
 
+/// An item whose only link is an SVG `<a>` (a chart or icon link): its
+/// `.href` is an SVGAnimatedString and its offsetParent undefined, so
+/// bestLink() picked it and extract=auto emitted the item url
+/// "/[object SVGAnimatedString]".
+#[test]
+fn extract_auto_item_link_skips_svg_anchors() {
+    let script = include_str!("../src/mcp/server/js/auto_extract.js");
+    let start = script.find("const HOST=").unwrap();
+    let end = script.find("// Redirect/tracking wrappers").unwrap();
+    let probe = r#"
+const assert=require('node:assert/strict');
+const anim=(v)=>Object.create({get baseVal(){return v;},get animVal(){return v;}});
+// SVG <a>: no innerText, no hostname, offsetParent undefined.
+const svgA={tagName:'a',href:anim('/chart/1'),matches(){return true;}};
+const htmlA={tagName:'A',href:'https://page.example/item/1',hostname:'page.example',innerText:'Item one title',offsetParent:{},matches(){return true;}};
+const item=(...as)=>({tagName:'DIV',querySelectorAll(){return as;},matches(){return false;}});
+assert.equal(bestLink(item(svgA),'Item one title'),null,'an SVG link is not an item url');
+assert.equal(bestLink(item(svgA,htmlA),'Item one title'),htmlA);
+"#;
+    let result = std::process::Command::new("node")
+        .arg("-e")
+        .arg(format!(
+            "global.location={{hostname:'page.example',href:'https://page.example/'}};\n{}\n{probe}",
+            &script[start..end]
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 /// Product-card heuristic (`see mode=content`): a currency amount anywhere +
 /// an h1 + a `/p/` URL is every Substack post that mentions "$5". The URL
 /// pattern alone must not turn an article into a product card that drops

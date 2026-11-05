@@ -20,7 +20,10 @@ if(/\d+\s+(point|comment|vote|reply|reaction)/i.test(t))return true;
 return false;
 }
 function bestLink(item,title){
-const lnks=links(item).filter(a=>!isActionLink(a)&&a.offsetParent!==null);
+// SVG <a> also matches a[href], but its .href is an SVGAnimatedString and
+// its offsetParent is undefined: it passed the visibility filter and became
+// the item url "/[object SVGAnimatedString]".
+const lnks=links(item).filter(a=>typeof a.href==='string'&&!isActionLink(a)&&a.offsetParent!==null);
 if(lnks.length===0)return null;
 const ext=lnks.find(a=>a.hostname&&a.hostname!==HOST);
 if(ext)return ext;
