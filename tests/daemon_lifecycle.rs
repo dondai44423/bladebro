@@ -446,3 +446,87 @@ fn daemon_closing_without_a_reply_reports_an_unknown_outcome() {
     assert!(!stderr.contains("one-shot"), "{stderr}");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn cli_request_carries_its_lane_and_explicit_settings() {
+    // The daemon's lane and settings came only from ITS environment —
+    // inherited from whichever command auto-started it — so
+    // `BLADE_LANE=agent bladebro nav …` against a real-lane daemon ran in
+    // the user's own browser. The request must say what this command asked
+    // for.
+    let home = tmp_home("carries");
+    let fake = fake_daemon(&home, r#"{"ok":true,"text":"ok","is_error":false}"#);
+    let (status, _, stderr) =
+        client_json(&home, &[("BLADE_NO_COMPRESS", "1")], &["see", "content"]);
+    let requests = fake.requests.lock().unwrap().clone();
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(requests.len(), 1);
+    let req: serde_json::Value = serde_json::from_str(&requests[0]).unwrap();
+    assert_eq!(req["tool"], "see");
+    assert_eq!(req["lane"], "agent", "request: {req}");
+    assert_eq!(req["env"]["BLADE_NO_COMPRESS"], "1", "request: {req}");
+    assert!(
+        req["env"].get("BLADE_HOME").is_none(),
+        "BLADE_HOME picks the daemon itself; it is not a per-command setting: {req}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn daemon_refuses_a_request_from_another_lane() {
+    // Daemon pinned to the agent lane; a request that resolved the real
+    // lane must be refused before anything launches (the old daemon ignored
+    // the field and launched its own lane). The real lane is never entered:
+    // the refusal is what is under test, and the daemon is agent-pinned.
+    let home = tmp_home("lane");
+    let mut daemon = start_daemon_with(&home, agent_cmd(&home));
+    let mut stream = std::os::unix::net::UnixStream::connect(home.join("cli.sock")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream
+        .write_all(b"{\"tool\":\"see\",\"args\":{\"mode\":\"content\"},\"lane\":\"real\"}\n")
+        .unwrap();
+    let mut resp = String::new();
+    let _ = stream.read_to_string(&mut resp);
+    term(&daemon);
+    let _ = wait_exit(&mut daemon, 10);
+    let v: serde_json::Value = serde_json::from_str(resp.trim())
+        .unwrap_or_else(|e| panic!("daemon reply must be JSON ({e}): {resp:?}"));
+    assert_eq!(v["ok"], false, "{v}");
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("lane") && err.contains("real") && err.contains("agent"),
+        "the refusal must name both lanes: {err}"
+    );
+    assert!(
+        !err.contains("Chrome launch failed"),
+        "a refused request must not launch anything: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn daemon_refuses_a_command_whose_settings_differ() {
+    // End to end: the daemon was started without BLADE_NO_COMPRESS; a
+    // command that sets it would have been silently served with the
+    // daemon's settings. It must be refused, naming the variable and the
+    // recovery, without running.
+    let home = tmp_home("settings");
+    let mut daemon = start_daemon_with(&home, agent_cmd(&home));
+    let (status, value, stderr) =
+        client_json(&home, &[("BLADE_NO_COMPRESS", "1")], &["see", "content"]);
+    term(&daemon);
+    let _ = wait_exit(&mut daemon, 10);
+    assert_eq!(status.code(), Some(1), "stderr: {stderr}");
+    let text = value["text"].as_str().unwrap();
+    assert!(
+        text.contains("BLADE_NO_COMPRESS") && text.contains("bladebro stop"),
+        "the refusal must name the setting and the recovery: {text}"
+    );
+    assert!(
+        !text.contains("Chrome launch failed"),
+        "a refused command must not run: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}

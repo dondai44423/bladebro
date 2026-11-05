@@ -363,6 +363,8 @@ bladebro stop                              # clean shutdown
 bladebro see content https://example.com --no-daemon   # one-shot: launch Chrome per command
 ```
 
+The daemon runs every command with its own lane and browser settings (`CHROME_PATH`, `BLADE_PROXY`, `BLADE_LOCALE`, … as set when it started). A command that resolves another lane (`BLADE_LANE`) or sets one of those variables to a different value is refused before anything runs — `bladebro stop` restarts the daemon with the command's settings, `--no-daemon` runs just that command on its own.
+
 **Universal flags**
 
 | Flag | What it does |

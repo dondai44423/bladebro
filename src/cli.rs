@@ -45,6 +45,8 @@ use self::args::{
     extract_endpoint, parse_act_args, parse_nav_args, parse_run_args, parse_see_args,
     parse_state_args, parse_vision_args,
 };
+#[cfg(unix)]
+use self::daemon::daemon_request;
 use self::daemon::{run_daemon, stop_daemon};
 pub use self::help::{command_help_text, help_json, help_text, suggest_command};
 use self::rb::run_rb;
@@ -372,8 +374,7 @@ fn send_to_daemon(tool: &str, args: &Value) -> std::result::Result<ToolResult, D
         }
     }
 
-    let req =
-        serde_json::to_string(&json!({ "tool": tool, "args": args })).map_err(BladeError::from)?;
+    let req = serde_json::to_string(&daemon_request(tool, args)).map_err(BladeError::from)?;
     writeln!(stream, "{req}").map_err(BladeError::from)?;
     stream.flush().map_err(BladeError::from)?;
 

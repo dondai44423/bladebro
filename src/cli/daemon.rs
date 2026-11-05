@@ -228,6 +228,24 @@ pub async fn run_daemon() -> Result<()> {
                     break;
                 }
 
+                // The command's own lane/settings vs this daemon's (see
+                // `settings_mismatch`). Refused, not relaunched: the live
+                // browser may hold another command stream's page state.
+                // `refresh_lane` first so an `rb on|off` since the last call
+                // counts as this daemon's lane; a switch consumed by a
+                // refusal is still caught below — the launch fingerprint
+                // covers the lane.
+                let lane_switched = crate::realbrowser::refresh_lane();
+                if let Some(why) = settings_mismatch(&req, crate::realbrowser::real_lane(), |k| {
+                    std::env::var(k).ok()
+                }) {
+                    let resp = json!({ "ok": false, "error": why });
+                    let resp_str = serde_json::to_string(&resp).unwrap_or_default();
+                    let _ = reader.get_mut().write_all(resp_str.as_bytes()).await;
+                    let _ = reader.get_mut().write_all(b"\n").await;
+                    continue;
+                }
+
                 // Lazy launch + self-heal + lane/settings drift (same as the
                 // MCP server): a running browser belongs to the lane it was
                 // launched on, so `rb on|off` (or a hand-edited config) must
@@ -236,7 +254,6 @@ pub async fn run_daemon() -> Result<()> {
                 // None): the same switch must DETACH it — a lane-flag flip
                 // alone would keep steering the user's browser, and a tab
                 // opened after it would get agent-lane page patches.
-                let lane_switched = crate::realbrowser::refresh_lane();
                 let session_live = browser.is_some()
                     || page.as_ref().map(|p| !p.is_closed()).unwrap_or(false);
                 let drifted = crate::realbrowser::session_drifted(
@@ -501,6 +518,112 @@ async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
     }
 }
 
+// ── Per-command settings ────────────────────────────────────────────────
+
+/// Settings a command sets through its environment that the DAEMON reads
+/// from its own — inherited from whichever command auto-started it, or the
+/// shell that ran `bladebro daemon`: the browser binary, network identity,
+/// fingerprint, profile, and how results are shaped. A command that sets
+/// one differently would otherwise run silently with the daemon's value.
+/// Not listed: where the daemon lives (BLADE_HOME/XDG_*: another value is
+/// another daemon), client-side knobs (BLADE_CMD_TIMEOUT, BLADE_PLAIN),
+/// daemon lifecycle (BLADE_IDLE_TIMEOUT), MCP-only (BLADE_TRANSPORT) and
+/// diagnostics. The lane (BLADE_LANE + `rb` config) travels separately as
+/// the command's resolved lane.
+#[cfg(unix)]
+const DAEMON_SCOPED_ENV: &[&str] = &[
+    "CHROME_PATH",
+    "BLADE_CHROME_FLAGS",
+    "BLADE_PROFILE_DIR",
+    "BLADE_FRESH",
+    "BLADE_INCOGNITO",
+    "BLADE_NO_WARMING",
+    "BLADE_PROXY",
+    "BLADE_LOCALE",
+    "BLADE_TZ",
+    "BLADE_GPU",
+    "BLADE_WEBGL",
+    "BLADE_MEDIA",
+    "BLADE_NOISE",
+    "BLADE_PERMS",
+    "BLADE_CONSENT",
+    "BLADE_PACE",
+    "BLADE_NO_COMPRESS",
+];
+
+#[cfg(unix)]
+fn lane_name(real: bool) -> &'static str {
+    if real {
+        "real"
+    } else {
+        "agent"
+    }
+}
+
+/// The request for one tool call: this command's resolved lane and the
+/// daemon-scoped settings it sets, so the daemon can refuse to serve it
+/// with different ones ([`settings_mismatch`]).
+#[cfg(unix)]
+pub(super) fn daemon_request(tool: &str, args: &Value) -> Value {
+    let env: serde_json::Map<String, Value> = DAEMON_SCOPED_ENV
+        .iter()
+        .filter_map(|&k| {
+            let v = std::env::var(k).ok().filter(|v| !v.is_empty())?;
+            Some((k.to_string(), Value::String(v)))
+        })
+        .collect();
+    json!({
+        "tool": tool,
+        "args": args,
+        "lane": lane_name(crate::realbrowser::real_lane()),
+        "env": env,
+    })
+}
+
+/// Why this daemon must not serve `req` (`None` = serve it): the command
+/// resolved another lane, or set a daemon-scoped variable to a value the
+/// daemon does not run with. Without this the daemon ran every command in
+/// ITS lane — `BLADE_LANE=agent bladebro nav bank.com` after `rb on` drove
+/// the user's real browser. A setting the command does not set is the
+/// daemon's (documented daemon-wide behavior); a request without the
+/// fields (an older CLI) is served as before. Values are compared, never
+/// echoed: BLADE_PROXY can carry credentials.
+#[cfg(unix)]
+fn settings_mismatch(
+    req: &Value,
+    daemon_real_lane: bool,
+    daemon_env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let mut differ: Vec<String> = Vec::new();
+    if let Some(lane) = req.get("lane").and_then(Value::as_str) {
+        let ours = lane_name(daemon_real_lane);
+        if lane != ours {
+            differ.push(format!("lane (this command: {lane}, daemon: {ours})"));
+        }
+    }
+    if let Some(env) = req.get("env").and_then(Value::as_object) {
+        // Only the listed names: a request cannot make the daemon compare
+        // or name anything else from its environment.
+        for &k in DAEMON_SCOPED_ENV {
+            if let Some(v) = env.get(k).and_then(Value::as_str) {
+                if daemon_env(k).as_deref() != Some(v) {
+                    differ.push(k.to_string());
+                }
+            }
+        }
+    }
+    if differ.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "refused: this command's settings differ from the running daemon's — {}. Nothing was run. \
+         The daemon keeps the settings it was started with: run 'bladebro stop' and retry to \
+         restart it with this command's, or add --no-daemon to run just this command in its own \
+         browser.",
+        differ.join(", ")
+    ))
+}
+
 // ── Daemon lifecycle helpers ───────────────────────────────────────────
 
 /// Path of the daemon pid file. Stale files (SIGKILL) are detected by
@@ -625,4 +748,63 @@ pub async fn stop_daemon() -> Result<String> {
 #[cfg(not(unix))]
 pub async fn stop_daemon() -> Result<String> {
     Ok("daemon mode is Unix-only — commands run one-shot on this platform".into())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_mismatch_refuses_another_lane_and_differing_explicit_settings() {
+        let daemon_env = |k: &str| (k == "BLADE_PROXY").then(|| "http://127.0.0.1:9".to_string());
+        let check = |req: Value, real: bool| settings_mismatch(&req, real, daemon_env);
+
+        // Same lane, nothing set: served.
+        assert_eq!(check(json!({"lane": "agent", "env": {}}), false), None);
+        // BLADE_LANE=agent against a real-lane daemon (`rb on`), and back.
+        let why = check(json!({"lane": "agent", "env": {}}), true).unwrap();
+        assert!(
+            why.contains("lane (this command: agent, daemon: real)"),
+            "{why}"
+        );
+        assert!(
+            why.contains("bladebro stop") && why.contains("--no-daemon"),
+            "{why}"
+        );
+        assert!(check(json!({"lane": "real", "env": {}}), false).is_some());
+        // Same value: served. Another value, or one the daemon lacks:
+        // refused by name — the value itself is never echoed.
+        assert_eq!(
+            check(
+                json!({"lane": "agent", "env": {"BLADE_PROXY": "http://127.0.0.1:9"}}),
+                false
+            ),
+            None
+        );
+        let why = check(
+            json!({"lane": "agent", "env": {"BLADE_PROXY": "http://u:SECRET@h:1"}}),
+            false,
+        )
+        .unwrap();
+        assert!(
+            why.contains("BLADE_PROXY") && !why.contains("SECRET"),
+            "{why}"
+        );
+        let why = check(
+            json!({"lane": "agent", "env": {"CHROME_PATH": "/x"}}),
+            false,
+        )
+        .unwrap();
+        assert!(why.contains("CHROME_PATH"), "{why}");
+        // Unlisted names are not the daemon's business.
+        assert_eq!(
+            check(
+                json!({"lane": "agent", "env": {"BLADE_HOME": "/x", "PATH": "/y"}}),
+                false
+            ),
+            None
+        );
+        // An older CLI's request (no lane/env fields) is served as before.
+        assert_eq!(check(json!({"tool": "see", "args": {}}), true), None);
+    }
 }
