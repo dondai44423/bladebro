@@ -3,11 +3,18 @@
 //! that died at startup) and not the session profile (with BLADE_FRESH=1
 //! every attempt — up to three per launch — creates its own
 //! `bladebro-chrome-*` dir under the temp root). Both transports.
+//!
+//! The same holds when a termination signal (Ctrl-C) reaches an in-process
+//! run's process group mid-launch: the browser and Xvfb each run in their own
+//! group, so bladebro dying on the signal's default action used to orphan
+//! them instead of cleaning up.
 #![cfg(unix)]
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// A stand-in browser that forks a long-lived helper (same process group,
 /// like Chrome's zygote; its pid is recorded) and then dies at startup.
@@ -19,6 +26,24 @@ fn fake_browser(root: &Path) -> (PathBuf, PathBuf) {
         format!(
             "#!/bin/sh\nsleep 60 &\necho $! >> '{}'\nexit 1\n",
             pids.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (fake, pids)
+}
+
+/// A stand-in browser that records its own pid and a forked helper's, then
+/// lingers at startup (no debug endpoint) long enough for a signal to land
+/// mid-launch, and dies.
+fn lingering_browser(root: &Path) -> (PathBuf, PathBuf) {
+    let pids = root.join("helpers.pid");
+    let fake = root.join("fake-chrome");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\necho $$ >> '{p}'\nsleep 60 &\necho $! >> '{p}'\nsleep 1\nexit 1\n",
+            p = pids.display()
         ),
     )
     .unwrap();
@@ -74,18 +99,132 @@ fn leftovers(temp: &Path, pids: &Path) -> (Vec<String>, Vec<i32>) {
     (profiles, survivors)
 }
 
+/// Every launch runs bladebro's orphan reaper, which kills an Xvfb whose
+/// bladebro is dead: run these tests one at a time, or a concurrent test's
+/// launch reaps the display a SIGINT'd run leaked before the check sees it.
+static LAUNCHES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    LAUNCHES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn scenario(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    scenario_with(name, fake_browser)
+}
+
+fn scenario_with(
+    name: &str,
+    browser: fn(&Path) -> (PathBuf, PathBuf),
+) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!("blade-leak-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let temp = root.join("tmp");
     std::fs::create_dir_all(&temp).unwrap();
     std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (fake, pids) = fake_browser(&root);
+    let (fake, pids) = browser(&root);
     (root, temp, fake, pids)
+}
+
+/// Linux: live processes still tied to bladebro `pid`'s virtual display.
+/// Xvfb names the session's Xauthority file (`…-xauth-<pid>-…`) in its
+/// command line; the WM and the browser tree carry it in XAUTHORITY. Killed
+/// here either way. Elsewhere there is no Xvfb: nothing to find.
+fn display_leftovers(pid: u32) -> Vec<i32> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let marker = format!("-xauth-{pid}-");
+    let scan = || -> Vec<i32> {
+        std::fs::read_dir("/proc")
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_string_lossy().parse::<i32>().ok())
+            .filter(|p| {
+                ["cmdline", "environ"].iter().any(|f| {
+                    let raw = std::fs::read(format!("/proc/{p}/{f}")).unwrap_or_default();
+                    String::from_utf8_lossy(&raw).contains(&marker)
+                })
+            })
+            .collect()
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !scan().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let survivors = scan();
+    for pid in &survivors {
+        unsafe {
+            libc::kill(*pid, libc::SIGKILL);
+        }
+    }
+    survivors
+}
+
+/// SIGINT to an in-process run's process group while its browser is still
+/// starting (the user's Ctrl-C): bladebro must not die on the spot. It has to
+/// outlive the signal long enough to tear down the browser tree, the profile
+/// and the virtual display it started.
+fn interrupt_mid_launch(name: &str, args: &[&str]) {
+    let _serial = serial();
+    let (root, temp, fake, pids) = scenario_with(name, lingering_browser);
+    let errlog = root.join("stderr.log");
+    let mut child = base_command(&root, &fake, &temp)
+        .args(args)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errlog).unwrap())
+        .spawn()
+        .unwrap();
+    let recorded = || {
+        std::fs::read_to_string(&pids)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    // The browser and its helper are up; the launch is waiting on the
+    // debug endpoint.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while recorded() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGINT);
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let (profiles, survivors) = leftovers(&temp, &pids);
+    let display = display_leftovers(child.id());
+    let stderr = std::fs::read_to_string(&errlog).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&root);
+    let status =
+        status.unwrap_or_else(|| panic!("bladebro still running 60s after SIGINT\n{stderr}"));
+    assert!(
+        survivors.is_empty() && profiles.is_empty() && display.is_empty(),
+        "SIGINT mid-launch left browser processes {survivors:?}, display processes {display:?} and profiles {profiles:?} ({status:?})\n{stderr}"
+    );
+    assert_eq!(
+        status.signal(),
+        None,
+        "bladebro died of the signal instead of cleaning up\n{stderr}"
+    );
 }
 
 #[test]
 fn failed_ws_launch_attempts_clean_up_tree_and_profile() {
+    let _serial = serial();
     let (root, temp, fake, pids) = scenario("ws");
     let output = base_command(&root, &fake, &temp)
         .arg("probe")
@@ -104,6 +243,7 @@ fn failed_ws_launch_attempts_clean_up_tree_and_profile() {
 
 #[test]
 fn failed_pipe_launch_attempts_clean_up_tree_and_profile() {
+    let _serial = serial();
     let (root, temp, fake, pids) = scenario("pipe");
     let mut child = base_command(&root, &fake, &temp)
         .arg("mcp")
@@ -130,4 +270,14 @@ fn failed_pipe_launch_attempts_clean_up_tree_and_profile() {
         survivors.is_empty() && profiles.is_empty(),
         "failed launch left browser helpers {survivors:?} and profiles {profiles:?}"
     );
+}
+
+#[test]
+fn sigint_mid_launch_of_a_one_shot_command_leaves_nothing_behind() {
+    interrupt_mid_launch("sigint-nav", &["nav", "http://127.0.0.1:9/", "--no-daemon"]);
+}
+
+#[test]
+fn sigint_mid_launch_of_probe_leaves_nothing_behind() {
+    interrupt_mid_launch("sigint-probe", &["probe"]);
 }

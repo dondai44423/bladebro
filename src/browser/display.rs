@@ -79,8 +79,11 @@ impl VirtualDisplay {
                 // at once, and Xvfb exiting on that SIGINT pulled the display
                 // out from under Chrome while `shutdown_gracefully` was still
                 // asking it to flush and close. Its lifetime is ours to end:
-                // Drop kills it explicitly, the orphan reaper covers a
-                // bladebro that died without running Drop.
+                // every in-process owner (MCP, daemon, one-shot CLI,
+                // probe/targets/audit) turns Ctrl-C and SIGTERM into a
+                // graceful close that ends in Drop killing it; the orphan
+                // reaper covers a bladebro that died without running Drop
+                // (SIGKILL).
                 .process_group(0)
                 .args([
                     &format!(":{display_num}"),

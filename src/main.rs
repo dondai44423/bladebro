@@ -245,20 +245,31 @@ fn run() -> Result<()> {
     // Pipe mode launches its own Chrome inside cmd_mcp_pipe.
     // Update hub commands skip Chrome entirely.
     let is_mcp = cmd == "mcp";
-    let mut browser = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp && !is_cli_cmd {
+    let launches_here = port == 0 && !use_pipe && !is_update_cmd && !is_mcp && !is_cli_cmd;
+    // The browser launched here is owned in-process: listen for termination
+    // signals from before the launch on (see `with_browser_guard`).
+    let mut signal = launches_here.then(|| {
+        let _rt = rt.enter();
+        bladebro::platform::TerminationSignal::listen()
+    });
+    let mut browser = if launches_here {
         Some(rt.block_on(bladebro::browser::Browser::launch(0))?)
     } else {
         None
     };
-    let base = if port == 0 && !use_pipe && !is_update_cmd && !is_mcp && !is_cli_cmd {
+    let base = if launches_here {
         browser.as_ref().unwrap().base()
     } else {
         format!("{host}:{port}")
     };
 
     let result = match cmd.as_str() {
-        "probe" => rt.block_on(with_browser_guard(&mut browser, || cmd_probe(&base))),
-        "targets" => rt.block_on(with_browser_guard(&mut browser, || cmd_targets(&base))),
+        "probe" => rt.block_on(with_browser_guard(&mut browser, &mut signal, || {
+            cmd_probe(&base)
+        })),
+        "targets" => rt.block_on(with_browser_guard(&mut browser, &mut signal, || {
+            cmd_targets(&base)
+        })),
         // `version` prints the TOOL version — no Chrome launch needed.
         // (It used to spawn a full Chrome + Xvfb just to read /json/version,
         // then exit without dropping it: one orphaned browser per call.)
@@ -293,7 +304,7 @@ fn run() -> Result<()> {
         "-v" | "--version" => rt.block_on(bladebro::updater::run("version", &positional)),
         "mcp" if use_pipe => rt.block_on(cmd_mcp_pipe()),
         "mcp" => rt.block_on(cmd_mcp(&host, port)),
-        "audit" => rt.block_on(with_browser_guard(&mut browser, || {
+        "audit" => rt.block_on(with_browser_guard(&mut browser, &mut signal, || {
             bladebro::audit::run_audit(&base)
         })),
         _ => {
@@ -326,15 +337,24 @@ fn run() -> Result<()> {
 /// browser down afterward — including on error. `exit_immediately` skips
 /// destructors, so without this guard every debug command orphans its
 /// Chrome + Xvfb tree.
+///
+/// The same goes for Ctrl-C, SIGTERM and SIGHUP: with `signal` listening
+/// (it does whenever the browser was launched here) they end the command,
+/// not the process. Dying on the default action would orphan Chrome and
+/// Xvfb, which each run in their own process group.
 async fn with_browser_guard<F, Fut>(
     browser: &mut Option<bladebro::browser::Browser>,
+    signal: &mut Option<bladebro::platform::TerminationSignal>,
     run: F,
 ) -> Result<()>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
-    let result = run().await;
+    let result = match signal {
+        Some(signal) => signal.interruptible(run()).await,
+        None => run().await,
+    };
     if let Some(b) = browser.take() {
         b.shutdown_gracefully().await;
     }

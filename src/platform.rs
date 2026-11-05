@@ -1153,6 +1153,89 @@ pub fn isolate_owned_child(cmd: &mut std::process::Command) {
     }
 }
 
+/// Termination signals for a process that owns its browser in-process (the
+/// one-shot CLI, `probe`/`targets`/`audit`): SIGTERM, SIGINT and SIGHUP on
+/// Unix, Ctrl+C on Windows — the set the MCP server shuts down on. Without
+/// a handler the default action ended bladebro alone: the browser runs in its
+/// own process group (`isolate_owned_child`) and so does Xvfb, so a Ctrl-C or
+/// a `timeout` SIGTERM orphaned both instead of closing them.
+///
+/// Listening starts in [`TerminationSignal::listen`]. From then on these
+/// signals no longer end the process by themselves, and one that arrives
+/// before [`TerminationSignal::recv`] is awaited (mid-launch, say) is kept.
+pub struct TerminationSignal {
+    #[cfg(unix)]
+    streams: Vec<tokio::signal::unix::Signal>,
+    #[cfg(windows)]
+    ctrl_c: Option<tokio::signal::windows::CtrlC>,
+}
+
+impl TerminationSignal {
+    /// Start listening. Must run inside the tokio runtime. A signal whose
+    /// handler cannot be installed keeps its default action.
+    pub fn listen() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let kinds = [
+                SignalKind::terminate(),
+                SignalKind::interrupt(),
+                SignalKind::hangup(),
+            ];
+            Self {
+                streams: kinds.into_iter().filter_map(|k| signal(k).ok()).collect(),
+            }
+        }
+        #[cfg(windows)]
+        {
+            Self {
+                ctrl_c: tokio::signal::windows::ctrl_c().ok(),
+            }
+        }
+    }
+
+    /// Resolves once a termination signal has arrived since `listen`.
+    pub async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            let streams = &mut self.streams;
+            std::future::poll_fn(|cx| {
+                if streams.iter_mut().any(|s| s.poll_recv(cx).is_ready()) {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await
+        }
+        #[cfg(windows)]
+        {
+            match &mut self.ctrl_c {
+                Some(ctrl_c) => {
+                    ctrl_c.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    /// Run `work` unless a termination signal arrives first (or already
+    /// arrived since `listen`): `work` is then dropped and the command fails
+    /// as interrupted. Closing the browser stays with the caller.
+    pub async fn interruptible<T>(
+        &mut self,
+        work: impl std::future::Future<Output = crate::error::Result<T>>,
+    ) -> crate::error::Result<T> {
+        tokio::select! {
+            biased;
+            _ = self.recv() => Err(crate::error::BladeError::Other(
+                "interrupted by a termination signal before the command finished (outcome unverified)".into(),
+            )),
+            result = work => result,
+        }
+    }
+}
+
 /// True while any process in `pgid` exists (EPERM means it exists but is not
 /// ours; for an owned group that still counts as alive).
 #[cfg(unix)]
