@@ -458,8 +458,16 @@ async fn run_cli_inner(
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     let rest = &args[1.min(args.len())..];
 
-    // `--help`/`-h` anywhere in a command's args → that command's help.
+    // `--help`/`-h` anywhere in a command's args → that command's help,
+    // never the command itself (main.rs leaves the flag here once a command
+    // has been named). --json gets the machine form, like `help <cmd> --json`.
     if cmd != "help" && rest.iter().any(|a| a == "--help" || a == "-h") {
+        if json_mode {
+            if let Ok(j) = help_json(Some(cmd)) {
+                print!("{j}");
+                return Ok(());
+            }
+        }
         if let Some(text) = command_help_text(cmd) {
             print!("{text}");
             return Ok(());
@@ -507,6 +515,12 @@ async fn run_cli_inner(
             run_tool("vision", &parsed, json_mode, no_daemon, external).await
         }
         "help" => {
+            // `help --help` / `help act -h` are still requests for help.
+            let rest: Vec<String> = rest
+                .iter()
+                .filter(|a| *a != "--help" && *a != "-h")
+                .cloned()
+                .collect();
             if json_mode {
                 print!("{}", help_json(rest.first().map(|s| s.as_str()))?);
             } else if rest.is_empty() {

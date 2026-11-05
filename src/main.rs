@@ -123,7 +123,12 @@ fn run() -> Result<()> {
                 })?;
                 port_given = true;
             }
-            "-h" | "--help" => {
+            // Only BEFORE a command is -h/--help the global switch. After
+            // one it belongs to that command (kept in `positional`), so
+            // `act --help` is act's help and `act type e3 x --help` asks
+            // for help instead of typing — it used to print the global
+            // manual for both, leaving per-command help unreachable.
+            "-h" | "--help" if cmd.is_none() => {
                 help_flag = true;
             }
             "-u" | "-doc" | "-v" | "--version" | "--rollback" if cmd.is_none() => {
@@ -138,6 +143,27 @@ fn run() -> Result<()> {
     }
     let cmd = cmd.unwrap_or_else(|| "help".to_string());
 
+    // Help routing. A global -h/--help becomes `help [<cmd>]`. A -h/--help
+    // after a known command the CLI module does not own (mcp, audit,
+    // update, doctor, …) is answered the same way here: that command's
+    // handler must never run for it (`mcp --help` would start a server,
+    // `-u --help` would self-update). CLI-module commands keep the flag —
+    // run_cli serves their per-command help, in its --json form too.
+    // Unknown commands fall through to the unknown-command error.
+    let help_after = positional.iter().any(|a| a == "-h" || a == "--help");
+    let (cmd, positional) =
+        if help_flag || (help_after && !is_cli_command(&cmd) && is_known_command(&cmd)) {
+            let topic =
+                Some(cmd).filter(|c| c != "help" && bladebro::cli::command_help_text(c).is_some());
+            let json = positional
+                .iter()
+                .any(|a| a == "--json")
+                .then(|| "--json".to_string());
+            ("help".to_string(), topic.into_iter().chain(json).collect())
+        } else {
+            (cmd, positional)
+        };
+
     // S18: pick this process's lane (config + BLADE_LANE env override). Every
     // surface — one-shot CLI, daemon, MCP — reads the same switch.
     bladebro::realbrowser::init_lane();
@@ -149,7 +175,7 @@ fn run() -> Result<()> {
     // teardown still runs and their socket writes handle EPIPE as an error).
     #[cfg(unix)]
     {
-        let effective = if help_flag { "help" } else { cmd.as_str() };
+        let effective = if help_after { "help" } else { cmd.as_str() };
         if effective != "daemon" && effective != "mcp" {
             unsafe {
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -157,59 +183,18 @@ fn run() -> Result<()> {
         }
     }
 
-    if help_flag {
-        print!("{}", bladebro::cli::help_text());
-        return Ok(());
-    }
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(bladebro::BladeError::other)?;
 
-    // Update hub commands don't need Chrome. Handle them before launch.
-    let is_update_cmd = matches!(
-        cmd.as_str(),
-        "update"
-            | "-u"
-            | "doctor"
-            | "-doc"
-            | "rollback"
-            | "--rollback"
-            | "-v"
-            | "--version"
-            | "version"
-    );
-
-    // CLI commands go through the new CLI module (own Chrome management).
-    let is_cli_cmd = matches!(
-        cmd.as_str(),
-        "nav"
-            | "see"
-            | "act"
-            | "state"
-            | "run"
-            | "vision"
-            | "daemon"
-            | "stop"
-            | "help"
-            | "rb"
-            | "realbrowser"
-            | "hermes"
-    );
-
-    // Legacy debug commands that need a launched browser. They share the
-    // same guard discipline as the CLI: the browser is ALWAYS shut down,
-    // even on error — `exit_immediately` (below) skips destructors, so a
-    // browser left alive on the stack here would leak Chrome + Xvfb on
-    // every invocation (observed: `bladebro version` orphaned a full
-    // Chrome tree per call).
-    let is_debug_cmd = matches!(cmd.as_str(), "probe" | "targets" | "audit");
+    let is_update_cmd = is_update_command(&cmd);
+    let is_cli_cmd = is_cli_command(&cmd);
 
     // Reject unknown commands BEFORE launching Chrome. Without this,
     // `bladebro bogus` would launch a full Chrome+Xvfb tree just to print
     // an error.
-    let is_known = is_update_cmd || is_cli_cmd || is_debug_cmd || cmd == "mcp";
+    let is_known = is_known_command(&cmd);
     if !is_known {
         let mut line = format!("{} unknown command `{cmd}`", ui::red("✗"));
         if let Some(s) = bladebro::cli::suggest_command(&cmd) {
@@ -320,6 +305,54 @@ fn run() -> Result<()> {
             });
         }
     }
+}
+
+/// Update hub commands don't need Chrome. Handled before any launch.
+fn is_update_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "update"
+            | "-u"
+            | "doctor"
+            | "-doc"
+            | "rollback"
+            | "--rollback"
+            | "-v"
+            | "--version"
+            | "version"
+    )
+}
+
+/// CLI commands go through the CLI module (own Chrome management).
+fn is_cli_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "nav"
+            | "see"
+            | "act"
+            | "state"
+            | "run"
+            | "vision"
+            | "daemon"
+            | "stop"
+            | "help"
+            | "rb"
+            | "realbrowser"
+            | "hermes"
+    )
+}
+
+/// Legacy debug commands that need a launched browser. They share the
+/// same guard discipline as the CLI: the browser is ALWAYS shut down,
+/// even on error — `exit_immediately` skips destructors, so a browser left
+/// alive on the stack would leak Chrome + Xvfb on every invocation
+/// (observed: `bladebro version` orphaned a full Chrome tree per call).
+fn is_debug_command(cmd: &str) -> bool {
+    matches!(cmd, "probe" | "targets" | "audit")
+}
+
+fn is_known_command(cmd: &str) -> bool {
+    is_update_command(cmd) || is_cli_command(cmd) || is_debug_command(cmd) || cmd == "mcp"
 }
 
 /// Run a legacy debug command (probe/targets/audit) and ALWAYS shut the

@@ -795,6 +795,7 @@ USAGE
                              payload conventions, examples — call ONCE and
                              you know the whole CLI
   bladebro help <cmd> --json per-command machine help
+  bladebro <cmd> --help      same as help <cmd> (never runs the command)
 "#
         }
         "hermes" => {
