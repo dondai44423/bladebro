@@ -2,7 +2,7 @@
 //! Xvfb locks and display claims, and interrupted sync-swap recovery.
 //! Split from the `session_profile` core.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::platform;
 
@@ -62,58 +62,73 @@ pub(super) fn reap_orphans_at(blade_dir: &Path) {
         restore_interrupted_swap(blade_dir);
     }
 
-    // 1. Dead session profiles + their Chromes (agent lane).
+    // 1. Dead session profiles + their Chromes (agent lane), then 1b. the
+    // real-lane (clone) roots: a dead MCP/daemon process must not leak its
+    // Chrome or lose the clone's state.
     reap_session_root(blade_dir, None);
-
-    // 1b. Real-lane (clone) roots: swap leftovers + dead sessions. A dead
-    // MCP/daemon process must not leak its Chrome or lose the clone's state.
-    let rb = blade_dir.join("realbrowser");
-    if let Ok(entries) = std::fs::read_dir(&rb) {
-        for entry in entries.flatten() {
-            let root = entry.path();
-            if !root.is_dir() {
-                continue;
-            }
-            if let Some(_lock) = SessionProfile::acquire_lock_at(&root) {
-                restore_interrupted_real_swap(&root);
-                let _ = std::fs::remove_dir_all(root.join("template.sync"));
-            }
-            reap_session_root(&root, Some(&root));
+    for root in real_lane_roots(blade_dir) {
+        if let Some(_lock) = SessionProfile::acquire_lock_at(&root) {
+            restore_interrupted_real_swap(&root);
+            let _ = std::fs::remove_dir_all(root.join("template.sync"));
         }
+        reap_session_root(&root, Some(&root));
     }
+}
+
+/// The real-lane (clone) browser roots under `blade_dir/realbrowser`.
+fn real_lane_roots(blade_dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(blade_dir.join("realbrowser"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|root| root.is_dir())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every root whose `profiles/` the reaper visits: the agent lane
+/// (`blade_dir` itself) and each real-lane browser root.
+pub(crate) fn session_roots(blade_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![blade_dir.to_path_buf()];
+    roots.extend(real_lane_roots(blade_dir));
+    roots
+}
+
+/// Is the owner of this `sess-*` dir dead? The owner is the pid in
+/// `.blade-owner`, else the pid in the name (a creation interrupted before
+/// the marker was written). Never dead: any other name, an unparseable
+/// owner, or this process. `doctor` reports with this same rule so its
+/// "auto-reaped on next launch" is what the next launch does.
+pub(crate) fn session_owner_dead(dir: &Path) -> bool {
+    let Some(name) = dir.file_name().map(|n| n.to_string_lossy()) else {
+        return false;
+    };
+    let Some(name_pid) = name.strip_prefix("sess-") else {
+        return false;
+    };
+    let owner = std::fs::read_to_string(dir.join(".blade-owner"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .or_else(|| name_pid.parse::<u32>().ok());
+    owner.is_some_and(|pid| pid != std::process::id() && !platform::process_alive(pid))
 }
 
 /// Reap dead session dirs under `root/profiles`; `real_root` selects the
 /// sync-back destination (`None` = the agent-lane template at `root`,
 /// `Some` = the browser-root's own `template/`).
 fn reap_session_root(root: &Path, real_root: Option<&Path>) {
-    let my_pid = std::process::id();
     let entries = match std::fs::read_dir(root.join("profiles")) {
         Ok(e) => e,
         Err(_) => return,
     };
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("sess-") {
-            continue;
-        }
         let dir = entry.path();
-        let owner = std::fs::read_to_string(dir.join(".blade-owner"))
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok());
-        let owner_dead = match owner {
-            Some(pid) => pid != my_pid && !platform::process_alive(pid),
-            // No owner file = pre-session-profile artifact or interrupted
-            // creation. Treat sess-<pid> name as owner.
-            None => name
-                .strip_prefix("sess-")
-                .and_then(|p| p.parse::<u32>().ok())
-                .map(|pid| pid != my_pid && !platform::process_alive(pid))
-                .unwrap_or(false),
-        };
-        if !owner_dead {
+        if !session_owner_dead(&dir) {
             continue;
         }
+        let name = entry.file_name().to_string_lossy().to_string();
         if reap_dead_session(root, &dir, real_root) {
             eprintln!("[bladebro] reaped dead session profile {name}");
         } else {

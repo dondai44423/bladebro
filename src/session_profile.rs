@@ -51,6 +51,7 @@ mod reap;
 use self::copy::copy_profile;
 pub(crate) use self::copy::copy_profile_ex;
 pub use self::reap::reap_orphans;
+pub(crate) use self::reap::{profile_in_use, session_owner_dead, session_roots};
 
 /// A per-process session profile. Cleaned up by [`cleanup`]
 /// after Chrome has exited (never while Chrome holds it).
