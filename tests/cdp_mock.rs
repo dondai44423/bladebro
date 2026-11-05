@@ -319,6 +319,8 @@ async fn capture_surfaces_a_dead_connection_instead_of_an_empty_page() {
 // ---- scripted page: drives `action::perform` end to end without a browser ----
 
 type Responder = Box<dyn Fn(&str, &str) -> Value + Send + 'static>;
+/// Like [`Responder`], but sees the whole request (params included).
+type RequestResponder = Box<dyn Fn(&Value) -> Value + Send + 'static>;
 
 const FIND_MODES: [&str; 11] = [
     "box", "prepare", "check", "focus", "clear", "selhost", "type", "select", "click", "state",
@@ -330,6 +332,24 @@ const FIND_MODES: [&str; 11] = [
 /// here) and logging each method name.
 async fn scripted_page(
     respond: Responder,
+) -> (
+    CdpSession,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    scripted_page_with(Box::new(move |request: &Value| {
+        respond(
+            request["method"].as_str().unwrap_or(""),
+            request["params"]["expression"].as_str().unwrap_or(""),
+        )
+    }))
+    .await
+}
+
+/// [`scripted_page`] for a page whose answers depend on request params
+/// (a field that changes as keys arrive).
+async fn scripted_page_with(
+    respond: RequestResponder,
 ) -> (
     CdpSession,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -351,7 +371,7 @@ async fn scripted_page(
             };
             let method = request["method"].as_str().unwrap_or("").to_string();
             let expression = request["params"]["expression"].as_str().unwrap_or("");
-            let mut response = respond(&method, expression);
+            let mut response = respond(&request);
             response["id"] = request["id"].clone();
             // find-by-sig calls are logged with their mode ("find:select").
             let entry = match FIND_MODES
@@ -697,4 +717,77 @@ async fn clear_never_presses_keys_when_the_target_cannot_take_focus() {
         );
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn a_field_that_trims_its_value_is_typed_once() {
+    // A-ws: a page that trims what is typed ("  x" reads back "x") can never
+    // match exactly, and retyping cannot change that. The readback poll, the
+    // corrective clear and the full retype doubled every keystroke and input
+    // event (autocomplete queries) on such fields; the verdict already says
+    // "whitespace differs".
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let value = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let typed = std::sync::Arc::new(AtomicUsize::new(0));
+    let (field, presses) = (value.clone(), typed.clone());
+    let respond: RequestResponder = Box::new(move |request| {
+        let method = request["method"].as_str().unwrap_or("");
+        let params = &request["params"];
+        let expression = params["expression"].as_str().unwrap_or("");
+        let typed_text = match method {
+            "Input.dispatchKeyEvent" if params["type"] == "keyDown" => params["text"].as_str(),
+            "Input.insertText" => params["text"].as_str(),
+            _ => None,
+        };
+        if let Some(t) = typed_text {
+            presses.fetch_add(1, Ordering::SeqCst);
+            let mut v = field.lock().unwrap();
+            let next = format!("{v}{t}");
+            *v = next.trim().to_string();
+            return json!({"result":{}});
+        }
+        if method == "Runtime.evaluate" && expression.starts_with("((sig,mode,text,frame)=>") {
+            let mut v = field.lock().unwrap();
+            if expression.contains(",\"clear\",null,") {
+                v.clear();
+            } else if expression.contains(",\"type\",") {
+                *v = "x".into();
+            }
+            return json!({"result":{"result":{"type":"object","value":{"ok":true,"box":[10,10,80,30],"disabled":false,"text":v.clone(),"hostKind":"input","hostIsTgt":true,"sel":0,"tgtMissing":false}}}});
+        }
+        if method == "Runtime.evaluate" {
+            return page_basics(expression);
+        }
+        json!({"result":{}})
+    });
+    let (cdp, log, server) = scripted_page_with(respond).await;
+    let (mut lpm, ref_id) = one_element_model("input", "textbox", "Search");
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        bladebro::action::perform(
+            &cdp,
+            &mut lpm,
+            &bladebro::action::Action::Type {
+                ref_id,
+                text: "  x".into(),
+            },
+            &std::sync::Arc::new(std::sync::Mutex::new(None)),
+        ),
+    )
+    .await
+    .unwrap();
+    let log = log.lock().unwrap().clone();
+    assert_eq!(
+        typed.load(Ordering::SeqCst),
+        3,
+        "each char is typed once; result {result:?}"
+    );
+    assert!(
+        !log.iter().any(|m| m == "find:clear" || m == "find:type"),
+        "a page-trimmed value was cleared or rewritten: {log:?}"
+    );
+    assert_eq!(value.lock().unwrap().as_str(), "x");
+    let verdict = result.expect("typed").1;
+    assert!(verdict.contains("whitespace differs"), "{verdict}");
+    server.abort();
 }

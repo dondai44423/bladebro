@@ -91,6 +91,18 @@ pub(super) fn readback_matches(host_kind: &str, got: &str, want: &str) -> bool {
     }
 }
 
+/// A value field holds the typed words with different whitespace: the page
+/// trimmed or reformatted the input. Waiting, a JS rewrite or a retype
+/// cannot change that - the page does it again - and each retry repeats
+/// every keystroke and input event (autocomplete queries). The verdict
+/// reports it as "whitespace differs".
+pub(super) fn page_reformatted(host_kind: &str, got: &str, want: &str) -> bool {
+    matches!(host_kind, "input" | "textarea")
+        && got != want
+        && !norm_text(got).is_empty()
+        && norm_text(got) == norm_text(want)
+}
+
 /// Readback of the effective editing host via the "check" mode. `None`
 /// when the eval itself fails - callers treat that as "unverified", never
 /// as "empty".
@@ -337,8 +349,9 @@ pub(super) async fn finalize_edit(
                 // Visible-but-wrong states can be corrected safely; value
                 // fields are readable by construction; blind CE readbacks
                 // stay as reported.
-                let retry_ok = !norm_text(&final_text).is_empty()
-                    || matches!(rep.host_kind.as_str(), "input" | "textarea");
+                let retry_ok = (!norm_text(&final_text).is_empty()
+                    || matches!(rep.host_kind.as_str(), "input" | "textarea"))
+                    && !page_reformatted(&rep.host_kind, &final_text, &rep.text);
                 if retry_ok {
                     let cl = clear_editable(cdp, sig, frame).await?;
                     if cl.ok {

@@ -491,7 +491,12 @@ pub async fn perform_with_network(
                 .as_ref()
                 .and_then(|c| c.text.clone())
                 .unwrap_or_default();
-            if !readback_matches(&kind_of(&last), &branch_text, text) {
+            // A page-reformatted value (see `page_reformatted`) is final:
+            // no poll, no setter rescue, no corrective retype.
+            let settled = |c: &Option<FoundElement>, got: &str| {
+                readback_matches(&kind_of(c), got, text) || page_reformatted(&kind_of(c), got, text)
+            };
+            if !settled(&last, &branch_text) {
                 for _ in 0..6u8 {
                     tokio::time::sleep(Duration::from_millis(120)).await;
                     last = check_editor(cdp, sig, frame).await;
@@ -499,7 +504,7 @@ pub async fn perform_with_network(
                         .as_ref()
                         .and_then(|c| c.text.clone())
                         .unwrap_or_default();
-                    if readback_matches(&kind_of(&last), &branch_text, text) {
+                    if settled(&last, &branch_text) {
                         break;
                     }
                 }
@@ -508,7 +513,7 @@ pub async fn perform_with_network(
             // did not register at all. Never for contenteditables - a DOM
             // write desyncs a framework editor's internal state.
             let mut set_via_js = false;
-            if !readback_matches(&kind_of(&last), &branch_text, text) {
+            if !settled(&last, &branch_text) {
                 let kind = kind_of(&last);
                 if (kind == "input" || kind == "textarea")
                     && norm_text(&branch_text) == norm_text(&pre_read)
