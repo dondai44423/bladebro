@@ -367,25 +367,9 @@ pub(crate) fn processes_on_user_data_dir(dir: &std::path::Path) -> Vec<u32> {
         .filter(|&pid| pid != me && process_uid(pid) == Some(uid))
         .filter(|&pid| {
             std::fs::read(format!("/proc/{pid}/cmdline"))
-                .is_ok_and(|cmdline| cmdline_has_token(&cmdline, &needle))
+                .is_ok_and(|cmdline| platform::cmdline_has_token(&cmdline, &needle))
         })
         .collect()
-}
-
-/// `needle` as a whole argument. Chromium rewrites its argv into one
-/// space-joined string (see `looks_like_chromium`), so a space separates
-/// arguments as well as the kernel's NUL.
-#[cfg(target_os = "linux")]
-fn cmdline_has_token(cmdline: &[u8], needle: &[u8]) -> bool {
-    let sep = |b: Option<&u8>| matches!(b, None | Some(0) | Some(b' '));
-    cmdline
-        .windows(needle.len())
-        .enumerate()
-        .any(|(at, window)| {
-            window == needle
-                && (at == 0 || sep(cmdline.get(at - 1)))
-                && sep(cmdline.get(at + needle.len()))
-        })
 }
 
 #[cfg(target_os = "linux")]

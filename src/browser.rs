@@ -198,7 +198,11 @@ impl Browser {
                                 .as_u64()
                                 .and_then(|id| u32::try_from(id).ok())
                                 .is_some_and(|id| {
-                                    platform::owns_browser_process(self.child.id(), id)
+                                    platform::owns_browser_process(
+                                        self.child.id(),
+                                        id,
+                                        self.profile.dir(),
+                                    )
                                 })
                     })
                 });
