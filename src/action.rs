@@ -851,6 +851,44 @@ mod action_tests {
     }
 
     #[test]
+    fn shift_chords_report_the_us_layout_glyph() {
+        // A-shift: Shift over a digit or punctuation key reports the shifted
+        // glyph (US layout, the layout the whole key map assumes) - "Shift+1"
+        // used to send key/text "1" with the Shift bit set.
+        use super::input::{combo_events, parse_key_combo};
+        for (chord, glyph, code, vk) in [
+            ("Shift+1", "!", "Digit1", 49),
+            ("Shift+2", "@", "Digit2", 50),
+            ("Shift+0", ")", "Digit0", 48),
+            ("Shift+/", "?", "Slash", 191),
+            ("Shift+;", ":", "Semicolon", 186),
+            ("Shift+'", "\"", "Quote", 222),
+            ("Shift+[", "{", "BracketLeft", 219),
+            ("Shift+`", "~", "Backquote", 192),
+            ("Shift+=", "+", "Equal", 187),
+            ("Shift+-", "_", "Minus", 189),
+            ("Shift+a", "A", "KeyA", 65),
+        ] {
+            let c = parse_key_combo(chord).unwrap().expect("combo");
+            let (evs, main) = combo_events(&c).unwrap();
+            assert_eq!(evs[main]["key"].as_str(), Some(glyph), "{chord}");
+            assert_eq!(evs[main]["text"].as_str(), Some(glyph), "{chord}");
+            assert_eq!(evs[main]["code"].as_str(), Some(code), "{chord}");
+            assert_eq!(
+                evs[main]["windowsVirtualKeyCode"].as_u64(),
+                Some(vk),
+                "{chord}"
+            );
+            assert_eq!(evs[main]["modifiers"].as_u64(), Some(8), "{chord}");
+        }
+        // A shortcut keeps the shifted key name but never types text.
+        let c = parse_key_combo("Control+Shift+1").unwrap().expect("combo");
+        let (evs, main) = combo_events(&c).unwrap();
+        assert_eq!(evs[main]["key"].as_str(), Some("!"));
+        assert!(evs[main].get("text").is_none());
+    }
+
+    #[test]
     fn value_fields_verify_exact_whitespace() {
         // A-ws: "  x" typed into a field that trims reads back "x"; the
         // normalized comparison called that verified.

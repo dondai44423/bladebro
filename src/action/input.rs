@@ -317,9 +317,10 @@ pub(super) fn resolve_combo_key(
     let key = combo.key.as_str();
     if key.chars().count() == 1 {
         let mut ch = key.chars().next().unwrap();
-        // Shift over a letter reports the shifted glyph, as real keyboards do.
-        if combo.shift && ch.is_ascii_alphabetic() {
-            ch = ch.to_ascii_uppercase();
+        // Shift reports the shifted glyph, as real keyboards do - digits and
+        // punctuation included ("Shift+1" is "!", not "1" with a Shift bit).
+        if combo.shift {
+            ch = shifted_us(ch);
         }
         let (code, vk, _) = char_to_key_code(ch);
         if code == "Unidentified" {
@@ -336,6 +337,36 @@ pub(super) fn resolve_combo_key(
             _ => None,
         };
         Ok((kname.to_string(), code.to_string(), vk, text))
+    }
+}
+
+/// The glyph Shift produces over a key on the US layout - the layout the
+/// whole key map (`char_to_key_code`) assumes.
+fn shifted_us(ch: char) -> char {
+    match ch {
+        'a'..='z' => ch.to_ascii_uppercase(),
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        _ => ch,
     }
 }
 
