@@ -353,6 +353,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_failed_later_page_keeps_the_pages_already_harvested() {
+        let mut first = vec![tweet_entry(tweet(FOCAL, "op", None))];
+        first.extend(tweets("7", 5, Some(FOCAL)));
+        first.push(cursor_entry("Bottom", "c1"));
+        let first = thread_body(vec![add_entries(first)]);
+        let failures: [(Reply, &str); 2] = [
+            (
+                Err("Execution context was destroyed."),
+                "page 2 fetch failed",
+            ),
+            (Ok((200, "<html>upstream error</html>".into())), "non-JSON"),
+        ];
+        for (failure, named) in failures {
+            let (cdp, served) = fake_cdp(vec![Ok((200, first.clone())), failure]).await;
+            let p = thread_walk(
+                &cdp,
+                &template("TweetDetail"),
+                FOCAL,
+                100,
+                &mut Budget::new(),
+            )
+            .await
+            .expect("page 1 landed — the walk must not throw it away");
+            assert_eq!(served.load(SeqCst), 2);
+            assert_eq!(p.count, 5, "page 1's replies survive");
+            assert!(!p.complete);
+            assert!(
+                p.note.as_deref().is_some_and(|n| n.contains(named)),
+                "the failure is named ({named}): {:?}",
+                p.note
+            );
+        }
+
+        // Timelines too.
+        let mut first = tweets("8", 4, None);
+        first.push(cursor_entry("Bottom", "c1"));
+        let first = search_body(vec![add_entries(first)]);
+        let (cdp, _) = fake_cdp(vec![Ok((200, first)), Err("Target closed.")]).await;
+        let p = timeline_walk(
+            &cdp,
+            &template("SearchTimeline"),
+            "search",
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("timeline page 1 survives");
+        assert_eq!(p.count, 4);
+        assert!(!p.complete);
+
+        // A first-page failure still errors, so the caller can fall back.
+        let (cdp, _) = fake_cdp(vec![Ok((200, "not json".into()))]).await;
+        assert!(thread_walk(
+            &cdp,
+            &template("TweetDetail"),
+            FOCAL,
+            100,
+            &mut Budget::new()
+        )
+        .await
+        .is_err());
+    }
+
     #[test]
     fn fixture_parses_the_complete_page() {
         let j = fixture();

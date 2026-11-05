@@ -261,7 +261,21 @@ async fn walk(
             }
         }
         let url = build_url(tpl, &vars);
-        let (status, body) = fetch_api(cdp, &url, &tpl.headers).await?;
+        // Past the first page a failed read (the page navigated away, a
+        // proxy error page) must not throw away the pages already
+        // harvested: return them as partial and say why. A first-page
+        // failure still errors so the caller can pick a fallback.
+        let (status, body) = match fetch_api(cdp, &url, &tpl.headers).await {
+            Ok(reply) => reply,
+            Err(e) if pages > 0 => {
+                w.note = Some(format!(
+                    "x: page {} fetch failed ({e}) — partial results",
+                    pages + 1
+                ));
+                break;
+            }
+            Err(e) => return Err(e),
+        };
         if status == 429 {
             w.note = Some("x: rate limited (HTTP 429) — partial results, retry in a minute".into());
             break;
@@ -279,8 +293,16 @@ async fn walk(
             ));
             break;
         }
-        let j: Value = serde_json::from_str(&body)
-            .map_err(|e| BladeError::Other(format!("x: non-JSON response ({e})")))?;
+        let j: Value = match serde_json::from_str(&body) {
+            Ok(j) => j,
+            Err(e) if pages > 0 => {
+                w.note = Some(format!(
+                    "x: non-JSON response after {pages} page(s) ({e}) — partial results"
+                ));
+                break;
+            }
+            Err(e) => return Err(BladeError::Other(format!("x: non-JSON response ({e})"))),
+        };
         let parsed = match focal_id {
             Some(f) => parse_thread_page(&j, f),
             None => parse_timeline_page(&j),
