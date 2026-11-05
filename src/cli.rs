@@ -322,6 +322,38 @@ fn daemon_running() -> bool {
     }
 }
 
+/// How a daemon call failed. The split decides what the CLI may do next, so
+/// it comes from WHERE the call failed — never from error text: a live
+/// daemon's reply can quote any OS error ("failed to launch Chrome: No such
+/// file or directory"), and reading that as "daemon dead" used to unlink
+/// the live daemon's socket and orphan it.
+#[cfg(unix)]
+enum DaemonCallError {
+    /// The connect failed: nothing accepted the request, so it was never
+    /// delivered. Starting a daemon (or running elsewhere) is safe.
+    Unreachable(std::io::Error),
+    /// The daemon was reached. It may have run — or still be running — the
+    /// command: never restart it or run the command again.
+    Failed(BladeError),
+}
+
+#[cfg(unix)]
+impl From<BladeError> for DaemonCallError {
+    fn from(e: BladeError) -> Self {
+        DaemonCallError::Failed(e)
+    }
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for DaemonCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DaemonCallError::Unreachable(e) => write!(f, "daemon not running: {e}"),
+            DaemonCallError::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Send a tool call to the daemon over Unix socket.
 ///
 /// Hardening: the read has a timeout (`BLADE_CMD_TIMEOUT` seconds, default
@@ -329,7 +361,7 @@ fn daemon_running() -> bool {
 /// an agent's shell call hung until its harness killed it, with no output
 /// and no way to tell "still working" from "dead".
 #[cfg(unix)]
-fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
+fn send_to_daemon(tool: &str, args: &Value) -> std::result::Result<ToolResult, DaemonCallError> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -339,20 +371,21 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
         .filter(|&s| s > 0)
         .unwrap_or(300);
 
-    let mut stream = UnixStream::connect(socket_path())
-        .map_err(|e| BladeError::Other(format!("daemon not running: {e}")))?;
+    let mut stream = UnixStream::connect(socket_path()).map_err(DaemonCallError::Unreachable)?;
     {
         use std::os::fd::AsRawFd;
         if !peer_uid_matches_self(stream.as_raw_fd()) {
             return Err(BladeError::Other(
                 "refusing the daemon channel: the socket peer is not this user".into(),
-            ));
+            )
+            .into());
         }
     }
 
-    let req = serde_json::to_string(&json!({ "tool": tool, "args": args }))?;
-    writeln!(stream, "{req}")?;
-    stream.flush()?;
+    let req =
+        serde_json::to_string(&json!({ "tool": tool, "args": args })).map_err(BladeError::from)?;
+    writeln!(stream, "{req}").map_err(BladeError::from)?;
+    stream.flush().map_err(BladeError::from)?;
 
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(timeout_secs)));
 
@@ -367,12 +400,11 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
                 "no daemon response after {timeout_secs}s — the command may still be running.\n\
                  Check with 'bladebro state tabs', cancel with 'bladebro stop', or raise the\n\
                  client limit with BLADE_CMD_TIMEOUT=<seconds>."
-            )));
+            ))
+            .into());
         }
         Err(e) => {
-            return Err(BladeError::Other(format!(
-                "failed to read daemon response: {e}"
-            )));
+            return Err(BladeError::Other(format!("failed to read daemon response: {e}")).into());
         }
     }
 
@@ -385,7 +417,7 @@ fn send_to_daemon(tool: &str, args: &Value) -> Result<ToolResult> {
             .get("error")
             .and_then(|e| e.as_str())
             .unwrap_or("unknown error");
-        return Err(BladeError::Other(err.to_string()));
+        return Err(BladeError::Other(err.to_string()).into());
     }
 
     let text = v
@@ -537,11 +569,12 @@ async fn run_cli_inner(
 /// exits 1 — the old CLI exited 0 on tool errors, so scripts and agents
 /// could not tell a failed click from a successful one.
 ///
-/// Failure handling is deliberately two-tiered:
+/// Failure handling is deliberately two-tiered, keyed on [`DaemonCallError`]
+/// (where the call failed, never what the error text says):
 /// - the socket connect fails → the daemon is dead; restart it and retry;
-/// - the socket connect succeeds but the call fails (e.g. client timeout) →
-///   the daemon is alive and may still be running the command; never kill
-///   or bypass it, surface the error instead.
+/// - the socket connect succeeds but the call fails (e.g. client timeout, or
+///   any tool error the daemon reports) → the daemon is alive and may still
+///   be running the command; never kill or bypass it, surface the error.
 async fn run_tool(
     tool: &str,
     args: &Value,
@@ -573,20 +606,16 @@ async fn run_tool(
                         }
                         return Ok(());
                     }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        let unreachable = msg.contains("Connection refused")
-                            || msg.contains("No such file")
-                            || msg.contains("daemon not running");
-                        if unreachable {
-                            eprintln!("[bladebro] daemon unreachable ({msg}) — restarting it");
-                            // A dead daemon can leave a stale socket file behind.
-                            let _ = std::fs::remove_file(socket_path());
-                        } else {
-                            // Alive but the call failed: do not kill or bypass.
-                            return Err(e);
-                        }
+                    Err(DaemonCallError::Unreachable(e)) => {
+                        // Died between the liveness probe and the call. No
+                        // unlink of the socket here: the daemon started
+                        // below clears a stale one itself, under its lock —
+                        // an unlink from this unlocked client could hit a
+                        // live daemon's socket and orphan it.
+                        eprintln!("[bladebro] daemon unreachable ({e}) — restarting it");
                     }
+                    // Alive but the call failed: do not kill or bypass.
+                    Err(DaemonCallError::Failed(e)) => return Err(e),
                 }
             }
 

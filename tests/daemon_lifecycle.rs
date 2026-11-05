@@ -7,14 +7,22 @@
 //!    still owns them — before, a stale ("ghost") daemon dying unlinked the
 //!    ACTIVE daemon's socket, so the next command spawned yet another daemon.
 //!
+//! The client side of the daemon channel is guarded too: a delivered command
+//! is never re-run, a live daemon is never declared dead from its reply text,
+//! a command never runs under a daemon whose lane/settings differ from its
+//! own, and an oversized request fails with a message instead of SIGPIPE.
+//!
 //! Subprocess-based with an isolated BLADE_HOME — no Chrome involved (the
-//! daemon binds lazily; Chrome starts on the first tool call only).
+//! daemon binds lazily; Chrome starts on the first tool call only). Tests
+//! that send tool calls pin `BLADE_LANE=agent` and a missing `CHROME_PATH`,
+//! so a launch fails fast and the real-browser lane is never entered.
 
 #![cfg(unix)]
 
-use std::io::Read;
-use std::path::PathBuf;
+use std::io::{BufRead, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn bin() -> &'static str {
@@ -36,8 +44,13 @@ fn tmp_home(tag: &str) -> PathBuf {
 /// that startup window lets the daemon's own pidfile write clobber the
 /// test's overwrite — a race macOS CI hit once (ghost teardown, 2026-10),
 /// never a daemon defect.
-fn start_daemon(home: &PathBuf) -> Child {
-    let mut child = Command::new(bin())
+fn start_daemon(home: &Path) -> Child {
+    start_daemon_with(home, Command::new(bin()))
+}
+
+/// [`start_daemon`] with a caller-prepared command (extra env).
+fn start_daemon_with(home: &Path, mut cmd: Command) -> Child {
+    let mut child = cmd
         .arg("daemon")
         .env("BLADE_HOME", home)
         .stdin(Stdio::null())
@@ -256,4 +269,135 @@ fn stop_json_is_one_object_and_lane_restart_emits_no_stray_stdout() {
     assert_eq!(value["ok"], true);
     assert!(wait_exit(&mut daemon, 2).unwrap().success());
     std::fs::remove_dir_all(home).unwrap();
+}
+
+// ── Client side of the daemon channel ──────────────────────────────────
+
+/// A `bladebro` process (client or daemon) pinned to the agent lane with a
+/// Chrome binary that does not exist: a tool call that reaches a launch
+/// fails fast, nothing is ever opened, and the real-browser lane (the
+/// user's own browser) is never entered whatever the code under test does.
+fn agent_cmd(home: &Path) -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.env("BLADE_HOME", home)
+        .env("BLADE_LANE", "agent")
+        .env("CHROME_PATH", home.join("missing-chrome"))
+        .env("BLADE_NO_WARMING", "1")
+        .env("BLADE_NO_UPDATE_CHECK", "1")
+        .stdin(Stdio::null());
+    cmd
+}
+
+/// Run `bladebro --json <args>` as a client; returns (exit status, the one
+/// stdout JSON object, stderr).
+fn client_json(
+    home: &Path,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> (std::process::ExitStatus, serde_json::Value, String) {
+    let mut cmd = agent_cmd(home);
+    cmd.arg("--json").args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("client must run");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("stdout must be one JSON object ({e}); status {:?}\nstdout: {stdout:?}\nstderr: {stderr}", out.status)
+    });
+    (out.status, value, stderr)
+}
+
+/// A stand-in for a LIVE daemon: holds the daemon lock (as a running
+/// daemon does — so an auto-started real daemon bows out "already
+/// running") and answers every request with `reply`, recording each
+/// request line. The connect-only liveness probes write nothing and are
+/// not recorded.
+struct FakeDaemon {
+    requests: Arc<Mutex<Vec<String>>>,
+    _lock: std::fs::File,
+}
+
+fn fake_daemon(home: &Path, reply: &'static str) -> FakeDaemon {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.join("cli.lock"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "the fake daemon must own the daemon lock"
+    );
+    let listener = std::os::unix::net::UnixListener::bind(home.join("cli.sock")).unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut line = String::new();
+            let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+            if line.trim().is_empty() {
+                continue;
+            }
+            seen.lock().unwrap().push(line);
+            let _ = stream.write_all(format!("{reply}\n").as_bytes());
+        }
+    });
+    FakeDaemon {
+        requests,
+        _lock: lock,
+    }
+}
+
+/// Stop whatever daemon a test's client auto-started (it is detached into
+/// its own session, so it would otherwise outlive the test).
+fn stop_daemon(home: &Path) {
+    let _ = agent_cmd(home)
+        .arg("stop")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[test]
+fn daemon_error_text_never_marks_a_live_daemon_unreachable() {
+    // A live daemon's tool error can carry an OS error string — here a
+    // Chrome spawn ENOENT. The CLI used to grep reply text for "No such
+    // file", decide the daemon was dead, unlink the LIVE daemon's socket and
+    // auto-start a second daemon (which lost the lock and exited), orphaning
+    // the first one and falling back to a one-shot re-run.
+    let home = tmp_home("reply-text");
+    let fake = fake_daemon(
+        &home,
+        r#"{"ok":false,"error":"Chrome launch failed: failed to launch Chrome: No such file or directory (os error 2)"}"#,
+    );
+    let (status, value, stderr) = client_json(&home, &[], &["nav", "http://127.0.0.1:9/"]);
+    let sock_alive = home.join("cli.sock").exists();
+    let requests = fake.requests.lock().unwrap().len();
+    stop_daemon(&home);
+    assert!(
+        sock_alive,
+        "the live daemon's socket was unlinked; stderr: {stderr}"
+    );
+    assert_eq!(requests, 1, "the command must be delivered exactly once");
+    assert_eq!(status.code(), Some(1), "stderr: {stderr}");
+    assert_eq!(value["ok"], false);
+    assert!(
+        value["text"]
+            .as_str()
+            .unwrap()
+            .contains("No such file or directory"),
+        "the daemon's own error must be surfaced: {value}"
+    );
+    assert!(
+        !stderr.contains("restarting") && !stderr.contains("one-shot"),
+        "a delivered command must not trigger a restart or re-run: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
 }
