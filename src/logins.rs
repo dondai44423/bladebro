@@ -102,6 +102,17 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
         .get("cookies")
         .and_then(Value::as_array)
         .ok_or_else(|| BladeError::Other("cookie snapshot missing cookie store".into()))?;
+    let out = snapshot_cookies(arr);
+    let bytes = serde_json::to_vec(&out)?;
+    // The browser-wide store is authoritative, including logout/deletion.
+    let path = logins_path();
+    platform::secure_create_dir_all(&platform::blade_dir())?;
+    platform::secure_write_file(&path, &bytes)?;
+    Ok(())
+}
+
+/// The cookies of a store read that the sidecar keeps.
+fn snapshot_cookies(arr: &[Value]) -> Vec<SavedCookie> {
     let mut out: Vec<SavedCookie> = Vec::with_capacity(arr.len());
     for c in arr {
         let domain = c
@@ -114,7 +125,12 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
         if c.get("partitionKey").map(|p| !p.is_null()).unwrap_or(false) {
             continue;
         }
-        if domain.is_empty() || domain.starts_with("chrome") || domain == "file" {
+        // Internal pseudo-hosts are matched exactly: a "chrome" prefix test
+        // also dropped real sites (chromestatus.com, chrome.google.com).
+        if matches!(
+            domain.as_str(),
+            "" | "file" | "chrome" | "chrome-extension" | "chrome-untrusted" | "devtools"
+        ) {
             continue;
         }
         out.push(SavedCookie {
@@ -143,12 +159,7 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
             expires: c.get("expires").and_then(|v| v.as_f64()),
         });
     }
-    let bytes = serde_json::to_vec(&out)?;
-    // The browser-wide store is authoritative, including logout/deletion.
-    let path = logins_path();
-    platform::secure_create_dir_all(&platform::blade_dir())?;
-    platform::secure_write_file(&path, &bytes)?;
-    Ok(())
+    out
 }
 
 /// Inject the sidecar snapshot into the fresh browser context at launch.
@@ -434,6 +445,40 @@ mod tests {
             .expect("a refused cookie must not fail the restore");
         assert_eq!(missing, 2, "the refused cookies are counted, not fatal");
         assert_eq!(jar.names(), ["good", "other"]);
+    }
+
+    /// The internal-origin filter was `domain.starts_with("chrome")`, which
+    /// also dropped real sites (chromestatus.com, chrome.google.com
+    /// host-only cookies) from the login snapshot, logging the user out of
+    /// them at every launch.
+    #[test]
+    fn snapshot_keeps_real_sites_whose_name_starts_with_chrome() {
+        let store: Vec<Value> = [
+            "chromestatus.com",
+            "chrome.google.com",
+            ".chromestatus.com",
+            "example.com",
+            "",
+            "file",
+            "chrome",
+            "chrome-extension",
+        ]
+        .iter()
+        .map(|d| json!({"name": "c", "value": "v", "domain": d, "path": "/"}))
+        .collect();
+        let kept: Vec<String> = snapshot_cookies(&store)
+            .into_iter()
+            .map(|c| c.domain)
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "chromestatus.com",
+                "chrome.google.com",
+                ".chromestatus.com",
+                "example.com"
+            ]
+        );
     }
 
     #[test]
