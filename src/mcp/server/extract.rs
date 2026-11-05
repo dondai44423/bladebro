@@ -728,21 +728,7 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
             .and_then(|i| i.as_array())
             .cloned()
             .unwrap_or_default();
-        let mut new_count = 0usize;
-        for item in items {
-            // Keyless items dedupe by their JSON — the old empty-key branch
-            // re-pushed them every scroll iteration.
-            let key = item
-                .get("url")
-                .or_else(|| item.get("title"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| item.to_string());
-            if seen.insert(key) {
-                all_items.push(item);
-                new_count += 1;
-            }
-        }
+        let new_count = merge_collected(&mut all_items, &mut seen, items, max);
 
         if all_items.len() >= max {
             stop = format!("max={max} reached — raise max to collect more");
@@ -794,6 +780,66 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
         artifact_hint(&path)
     ))
 }
+/// Merge one extraction pass into the collection; returns how many items
+/// were new. Stops at `max`: one pass over a long page used to overshoot it
+/// (max=10 returned 50 rows plus "max=10 reached").
+fn merge_collected(
+    all_items: &mut Vec<Value>,
+    seen: &mut std::collections::HashSet<String>,
+    items: Vec<Value>,
+    max: usize,
+) -> usize {
+    let mut new_count = 0usize;
+    for item in items {
+        if all_items.len() >= max {
+            break;
+        }
+        // Keyless items dedupe by their JSON — the old empty-key branch
+        // re-pushed them every scroll iteration.
+        let key = item
+            .get("url")
+            .or_else(|| item.get("title"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| item.to_string());
+        if seen.insert(key) {
+            all_items.push(item);
+            new_count += 1;
+        }
+    }
+    new_count
+}
+
+#[cfg(test)]
+mod collect_tests {
+    use super::*;
+
+    #[test]
+    fn collect_never_returns_more_than_max() {
+        // One pass over a 50-row page with max=10 used to keep all 50 rows
+        // and then report "max=10 reached".
+        let rows: Vec<Value> = (0..50)
+            .map(|i| json!({"url":format!("https://e.test/{i}")}))
+            .collect();
+        let mut all = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let added = merge_collected(&mut all, &mut seen, rows.clone(), 10);
+        assert_eq!((all.len(), added), (10, 10));
+        // A later pass adds nothing once the cap is met, and repeats of
+        // earlier rows are still deduped.
+        assert_eq!(merge_collected(&mut all, &mut seen, rows, 10), 0);
+        assert_eq!(all.len(), 10);
+        let mut all = vec![json!({"url":"https://e.test/0"})];
+        let mut seen = std::collections::HashSet::from(["https://e.test/0".to_string()]);
+        let pass = vec![
+            json!({"url":"https://e.test/0"}),
+            json!({"url":"https://e.test/1"}),
+        ];
+        assert_eq!(merge_collected(&mut all, &mut seen, pass, 100), 1);
+        assert_eq!(all.len(), 2);
+    }
+}
+
 #[cfg(test)]
 mod extract_script_tests {
     //! The auto-extract script is a large injected string — a syntax error
