@@ -249,6 +249,8 @@ async function consoleCapture() {
     .replace('__SEED__', '7').replace('__PROXY_HELPERS__', () => helpers)
     + fs.readFileSync(path.join(root, 'src/stealth/js/stealth_tail.js'), 'utf8');
   const { ctx, g } = mockWindow();
+  // A URL with a native-style toJSON, there before the core runs (as in a page).
+  vm.runInContext('this.URL=class URL{constructor(h){this.h=h;}toJSON(){return this.h;}};', ctx);
   vm.runInContext(core, ctx);
   const ring = g[Symbol.for('q')];
   const last = () => ring[ring.length - 1].m;
@@ -257,6 +259,10 @@ async function consoleCapture() {
   assert.equal(g.tj, 0, 'logging must not invoke page toJSON');
   vm.runInContext('console.log({a:1,get b(){return 2;}})', ctx);
   assert.equal(last(), '{"a":1,"b":"(...)"}', 'accessors are shown, not invoked');
+  vm.runInContext('var vo=0,tju=0;URL.prototype.toJSON=function(){tju++;return "page";};var nb=new Number(3);nb.valueOf=function(){vo++;return 9;};console.log(nb,new URL("http://a/"));', ctx);
+  assert.equal(g.vo, 0, 'boxed primitives unwrap through the native valueOf');
+  assert.equal(g.tju, 0, 'URL toJSON is the native captured at injection time');
+  assert.equal(last(), '3 "http://a/"');
   // Plain values read exactly as the JSON.stringify capture wrote them.
   const old = c => vm.runInContext(`(function(){var a=[${c}],p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.push(typeof v==='string'?v:JSON.stringify(v));}catch(e){p.push(String(v));}}return p.join(' ').slice(0,400);})()`, ctx);
   for (const c of ['1', "'str'", 'true', 'null', 'undefined', '-0', 'NaN', 'Infinity', '1.5e300', '10n',
@@ -265,10 +271,19 @@ async function consoleCapture() {
     'new Date(0)', 'new Date(NaN)', '({d:new Date(86400000)})', "'a', 1, {x:[1]}, undefined, 'b'",
     "({'k\"ey':'v'})", '(function(){var o=Object.create(null);o.z=1;return o;})()', 'new Uint8Array([1,2])',
     'new Error("x")', 'new Map([[1,2]])', '({a:1n})', '(function(){var o={a:1};o.self=o;return o;})()',
-    "'x'.repeat(500)", "{s:'y'.repeat(500)}", "'a'.repeat(399), 'tail'"]) {
+    "'x'.repeat(500)", "{s:'y'.repeat(500)}", "'a'.repeat(399), 'tail'",
+    // Boxed primitives unwrap; where JSON.stringify throws (a BigInt or a cycle
+    // inside) the capture falls back to String(v), as before.
+    'new Number(3)', "new String('ab')", 'new Boolean(false)', "({n:new Number(1),s:new String('x'),b:new Boolean(true)})",
+    'Object.create(Number.prototype)', 'Object(1n)', '[1n,2n]', 'new BigInt64Array([1n,2n])',
+    '(function(){var a=[1,2];a.push(a);return a;})()', '[1n,[2,[3n,null,undefined]],{},new Number(4)]',
+    '({t:new BigUint64Array([5n])})']) {
     vm.runInContext(`console.log(${c})`, ctx);
     assert.equal(last(), old(c), c);
   }
+  // A cut by the work cap (not by the 400-char window) is marked, not silent.
+  vm.runInContext('var wc={};for(var i=0;i<2100;i++)wc["f"+i]=function(){};wc.z=1;console.log(wc);', ctx);
+  assert.equal(last(), '{\u2026', 'a work-cap cut is marked');
   // Bounded: a large value costs a few hundred property reads, not all of them.
   vm.runInContext('var reads=0,big=[];for(var i=0;i<200000;i++)big.push({i:i,s:"xxxxxxxx"});var pbig=new Proxy(big,{get:function(t,k,r){reads++;return Reflect.get(t,k,r);},getOwnPropertyDescriptor:function(t,k){reads++;return Reflect.getOwnPropertyDescriptor(t,k);}});console.log(pbig);', ctx);
   assert.equal(last(), vm.runInContext('JSON.stringify(big).slice(0,400)', ctx), 'same first 400 chars');

@@ -194,27 +194,40 @@ if(screen.pixelDepth!==24){_defGet(_sp2,'pixelDepth',_ogs(_sp2,'pixelDepth'),fun
 try{
 var _uk=Symbol.for('q');
 var _uxa=[];
-// Entry serializer. Plain data (primitives, arrays and objects of data
-// properties, typed arrays) reads exactly as JSON.stringify wrote it, but the
-// walk runs no page code — accessors show as "(...)" instead of being invoked,
-// toJSON is honoured only for native Date/URL (through captured natives), DOM
+// Entry serializer. Plain data (primitives, boxed primitives, arrays and
+// objects of data properties, typed arrays) reads exactly as JSON.stringify
+// wrote it, and where JSON.stringify threw (a BigInt or a cycle inside) as the
+// String(v) fallback did. But the walk runs no page code — accessors show as
+// "(...)" instead of being invoked, toJSON is honoured only for native
+// Date/URL and boxed values unwrap, all through natives captured here; DOM
 // nodes and windows read as their [object Tag] — and it stops once the
-// 400-char entry is full. JSON.stringify fired page getters/toJSON on every
-// logged argument (page-observable: the console trap the protocol layer exists
-// to avoid) and serialized the whole value before the cut (~20 ms per log of a
-// large array).
-var _uj=JSON.stringify,_uks=Object.keys,_ud=Object.getOwnPropertyDescriptor,_uia=Array.isArray,_ura=Reflect.apply,_unow=Date.now;
-var _uhi=Function.prototype[Symbol.hasInstance],_uho=Object.prototype.hasOwnProperty,_uts=Object.prototype.toString;
-var _uD=Date,_udt=Date.prototype.getTime,_udi=Date.prototype.toISOString;
-var _uU=(typeof URL!=='undefined'&&typeof URL.prototype.toJSON==='function')?URL:null;
+// 400-char entry is full, or marks the cut with … when a value runs out of
+// its work budget first. JSON.stringify fired page getters/toJSON on every
+// logged argument (page-observable: the console trap the protocol layer
+// exists to avoid) and serialized the whole value before the cut (~20 ms per
+// log of a large array).
+var _uj=JSON.stringify,_uks=Object.keys,_ud=Object.getOwnPropertyDescriptor,_uia=Array.isArray,_ura=Reflect.apply,_unow=Date.now,_uS=String;
+var _uhi=Function.prototype[Symbol.hasInstance],_uho=Object.prototype.hasOwnProperty,_uts=Object.prototype.toString,_ufs=Function.prototype.toString;
+var _uD=Date,_udt=Date.prototype.getTime,_udi=Date.prototype.toISOString,_uds=Date.prototype.toString;
+var _uUj=(typeof URL!=='undefined'&&typeof URL.prototype.toJSON==='function')?URL.prototype.toJSON:null,_uU=_uUj?URL:null;
+var _ubx=[[Number,Number.prototype.valueOf],[String,String.prototype.valueOf],[Boolean,Boolean.prototype.valueOf]];
+if(typeof BigInt!=='undefined')_ubx[3]=[BigInt,BigInt.prototype.valueOf];
 var _uN=typeof Node!=='undefined'?Node:null,_uW=typeof Window!=='undefined'?Window:null;
 var _uav=ArrayBuffer.isView,_uDV=DataView,_utl=_ud(Object.getPrototypeOf(Uint8Array.prototype),'length').get;
-var _uend={};
+var _uend={},_ucap={};
 function _uxs(v){
   var out='',work=0,stk=[];
   function put(s){out+=s;if(out.length>400)throw _uend;}
-  function tick(){if(++work>2000)throw _uend;}
+  function tick(){if(++work>2000)throw _ucap;}
   function tag(x){return (_uN&&_ura(_uhi,_uN,[x]))||(_uW&&_ura(_uhi,_uW,[x]))?_ura(_uts,x,[]):null;}
+  function tview(x){return _uav(x)&&!_ura(_uhi,_uDV,[x]);}
+  // A boxed primitive's own value (JSON unwraps Number/String/Boolean/BigInt
+  // objects), read by the native valueOf so a page valueOf never runs; _uend
+  // when x is not one.
+  function unbox(x){
+    for(var i=0;i<_ubx.length;i++)if(_ura(_uhi,_ubx[i][0],[x])){try{return _ura(_ubx[i][1],x,[]);}catch(e){return _uend;}}
+    return _uend;
+  }
   // false = a value JSON omits (undefined, functions, symbols)
   function val(x){
     var t=typeof x,d,i,n;
@@ -225,15 +238,16 @@ function _uxs(v){
     if(t==='bigint')throw new TypeError('BigInt');
     if(t!=='object')return false;
     if(_ura(_uhi,_uD,[x])){var tv=_ura(_udt,x,[]);put(tv===tv?_uj(_ura(_udi,x,[])):'null');return true;}
-    if(_uU&&_ura(_uhi,_uU,[x])){put(_uj(_ura(_uU.prototype.toJSON,x,[])));return true;}
+    if(_uU&&_ura(_uhi,_uU,[x])){put(_uj(_ura(_uUj,x,[])));return true;}
     var tg=tag(x);if(tg){put(_uj(tg));return true;}
+    var b=unbox(x);if(b!==_uend)return val(b);
     for(i=0;i<stk.length;i++)if(stk[i]===x)throw new TypeError('cyclic');
     stk[stk.length]=x;
     if(_uia(x)){
       put('[');
       for(i=0,n=x.length;i<n;i++){tick();if(i)put(',');d=_ud(x,i);if(!d)put('null');else if(!_ura(_uho,d,['value']))put('"(...)"');else if(!val(d.value))put('null');}
       put(']');
-    }else if(_uav(x)&&!_ura(_uhi,_uDV,[x])){
+    }else if(tview(x)){
       put('{');
       for(i=0,n=_ura(_utl,x,[]);i<n;i++){tick();put((i?',"':'"')+i+'":');val(x[i]);}
       put('}');
@@ -252,13 +266,39 @@ function _uxs(v){
     stk.length--;
     return true;
   }
+  // String(x) as Array.prototype.join builds it: null/undefined/holes read
+  // as '', a cycle as '', other objects as [object Object] without running
+  // their toString.
+  function str(x){
+    var t=typeof x,b,d,i,n,arr;
+    if(x===null||x===undefined)return true;
+    if(t==='function'){put(_ura(_ufs,x,[]));return true;}
+    if(t!=='object'){put(_uS(x));return true;}
+    if(_ura(_uhi,_uD,[x])){put(_ura(_uds,x,[]));return true;}
+    b=unbox(x);if(b!==_uend){put(_uS(b));return true;}
+    arr=_uia(x);
+    if(!arr&&!tview(x)){put('[object Object]');return true;}
+    for(i=0;i<stk.length;i++)if(stk[i]===x)return true;
+    stk[stk.length]=x;
+    for(i=0,n=arr?x.length:_ura(_utl,x,[]);i<n;i++){
+      tick();if(i)put(',');
+      if(!arr)str(x[i]);else{d=_ud(x,i);if(d){if(_ura(_uho,d,['value']))str(d.value);else put('(...)');}}
+    }
+    stk.length--;
+    return true;
+  }
+  function run(f){
+    out='';work=0;stk=[];
+    try{return f(v)?out:undefined;}
+    catch(e){if(e===_uend)return out;if(e===_ucap)return out+'\u2026';throw e;}
+  }
   try{
     if(typeof v==='object'&&v!==null){var tg0=tag(v);if(tg0)return tg0;}
-    return val(v)?out:undefined;
+    return run(val);
   }catch(e){
-    if(e===_uend)return out;
-    // Where JSON.stringify throws (a cycle, a BigInt) the capture always fell back to String(v).
-    return typeof v==='bigint'?String(v):_uia(v)?'[object Array]':'[object Object]';
+    // Where JSON.stringify throws (a BigInt or a cycle inside) the capture
+    // always fell back to String(v).
+    try{return run(str);}catch(e2){return '[object Object]';}
   }
 }
 function _uxp(l,a){try{var m='';for(var i=0;i<a.length&&m.length<400;i++){var v=a[i],s=typeof v==='string'?v:_uxs(v);m+=(i?' ':'')+(s===undefined?'':s.length>400?s.slice(0,400):s);}_uxa.push({l:l,m:m.slice(0,400),t:_unow()});if(_uxa.length>200)_uxa.shift();}catch(e){}}
