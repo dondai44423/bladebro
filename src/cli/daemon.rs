@@ -188,7 +188,7 @@ pub async fn run_daemon() -> Result<()> {
                     _ = wait_for_shutdown_signal() => break,
                     read = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    crate::framing::read_until_limited(&mut reader, b'\n', &mut input, 8 * 1024 * 1024),
+                    crate::framing::read_until_limited(&mut reader, b'\n', &mut input, MAX_REQUEST_BYTES),
                 )
                     => read,
                 };
@@ -519,6 +519,12 @@ async fn launch_browser() -> Result<(Page, Option<crate::browser::Browser>)> {
 }
 
 // ── Per-command settings ────────────────────────────────────────────────
+
+/// Largest request line (newline included) the daemon reads; a longer one
+/// is dropped mid-read. The CLI checks against the same number before
+/// sending, so an oversized command fails with a reason instead.
+#[cfg(unix)]
+pub(super) const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
 /// Settings a command sets through its environment that the DAEMON reads
 /// from its own — inherited from whichever command auto-started it, or the

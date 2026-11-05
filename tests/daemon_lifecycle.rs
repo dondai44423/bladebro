@@ -530,3 +530,47 @@ fn daemon_refuses_a_command_whose_settings_differ() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn oversized_request_fails_with_an_actionable_message() {
+    // The daemon drops a request over 8 MiB mid-read. The CLI then failed
+    // on its socket write with a bare "I/O error: Broken pipe (os error
+    // 32)" — no size, no limit, no way forward (and with no daemon running
+    // it auto-started one first, for nothing). Never by signal: stdout must
+    // still carry the one JSON object.
+    use std::os::unix::process::ExitStatusExt;
+    let home = tmp_home("oversize");
+    let mut daemon = start_daemon_with(&home, agent_cmd(&home));
+    let payload = home.join("steps.json");
+    let pad = "x".repeat(9 * 1024 * 1024);
+    std::fs::write(
+        &payload,
+        format!("[{{\"action\":\"see\",\"pad\":\"{pad}\"}}]"),
+    )
+    .unwrap();
+    let mut cmd = agent_cmd(&home);
+    let out = cmd
+        .args(["--json", "run"])
+        .arg(format!("@{}", payload.display()))
+        .output()
+        .unwrap();
+    let alive = daemon.try_wait().unwrap().is_none();
+    term(&daemon);
+    let _ = wait_exit(&mut daemon, 10);
+    assert_eq!(
+        out.status.signal(),
+        None,
+        "the CLI was killed by a signal: {:?}",
+        out.status
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be one JSON object");
+    let text = value["text"].as_str().unwrap();
+    assert!(
+        text.contains("8 MiB") && text.contains("--no-daemon"),
+        "the error must say why and how to recover: {text}"
+    );
+    assert!(alive, "the daemon must survive an oversized request");
+    let _ = std::fs::remove_dir_all(&home);
+}

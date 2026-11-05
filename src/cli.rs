@@ -46,7 +46,7 @@ use self::args::{
     parse_state_args, parse_vision_args,
 };
 #[cfg(unix)]
-use self::daemon::daemon_request;
+use self::daemon::{daemon_request, MAX_REQUEST_BYTES};
 use self::daemon::{run_daemon, stop_daemon};
 pub use self::help::{command_help_text, help_json, help_text, suggest_command};
 use self::rb::run_rb;
@@ -346,14 +346,34 @@ impl From<BladeError> for DaemonCallError {
     }
 }
 
-/// Send a tool call to the daemon over Unix socket.
+/// The framed request line for one tool call, checked against the daemon's
+/// request limit BEFORE any daemon is reached or started. The daemon drops
+/// an oversized request mid-read, which surfaced here as a bare "I/O error:
+/// Broken pipe (os error 32)" — after auto-starting a daemon for nothing.
+#[cfg(unix)]
+fn daemon_request_line(tool: &str, args: &Value) -> Result<String> {
+    let req = serde_json::to_string(&daemon_request(tool, args))?;
+    // +1: the newline that frames the request counts against the limit.
+    if req.len() + 1 > MAX_REQUEST_BYTES {
+        return Err(BladeError::Other(format!(
+            "this command is {:.1} MiB; the daemon accepts at most {} MiB per command — nothing \
+             was sent. Shrink the payload (e.g. split the steps across calls), or add --no-daemon \
+             to run it one-shot in a fresh browser.",
+            req.len() as f64 / (1024.0 * 1024.0),
+            MAX_REQUEST_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(req)
+}
+
+/// Send a tool call (a [`daemon_request_line`]) to the daemon over Unix socket.
 ///
 /// Hardening: the read has a timeout (`BLADE_CMD_TIMEOUT` seconds, default
 /// 300). Before this, a wedged daemon left the client blocking forever —
 /// an agent's shell call hung until its harness killed it, with no output
 /// and no way to tell "still working" from "dead".
 #[cfg(unix)]
-fn send_to_daemon(tool: &str, args: &Value) -> std::result::Result<ToolResult, DaemonCallError> {
+fn send_to_daemon(req: &str) -> std::result::Result<ToolResult, DaemonCallError> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -374,7 +394,6 @@ fn send_to_daemon(tool: &str, args: &Value) -> std::result::Result<ToolResult, D
         }
     }
 
-    let req = serde_json::to_string(&daemon_request(tool, args)).map_err(BladeError::from)?;
     writeln!(stream, "{req}").map_err(BladeError::from)?;
     stream.flush().map_err(BladeError::from)?;
 
@@ -598,9 +617,11 @@ async fn run_tool(
     if !no_daemon {
         #[cfg(unix)]
         {
+            let req = daemon_request_line(tool, args)?;
+
             // Try the running daemon first.
             if daemon_running() {
-                match send_to_daemon(tool, args) {
+                match send_to_daemon(&req) {
                     Ok(result) => {
                         let code = print_result(&result, json_mode);
                         if code != 0 {
@@ -635,7 +656,7 @@ async fn run_tool(
             }
 
             if daemon_running() {
-                match send_to_daemon(tool, args) {
+                match send_to_daemon(&req) {
                     Ok(result) => {
                         let code = print_result(&result, json_mode);
                         if code != 0 {
