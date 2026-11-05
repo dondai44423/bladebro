@@ -14,7 +14,8 @@ pub struct GqlTemplate {
     pub params: Vec<(String, String)>,
     /// The variables blob the app sent (shape reference for rebuilds).
     pub variables: Value,
-    /// Request headers captured for replay (auth + twitter metadata subset).
+    /// Request headers captured for replay (all the app sent, minus the
+    /// transport headers the browser regenerates - see `XhrEntry::headers`).
     pub headers: Vec<(String, String)>,
 }
 
