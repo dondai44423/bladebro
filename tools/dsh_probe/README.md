@@ -32,6 +32,10 @@ this and a separate DSH run with `BLADE_WEBGL=real` diagnose browser/driver
 boundaries. Diagnostic passes cannot turn the failed required job green.
 An optional script-path argument registers that exact generated injection in a
 second isolated Chrome, then verifies navigation, layout and WebGL readback.
+Further failure-only Mac controls keep the mask while skipping hardware
+detection, and select the native Metal backend. `BLADE_DSH_FAILURE_DIR` enables
+bounded desktop screenshots and samples of owned MCP child processes before
+cleanup; these fixture diagnostics are preserved as CI artifacts.
 
 Run `node tools/dsh_probe/package.mjs` for portable package/resolver boundaries
 (all five mapped platforms plus unsupported platforms, paths, config and missing

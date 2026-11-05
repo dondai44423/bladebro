@@ -40,6 +40,22 @@ const diagnostic = value => JSON.stringify(value, (key, value) =>
     : value);
 function check(label, value) {
   if (!value && lastCall) console.error('Last tool call:', diagnostic(lastCall));
+  if (!value && process.platform === 'darwin' && process.env.BLADE_DSH_FAILURE_DIR) {
+    const dir = process.env.BLADE_DSH_FAILURE_DIR;
+    try {
+      childProcess.execFileSync('/usr/sbin/screencapture', ['-x', join(dir, `failure-${process.pid}.png`)], { timeout: 5000 });
+    } catch (error) { console.error('Native screenshot unavailable:', error.message); }
+    // Sample only direct children of the owned MCP fixture processes.
+    // Native modal dialogs and renderer stalls can be invisible to CDP.
+    for (const child of children.filter(child => child.exitCode === null && child.signalCode === null)) {
+      try {
+        const pids = childProcess.execFileSync('pgrep', ['-P', String(child.pid)], { encoding: 'utf8', timeout: 2000 });
+        for (const pid of pids.trim().split(/\s+/).filter(pid => /^\d+$/.test(pid))) {
+          childProcess.execFileSync('/usr/bin/sample', [pid, '1', '1', '-file', join(dir, `sample-${pid}.txt`)], { timeout: 5000 });
+        }
+      } catch (error) { console.error('Owned browser sample unavailable:', error.message); }
+    }
+  }
   assert.ok(value, label); checks++; console.log(`PASS ${label}`);
 }
 async function until(predicate) {

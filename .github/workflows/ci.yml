@@ -126,6 +126,8 @@ jobs:
           export DSH_RUNTIME=target/dsh-runtime
           export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
           export BLADE_DUMP_INJECT="$RUNNER_TEMP/bladebro-inject.js"
+          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
+          mkdir -p "$BLADE_DSH_FAILURE_DIR"
           export BLADE_DBG_WORKERS=1
           export NAV_TIMING=1
           node tools/dsh_probe/run.mjs
@@ -147,7 +149,42 @@ jobs:
           DSH_RUNTIME: target/dsh-runtime
         run: |
           export BLADEBRO="$PWD/target/release/bladebro"
+          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
           node tools/dsh_probe/run.mjs
+
+      - name: Diagnose macOS mask without hardware detection
+        if: failure() && startsWith(matrix.os, 'macos-')
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BLADE_WEBGL: spoof
+          BLADE_GPU: apple
+          DSH_RUNTIME: target/dsh-runtime
+        run: |
+          export BLADEBRO="$PWD/target/release/bladebro"
+          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
+          node tools/dsh_probe/run.mjs
+
+      - name: Diagnose macOS native Metal backend
+        if: failure() && startsWith(matrix.os, 'macos-')
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BLADE_CHROME_FLAGS: --use-angle=metal
+          DSH_RUNTIME: target/dsh-runtime
+        run: |
+          export BLADEBRO="$PWD/target/release/bladebro"
+          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
+          node tools/dsh_probe/run.mjs
+
+      - name: Preserve macOS native failure evidence
+        if: failure() && startsWith(matrix.os, 'macos-')
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-native-failure
+          path: ${{ runner.temp }}/bladebro-dsh-failure
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Authenticated cross-origin downloads — native browser
         timeout-minutes: 10
