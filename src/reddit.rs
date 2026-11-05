@@ -823,6 +823,30 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_is_the_429_status_not_a_429_in_a_path() {
+        // Sweep errors carry the request path, and base36 post/comment ids
+        // (or a subreddit name) can spell "429" or "throttled".
+        for plain in [
+            "reddit: GET /comments/1ab429c/comment/k2xq.json?limit=500&raw_json=1&sort=confidence → HTTP 500",
+            "reddit: GET /r/throttled/comments/1wn7jni/comment/k2xq.json?limit=500&raw_json=1&sort=new → HTTP 502",
+            "reddit: non-JSON response from /comments/1x429/comment/a.json (expected value at line 1 column 1)",
+        ] {
+            assert!(!is_rate_limit(&BladeError::Other(plain.into())), "{plain}");
+        }
+        for limited in [
+            "reddit: rate limited (HTTP 429)",
+            "rate limited (HTTP 429)",
+            "reddit: empty response (throttled?)",
+            "empty response (throttled?)",
+        ] {
+            assert!(
+                is_rate_limit(&BladeError::Other(limited.into())),
+                "{limited}"
+            );
+        }
+    }
+
+    #[test]
     fn gate_classification_is_case_insensitive() {
         assert!(
             classify_gate_body("/x.json", "YOU'VE BEEN BLOCKED BY Network Security.").is_some()
