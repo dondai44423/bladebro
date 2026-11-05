@@ -70,18 +70,32 @@ pub(crate) fn find_chrome() -> Result<String> {
         }
     }
 
-    if std::path::Path::new("/nix/store").exists() {
+    let nix = std::path::Path::new("/nix/store").exists();
+    if nix {
         if let Some(path) = find_in_nix_store() {
             return Ok(path);
         }
+    }
+
+    // Flatpak exports come after every native install (SteamOS and other
+    // read-only-root distros have no other way to add a browser), but before
+    // nix-shell, which may build or download a whole Chromium.
+    #[cfg(target_os = "linux")]
+    if let Some(path) = super::flatpak::find_flatpak_browser(&|key| std::env::var(key).ok()) {
+        return Ok(path);
+    }
+
+    if nix {
         if let Some(path) = find_via_nix_shell() {
             return Ok(path);
         }
     }
 
-    Err(BladeError::Other(
-        "Chrome/Chromium not found. Set CHROME_PATH env var, add chromium to PATH, or install Chrome.".into(),
-    ))
+    Err(BladeError::Other(if cfg!(target_os = "linux") {
+        "Chrome/Chromium not found. Set CHROME_PATH env var, add chromium to PATH, or install Chrome (read-only systems such as SteamOS: `flatpak install flathub org.chromium.Chromium`).".into()
+    } else {
+        "Chrome/Chromium not found. Set CHROME_PATH env var, add chromium to PATH, or install Chrome.".into()
+    }))
 }
 
 fn common_paths() -> Vec<&'static str> {
@@ -133,7 +147,7 @@ pub(super) fn find_in_path(cmd: &str) -> Option<String> {
     None
 }
 
-fn is_executable(path: &std::path::Path) -> bool {
+pub(super) fn is_executable(path: &std::path::Path) -> bool {
     if !path.is_file() {
         return false;
     }

@@ -734,7 +734,9 @@ fn find_chrome_path() -> Option<String> {
 
 fn chrome_install_hint() -> String {
     if cfg!(target_os = "linux") {
-        "Install: sudo pacman -S chromium (Arch) / sudo apt install chromium-browser (Debian) / nix-shell -p chromium (Nix)".into()
+        // Read-only roots (SteamOS, Bazzite, Silverblue) cannot take a
+        // package-manager install; Flatpak exports are discovered.
+        "Install: sudo pacman -S chromium (Arch) / sudo apt install chromium-browser (Debian) / nix-shell -p chromium (Nix) / flatpak install flathub org.chromium.Chromium (SteamOS, Bazzite, Silverblue: found automatically), or set CHROME_PATH".into()
     } else if cfg!(target_os = "macos") {
         "Install: brew install --cask google-chrome".into()
     } else if cfg!(windows) {

@@ -4,7 +4,8 @@
 //! The "one binary, works out of the box" promise (D2/D8): Bladebro finds
 //! Chrome itself — no manual `--remote-debugging-port` setup. On NixOS it
 //! scans the nix store via `fd`; on mainstream distros it checks PATH and
-//! common install paths; everywhere it respects `CHROME_PATH`.
+//! common install paths, then Flatpak exports (read-only-root distros such as
+//! SteamOS); everywhere it respects `CHROME_PATH`.
 //!
 //! Stealth mode: if Xvfb (virtual X display) is available, Chrome runs in
 //! headful mode on a virtual display. This eliminates most headless-detection
@@ -15,7 +16,8 @@
 //! shutdown/drop contract; `flags` builds the command line, `probe` runs the
 //! GL healthcheck, `display` owns the Xvfb + WM layer (Linux), `launch` is the
 //! launch ladder + lane dispatch, `pipe` is the pipe-transport launch, and
-//! `discover` finds Chrome/Xvfb on this system.
+//! `discover` finds Chrome/Xvfb on this system (`flatpak`: Flatpak browsers,
+//! Linux).
 
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -29,6 +31,8 @@ mod discover;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod display;
 mod flags;
+#[cfg(target_os = "linux")]
+mod flatpak;
 mod launch;
 mod pipe;
 mod probe;
