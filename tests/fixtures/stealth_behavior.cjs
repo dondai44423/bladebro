@@ -109,12 +109,15 @@ function mockWindow() {
 // The exact assembled page script (written by the inject.rs lib test).
 async function page() {
   const { ctx, g } = mockWindow();
+  class SharedWorker {}
+  g.SharedWorker = SharedWorker;
   // The tail's cdc_ watcher is the last statement of the script: its
   // observe() call proves every conditional segment before it ran through.
   let observed = 0;
   g.MutationObserver = class { observe() { observed++; } disconnect() {} };
   vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), ctx);
   assert.equal(observed, 1, 'the script ran through to the tail');
+  assert.equal(g.SharedWorker, SharedWorker, 'SharedWorker must stay the native constructor');
   console.log('assembled page script checks passed');
 }
 const scenarios = { permissions, media, page };

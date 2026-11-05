@@ -360,12 +360,21 @@ fn assemble_page_script(plan: &ScriptPlan<'_>) -> String {
     }
     if let Some(profile) = plan.gl {
         script.push_str(&build_gl_spoof(profile));
-        // SharedWorker constructor wrapper (issue #8): CDP doesn't emit
-        // attachedToTarget for shared_worker targets, so we intercept the
-        // constructor on the main page and inject GL spoof via blob URL.
-        if let Some(sw) = sharedworker_wrapper(plan.locale) {
-            script.push_str(&sw);
-        }
+        // No SharedWorker constructor wrapper. The old blob: wrapper
+        // (<spoof> + locale patch + importScripts(url)) broke the worker
+        // itself: module workers died (importScripts throws there), every
+        // construction got its own instance (a SharedWorker is keyed by its
+        // script URL, and a blob: URL is unique per document — so the
+        // cross-tab/cross-frame hub a SharedWorker exists for never formed),
+        // and relative importScripts/fetch inside it resolved against blob:.
+        // Correctness wins: shared workers run native. Known mask gap: they
+        // report the real GL renderer and, with BLADE_LOCALE, the real
+        // WorkerNavigator.language(s), while the page and dedicated workers
+        // report the spoofed values. Page-level auto-attach never reports
+        // shared_worker targets (Chromium 156); browser-level
+        // Target.setAutoAttach with waitForDebuggerOnStart does, early enough
+        // to run worker_gl_spoof before the worker script, which would close
+        // the gap without a wrapper — an injection-architecture change.
     }
     if plan.media {
         script.push_str(MEDIA_PATCH);
@@ -586,70 +595,6 @@ fn worker_locale_patch(locale: Option<&str>) -> String {
     }
 }
 
-/// SharedWorker constructor wrapper for the main page injection.
-/// CDP doesn't emit Target.attachedToTarget for shared_worker targets, so we
-/// intercept the SharedWorker constructor and inject the GL spoof via a blob
-/// URL: <gl_spoof + locale patch + importScripts(absolute_url)>. The URL is
-/// resolved against the document first — relative paths cannot resolve inside
-/// a blob: worker's scope (importScripts throws), which is exactly how
-/// CreepJS's shared-worker tier was broken. A Proxy construct trap keeps the
-/// interface object native-shaped (toString, own keys, prototype forwarding)
-/// — the old plain-wrapper function was itself a differential. Any
-/// construction failure falls back to the untouched constructor. Returns
-/// None when GL spoof is not active.
-pub fn sharedworker_wrapper(locale: Option<&str>) -> Option<String> {
-    if !GL_SPOOFED.load(Ordering::Relaxed) {
-        return None;
-    }
-    let profile = get_gpu_profile();
-    let worker_code = build_worker_gl_spoof(&profile, locale);
-    // Escape for embedding in a JS string literal.
-    let escaped: String = worker_code
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    Some(format!(
-        r#"
-// SharedWorker GL spoof — CDP doesn't emit attachedToTarget for shared_worker.
-try{{
-  var _swCode='{escaped}';
-  var _OrigSW=window.SharedWorker;
-  if(_OrigSW){{
-    var _swh={{construct:function(t,a,nt){{
-      try{{
-        var url=a[0],options=a[1];
-        try{{url=new URL(url, document.baseURI).href;}}catch(e){{}}
-        var full=_swCode+'\nimportScripts('+JSON.stringify(url)+')';
-        var blob=new Blob([full],{{type:'application/javascript'}});
-        var blobUrl=URL.createObjectURL(blob);
-        var sw=Reflect.construct(t,[blobUrl,options],nt);
-        setTimeout(function(){{URL.revokeObjectURL(blobUrl);}},10000);
-        return sw;
-      }}catch(e){{
-        return Reflect.construct(t,a,nt);
-      }}
-    }}}};
-    var _SWProxy=new Proxy(_OrigSW,_swh);
-    // 4.6.0 shield: a bare callable proxy fails the cyclic-prototype torture
-    // (RangeError where a native constructor throws
-    // TypeError('Cyclic __proto__ value') at setPrototypeOf); refuse the cycle
-    // explicitly, exactly like the shared mask helpers do.
-    _swh.setPrototypeOf=function(t,p){{
-      if(p!==null&&(typeof p==='object'||typeof p==='function')){{
-        var q=p,i=0;
-        while(q&&i++<256){{if(q===_SWProxy)throw new TypeError('Cyclic __proto__ value');q=Object.getPrototypeOf(q);}}
-      }}
-      return Reflect.setPrototypeOf(t,p);
-    }};
-    Object.defineProperty(window,'SharedWorker',{{value:_SWProxy,writable:true,configurable:true,enumerable:false}});
-  }}
-}}catch(e){{}}
-"#,
-        escaped = escaped
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,11 +654,14 @@ mod tests {
     }
 
     // Every segment at once, GL spoof on (the software-GL / Xvfb default):
-    // the assembled script must run top to bottom.
+    // the script must run top to bottom and leave SharedWorker native — a
+    // blob: wrapper broke module workers, cross-document sharing and
+    // relative URLs inside the worker.
     #[test]
-    fn assembled_page_script_runs_to_the_tail() {
+    fn assembled_page_script_runs_and_leaves_shared_worker_native() {
         // The production state when the plan carries a GL profile: `apply`
-        // stores the decision before assembling, and GL-gated code reads it.
+        // stores the decision before assembling, and the old wrapper was gated
+        // on this flag — without it, re-adding that wrapper would pass here.
         // Nothing else in the lib tests reads it.
         GL_SPOOFED.store(true, Ordering::Relaxed);
         let profile = gpu::test_profile();
