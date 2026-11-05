@@ -316,49 +316,12 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             }
             validate_session_name(name)?;
 
-            cdp.enable("Network").await?;
-            let origin_res = cdp
-                .send(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": "location.origin",
-                        "returnByValue": true,
-                    })),
-                )
-                .await?;
-            let origin = origin_res
-                .get("result")
-                .and_then(|r| r.get("value"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            // Error pages (chrome-error://) and untouched about:blank report
-            // a literal "null" origin.
-            if origin.is_empty() || origin == "null" {
-                return Err(BladeError::Other(
-                    "cannot save a session without an open page: navigate to a site first so cookies and storage have an origin".into(),
-                ));
-            }
-            let res = cdp.send("Network.getCookies", Some(json!({}))).await?;
-            let cookies = res
-                .get("cookies")
-                .filter(|v| v.is_array())
-                .cloned()
-                .ok_or_else(|| BladeError::Other("cookie snapshot missing cookie array".into()))?;
-            // Save structured entries, never the display representation:
-            // values may contain '=' or newlines.
-            let ls_result = cdp.send("Runtime.evaluate", Some(json!({
-                "expression": "Object.keys(localStorage).map(k=>({key:k,value:localStorage.getItem(k)}))",
-                "returnByValue": true,
-            }))).await?;
-            let ls_entries: Vec<StorageEntry> =
-                serde_json::from_value(extract_eval_value(&ls_result)?)?;
-            let session =
-                json!({ "cookies": cookies, "localStorage": ls_entries, "origin": origin });
+            let captured = capture_session(cdp).await?;
             let dir = crate::platform::blade_dir().join("sessions");
             crate::platform::secure_create_dir_all(&dir)
                 .map_err(|e| BladeError::Other(format!("cannot create sessions dir: {e}")))?;
             let path = dir.join(format!("{name}.json"));
-            let bytes = serde_json::to_vec_pretty(&session)?;
+            let bytes = serde_json::to_vec_pretty(&captured.session)?;
             if bytes.len() > 8 * 1024 * 1024 {
                 return Err(BladeError::Other(
                     "session exceeds 8 MiB; existing snapshot preserved".into(),
@@ -366,12 +329,16 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             }
             crate::platform::secure_write_file(&path, &bytes)
                 .map_err(|e| BladeError::Other(format!("cannot write session: {e}")))?;
-            let cookie_count = cookies.as_array().map(|a| a.len()).unwrap_or(0);
+            let skipped = if captured.partitioned > 0 {
+                format!(" ({} partitioned, skipped)", captured.partitioned)
+            } else {
+                String::new()
+            };
             Ok(format!(
-                "✓ saved session '{}': {} cookies, {} localStorage entries\n  → {}",
+                "✓ saved session '{}': {} cookies{skipped}, {} localStorage entries\n  → {}",
                 name,
-                cookie_count,
-                ls_entries.len(),
+                captured.cookies,
+                captured.storage,
                 path.display()
             ))
         }
@@ -405,6 +372,68 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
     }
 }
 
+/// What `state save` writes, plus the counts its verdict reports.
+struct CapturedSession {
+    session: Value,
+    cookies: usize,
+    partitioned: usize,
+    storage: usize,
+}
+
+/// Read the current page's cookies + localStorage into a session document.
+async fn capture_session(cdp: &CdpSession) -> Result<CapturedSession> {
+    cdp.enable("Network").await?;
+    let origin_res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "location.origin",
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    let origin = origin_res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // Error pages (chrome-error://) and untouched about:blank report
+    // a literal "null" origin.
+    if origin.is_empty() || origin == "null" {
+        return Err(BladeError::Other(
+            "cannot save a session without an open page: navigate to a site first so cookies and storage have an origin".into(),
+        ));
+    }
+    let res = cdp.send("Network.getCookies", Some(json!({}))).await?;
+    let all = res
+        .get("cookies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| BladeError::Other("cookie snapshot missing cookie array".into()))?;
+    // getCookies includes partitioned (CHIPS) cookies, which `state load`
+    // cannot set as ordinary cookies: saving one made the whole session
+    // unloadable. Leave them out, as the login snapshot does, and count them.
+    let cookies: Vec<&Value> = all.iter().filter(|c| !cookie_partitioned(c)).collect();
+    let partitioned = all.len() - cookies.len();
+    // Save structured entries, never the display representation:
+    // values may contain '=' or newlines.
+    let ls_result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "Object.keys(localStorage).map(k=>({key:k,value:localStorage.getItem(k)}))",
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    let ls_entries: Vec<StorageEntry> = serde_json::from_value(extract_eval_value(&ls_result)?)?;
+    Ok(CapturedSession {
+        storage: ls_entries.len(),
+        cookies: cookies.len(),
+        session: json!({ "cookies": cookies, "localStorage": ls_entries, "origin": origin }),
+        partitioned,
+    })
+}
+
 /// A named session file (`state save`), as read back by `state load`.
 #[derive(Deserialize)]
 struct SavedSession {
@@ -422,13 +451,19 @@ async fn restore_session(cdp: &CdpSession, name: &str, session: &SavedSession) -
     // accepted by setCookie but never stored, so requiring it at readback
     // failed every later load after some cookies were already set. Skip it
     // in both places, as the login sidecar restore does, and say so.
+    // Partitioned cookies in sessions saved before `state save` dropped
+    // them cannot be set as ordinary cookies; they are skipped the same way.
     let now = unix_now()?;
-    let live: Vec<&Value> = session
+    let partitioned = session
         .cookies
         .iter()
+        .filter(|c| cookie_partitioned(c))
+        .count();
+    let unpartitioned = || session.cookies.iter().filter(|c| !cookie_partitioned(c));
+    let live: Vec<&Value> = unpartitioned()
         .filter(|c| !cookie_expired(c, now))
         .collect();
-    let expired = session.cookies.len() - live.len();
+    let expired = unpartitioned().count() - live.len();
     // Validate every cookie and the origin before changing browser state.
     let cookies = live
         .iter()
@@ -482,10 +517,15 @@ async fn restore_session(cdp: &CdpSession, name: &str, session: &SavedSession) -
     for entry in &session.storage {
         set_storage(cdp, "localStorage", &entry.key, &entry.value).await?;
     }
-    let skipped = if expired > 0 {
-        format!(" ({expired} expired, skipped)")
-    } else {
+    let skipped: Vec<String> = [(expired, "expired"), (partitioned, "partitioned")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, kind)| format!("{n} {kind}"))
+        .collect();
+    let skipped = if skipped.is_empty() {
         String::new()
+    } else {
+        format!(" ({}, skipped)", skipped.join(", "))
     };
     Ok(format!(
         "✓ loaded session '{}': {} cookies{skipped}, {} localStorage entries — reload to apply",
@@ -493,6 +533,11 @@ async fn restore_session(cdp: &CdpSession, name: &str, session: &SavedSession) -
         cookies.len(),
         session.storage.len()
     ))
+}
+
+/// A partitioned (CHIPS) cookie: its jar is keyed by a top-level site.
+fn cookie_partitioned(cookie: &Value) -> bool {
+    cookie.get("partitionKey").is_some_and(|k| !k.is_null())
 }
 
 /// A persistent cookie whose expiry has passed. Session cookies report
@@ -730,5 +775,47 @@ mod cookie_jar_tests {
         assert!(out.contains("1 cookies"), "{out}");
         assert!(out.contains("1 expired"), "{out}");
         assert_eq!(jar.names(), ["sid"]);
+    }
+
+    fn partitioned(name: &str) -> Value {
+        let mut c = cookie(name, "127.0.0.1", -1.0);
+        c["secure"] = json!(true);
+        c["partitionKey"] =
+            json!({"topLevelSite": "http://127.0.0.1", "hasCrossSiteAncestor": false});
+        c
+    }
+
+    /// `Network.getCookies` returns partitioned (CHIPS) cookies, which a
+    /// restore cannot set as ordinary cookies: a session that captured one
+    /// saved fine and then could never load. Save leaves them out and says
+    /// so; a session file written before that still loads without them.
+    #[tokio::test]
+    async fn partitioned_cookies_neither_poison_a_save_nor_fail_a_load() {
+        let (cdp, _jar) = fake_jar::start(
+            ORIGIN,
+            vec![partitioned("chip"), cookie("plain", "127.0.0.1", -1.0)],
+        )
+        .await;
+        let captured = capture_session(&cdp).await.unwrap();
+        let names: Vec<&str> = captured.session["cookies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert_eq!(names, ["plain"], "partitioned cookie must not be saved");
+        assert_eq!(captured.cookies, 1);
+        assert_eq!(captured.partitioned, 1);
+
+        let (cdp, jar) = fake_jar::start(ORIGIN, vec![]).await;
+        let legacy = session(vec![
+            partitioned("chip"),
+            cookie("plain", "127.0.0.1", -1.0),
+        ]);
+        let out = restore_session(&cdp, "c1", &legacy)
+            .await
+            .expect("a partitioned cookie must not fail the load");
+        assert!(out.contains("1 partitioned"), "{out}");
+        assert_eq!(jar.names(), ["plain"]);
     }
 }
