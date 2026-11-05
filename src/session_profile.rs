@@ -880,6 +880,50 @@ mod tests {
     }
 
     #[test]
+    fn copy_keeps_files_nested_deeper_than_six_levels() {
+        // A real profile's extension packages nest well past six levels
+        // (uBlock Origin ships lib/codemirror/addon/<group>/*.js); a clone
+        // that silently drops those files breaks the user's extensions.
+        let root = std::env::temp_dir().join(format!("bladebro-test-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        let rel = "Default/Extensions/cjpalhdlnbpafiamejdnhcphjbkeiagm/1.62.0_0/lib/codemirror/addon/fold/foldcode.js";
+        std::fs::create_dir_all(src.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(src.join(rel), b"// addon").unwrap();
+
+        copy_profile(&src, &dst);
+
+        let copied = dst.join(rel).is_file();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(copied, "{rel} must survive the profile copy");
+    }
+
+    #[test]
+    fn copy_reports_what_the_depth_bound_cuts() {
+        let root =
+            std::env::temp_dir().join(format!("bladebro-test-too-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        let mut leaf = src.clone();
+        for i in 0..=super::copy::MAX_COPY_DEPTH {
+            leaf.push(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("deepest"), b"x").unwrap();
+        std::fs::write(src.join("shallow"), b"x").unwrap();
+
+        let cut = copy_profile(&src, &dst);
+
+        let shallow = dst.join("shallow").is_file();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            cut, 1,
+            "the cut directory must be counted, not dropped silently"
+        );
+        assert!(shallow);
+    }
+
+    #[test]
     fn copy_tolerates_missing_src() {
         let src = std::env::temp_dir().join("bladebro-test-nonexistent");
         let dst = std::env::temp_dir().join("bladebro-test-copy-dst2");
