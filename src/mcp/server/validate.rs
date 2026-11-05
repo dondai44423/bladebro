@@ -351,6 +351,25 @@ pub(super) fn see(args: &Value) -> Result<()> {
             "changes=true is a model delta read; omit extract/logs/artifact/scope/find".into(),
         ));
     }
+    // handle_see answers mode/logs BEFORE extract and extract before
+    // find/scope, so these pairs silently dropped one side (format=json then
+    // came back as markdown/log text). One read per call; say which.
+    if nonempty(args, "extract") {
+        let mode = args.get("mode").and_then(Value::as_str).unwrap_or("");
+        if matches!(mode, "model" | "content" | "outline") {
+            return Err(BladeError::Usage(format!(
+                "extract= and mode={mode} are separate reads; drop mode for the extract, or split into two see calls"
+            )));
+        }
+        if let Some(key) = ["logs", "find", "scope"]
+            .into_iter()
+            .find(|k| nonempty(args, k))
+        {
+            return Err(BladeError::Usage(format!(
+                "extract= and {key}= are separate reads and one would be ignored; split into two see calls"
+            )));
+        }
+    }
     if args.get("format").and_then(Value::as_str) == Some("json")
         && !nonempty(args, "extract")
         && !nonempty(args, "artifact")
@@ -732,6 +751,35 @@ mod tests {
             act(&json!({"action":"upload","selector":"input[type=file]","text":"cv.pdf"})).is_ok()
         );
         assert!(act(&json!({"action":"upload","ref":"e3","text":"cv.pdf"})).is_ok());
+    }
+
+    #[test]
+    fn extract_cannot_combine_with_a_read_that_replaces_or_drops_it() {
+        // handle_see answers mode/logs before extract, and extract before
+        // find/scope: format=json returned markdown, and find/scope vanished.
+        for args in [
+            json!({"mode":"content","extract":"auto","format":"json"}),
+            json!({"mode":"outline","extract":"links","format":"json"}),
+            json!({"mode":"model","extract":"auto"}),
+            json!({"logs":"console","extract":"auto","format":"json"}),
+            json!({"find":"Price","extract":"auto"}),
+            json!({"scope":"e5","extract":"links"}),
+        ] {
+            assert!(see(&args).is_err(), "{args}");
+        }
+        let err = act(&json!({"action":"extract","find":"Price"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("find"), "{err}");
+        for ok in [
+            json!({"extract":"auto","format":"json"}),
+            json!({"mode":"extract","extract":"auto"}),
+            json!({"mode":"content","scope":"e5"}),
+            json!({"logs":"network"}),
+            json!({"find":"Price"}),
+        ] {
+            assert!(see(&ok).is_ok(), "{ok}");
+        }
     }
 
     #[test]
