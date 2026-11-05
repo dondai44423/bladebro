@@ -479,6 +479,41 @@ pub async fn run_interception(
 }
 
 impl InterceptState {
+    /// Switch to the `mask` block classes, toggling the CDP Fetch domain on
+    /// the off/on edges so interception costs nothing while blocking is off.
+    ///
+    /// The mask is stored before the toggle (the first requests a fresh
+    /// Fetch.enable pauses must already see it) and rolled back if the
+    /// toggle fails. The stored mask is both what `state block get` reports
+    /// and what decides whether the next call toggles: left in place after
+    /// a failed Fetch.enable it reported blocking that was not happening,
+    /// and every later call (including navigate's stored per-domain config)
+    /// saw a non-zero mask and never retried the enable.
+    pub async fn apply_rules(&self, cdp: &CdpSession, mask: u32) -> crate::error::Result<u32> {
+        let was = self.rules();
+        self.set_rules(mask);
+        let toggled = if mask != 0 && was == 0 {
+            // Enable interception: pause every request so we can decide.
+            cdp.send(
+                "Fetch.enable",
+                Some(serde_json::json!({ "patterns": [{ "urlPattern": "*" }] })),
+            )
+            .await
+            .map(drop)
+        } else if mask == 0 && was != 0 {
+            // Drain anything still paused, then stop intercepting.
+            self.drain_pending_requests(cdp).await;
+            cdp.send("Fetch.disable", None).await.map(drop)
+        } else {
+            Ok(())
+        };
+        if let Err(e) = toggled {
+            self.set_rules(was);
+            return Err(e);
+        }
+        Ok(mask)
+    }
+
     /// Re-allow any still-paused requests (used before Fetch.disable
     /// so nothing is left hung). Best-effort.
     pub async fn drain_pending_requests(&self, cdp: &CdpSession) {
