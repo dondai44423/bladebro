@@ -774,8 +774,11 @@ USAGE
   bladebro stop
 
 Graceful: flushes logins + domain knowledge, kills Chrome, removes the
-socket. Idempotent — exit 0 even when nothing is running. If the daemon is
-wedged, falls back to terminating the pid from the pid file.
+socket. Idempotent — exit 0 even when nothing is running. The daemon runs
+one command at a time: if it does not answer within 10s (busy with a long
+command, or wedged), stop sends SIGTERM to the pid from the pid file — the
+running command is cancelled (outcome unknown) and Chrome still closes
+gracefully; SIGKILL follows if it is still alive 10s later.
 "#
         }
         "help" => {

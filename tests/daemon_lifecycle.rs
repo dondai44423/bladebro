@@ -14,7 +14,8 @@
 //! "Broken pipe" error.
 //!
 //! Plus the busy daemon: a SIGTERM that lands while a request is in flight
-//! must not be lost.
+//! must not be lost, and `bladebro stop` must still stop a daemon that is
+//! too busy (or wedged) to answer.
 //!
 //! Subprocess-based with an isolated BLADE_HOME — no Chrome involved (the
 //! daemon binds lazily; Chrome starts on the first tool call only). Tests
@@ -646,4 +647,53 @@ fn sigterm_during_a_request_is_not_lost() {
         reply.contains("\"ok\":false"),
         "the in-flight request still gets its answer: {reply:?}"
     );
+}
+
+#[test]
+fn stop_terminates_a_busy_daemon() {
+    let home = tmp_home("stop-busy");
+    let mut daemon = start_daemon(&home);
+    let sock = home.join("cli.sock");
+    // The daemon serves one connection at a time and waits up to 30 s for
+    // each request line: two silent clients keep it busy for a minute, so
+    // the stop request queues behind them and gets no answer in time.
+    let _first = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    let _second = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    let begun = Instant::now();
+    let stop = Command::new(bin())
+        .args(["--json", "stop"])
+        .env("BLADE_HOME", &home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Reap the daemon the moment it exits, as init does for a real one: a
+    // zombie child of this test would still look alive to stop's pid check.
+    let status = wait_exit(&mut daemon, 40);
+    if status.is_none() {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+    }
+    let output = stop.wait_with_output().unwrap();
+    let took = begun.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let sock_left = sock.exists();
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(
+        output.status.success(),
+        "stop on a busy daemon failed after {took:?}: {stdout}{stderr}"
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stop stdout must be one JSON object");
+    assert!(
+        value["text"].as_str().unwrap_or("").contains("terminated"),
+        "stop must say it terminated the daemon: {value}"
+    );
+    let status = status.expect("stop returned but the daemon is still running");
+    assert!(
+        status.success(),
+        "SIGTERM must still tear the daemon down gracefully: {status:?}"
+    );
+    assert!(!sock_left, "the socket must be gone after stop");
 }

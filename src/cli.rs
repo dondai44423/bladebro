@@ -407,9 +407,10 @@ fn send_to_daemon(req: &str) -> std::result::Result<ToolResult, DaemonCallError>
                 || e.kind() == std::io::ErrorKind::TimedOut =>
         {
             return Err(BladeError::Other(format!(
-                "no daemon response after {timeout_secs}s — the command may still be running.\n\
-                 Check with 'bladebro state tabs', cancel with 'bladebro stop', or raise the\n\
-                 client limit with BLADE_CMD_TIMEOUT=<seconds>."
+                "no daemon response after {timeout_secs}s — the command may still be running\n\
+                 (the daemon runs one command at a time; others queue behind it). Raise the\n\
+                 client limit with BLADE_CMD_TIMEOUT=<seconds>, or cancel it with 'bladebro stop'\n\
+                 (terminates the daemon; Chrome restarts on the next command, page state reset)."
             ))
             .into());
         }

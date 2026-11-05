@@ -718,51 +718,77 @@ fn looks_like_bladebro(pid: i32) -> bool {
     }
 }
 
+/// How long `stop` waits for the daemon to answer before terminating it.
+/// The daemon serves one connection at a time, so the stop request queues
+/// behind whatever it is running; this lets a short command finish first.
+#[cfg(unix)]
+const STOP_ANSWER_SECS: u64 = 10;
+
 /// Stop the daemon: graceful over the socket; idempotent when nothing runs.
 ///
 /// Reliability: if the socket is gone but the pid file says a daemon is
 /// alive (wedged, or SIGKILLed mid-cleanup), terminate it — otherwise
 /// `stop` would lie "not running" while an orphan Chrome kept running.
+/// A daemon that is still bound but does not answer within
+/// `STOP_ANSWER_SECS` (busy with a long command, or wedged) gets the same
+/// SIGTERM: the daemon cancels the command in flight and still tears down
+/// gracefully.
 #[cfg(unix)]
 pub async fn stop_daemon() -> Result<String> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
     let path = socket_path();
+    let mut unanswered = false;
 
     // Graceful path: a live daemon answers the stop command itself
     // (it flushes logins + knowledge before acknowledging).
     if let Ok(mut stream) = UnixStream::connect(&path) {
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(STOP_ANSWER_SECS)));
         writeln!(stream, "{{\"tool\":\"stop\"}}")?;
         stream.flush()?;
         let mut resp = String::new();
-        stream.read_to_string(&mut resp)?;
-        let response: Value = serde_json::from_str(resp.trim())?;
-        if response.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(BladeError::Other(
-                "daemon did not acknowledge shutdown".into(),
-            ));
-        }
-        // Wait for the daemon to finish teardown — it removes the socket
-        // file last. Without this, an immediate second `stop` could connect
-        // to the dying daemon's still-bound socket and report "stopped"
-        // again instead of "not running".
-        // Browser close can use two 2s CDP deadlines, a 1s ownership check,
-        // and a 3s process grace; allow time for the profile copy as well.
-        for _ in 0..100 {
-            if !path.exists() {
-                break;
+        match stream.read_to_string(&mut resp) {
+            Ok(_) => {
+                let response: Value = serde_json::from_str(resp.trim())?;
+                if response.get("ok").and_then(Value::as_bool) != Some(true) {
+                    return Err(BladeError::Other(
+                        "daemon did not acknowledge shutdown".into(),
+                    ));
+                }
+                // Wait for the daemon to finish teardown — it removes the socket
+                // file last. Without this, an immediate second `stop` could connect
+                // to the dying daemon's still-bound socket and report "stopped"
+                // again instead of "not running".
+                // Browser close can use two 2s CDP deadlines, a 1s ownership check,
+                // and a 3s process grace; allow time for the profile copy as well.
+                for _ in 0..100 {
+                    if !path.exists() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                if path.exists() {
+                    return Err(BladeError::Other("daemon acknowledged stop but cleanup is still running; check again before restarting".into()));
+                }
+                return Ok("daemon stopped".into());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // No answer in time: the request is still queued behind the
+            // daemon's current one, or the daemon is wedged. Bubbling the
+            // read timeout up failed `stop` with "Resource temporarily
+            // unavailable" while the queued stop fired later anyway.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                unanswered = true;
+            }
+            Err(e) => return Err(e.into()),
         }
-        if path.exists() {
-            return Err(BladeError::Other("daemon acknowledged stop but cleanup is still running; check again before restarting".into()));
-        }
-        return Ok("daemon stopped".into());
     }
 
-    // No socket. A daemon process may still linger — check the pid file.
+    // No socket, or no answer: a daemon process may still linger — check
+    // the pid file.
     if let Some(pid) = read_pid_file() {
         if process_alive(pid) && looks_like_bladebro(pid) {
             unsafe {
@@ -782,11 +808,26 @@ pub async fn stop_daemon() -> Result<String> {
             }
             let _ = std::fs::remove_file(pid_path());
             let _ = std::fs::remove_file(&path);
+            if unanswered {
+                return Ok(format!("daemon (pid {pid}) did not answer within {STOP_ANSWER_SECS}s (busy or wedged) — terminated; any command it was running was cancelled, outcome unknown"));
+            }
             return Ok(format!("daemon (pid {pid}) was unresponsive — terminated"));
         }
-        let _ = std::fs::remove_file(pid_path());
-        let _ = std::fs::remove_file(&path);
-        return Ok("daemon not running".into());
+        if !unanswered {
+            let _ = std::fs::remove_file(pid_path());
+            let _ = std::fs::remove_file(&path);
+            return Ok("daemon not running".into());
+        }
+    }
+
+    // Something live holds the socket (it accepted our request) but no
+    // live bladebro is on record: never unlink a live socket or claim
+    // "not running".
+    if unanswered {
+        return Err(BladeError::Other(format!(
+            "the daemon on {} did not answer within {STOP_ANSWER_SECS}s and the pid file names no live bladebro process, so it was left running — find it with `pgrep -ax bladebro`, terminate it, then run `bladebro stop` again",
+            path.display()
+        )));
     }
 
     let _ = std::fs::remove_file(&path);
