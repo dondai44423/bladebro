@@ -467,6 +467,11 @@ pub async fn perform_with_network(
             let mut pre_cleared = pre_read.is_empty();
             if !pre_read.is_empty() {
                 let cl = clear_editable(cdp, sig, frame).await?;
+                if let Some(why) = cl.blocked {
+                    return Err(BladeError::NotInteractable(format!(
+                        "{ref_id} {why}; no keys typed"
+                    )));
+                }
                 pre_cleared = cl.ok;
             }
             // Type: short text via per-char key events (the biometrics
@@ -552,6 +557,18 @@ pub async fn perform_with_network(
             let cl = clear_editable(cdp, sig, frame).await?;
             if cl.missing {
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
+            }
+            // Same rule as type: the ladder's keys go wherever focus is, so
+            // a target that cannot take it is refused before any write.
+            if let Some(why) = cl.blocked {
+                let hint = if why.starts_with("did not take focus") {
+                    " - the field may be inert or covered"
+                } else {
+                    ""
+                };
+                return Err(BladeError::NotInteractable(format!(
+                    "{ref_id} {why}; nothing cleared{hint}"
+                )));
             }
             let cur = check_editor(cdp, sig, frame).await;
             let host = cur.as_ref();

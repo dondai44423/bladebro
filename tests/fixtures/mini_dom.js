@@ -29,7 +29,7 @@
         parts.push((e) => !inner(e));
         i = j + 1;
       } else if (rest.startsWith(':disabled')) {
-        parts.push((e) => !!e.disabled);
+        parts.push((e) => e._disabledNow());
         i += 9;
       } else if (rest[0] === '[') {
         const j = s.indexOf(']', i);
@@ -132,6 +132,14 @@
       return false;
     }
     set disabled(v) { if (v) this.setAttribute('disabled', ''); else this.removeAttribute('disabled'); }
+    // `:disabled` also covers a form control inside a disabled <fieldset>,
+    // which the `disabled` property (the element's own attribute) does not.
+    _disabledNow() {
+      if (this.disabled) return true;
+      if (!['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(this.tagName)) return false;
+      for (let e = this.parentNode; e && e.nodeType === 1; e = e.parentNode) if (e.tagName === 'FIELDSET' && e.hasAttribute('disabled')) return true;
+      return false;
+    }
     get tabIndex() {
       const t = this.getAttribute('tabindex');
       if (t !== null) return parseInt(t, 10);
@@ -179,7 +187,7 @@
     }
     focus() {
       const doc = this.ownerDocument;
-      if (!doc || !this._rendered() || this.disabled) return;
+      if (!doc || !this._rendered() || this._disabledNow()) return;
       if (!(this._nativeFocusable() || this.isContentEditable || this.hasAttribute('tabindex'))) return;
       if (doc.activeElement === this) return;
       doc.activeElement = this;

@@ -265,6 +265,50 @@ ok(b && b.ok === false && b.reason === 'element hidden', 'a body-level hidden fi
     );
 }
 
+#[test]
+fn focus_mode_reports_a_target_that_cannot_take_focus() {
+    // The clear ladder focuses through the "focus" mode and then presses
+    // Ctrl+A/Backspace into whatever holds focus. A disabled target (its own
+    // attribute or a disabled fieldset) leaves focus on the email field, so
+    // the mode must say so - and name that field - for the caller to refuse.
+    let body = r#"
+const d = use(page({},
+  h('p', {rect: [0, 0, 400, 40]}, h('input', {id: 'email', type: 'email', 'aria-label': 'Email', rect: [10, 10, 300, 30]})),
+  h('p', {rect: [0, 40, 400, 40]}, h('input', {id: 'locked', 'aria-label': 'Locked name', value: 'locked-name', disabled: '', rect: [10, 50, 300, 30]})),
+  h('fieldset', {id: 'fs', disabled: '', rect: [0, 80, 400, 60]}, h('input', {id: 'fsin', 'aria-label': 'Fieldset field', value: 'fs-value', rect: [10, 90, 300, 30]})),
+  h('p', {rect: [0, 160, 400, 40]}, h('input', {id: 'free', 'aria-label': 'Free field', value: 'free', rect: [10, 170, 300, 30]}))));
+const email = d.getElementById('email');
+email.value = 'me@example.com';
+for (const [label, run] of [['attribute', __LOCKED__], ['fieldset', __FS__]]) {
+  email.focus();
+  const r = run();
+  ok(r && r.ok && r.disabled === true, label + ': focus mode reports the disabled target', r);
+  ok(r && typeof r.away === 'string' && r.away.indexOf('email') >= 0 && r.away.indexOf('me@example.com') < 0, label + ': focus mode names the field keys would reach (label, not value)', r);
+  ok(d.activeElement === email && email.value === 'me@example.com', label + ': the email field keeps focus and value');
+}
+email.focus();
+const p = __FS_PREPARE__();
+ok(p && p.ok && p.disabled === true, 'prepare: a field in a disabled fieldset is disabled', p);
+email.focus();
+const f = __FREE__();
+ok(f && f.ok && f.focused === true && f.disabled === false && !f.away, 'an enabled field takes focus and reports nothing', f);
+ok(d.activeElement === d.getElementById('free'), 'focus moved to the free field');
+"#;
+    run(
+        "l2_focus_mode",
+        body,
+        &[
+            ("__LOCKED__", sig("|textbox|Locked name|1", "focus", None)),
+            ("__FS__", sig("|textbox|Fieldset field|1", "focus", None)),
+            (
+                "__FS_PREPARE__",
+                sig("|textbox|Fieldset field|1", "prepare", None),
+            ),
+            ("__FREE__", sig("|textbox|Free field|1", "focus", None)),
+        ],
+    );
+}
+
 // ---- L3: leaf-forwarding never trades an actionable target for another ----
 #[test]
 fn actionable_container_is_clicked_itself() {

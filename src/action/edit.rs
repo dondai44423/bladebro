@@ -67,6 +67,10 @@ pub(super) struct ClearResult {
     pub(super) was_empty: bool,
     /// Neither the addressed element nor a live editor host was reachable.
     pub(super) missing: bool,
+    /// Why nothing was attempted: the target is disabled, or another field
+    /// kept focus ("is disabled" / "did not take focus (X holds it)").
+    /// Callers prefix the ref and say what was not done.
+    pub(super) blocked: Option<String>,
 }
 
 /// Normalize text for readback comparison (mirrors the JS `_tvr`).
@@ -112,8 +116,24 @@ pub(super) async fn clear_editable(
     frame: &[usize],
 ) -> Result<ClearResult> {
     // Focus first: framework editors mount and take focus here, and the
-    // trusted-key rungs act on whatever is focused.
-    let _ = find_by_sig(cdp, sig, frame, "focus", None).await;
+    // trusted-key rungs act on whatever is focused. A target that could not
+    // take focus (disabled - its own attribute or a disabled fieldset - or
+    // inert) leaves it on some other field: Ctrl+A + Backspace emptied that
+    // field (a focused email wiped by `clear` on a locked, controlled
+    // input). Nothing is written then, not even through the setter: no user
+    // could edit a disabled field either.
+    let focus = find_by_sig(cdp, sig, frame, "focus", None)
+        .await
+        .ok()
+        .filter(|f| f.ok);
+    let blocked = focus.and_then(|f| {
+        if f.disabled == Some(true) {
+            Some("is disabled".to_string())
+        } else {
+            f.away
+                .map(|other| format!("did not take focus ({other} holds it)"))
+        }
+    });
     let mut cur = check_editor(cdp, sig, frame).await;
     let Some(first) = cur.as_ref() else {
         return Ok(ClearResult {
@@ -121,6 +141,7 @@ pub(super) async fn clear_editable(
             text: String::new(),
             was_empty: false,
             missing: true,
+            blocked: None,
         });
     };
     let mut text = first.text.clone().unwrap_or_default();
@@ -130,6 +151,16 @@ pub(super) async fn clear_editable(
             text,
             was_empty: true,
             missing: false,
+            blocked: None,
+        });
+    }
+    if blocked.is_some() {
+        return Ok(ClearResult {
+            ok: false,
+            text,
+            was_empty: false,
+            missing: false,
+            blocked,
         });
     }
     let kind = first.host_kind.clone().unwrap_or_default();
@@ -149,6 +180,7 @@ pub(super) async fn clear_editable(
                 text,
                 was_empty: false,
                 missing: false,
+                blocked: None,
             });
         }
     }
@@ -168,6 +200,7 @@ pub(super) async fn clear_editable(
                     text,
                     was_empty: false,
                     missing: false,
+                    blocked: None,
                 });
             }
         }
@@ -185,6 +218,7 @@ pub(super) async fn clear_editable(
         text,
         was_empty: false,
         missing: false,
+        blocked: None,
     })
 }
 

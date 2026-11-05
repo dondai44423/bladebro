@@ -589,6 +589,9 @@ pub(super) fn find_sig_expr(
         // a page that trimmed or collapsed what was typed. Rich editors
         // reflow whitespace in innerText, so theirs stays normalized.
         + "var _read=function(e){if(!e)return '';if('value' in e&&typeof e.value==='string')return e.value;return _tvr(e.innerText||e.textContent||'');};"
+        // `:disabled` also covers a control inside a disabled <fieldset>,
+        // which the element's own `disabled` property does not.
+        + "var _dis=function(e){try{return !!(e&&e.matches(':disabled'));}catch(_e){return !!(e&&e.disabled);}};"
         + "var _isd=function(e){return !!(e&&(_ced(e)||((e.tagName==='INPUT'||e.tagName==='TEXTAREA')&&e.type!=='hidden')));};"
         // Ownership (L2): an editor is the target's own when it IS the
         // target, sits inside or around it (composed tree: a custom
@@ -603,7 +606,7 @@ pub(super) fn find_sig_expr(
         + "var _own=function(t,e){if(_rel(t,e))return true;var w=t&&t.parentNode;return !!(w&&w!==doc.body&&w!==doc.documentElement&&w.contains&&_ced(e)&&w.contains(e));};"
         // A disabled target never hands its keys to a wrapper editor: focus
         // stayed wherever it was, and that is not the target's doing.
-        + "var _hostOf=function(t){var a=doc.activeElement;if(_isd(a)&&(_rel(t,a)||(!t.disabled&&_own(t,a))))return a;if(t&&t.querySelector){var ii=_ced(t)?null:t.querySelector('textarea,input:not([type=hidden]),[contenteditable]:not([contenteditable=false])');if(ii)return ii;}return t;};"
+        + "var _hostOf=function(t){var a=doc.activeElement;if(_isd(a)&&(_rel(t,a)||(!_dis(t)&&_own(t,a))))return a;if(t&&t.querySelector){var ii=_ced(t)?null:t.querySelector('textarea,input:not([type=hidden]),[contenteditable]:not([contenteditable=false])');if(ii)return ii;}return t;};"
         + "var _selLen=function(h){try{if(h&&('selectionStart' in h)&&'value' in h)return Math.abs((h.selectionEnd||0)-(h.selectionStart||0));var s=doc.getSelection&&doc.getSelection();return (s&&!s.isCollapsed)?String(s).length:0;}catch(_e){return 0;}};"
         // A hidden target hands off only to its own visible editor: the
         // focused one, else the single candidate in its wrapper (two would be
@@ -653,8 +656,12 @@ pub(super) fn find_sig_expr(
         + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!((lp(n)||n).disabled),isTopmost:_ltopOk,hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),leaf:_lred,top_desc:_ltop};}"
         // The resolved host gets focus when focusing the target left it
         // elsewhere (a wrapper's inner field): keys go where we read back.
-        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});_reoff();tgt.focus();var _ph=_hostOf(tgt);if(_ph&&_ph!==tgt&&_ph!==doc.activeElement){try{_ph.focus();}catch(_e){}}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false,away:_away(_ph,tgt)};}"
-        + "if(mode==='focus'){var _fc=tgt;try{if(tgt.tabIndex<0){var _cd=tgt.querySelector('[tabindex],button,a[href],input,select,textarea');if(_cd)_fc=_cd;}}catch(_e){}try{_fc.focus();}catch(_e){}var _fo=false;try{_fo=(_fc.getRootNode().activeElement===_fc)||(document.activeElement===_fc);}catch(_e){}return{ok:true,focused:_fo};}"
+        + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});_reoff();tgt.focus();var _ph=_hostOf(tgt);if(_ph&&_ph!==tgt&&_ph!==doc.activeElement){try{_ph.focus();}catch(_e){}}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:_dis(tgt),text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false,away:_away(_ph,tgt)};}"
+        // focus also reports what prepare does for typing: a disabled
+        // target, or the foreign field still holding focus. The clear
+        // ladder's trusted Ctrl+A/Backspace go wherever focus is, so it
+        // refuses on either before any write.
+        + "if(mode==='focus'){var _fc=tgt;try{if(tgt.tabIndex<0){var _cd=tgt.querySelector('[tabindex],button,a[href],input,select,textarea');if(_cd)_fc=_cd;}}catch(_e){}try{_fc.focus();}catch(_e){}var _fo=false;try{_fo=(_fc.getRootNode().activeElement===_fc)||(document.activeElement===_fc);}catch(_e){}return{ok:true,focused:_fo,disabled:_dis(tgt),away:_away(_hostOf(tgt),tgt)};}"
         + "if(mode==='clear'){var _ch=_hostOf(tgt);if(!_ch)return{ok:false,reason:'no editable host'};if(_ced(_ch)){_clr(_ch);}else if('value' in _ch){var _cpr=_ch.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var _cd=Object.getOwnPropertyDescriptor(_cpr,'value');if(_cd&&_cd.set){_cd.set.call(_ch,'');}else{_ch.value='';}_ch.dispatchEvent(new Event('input',{bubbles:true}));_ch.dispatchEvent(new Event('change',{bubbles:true}));}else{return{ok:false,reason:'not an editable field'};}return{ok:true,text:_read(_ch)};}"
         // js-fallback click (W1): a bare n.click() fires ONE click event and
         // misses pointer-event components entirely (rpl dropdown items closed
@@ -677,7 +684,7 @@ pub(super) fn find_sig_expr(
         // back. A disabled select/option used to change anyway and read
         // "selected"; a page that vetoes the change in its handlers is
         // reported with what the select actually shows.
-        + "var _dis=function(e){try{return e.matches(':disabled');}catch(_e){return !!e.disabled;}};if(_dis(n))return{ok:false,reason:'select disabled'};"
+        + "if(_dis(n))return{ok:false,reason:'select disabled'};"
         + "var opts=[...n.options];var match=opts.find(o=>o.value===" + &text_js + ")||opts.find(o=>o.label.trim()===" + &text_js + ")||opts.find(o=>o.text.trim()===" + &text_js + ")||opts.find(o=>o.label.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.text.trim().toLowerCase()===(" + &text_js + ").toLowerCase())||opts.find(o=>o.value.toLowerCase()===(" + &text_js + ").toLowerCase());"
         + "var __lo=function(en){var oo=[...n.options].filter(o=>!en||!_dis(o));return{options:oo.slice(0,80).map(o=>{var t=(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦');var v=(o.value||'').trim().split('|').join('¦');if(t&&v&&t!==v)return t+'='+v;return t||(v?'='+v:'');}).filter(Boolean),ototal:oo.length};};"
         + "if(match){if(_dis(match)){var _le=__lo(true);return{ok:false,reason:'option disabled',options:_le.options,ototal:_le.ototal};}"

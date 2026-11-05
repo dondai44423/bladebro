@@ -633,3 +633,68 @@ async fn select_on_a_text_combobox_types_instead_of_assigning() {
     assert!(verdict.starts_with("outcome: typed \"Paris\""), "{verdict}");
     server.abort();
 }
+
+#[tokio::test]
+async fn clear_never_presses_keys_when_the_target_cannot_take_focus() {
+    // L2: the clear ladder's trusted rungs press Ctrl+A and Backspace into
+    // whatever holds focus. A disabled (or otherwise unfocusable) target
+    // whose page writes its value back - a controlled field the setter
+    // cannot empty - left focus on the email field, and the rungs emptied
+    // the email while the verdict only said "clear failed". Refuse before
+    // any write instead.
+    let cases: [(&str, Value); 2] = [
+        (
+            "is disabled; nothing cleared",
+            json!({"ok":true,"focused":false,"disabled":true}),
+        ),
+        (
+            "did not take focus (input#email \"Email\" holds it); nothing cleared",
+            json!({"ok":true,"focused":false,"disabled":false,"away":"input#email \"Email\""}),
+        ),
+    ];
+    for (want, focus) in cases {
+        let respond: Responder = Box::new(move |method, expression| {
+            if method == "Runtime.evaluate" && expression.contains(",\"focus\",null,") {
+                json!({"result":{"result":{"type":"object","value":focus.clone()}}})
+            } else if method == "Runtime.evaluate"
+                && expression.starts_with("((sig,mode,text,frame)=>")
+            {
+                // A controlled field: every write is put back.
+                json!({"result":{"result":{"type":"object","value":{"ok":true,"text":"locked-name","hostKind":"input","hostIsTgt":true,"sel":0,"tgtMissing":false}}}})
+            } else if method == "Runtime.evaluate" {
+                page_basics(expression)
+            } else {
+                json!({"result":{}})
+            }
+        });
+        let (cdp, log, server) = scripted_page(respond).await;
+        let (mut lpm, ref_id) = one_element_model("input", "textbox", "Locked name");
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            bladebro::action::perform(
+                &cdp,
+                &mut lpm,
+                &bladebro::action::Action::Clear { ref_id },
+                &std::sync::Arc::new(std::sync::Mutex::new(None)),
+            ),
+        )
+        .await
+        .unwrap();
+        let log = log.lock().unwrap().clone();
+        let keys = log
+            .iter()
+            .filter(|m| m.as_str() == "Input.dispatchKeyEvent")
+            .count();
+        assert_eq!(keys, 0, "{want}: keys were dispatched; result {result:?}");
+        assert!(
+            !log.iter().any(|m| m == "find:clear" || m == "find:selhost"),
+            "{want}: the field was written from script: {log:?}"
+        );
+        let err = result.expect_err(want);
+        assert!(
+            matches!(err, BladeError::NotInteractable(_)) && err.to_string().contains(want),
+            "{want}: {err}"
+        );
+        server.abort();
+    }
+}
