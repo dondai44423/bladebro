@@ -834,6 +834,10 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
             let _rt = std::time::Instant::now();
             let verdict = if delta.navigated {
                 format!("outcome: navigated \u{2192} {}", page.model().url())
+            } else if delta.unanswered {
+                // The read after loading saw nothing: "already here" would be
+                // a confident claim about a page that never answered.
+                "outcome: navigation unverified - the page did not answer the post-navigation read (busy or mid-load); observe before acting".to_string()
             } else {
                 "outcome: already here".to_string()
             };
@@ -922,7 +926,12 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                 page.incr_act_turn();
             }
             // M14: Check expect param against observed outcome.
-            let expect_note = if !expect.is_empty() {
+            let expect_note = if !expect.is_empty() && delta.unanswered && expect != "any" {
+                // Nothing was observed: neither a match nor a "got none".
+                format!(
+                    "\n\u{26a0} expected {expect}: unverified (the page did not answer the read)"
+                )
+            } else if !expect.is_empty() {
                 let observed = if delta.navigated {
                     "navigation"
                 } else if !delta.is_empty() {

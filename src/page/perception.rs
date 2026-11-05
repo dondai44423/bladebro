@@ -200,6 +200,27 @@ impl PageCapture {
             _ => "ready",
         }
     }
+
+    /// The capture returned when the page did not answer the read (the
+    /// evaluate timed out on a busy main thread, or the execution context
+    /// was mid-transition and returned nothing). It observed nothing:
+    /// [`LivePageModel::ingest`](super::LivePageModel::ingest) keeps the
+    /// previous state instead of treating it as a blank page.
+    pub fn unanswered() -> Self {
+        PageCapture {
+            url: String::new(),
+            title: String::new(),
+            ready_state: "loading".into(),
+            muts: 0,
+            elements: Vec::new(),
+        }
+    }
+
+    /// True for [`PageCapture::unanswered`]: an answered capture always
+    /// carries `location.href`, which is never empty (`about:blank` at least).
+    pub fn is_unanswered(&self) -> bool {
+        self.url.is_empty()
+    }
 }
 
 // ---- shared JS fragments (used by both capture + find-by-sig scripts) ----
@@ -320,7 +341,13 @@ pub const JS_NC_FN: &str = include_str!("js/nc_fn.js");
 static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
     "(()=>{"
         .to_string()
-        + "const d=document;if(!d||!d.body)return null;"
+        + "const d=document;if(!d)return null;"
+        // A document without a body still answered: an SVG or XML file
+        // opened directly never gets one, and an HTML page mid-parse has
+        // none yet. Report its url and readyState with no elements; `null`
+        // would read as an unanswered (busy) page and keep showing the
+        // previous page's refs.
+        + "if(!d.body)return{url:location.href,title:d.title||'',readyState:d.readyState,muts:0,elements:[]};"
         + &JS_PREAMBLE
         + "const out=[];"
         // Viewport culling (V25c): only capture elements in or near the
@@ -427,7 +454,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
 pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
     // Use a shorter timeout than the default 30s — if the execution
     // context is in transition (e.g. after a form-submit navigation to a
-    // JSON response page), Runtime.evaluate can hang. Return a "loading"
+    // JSON response page), Runtime.evaluate can hang. Return an unanswered
     // capture on timeout instead of erroring after 30s.
     let res = cdp
         .send_with_timeout(
@@ -443,17 +470,14 @@ pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
 
     let res = match res {
         Ok(v) => v,
-        Err(_) => {
-            // Execution context not ready (page in transition).
-            // Return a loading capture instead of erroring.
-            return Ok(PageCapture {
-                url: String::new(),
-                title: String::new(),
-                ready_state: "loading".into(),
-                muts: 0,
-                elements: Vec::new(),
-            });
-        }
+        // A dead tab/browser is not a page state: `Closed` is the error the
+        // MCP and daemon loops self-heal on. Swallowing it reported a blank
+        // "loading" page and hid the death from the relaunch path.
+        Err(BladeError::Closed) => return Err(BladeError::Closed),
+        // Execution context not ready (page in transition) or a busy main
+        // thread: the page did not answer. Not an error for the caller, but
+        // not a page state either - the model keeps its previous read.
+        Err(_) => return Ok(PageCapture::unanswered()),
     };
 
     // Runtime.evaluate → { result: { type, value }, exceptionDetails? }
@@ -469,16 +493,10 @@ pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
 
     let value = res.get("result").and_then(|r| r.get("value"));
 
-    // The capture script returns null when the page isn't ready yet (no
-    // document.body). Return an empty loading capture instead of erroring.
+    // No value means there was no document to read (a body-less document
+    // answers with its url - see the script). Same unanswered capture.
     match value {
-        Some(serde_json::Value::Null) | None => Ok(PageCapture {
-            url: String::new(),
-            title: String::new(),
-            ready_state: "loading".into(),
-            muts: 0,
-            elements: Vec::new(),
-        }),
+        Some(serde_json::Value::Null) | None => Ok(PageCapture::unanswered()),
         Some(v) => {
             let mut parsed: PageCapture = serde_json::from_value(v.clone())?;
             // Chrome internal pages (chrome://, chrome-extension://, about:*
@@ -658,6 +676,40 @@ console.log(JSON.stringify((0, eval)(S)));
                 Some("http://fixture.test/plain")
             ]
         );
+    }
+
+    /// A document without a body (an SVG or XML file opened directly, an
+    /// HTML page mid-parse) still answered the read: it must come back with
+    /// its url, never as the unanswered capture that keeps the previous
+    /// page's refs on screen behind a "busy" note.
+    #[test]
+    fn capture_of_a_bodyless_document_is_answered() {
+        let src = serde_json::to_string(&*super::CAPTURE_SCRIPT).expect("serialize capture");
+        let js = format!(
+            r#"const S = {src};
+globalThis.window = globalThis;
+globalThis.location = {{ href: 'http://fixture.test/chart.svg' }};
+globalThis.document = {{ title: 'chart', readyState: 'complete', body: null, documentElement: {{}} }};
+console.log(JSON.stringify((0, eval)(S)));
+"#
+        );
+        let Some(out) = node_exec("capture-bodyless", &js) else {
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "capture script threw:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cap: super::PageCapture = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "a body-less document must answer with a capture, got {}: {e}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            )
+        });
+        assert_eq!(cap.url, "http://fixture.test/chart.svg");
+        assert_eq!(cap.phase(), "ready");
+        assert!(cap.elements.is_empty());
     }
 
     /// Inline SVG children report LOWERCASE tagNames (`svg`, `style`), so

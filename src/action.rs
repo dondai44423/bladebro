@@ -401,6 +401,70 @@ mod action_tests {
         );
     }
 
+    /// The post-action capture the page never answered (busy main thread,
+    /// context mid-transition) observed nothing: the verdict must say the
+    /// effect is unverified - never "navigated" (the old url "" ingest) nor
+    /// "no observable DOM change" (an empty delta that read nothing).
+    #[test]
+    fn verdict_after_an_unanswered_read_is_unverified() {
+        use super::verdict::{compute_verdict, ClickEvidence};
+        use super::Action;
+        use crate::page::perception::PageCapture;
+        let mut lpm = crate::page::LivePageModel::new();
+        lpm.ingest(PageCapture {
+            url: "https://x.test/".into(),
+            title: "Fixture".into(),
+            ready_state: "complete".into(),
+            muts: 0,
+            elements: Vec::new(),
+        });
+        let delta = lpm.ingest(PageCapture {
+            url: String::new(),
+            title: String::new(),
+            ready_state: "loading".into(),
+            muts: 0,
+            elements: Vec::new(),
+        });
+        let tried = ["mouse"];
+        let cases = [
+            (
+                Action::Click {
+                    ref_id: "e1".into(),
+                },
+                ClickEvidence {
+                    via: Some((
+                        "mouse",
+                        &tried[..],
+                        "button [Save] (topmost=true,disabled=false)",
+                    )),
+                    dispatched: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                Action::ClickCoord { x: 5.0, y: 5.0 },
+                ClickEvidence {
+                    dispatched: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                Action::Press {
+                    key: "Enter".into(),
+                },
+                ClickEvidence::default(),
+            ),
+            (Action::Back, ClickEvidence::default()),
+        ];
+        for (action, click) in cases {
+            let v = compute_verdict(&action, &delta, &lpm, click, None, None);
+            assert!(v.contains("unverified"), "{v}");
+            assert!(!v.contains("navigated"), "{v}");
+            assert!(!v.contains("no observable"), "{v}");
+            assert!(!v.contains("no navigation"), "{v}");
+        }
+    }
+
     #[test]
     fn no_effect_verdict_falls_back_when_target_unknown() {
         let msg = super::verdict::no_effect_verdict(&["mouse"], "", None);

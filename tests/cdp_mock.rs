@@ -279,3 +279,39 @@ async fn rejected_scroll_stops_at_first_dispatch_without_claiming_success() {
     assert_eq!(dispatched.load(Ordering::SeqCst), 1);
     server.abort();
 }
+
+/// A tab/browser that dies under a capture must surface as `Closed` - the
+/// error the MCP/daemon loops self-heal on. It used to come back as an
+/// empty "loading" page (url "", 0 actionable), which hid the death from
+/// self-heal and read to the agent like a blank page.
+#[tokio::test]
+async fn capture_surfaces_a_dead_connection_instead_of_an_empty_page() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws = accept_async(stream).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        // Read the capture request, then die without answering.
+        let _ = stream.next().await;
+        let _ = sink.send(Message::Close(None)).await;
+    });
+    let client = CdpClient::connect(&format!("ws://{addr}")).await.unwrap();
+    let cdp = CdpSession::root(client);
+    let res = tokio::time::timeout(
+        Duration::from_secs(5),
+        bladebro::page::perception::capture(&cdp),
+    )
+    .await
+    .expect("capture must not hang on a closed connection");
+    match res {
+        Err(BladeError::Closed) => {}
+        Err(e) => panic!("expected Closed, got {e:?}"),
+        Ok(cap) => panic!(
+            "a dead connection was reported as a page: url={:?} phase={} elements={}",
+            cap.url,
+            cap.phase(),
+            cap.elements.len()
+        ),
+    }
+}

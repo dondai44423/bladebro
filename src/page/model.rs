@@ -47,6 +47,10 @@ pub struct PageDelta {
     /// mutation watcher installed before an action). Detects effects on
     /// non-actionable content — text swaps, counters, live regions.
     pub content_changed: bool,
+    /// The page did not answer this read ([`PageCapture::unanswered`]):
+    /// nothing was observed and the model kept its previous state. An
+    /// effect after an action is unverified - never "no change".
+    pub unanswered: bool,
 }
 
 impl PageDelta {
@@ -89,10 +93,16 @@ pub struct LivePageModel {
     url: String,
     title: String,
     phase: String,
+    /// The latest read went unanswered: the elements are the last answered
+    /// state, not a fresh observation. Rendered as a note on every view.
+    unanswered: bool,
 }
 
 /// Max remembered dead-ref identities.
 const GRAVEYARD_CAP: usize = 64;
+
+/// Shown under the page line while the latest read went unanswered.
+const UNANSWERED_NOTE: &str = "(page did not answer this read - busy or mid-navigation; showing the last answered state, refs kept - observe again)\n";
 
 impl Default for LivePageModel {
     fn default() -> Self {
@@ -106,6 +116,7 @@ impl Default for LivePageModel {
             url: String::new(),
             title: String::new(),
             phase: String::new(),
+            unanswered: false,
         }
     }
 }
@@ -231,6 +242,22 @@ impl LivePageModel {
     ///
     /// This is the core mutation. Returns the delta to surface to the agent.
     pub fn ingest(&mut self, cap: PageCapture) -> PageDelta {
+        // An unanswered read observed nothing. Ingested as a page it reported
+        // a navigation to "" with 0 actionable, sent every ref to the
+        // graveyard, and made the next good capture mint new refs for the
+        // same elements. Keep the last answered state; the phase and the
+        // `unanswered` flag say the page is busy.
+        if cap.is_unanswered() {
+            self.phase = cap.phase().to_string();
+            self.unanswered = true;
+            return PageDelta {
+                url: self.url.clone(),
+                title: self.title.clone(),
+                phase: self.phase.clone(),
+                unanswered: true,
+                ..PageDelta::default()
+            };
+        }
         let navigated = self.initialized && self.url != cap.url;
         let title_changed = self.initialized && self.title != cap.title;
         let phase = cap.phase().to_string();
@@ -309,6 +336,7 @@ impl LivePageModel {
             rebound: stab.rebound,
             title_changed,
             content_changed: cap.muts > 0,
+            unanswered: false,
         };
 
         self.elements = elements;
@@ -318,6 +346,7 @@ impl LivePageModel {
         self.title = cap.title;
         self.phase = phase;
         self.initialized = true;
+        self.unanswered = false;
 
         delta
     }
@@ -356,6 +385,9 @@ impl LivePageModel {
         ));
         if !self.title.is_empty() {
             out.push_str(&format!("title: {}\n", truncate(&self.title, 80)));
+        }
+        if self.unanswered {
+            out.push_str(UNANSWERED_NOTE);
         }
 
         let mut folded_done: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -444,6 +476,9 @@ impl LivePageModel {
         if !self.title.is_empty() {
             out.push_str(&format!("title: {}\n", truncate(&self.title, 80)));
         }
+        if self.unanswered {
+            out.push_str(UNANSWERED_NOTE);
+        }
         for (printed, el) in matching.iter().enumerate() {
             let mut line = format_element(el);
             if !el.raw.ctx.is_empty() {
@@ -491,6 +526,11 @@ impl LivePageModel {
         }
         if !d.navigated && !self.title.is_empty() {
             out.push_str(&format!("title: {}\n", truncate(&self.title, 80)));
+        }
+        // Nothing was observed: no element list, and never "(no change)".
+        if d.unanswered {
+            out.push_str(UNANSWERED_NOTE);
+            return out;
         }
 
         // For small pages, show the full element list with change markers.

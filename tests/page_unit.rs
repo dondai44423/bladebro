@@ -647,3 +647,45 @@ fn truncated_delta_counts_the_elements_it_cut() {
     let view = lpm.compress_delta(&d, head(&full, 4) + 1, 0);
     assert_eq!(more(&view), "\u{2026}(18 more)", "{view}");
 }
+
+/// A capture the page never answered (Runtime.evaluate timed out on a busy
+/// main thread, or the context was mid-transition) is not a page state.
+/// Ingesting it as one reported a navigation to "", sent every ref to the
+/// graveyard, and made the next good capture mint all-new refs for the same
+/// elements.
+#[test]
+fn unanswered_capture_is_not_a_navigation_and_keeps_refs() {
+    let page = || {
+        vec![
+            el("button", "Save", "|button|Save|1", None, false),
+            el("link", "Home", "|link|Home|1", None, false),
+        ]
+    };
+    let mut lpm = LivePageModel::new();
+    lpm.ingest(titled("https://x.test/", "Fixture", page()));
+    let refs: Vec<String> = lpm.elements().iter().map(|e| e.ref_id.clone()).collect();
+
+    // Exactly what `capture()` returns when the page does not answer.
+    let unanswered = bladebro::page::PageCapture {
+        url: String::new(),
+        title: String::new(),
+        ready_state: "loading".into(),
+        muts: 0,
+        elements: Vec::new(),
+    };
+    let d = lpm.ingest(unanswered);
+    assert!(!d.navigated, "an unanswered read is not a navigation");
+    assert!(d.removed.is_empty(), "no ref may die on an unanswered read");
+    assert_eq!(d.url, "https://x.test/");
+    assert_eq!(d.phase, "loading");
+    assert_eq!(lpm.url(), "https://x.test/");
+    assert_eq!(lpm.actionables(), 2);
+
+    // The next good capture of the same page re-binds the same refs.
+    let d = lpm.ingest(titled("https://x.test/", "Fixture", page()));
+    assert!(!d.navigated);
+    assert!(d.added.is_empty() && d.removed.is_empty(), "{d:?}");
+    let after: Vec<String> = lpm.elements().iter().map(|e| e.ref_id.clone()).collect();
+    assert_eq!(after, refs);
+    assert_eq!(lpm.phase(), "ready");
+}
