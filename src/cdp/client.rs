@@ -24,6 +24,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::cdp::protocol::{CdpEvent, CdpIncoming, CdpMessage, CdpRequest};
@@ -48,6 +49,14 @@ const EVENT_BUS_CAPACITY: usize = 16384;
 /// keeping the small identity fields consumers read, which caps
 /// worst-case ring retention at EVENT_BUS_CAPACITY × MAX_EVENT_BYTES.
 const MAX_EVENT_BYTES: usize = 16 * 1024;
+
+/// Largest single CDP message accepted, on both transports. Chrome sends
+/// each DevTools message as ONE WebSocket frame, so the frame cap has to
+/// equal the message cap: tungstenite's default 16 MiB frame cap turned a
+/// bigger reply or event (a large eval result, a full-page screenshot) into
+/// a read error that closed the connection and forced a browser relaunch,
+/// while the pipe lane accepted it.
+const MAX_CDP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The result delivered to a pending command caller.
 type CdpOutcome = std::result::Result<Value, BladeError>;
@@ -78,7 +87,11 @@ impl CdpClient {
     /// [`crate::cdp::discovery`], e.g. `ws://127.0.0.1:9222/devtools/page/<id>`.
     pub async fn connect(ws_url: &str) -> Result<Self> {
         let deadline = Duration::from_secs(5);
-        let (ws, _resp) = timeout(deadline, tokio_tungstenite::connect_async(ws_url))
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_CDP_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_CDP_MESSAGE_BYTES));
+        let connecting = tokio_tungstenite::connect_async_with_config(ws_url, Some(config), false);
+        let (ws, _resp) = timeout(deadline, connecting)
             .await
             .map_err(|_| BladeError::Timeout(deadline))?
             .map_err(|e| BladeError::Transport(e.to_string()))?;
@@ -214,7 +227,7 @@ impl CdpClient {
                         &mut reader,
                         0,
                         &mut buf,
-                        64 * 1024 * 1024,
+                        MAX_CDP_MESSAGE_BYTES,
                     )
                     .await
                     {
@@ -742,5 +755,44 @@ mod reliability_tests {
         )
         .await;
         assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn websocket_carries_a_message_larger_than_16_mib() {
+        // Regression: tungstenite's default 16 MiB frame cap. Chrome sends
+        // each DevTools message as ONE frame, so a bigger reply (a large
+        // eval result, a full-page screenshot) was a read error that closed
+        // the connection. The pipe lane always allowed 64 MiB.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let Some(Ok(Message::Text(req))) = ws.next().await else {
+                return;
+            };
+            let req: Value = serde_json::from_str(req.as_str()).unwrap();
+            let reply = serde_json::json!({
+                "id": req["id"],
+                "result": {"result": {"type": "string", "value": "x".repeat(17 << 20)}}
+            });
+            ws.send(Message::Text(reply.to_string().into()))
+                .await
+                .unwrap();
+            let _ = ws.next().await;
+        });
+        let client = CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let res = client
+            .send_with_timeout("Runtime.evaluate", None, Duration::from_secs(30))
+            .await;
+        server.abort();
+        let value = res.expect("a 17 MiB CDP reply must arrive intact");
+        assert_eq!(
+            value["result"]["value"].as_str().map(str::len),
+            Some(17 << 20)
+        );
+        assert!(!client.is_closed());
     }
 }
