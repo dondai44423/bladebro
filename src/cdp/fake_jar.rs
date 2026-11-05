@@ -7,8 +7,9 @@
 //! - a cookie Chrome cannot build at all (a `__Secure-`/`__Host-` name
 //!   without `Secure`) fails the whole `Network.setCookies` call with
 //!   -32602 "Invalid cookie fields", and `Network.setCookie` likewise;
-//! - `Network.deleteCookies` with `domain` matches that domain exactly
-//!   (`fixture.test` does not delete a `.fixture.test` cookie);
+//! - `Network.deleteCookies` matches the cookie domain exactly, against
+//!   `domain` or the `url` host (`fixture.test` does not delete a
+//!   `.fixture.test` cookie);
 //! - `Storage.getCookies` / `Network.getCookies` return the jar;
 //! - `Runtime.evaluate` answers `location.origin` and storage writes.
 
@@ -119,17 +120,16 @@ fn answer(
         "Network.getCookies" | "Storage.getCookies" => json!({ "cookies": jar.clone() }),
         "Network.deleteCookies" => {
             let name = params["name"].clone();
-            if let Some(domain) = params["domain"].as_str() {
-                jar.retain(|c| !(c["name"] == name && c["domain"] == domain));
-            } else if let Some(url) = params["url"].as_str() {
-                let host = host_of(url);
-                jar.retain(|c| {
-                    let d = c["domain"].as_str().unwrap_or_default();
-                    let applies =
-                        d == host || (d.starts_with('.') && (host == d[1..] || host.ends_with(d)));
-                    !(c["name"] == name && applies)
-                });
-            }
+            let domain = params["domain"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| host_of(params["url"].as_str().unwrap_or_default()));
+            // Partitioned cookies are only deleted with their partitionKey.
+            jar.retain(|c| {
+                !(c["name"] == name
+                    && c["domain"] == domain.as_str()
+                    && c.get("partitionKey").is_none_or(Value::is_null))
+            });
             json!({})
         }
         "Runtime.evaluate" => {

@@ -217,12 +217,33 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             let mut params = json!({ "name": name });
             // CDP Network.deleteCookies requires either url or domain.
             // Prefer url when given (Chrome derives domain), fall back to domain.
+            let mut host = String::new();
             if let Some(u) = url {
                 params["url"] = json!(u);
+                host = url::Url::parse(u)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_owned))
+                    .unwrap_or_default();
             } else if let Some(d) = domain {
                 params["domain"] = json!(d);
+                host = d.trim_start_matches('.').to_string();
             }
+            // Chrome deletes only cookies whose domain equals `domain` (or
+            // the url host) exactly, so `--domain example.com` leaves a
+            // `.example.com` cookie in place. Read the store back on both
+            // sides of the call rather than claiming a deletion.
+            let before = cookie_domains_sent_to(cdp, name, &host).await?;
             cdp.send("Network.deleteCookies", Some(params)).await?;
+            let after = cookie_domains_sent_to(cdp, name, &host).await?;
+            if let Some(first) = after.first() {
+                return Err(BladeError::Other(format!(
+                    "cookie {name:?} is still set for {} — Chrome deletes only an exact domain match; retry del-cookie with domain {first}",
+                    after.join(", ")
+                )));
+            }
+            if before.is_empty() {
+                return Ok(format!("no cookie {name:?} for {host}; nothing deleted"));
+            }
             Ok(format!("✓ cookie deleted: {name}"))
         }
 
@@ -370,6 +391,29 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             restore_session(cdp, name, &session).await
         }
     }
+}
+
+/// Domains of the unpartitioned cookies named `name` that Chrome would
+/// send to `host` (deleteCookies never touches partitioned ones).
+async fn cookie_domains_sent_to(cdp: &CdpSession, name: &str, host: &str) -> Result<Vec<String>> {
+    let store = cdp.cookie_store().await?;
+    let all = store
+        .get("cookies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| BladeError::Other("cookie readback missing cookie store".into()))?;
+    let mut domains: Vec<String> = all
+        .iter()
+        .filter(|c| c["name"].as_str() == Some(name) && !cookie_partitioned(c))
+        .filter_map(|c| c["domain"].as_str())
+        .filter(|d| {
+            !host.is_empty()
+                && (d.trim_start_matches('.') == host || (d.starts_with('.') && host.ends_with(d)))
+        })
+        .map(str::to_owned)
+        .collect();
+    domains.sort();
+    domains.dedup();
+    Ok(domains)
 }
 
 /// What `state save` writes, plus the counts its verdict reports.
@@ -817,5 +861,49 @@ mod cookie_jar_tests {
             .expect("a partitioned cookie must not fail the load");
         assert!(out.contains("1 partitioned"), "{out}");
         assert_eq!(jar.names(), ["plain"]);
+    }
+
+    fn delete(name: &str, domain: Option<&str>, url: Option<&str>) -> StateOp {
+        StateOp::DeleteCookies {
+            name: name.into(),
+            domain: domain.map(str::to_owned),
+            url: url.map(str::to_owned),
+        }
+    }
+
+    /// `Network.deleteCookies` matches the cookie domain exactly, so
+    /// `del-cookie sid --domain fixture.test` against a `.fixture.test`
+    /// cookie deleted nothing and still reported "✓ cookie deleted".
+    #[tokio::test]
+    async fn del_cookie_reports_a_cookie_it_did_not_delete() {
+        let (cdp, jar) = fake_jar::start(ORIGIN, vec![cookie("sid", ".fixture.test", -1.0)]).await;
+        let err = perform(&cdp, &delete("sid", Some("fixture.test"), None))
+            .await
+            .expect_err("the cookie is still set; success would be a lie");
+        let err = err.to_string();
+        assert!(err.contains("still set for .fixture.test"), "{err}");
+        assert!(
+            err.contains("domain .fixture.test"),
+            "names the retry: {err}"
+        );
+        assert_eq!(jar.names(), ["sid"]);
+
+        // The same holds for a url scope: the url host is matched exactly too.
+        let err = perform(&cdp, &delete("sid", None, Some("http://fixture.test/")))
+            .await
+            .expect_err("a url scope does not delete a domain cookie");
+        assert!(err.to_string().contains(".fixture.test"), "{err}");
+
+        let out = perform(&cdp, &delete("sid", Some(".fixture.test"), None))
+            .await
+            .unwrap();
+        assert_eq!(out, "✓ cookie deleted: sid");
+        assert!(jar.names().is_empty());
+
+        let out = perform(&cdp, &delete("sid", Some(".fixture.test"), None))
+            .await
+            .unwrap();
+        assert!(!out.starts_with('✓'), "nothing left to delete: {out}");
+        assert!(out.contains("nothing deleted"), "{out}");
     }
 }
