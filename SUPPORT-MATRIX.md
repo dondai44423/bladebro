@@ -25,11 +25,12 @@ probes. The linked PR run reached both profile-mode suites on all desktops.
 Release gates require green CI and reached assertions for the exact release
 commit; local cross builds do not substitute for those runs.
 
-The native Mac job uses the supported standard `macos-26-intel` pool after
-repeated ARM64 allocation failures cancelled jobs before their first step.
-Both Mac architectures remain distribution targets. Build caches include
-`runner.arch`, keeping compiled Rust and native integration files separate
-across Intel/Apple Silicon. Available labels are documented by
+The native Mac job runs on the standard arm64 `macos-26` pool. The `macos-26-intel`
+image was tried and abandoned: headful Chrome's main thread wedges in a synchronous
+IconServices XPC call (process samples: NSMenu/ShareKit to `ISIconManager`), so `Input.*`
+calls time out for minutes on fresh browser instances, while the identical suite passes every
+assertion on arm64. The darwin-x64 binary is still cross-built and architecture-checked by
+the release script but is not executed natively in CI. Available labels are documented by
 [GitHub](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job).
 
 The local cross links retain the existing Zig deprecated linker-optimization

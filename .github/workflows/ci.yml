@@ -33,10 +33,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest routes to the ARM64 pool; repeated allocation failures
-        # prevented even starting the release gate. Keep full native Mac tests
-        # on the supported standard Intel pool. Both Mac targets still ship.
-        os: [ubuntu-latest, macos-26, macos-26-intel, windows-latest]
+        # Native Mac tests run on the arm64 pool. The macos-26-intel image wedges headful Chrome's
+        # main thread in a synchronous IconServices XPC call (process samples of Chrome 157:
+        # NSMenu/ShareKit -> ISIconManager), timing out Input.* calls for minutes on fresh Chrome
+        # instances; the same suite passes every assertion on arm64. The darwin-x64 binary is still
+        # cross-built and checked by release.sh.
+        os: [ubuntu-latest, macos-26, windows-latest]
         rust-version: ["stable"]
 
     steps:
@@ -108,11 +110,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
-
-      - name: Wait for macOS browser input readiness (cold-VM main-thread stall)
-        if: startsWith(matrix.os, 'macos-')
-        timeout-minutes: 12
-        run: node tools/ci/mac-browser-ready.mjs
 
       - name: Verify native DSH package and browser lifecycle
         timeout-minutes: 10
