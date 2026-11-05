@@ -260,3 +260,45 @@ ok(b && b.ok === false && b.reason === 'element hidden', 'a body-level hidden fi
         ],
     );
 }
+
+// ---- L3: leaf-forwarding never trades an actionable target for another ----
+#[test]
+fn actionable_container_is_clicked_itself() {
+    // A clickable row (role=button, focusable, own handler) holding a Delete
+    // button: clicking the row's center opens it. Leaf-forwarding used to
+    // move the click onto Delete.
+    let body = r#"
+const d = use(page({},
+  h('div', {id: 'row', role: 'button', tabindex: '0', onclick: 'open()', 'aria-label': 'Open thread', rect: [0, 0, 400, 60]},
+    'Thread title',
+    h('button', {id: 'del', 'aria-label': 'Delete', rect: [330, 18, 60, 24]}, 'x'))));
+const r = __ROW__();
+eq(r && r.box, [0, 0, 400, 60], 'the click box is the row itself');
+ok(r && !r.leaf && String(r.hit_tgt).indexOf('Open thread') >= 0, 'no redirect is reported for the row', r);
+"#;
+    run(
+        "l3_row",
+        body,
+        &[("__ROW__", sig("|button|Open thread|1", "box", None))],
+    );
+}
+
+#[test]
+fn dead_container_still_leaf_forwards_and_says_so() {
+    // The #15 class keeps working: a role=button wrapper (not focusable
+    // itself) around its native button forwards to the control - and the
+    // box result flags the redirect so the verdict can name it.
+    let body = r#"
+const d = use(page({},
+  h('div', {id: 'wrap', role: 'button', 'aria-label': 'Account menu', rect: [0, 100, 300, 60]},
+    h('button', {id: 'acct', 'aria-label': 'Account menu', rect: [250, 110, 40, 40]}))));
+let r = __WRAP__();
+eq(r && r.box, [250, 110, 40, 40], 'a same-named inner button is the wrapper\'s control');
+ok(r && r.leaf === true, 'the redirect is flagged', r);
+"#;
+    run(
+        "l3_wrapper",
+        body,
+        &[("__WRAP__", sig("|button|Account menu|1", "box", None))],
+    );
+}

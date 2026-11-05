@@ -289,7 +289,15 @@ pub async fn perform_with_network(
             // that rejected a well-aimed click (issue #15). When the target
             // is NOT topmost, name what actually receives the click there
             // (occlusion diagnostic).
+            // L3: a leaf-forwarded click names the inner control it hit.
+            let leaf = found
+                .hit_tgt
+                .as_deref()
+                .filter(|_| found.leaf == Some(true));
             let mut tgt_meta = found.hit_tgt.as_deref().unwrap_or("").to_string();
+            if leaf.is_some() {
+                tgt_meta.insert_str(0, "inner ");
+            }
             if !tgt_meta.is_empty() {
                 if found.is_topmost == Some(false) {
                     match found.top_desc.as_deref() {
@@ -312,6 +320,7 @@ pub async fn perform_with_network(
                 lpm,
                 ClickEvidence {
                     via: Some((via, &tried, &tgt_meta)),
+                    leaf,
                     coord_hit: None,
                     toggle: toggle.as_ref(),
                     dispatched,
@@ -977,6 +986,7 @@ pub async fn perform_with_network(
         lpm,
         ClickEvidence {
             via: None,
+            leaf: None,
             coord_hit: coord_hit.as_deref(),
             toggle: coord_toggle.as_ref(),
             // A coord click always dispatches (the click above is

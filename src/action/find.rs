@@ -35,6 +35,10 @@ pub(super) struct FoundElement {
     /// clicked, so quiet-click verdicts expose the real target.
     #[serde(default, rename = "hit_tgt")]
     pub(super) hit_tgt: Option<String>,
+    /// Box mode: `hit_tgt` is an inner control the click was leaf-forwarded
+    /// to, not the addressed element itself.
+    #[serde(default)]
+    pub(super) leaf: Option<bool>,
     /// When the element is NOT topmost at its click point: a description of
     /// the element that actually receives clicks there (or "outside the
     /// viewport"). Turns a silent no-op into "clicks land on X" - the
@@ -630,7 +634,7 @@ pub(super) fn find_sig_expr(
         + "var _cmpAnc=function(a,x){var t=x;for(var i=0;i<40&&t;i++){if(t===a)return true;t=t.parentElement||(t.getRootNode&&t.getRootNode().host)||null;}return false;};"
         + "var _ltopOk=(_lfc===n)||_cmpAnc(n,_lfc)||_cmpAnc(_lfc,n);"
         + "var _ltop=_ltopOk?null:(_lfc?_desc(_lfc):'outside the viewport');"
-        + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!((lp(n)||n).disabled),isTopmost:_ltopOk,hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),top_desc:_ltop};}"
+        + "return{ok:true,box:_lClick,tag:n.tagName.toLowerCase(),type:n.type||null,disabled:!!((lp(n)||n).disabled),isTopmost:_ltopOk,hit_tgt:(_lhr+' ['+String(_lht).slice(0,60)+']'),leaf:_lred,top_desc:_ltop};}"
         // The resolved host gets focus when focusing the target left it
         // elsewhere (a wrapper's inner field): keys go where we read back.
         + "if(mode==='prepare'){tgt.scrollIntoView({block:'center'});tgt.focus();var _ph=_hostOf(tgt);if(_ph&&_ph!==tgt&&_ph!==doc.activeElement){try{_ph.focus();}catch(_e){}}const r3=tgt.getBoundingClientRect();return{ok:true,box:[Math.round(r3.x+ox)||0,Math.round(r3.y+oy)||0,Math.round(r3.width)||0,Math.round(r3.height)||0],disabled:!!tgt.disabled,text:_read(_ph),hostKind:(_ced(_ph)?'ce':((_ph&&_ph.tagName)?_ph.tagName.toLowerCase():'')),hostIsTgt:_ph===tgt,sel:_selLen(_ph),tgtMissing:false,away:_away(_ph,tgt)};}"

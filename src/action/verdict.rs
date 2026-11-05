@@ -160,6 +160,10 @@ impl ToggleProbe {
 #[derive(Default)]
 pub struct ClickEvidence<'a> {
     pub via: Option<(&'a str, &'a [&'a str], &'a str)>,
+    /// L3: the inner control a container click was leaf-forwarded to
+    /// (`button [Delete]`), so an effect is never credited to the addressed
+    /// element when another control received the click.
+    pub leaf: Option<&'a str>,
     pub coord_hit: Option<&'a str>,
     pub toggle: Option<&'a ToggleProbe>,
     /// True when a click was actually dispatched (mouse/js/enter/space/coord).
@@ -228,6 +232,12 @@ pub(super) fn compute_verdict(
         }
         Action::Click { .. } => {
             let (via, tried, tgt_meta) = click_via.unwrap_or(("", &[][..], ""));
+            // Only the mouse lane aims at the forwarded box; js/enter/space
+            // act on the addressed element itself.
+            let via = match click.leaf {
+                Some(inner) if via == "mouse" => format!("{via} on inner {inner}"),
+                _ => via.to_string(),
+            };
             if delta.navigated {
                 format!("outcome: navigated \u{2192} {} via {}", shorten_url(&delta.url), via)
             } else if let Some(eff) = dom_effect_summary(delta) {
@@ -830,12 +840,19 @@ pub async fn eval_condition(
 /// point does not land on a native control, find the nearest exposed native
 /// control inside the match and click there instead. CL3 fix: the YouTube
 /// account-menu / nav-wrapper no-effect bug (#15).
+///
+/// L3: an addressed node that is itself actionable (a native control, an
+/// inline handler, or a focusable interactive role) is clicked where it is;
+/// only a same-named inner control may stand in for it (a wrapper around its
+/// own button). Redirecting a clickable thread row onto its nested Delete
+/// button fired Delete. `_lred` flags a redirect so the verdict names it.
 pub(super) const LEAF_TARGET_JS: &str = concat!(
-    "var _lClick=_lbx(n);var _lht=(n.getAttribute&&(n.getAttribute('aria-label')||n.getAttribute('title')))||'';var _lhr=(n.getAttribute&&n.getAttribute('role'))||n.tagName.toLowerCase();",
+    "var _lClick=_lbx(n);var _lht=(n.getAttribute&&(n.getAttribute('aria-label')||n.getAttribute('title')))||'';var _lhr=(n.getAttribute&&n.getAttribute('role'))||n.tagName.toLowerCase();var _lred=false;",
     "var _ltopN=doc.elementFromPoint(cx,cy);var _lNative=_lnb(_ltopN);",
+    "var _lnm=null;try{var _lr0=(n.getAttribute&&n.getAttribute('role'))||'';if(_lnb(n)||typeof n.onclick==='function'||(n.hasAttribute&&n.hasAttribute('onclick'))||(/^(button|link|menuitem|menuitemcheckbox|menuitemradio|tab|option|checkbox|radio|switch|treeitem)$/.test(_lr0)&&n.hasAttribute('tabindex')&&n.tabIndex>=0)){_lnm=String(name(n,false)||'').toLowerCase();}}catch(e){}",
     "if(!_lNative){var _lbest=null,_lbd=Infinity,_lcands=[];try{_lcands=deepAll(n,'button,a[href],input:not([type=hidden]),select,textarea');}catch(e){}",
-    "for(var _lk=0;_lk<_lcands.length;_lk++){var _lc=_lcands[_lk];var _lrc=_lc.getBoundingClientRect();if(_lrc.width<2||_lrc.height<2)continue;var _lbn=n.getBoundingClientRect();if(!(_lrc.left<=_lbn.right&&_lrc.right>=_lbn.left))continue;var _lccx=_lrc.x+_lrc.width/2,_lccy=_lrc.y+_lrc.height/2;var _ltc=doc.elementFromPoint(_lccx,_lccy);if(!(_ltc===_lc||(_lc.contains&&_lc.contains(_ltc))))continue;var _ldd=Math.hypot(_lccx-cx,_lccy-cy);if(_ldd<_lbd){_lbd=_ldd;_lbest=_lc;}}",
-    "if(_lbest){_lClick=_lbx(_lbest);_lht=(_lbest.getAttribute&&(_lbest.getAttribute('aria-label')||_lbest.textContent||_lbest.getAttribute('title')))||'';_lhr=(_lbest.getAttribute&&_lbest.getAttribute('role'))||_lbest.tagName.toLowerCase();}}",
+    "for(var _lk=0;_lk<_lcands.length;_lk++){var _lc=_lcands[_lk];if(_lnm!==null){var _lcn='';try{_lcn=String(name(_lc,false)||'').toLowerCase();}catch(e){}if(_lcn!==_lnm)continue;}var _lrc=_lc.getBoundingClientRect();if(_lrc.width<2||_lrc.height<2)continue;var _lbn=n.getBoundingClientRect();if(!(_lrc.left<=_lbn.right&&_lrc.right>=_lbn.left))continue;var _lccx=_lrc.x+_lrc.width/2,_lccy=_lrc.y+_lrc.height/2;var _ltc=doc.elementFromPoint(_lccx,_lccy);if(!(_ltc===_lc||(_lc.contains&&_lc.contains(_ltc))))continue;var _ldd=Math.hypot(_lccx-cx,_lccy-cy);if(_ldd<_lbd){_lbd=_ldd;_lbest=_lc;}}",
+    "if(_lbest){_lClick=_lbx(_lbest);_lht=(_lbest.getAttribute&&(_lbest.getAttribute('aria-label')||_lbest.textContent||_lbest.getAttribute('title')))||'';_lhr=(_lbest.getAttribute&&_lbest.getAttribute('role'))||_lbest.tagName.toLowerCase();_lred=true;}}",
 );
 
 /// Build the verdict for a click where NO activation lane dispatched (every

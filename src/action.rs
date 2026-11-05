@@ -494,6 +494,49 @@ mod action_tests {
         assert!(msg.contains("no observable DOM change"), "{msg}");
     }
 
+    #[test]
+    fn leaf_forwarded_click_names_the_inner_control() {
+        // L3: an effect produced by a leaf-forwarded mouse click is credited
+        // to the inner control that received it, never silently to the
+        // addressed container.
+        use super::verdict::{compute_verdict, ClickEvidence};
+        let lpm = crate::page::LivePageModel::new();
+        let mut d = crate::page::PageDelta::default();
+        d.removed.push("e9".into());
+        let click = super::Action::Click {
+            ref_id: "e5".into(),
+        };
+        let verdict = |via: &'static str, leaf: Option<&'static str>| {
+            compute_verdict(
+                &click,
+                &d,
+                &lpm,
+                ClickEvidence {
+                    via: Some((via, &[via][..], "")),
+                    leaf,
+                    coord_hit: None,
+                    toggle: None,
+                    dispatched: true,
+                },
+                None,
+                None,
+            )
+        };
+        assert_eq!(
+            verdict("mouse", Some("button [Delete]")),
+            "outcome: dom-changed (+0 \u{2212}1) via mouse on inner button [Delete]"
+        );
+        // The js lane dispatches on the addressed element itself.
+        assert_eq!(
+            verdict("js", Some("button [Delete]")),
+            "outcome: dom-changed (+0 \u{2212}1) via js"
+        );
+        assert_eq!(
+            verdict("mouse", None),
+            "outcome: dom-changed (+0 \u{2212}1) via mouse"
+        );
+    }
+
     // Guards the leaf-targeting JS fragment: the box-mode resolver must stay
     // wired into the injected script, or container-matched clicks silently
     // regress to the no-effect they were built to fix.
