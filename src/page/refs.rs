@@ -10,12 +10,15 @@
 //!
 //! Matching strategy (v1): exact signature match first; if a new element's
 //! signature has no exact match but the old element with the same role+name
-//! exists with a shifted ordinal, rebind it (the set reordered, not replaced).
-//! Only truly novel role+name pairs get fresh refs; truly gone ones invalidate.
+//! sits in the same uniquely-fingerprinted slot with a shifted ordinal or
+//! frame, rebind it (the set reordered, not replaced). Only truly novel
+//! role+name pairs get fresh refs; truly gone ones invalidate — a ref never
+//! moves to an element with a different name (bar a form control named by
+//! its own content, see `same_element`).
 
 use std::collections::HashMap;
 
-use crate::page::perception::RawElement;
+use crate::page::perception::{RawElement, SelectOptions};
 
 /// A ref assigned to a captured element, persisted across captures when the
 /// element survives.
@@ -43,8 +46,9 @@ pub struct StabilizeResult {
     pub changed: Vec<(String, StateChange)>,
     /// Refs rebound via structural fingerprint after a re-render (D48).
     /// `(ref id, new sig)` — the ref survived even though its sig changed
-    /// because the structural fingerprint matched. This is the re-render
-    /// immunity signal: the agent was never visible to the agent as a loss.
+    /// because the structural fingerprint matched and role+name did not
+    /// change. This is the re-render immunity signal: the move is never
+    /// visible to the agent as a loss.
     pub rebound: Vec<(String, String)>,
 }
 
@@ -118,34 +122,48 @@ pub fn stabilize(
         fresh_vec.push(i);
     }
 
-    // Pass 2: fingerprint rebind (D48). The element's sig changed (text,
-    // class, state) but its structural fingerprint is identical — meaning
-    // the same component re-rendered into a new DOM node. This is the core
-    // innovation: React/Vue/Angular re-renders kill refs in every other
-    // agent browser. Bladebro's fingerprint survives them.
+    // Pass 2: fingerprint rebind (D48). The element's sig moved (its frame
+    // index shifted, a same-named element ahead of it came or went) but its
+    // structural fingerprint is identical — the same element in the same
+    // slot. The fingerprint is a SLOT identity, not an element identity: it
+    // carries no text, so on its own it cannot tell a re-render from new
+    // content swapped into the same markup (a result list refreshed in
+    // place). Two guards keep a ref from ever moving to a different element:
+    // - the fingerprint must be unique on both sides. Identical component
+    //   markup hashes alike (a shadow root's chain stops at the root; deep
+    //   div soup past 10 levels), and a hash shared by several elements
+    //   identifies none of them — picking one was a silent misbind, and in
+    //   HashMap order a random one;
+    // - role and name must still match (see `same_element`).
+    let mut next_fp_count: HashMap<u64, usize> = HashMap::new();
+    for el in next {
+        *next_fp_count.entry(el.fingerprint).or_default() += 1;
+    }
     for &i in &fresh_vec {
         let el = &next[i];
         if el.fingerprint == 0 {
             continue; // Pre-D48 captures or 0-fp elements can't fingerprint-match
         }
-        if let Some(candidates) = prev_by_fp.get(&el.fingerprint) {
-            for &ref_id in candidates {
-                if used_prev.contains(ref_id) {
-                    continue;
-                }
-                // Found the match: this new element IS the old ref, re-rendered.
-                result.live.insert(el.sig.clone(), ref_id.to_string());
-                used_prev.insert(ref_id.to_string());
-                if let Some(change) =
-                    diff_state_opt(prev.get(ref_id).and_then(|p| p.probe.as_ref()), el)
-                {
-                    result.changed.push((ref_id.to_string(), change));
-                }
-                result.rebound.push((ref_id.to_string(), el.sig.clone()));
-                fresh.remove(&i);
-                break;
-            }
+        let Some(&[ref_id]) = prev_by_fp.get(&el.fingerprint).map(Vec::as_slice) else {
+            continue;
+        };
+        if next_fp_count.get(&el.fingerprint) != Some(&1) || used_prev.contains(ref_id) {
+            continue;
         }
+        let Some(ps) = prev.get(ref_id) else {
+            continue;
+        };
+        if !same_element(ps, el) {
+            continue;
+        }
+        // This new element IS the old ref, moved.
+        result.live.insert(el.sig.clone(), ref_id.to_string());
+        used_prev.insert(ref_id.to_string());
+        if let Some(change) = diff_state_opt(ps.probe.as_ref(), el) {
+            result.changed.push((ref_id.to_string(), change));
+        }
+        result.rebound.push((ref_id.to_string(), el.sig.clone()));
+        fresh.remove(&i);
     }
 
     // Pass 3: mint fresh refs for remaining unclaimed elements.
@@ -181,11 +199,68 @@ pub fn stabilize(
     result
 }
 
+/// Whether a fingerprint-matched element is still the element the old ref
+/// named. A ref is a promise to the agent ("e5 is 'Result A'"), so a name
+/// change in the same slot is a different element: the old ref dies (and
+/// self-heals by its old identity, or errors) and the new one gets a fresh
+/// ref — `- e5` / `+ e9`, never a silent `↺ e5` onto other content.
+///
+/// The exception is a form control named by its own content — an
+/// unlabeled contenteditable (its accessible name IS the typed text) or an
+/// unlabeled `<select>` (named by an option, the selected one when the first
+/// is blank) — where typing or picking renames it without making it a
+/// different field.
+fn same_element(prev: &PrevState, el: &RawElement) -> bool {
+    if prev.role != el.role {
+        return false;
+    }
+    if prev.name == el.name {
+        return true;
+    }
+    if let Some(opts) = &el.options {
+        return named_by_option(&prev.name, opts) && named_by_option(&el.name, opts);
+    }
+    let prev_value = prev.probe.as_ref().and_then(|p| p.value.as_deref());
+    named_by_value(&prev.role, &prev.name, prev_value)
+        && named_by_value(&el.role, &el.name, el.value.as_deref())
+}
+
+/// A `<select>` whose name is blank or one of its own options' labels (the
+/// name fallback for an unlabeled select). Labels are captured clipped to 60
+/// chars with `|` escaped as `¦`; the name is not, so compare it the same
+/// way. Checked against the NEW option list on both sides: a select whose
+/// options were swapped for an unrelated set is not the same choice.
+fn named_by_option(name: &str, opts: &SelectOptions) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    let clipped: String = name.replace('|', "¦").chars().take(60).collect();
+    opts.items.iter().any(|(label, _)| *label == clipped)
+}
+
+/// An editable control whose name is (a prefix of) its value. Compared with
+/// all whitespace removed: the capture takes the name from text content and
+/// the value from `innerText`, which differ only in the whitespace block
+/// boundaries and `<br>` produce; either side may be truncated.
+fn named_by_value(role: &str, name: &str, value: Option<&str>) -> bool {
+    if !matches!(role, "textbox" | "combobox") {
+        return false;
+    }
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let (name, value) = (squash(name), squash(value.unwrap_or("")));
+    if name.is_empty() || value.is_empty() {
+        // An empty editor has neither; a labeled one has a name but no value.
+        return name.is_empty() && value.is_empty();
+    }
+    value.starts_with(&name) || name.starts_with(&value)
+}
+
 /// Structural identity fingerprint (D48): hash over ancestor chain +
 /// tag name + first children + identity attributes. Survives DOM
 /// re-renders that preserve structure even when text or classes change
 /// (React/Vue/Angular re-renders, live region updates, counter changes).
-/// Different sigs but same structural fingerprint = same element.
+/// Same fingerprint = same slot, not necessarily the same element: see
+/// `same_element`.
 ///
 /// The live state of an element at capture time, stored on the LPM so the next
 /// capture can detect changes without a separate query.

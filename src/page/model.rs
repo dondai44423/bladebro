@@ -38,7 +38,8 @@ pub struct PageDelta {
     pub changed: Vec<(String, StateChange)>,
     /// Refs kept via structural fingerprint rebind (D48 re-render immunity).
     /// Each `(ref_id, new_sig)` means the ref survived a re-render that
-    /// changed its sig but preserved the structural fingerprint. The agent
+    /// changed its sig but preserved the structural fingerprint and its
+    /// role+name (a renamed element is removed + added instead). The agent
     /// sees "re-render survived" instead of "ref died" — the key UX win.
     pub rebound: Vec<(String, String)>,
     /// Previous title — set when the title changed between captures.
