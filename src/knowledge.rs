@@ -35,8 +35,8 @@
 //! - Atomic writes: write to `.tmp`, then `rename()`. Never half-written.
 //! - Corruption recovery: corrupted file → delete, start fresh.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -309,14 +309,22 @@ pub struct KnowledgeBase {
     pub domains: HashMap<String, DomainKnowledge>,
     pub stats: GlobalStats,
     dirty: bool,
+    /// Domains changed since the last sync: the only files sync writes.
+    changed: HashSet<String>,
+    /// Domains evicted since the last sync: their files are deleted.
+    evicted: HashSet<String>,
 }
 
 impl KnowledgeBase {
     /// Load all domain knowledge + stats from disk. Corruption-tolerant:
     /// corrupted files are deleted and skipped. Missing dir → empty KB.
     pub fn load() -> KnowledgeBase {
+        Self::load_from(&knowledge_dir())
+    }
+
+    fn load_from(root: &Path) -> KnowledgeBase {
         let mut kb = KnowledgeBase::default();
-        let dir = knowledge_dir().join("domains");
+        let dir = root.join("domains");
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => return kb,
@@ -349,7 +357,7 @@ impl KnowledgeBase {
             }
         }
         // Load stats.
-        let stats_path = knowledge_dir().join("stats.json");
+        let stats_path = root.join("stats.json");
         if let Ok(content) = std::fs::read_to_string(&stats_path) {
             if let Ok(stats) = serde_json::from_str::<GlobalStats>(&content) {
                 kb.stats = stats;
@@ -391,54 +399,93 @@ impl KnowledgeBase {
                     fail_count: 0,
                 });
                 dk.last_visit = now;
+                self.touch(domain);
             }
         }
-        self.dirty = true;
     }
 
-    /// Atomically write all dirty domain knowledge + stats to disk.
+    /// Mark a domain for the next sync.
+    fn touch(&mut self, domain: &str) {
+        if self.domains.contains_key(domain) {
+            self.evicted.remove(domain);
+            self.changed.insert(domain.to_string());
+            self.dirty = true;
+        }
+    }
+
+    /// Atomically write changed domain knowledge + stats to disk.
     /// Called on shutdown and periodically (every 60s). Best-effort.
     pub fn sync(&mut self) {
+        self.sync_to(&knowledge_dir());
+    }
+
+    fn sync_to(&mut self, root: &Path) {
         if !self.dirty {
             return;
         }
-        let dir = knowledge_dir().join("domains");
+        let dir = root.join("domains");
         let _ = crate::platform::secure_create_dir_all(&dir);
 
-        // Write dirty domains.
-        for (domain, dk) in &self.domains {
+        // Write only the domains that changed. Rewriting every file (two
+        // fsyncs each, up to MAX_DOMAINS of them) on each 60 s tick held
+        // the shared knowledge mutex that navigation waits on. A failed
+        // write stays queued for the next sync.
+        let mut failed = HashSet::new();
+        for domain in std::mem::take(&mut self.changed) {
+            let Some(dk) = self.domains.get(&domain) else {
+                continue;
+            };
             let path = dir.join(format!("{domain}.json"));
             let tmp = dir.join(format!("{domain}.json.tmp"));
-            if let Ok(json) = serde_json::to_string_pretty(dk) {
-                if crate::platform::secure_write_file(&tmp, json.as_bytes()).is_ok() {
-                    let _ = std::fs::rename(&tmp, &path);
+            let written = serde_json::to_string_pretty(dk).is_ok_and(|json| {
+                crate::platform::secure_write_file(&tmp, json.as_bytes()).is_ok()
+                    && std::fs::rename(&tmp, &path).is_ok()
+            });
+            if !written {
+                failed.insert(domain);
+            }
+        }
+        // An evicted domain's file must go too, or it reloads at the next
+        // start and MAX_DOMAINS never bounds the store on disk.
+        for domain in std::mem::take(&mut self.evicted) {
+            let path = dir.join(format!("{domain}.json"));
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    self.evicted.insert(domain);
                 }
             }
         }
 
         // Write stats.
-        let stats_path = knowledge_dir().join("stats.json");
-        let stats_tmp = knowledge_dir().join("stats.json.tmp");
+        let stats_path = root.join("stats.json");
+        let stats_tmp = root.join("stats.json.tmp");
         if let Ok(json) = serde_json::to_string_pretty(&self.stats) {
             if crate::platform::secure_write_file(&stats_tmp, json.as_bytes()).is_ok() {
                 let _ = std::fs::rename(&stats_tmp, &stats_path);
             }
         }
-        self.dirty = false;
+        self.dirty = !failed.is_empty() || !self.evicted.is_empty();
+        self.changed = failed;
     }
 
     /// Evict stale/low-confidence entries. Called during sync.
     pub fn prune(&mut self) {
         let now = now_secs();
         let evict_age = EVICT_AGE_DAYS * 86400;
-        self.domains.retain(|_, dk| {
+        let mut evicted = Vec::new();
+        self.domains.retain(|domain, dk| {
             let consent_ok = dk
                 .consent
                 .as_ref()
                 .map(|c| c.confidence >= EVICT_THRESHOLD || (now - c.last_validated) < evict_age)
                 .unwrap_or(true);
             let domain_fresh = dk.visit_count > 0 && (now - dk.last_visit) < evict_age;
-            consent_ok || domain_fresh || dk.block_config.is_some() || dk.timing.is_some()
+            let keep =
+                consent_ok || domain_fresh || dk.block_config.is_some() || dk.timing.is_some();
+            if !keep {
+                evicted.push(domain.clone());
+            }
+            keep
         });
         // Hard cap: if still too many, evict lowest-value.
         if self.domains.len() > MAX_DOMAINS {
@@ -451,9 +498,14 @@ impl KnowledgeBase {
             let to_evict = self.domains.len() - MAX_DOMAINS;
             for (k, _, _) in entries.into_iter().take(to_evict) {
                 self.domains.remove(&k);
+                evicted.push(k);
             }
         }
-        self.dirty = true;
+        for domain in evicted {
+            self.changed.remove(&domain);
+            self.evicted.insert(domain);
+            self.dirty = true;
+        }
     }
 
     // ── Consent knowledge ─────────────────────────────────────────────
@@ -497,7 +549,7 @@ impl KnowledgeBase {
             }
         }
         dk.last_visit = now;
-        self.dirty = true;
+        self.touch(domain);
     }
 
     /// Downgrade consent confidence after a failed application.
@@ -513,7 +565,7 @@ impl KnowledgeBase {
                 }
             }
         }
-        self.dirty = true;
+        self.touch(domain);
     }
 
     // ── Block config knowledge ────────────────────────────────────────
@@ -532,7 +584,7 @@ impl KnowledgeBase {
         let dk = self.domains.entry(domain.to_string()).or_default();
         dk.block_config = Some(classes.to_string());
         dk.last_visit = now;
-        self.dirty = true;
+        self.touch(domain);
     }
 
     // ── Timing knowledge ──────────────────────────────────────────────
@@ -564,7 +616,7 @@ impl KnowledgeBase {
             },
         });
         dk.last_visit = now;
-        self.dirty = true;
+        self.touch(domain);
     }
 
     // ── Bot risk ──────────────────────────────────────────────────────
@@ -574,7 +626,7 @@ impl KnowledgeBase {
         let dk = self.domains.entry(domain.to_string()).or_default();
         dk.bot_risk = risk;
         dk.last_visit = now;
-        self.dirty = true;
+        self.touch(domain);
     }
 
     /// Last observed bot-detection risk for a domain.
@@ -599,7 +651,7 @@ impl KnowledgeBase {
         let dk = self.domains.entry(domain.to_string()).or_default();
         dk.visit_count += 1;
         dk.last_visit = now;
-        self.dirty = true;
+        self.touch(domain);
     }
 
     pub fn record_consent_dismissed(&mut self) {
@@ -989,6 +1041,92 @@ mod tests {
             kb.domains.contains_key("good.com"),
             "good high-confidence should survive"
         );
+    }
+
+    fn scratch_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("blade-kb-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("domains")).unwrap();
+        root
+    }
+
+    fn domain_files(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root.join("domains"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The MAX_DOMAINS cap was enforced in memory only: evicted domains
+    /// kept their files, came back at the next load, and the store grew on
+    /// disk without bound.
+    #[test]
+    fn evicted_domains_do_not_reload() {
+        let root = scratch_root("evict");
+        let old = now_secs() - 90 * 86400;
+        for i in 0..MAX_DOMAINS + 5 {
+            let dk = DomainKnowledge {
+                timing: Some(TimingKnowledge {
+                    settle_ms: 500,
+                    sample_count: 1,
+                }),
+                visit_count: 1,
+                last_visit: old + i as u64,
+                ..Default::default()
+            };
+            std::fs::write(
+                root.join("domains").join(format!("d{i}.test.json")),
+                serde_json::to_vec(&dk).unwrap(),
+            )
+            .unwrap();
+        }
+        let mut kb = KnowledgeBase::load_from(&root);
+        kb.prune();
+        kb.sync_to(&root);
+        assert_eq!(kb.domains.len(), MAX_DOMAINS);
+        let files = domain_files(&root);
+        assert_eq!(files.len(), MAX_DOMAINS, "evicted files must be deleted");
+        assert!(!files.contains(&"d0.test.json".to_string()));
+        let reloaded = KnowledgeBase::load_from(&root);
+        assert!(!reloaded.domains.contains_key("d0.test"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every sync (each 60 s tick and every stop) rewrote every domain file
+    /// with two fsyncs each while holding the knowledge mutex. Only domains
+    /// that changed since the last sync may be written.
+    #[test]
+    fn sync_writes_only_changed_domains() {
+        let root = scratch_root("dirty");
+        let mut kb = KnowledgeBase::load_from(&root);
+        kb.record_visit("a.test");
+        kb.record_visit("b.test");
+        kb.prune();
+        kb.sync_to(&root);
+        // Mark b.test on disk; a sync that did not change b.test must not
+        // rewrite it.
+        let b = root.join("domains").join("b.test.json");
+        let marker = DomainKnowledge {
+            visit_count: 42,
+            ..Default::default()
+        };
+        std::fs::write(&b, serde_json::to_vec(&marker).unwrap()).unwrap();
+        kb.record_visit("a.test");
+        kb.prune();
+        kb.sync_to(&root);
+        let read = |p: &Path| -> DomainKnowledge {
+            serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+        };
+        assert_eq!(read(&b).visit_count, 42, "unchanged b.test was rewritten");
+        assert_eq!(
+            read(&root.join("domains").join("a.test.json")).visit_count,
+            2
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
