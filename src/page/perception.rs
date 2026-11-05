@@ -388,7 +388,13 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "value:n.isContentEditable?((n.innerText||n.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200)||null):(n.value&&n.value.length<=200?n.value:null),"
         + "disabled:!!((lp(n)||n).disabled),"
         + "checked:(r==='checkbox'||r==='radio')?!!((lp(n)||n).checked):null,"
-        + "href:(function(){var h=n.getAttribute&&n.getAttribute('href');if(h==null)return null;if(h.charAt(0)==='#')return h;return n.href||null;})(),placeholder:n.placeholder||null,"
+        // An SVG <a href> matches `a[href]`, but its `.href` is an
+        // SVGAnimatedString object, not a string: returned by value it
+        // serialized as `{}` and failed the WHOLE capture ("invalid type:
+        // map, expected a string") on any page with a linked chart or icon.
+        // Non-string `.href` resolves the attribute against the element's
+        // base URL, exactly as an HTML anchor's `.href` does.
+        + "href:(function(){var h=n.getAttribute&&n.getAttribute('href');if(h==null)return null;if(h.charAt(0)==='#')return h;if(typeof n.href==='string')return n.href||null;try{return new URL(h,n.baseURI).href;}catch(_e){return h||null;}})(),placeholder:n.placeholder||null,"
         + "options:n.tagName==='SELECT'?{sel:n.selectedIndex,total:n.options.length,items:[...n.options].slice(0,80).map(o=>[(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦').slice(0,60),(o.value||'').split('|').join('¦').slice(0,40)]).filter(p=>p[0]||p[1])}:null,"
         + "required:!!n.required||n.getAttribute('aria-required')==='true',"
         + "haspopup:!!n.getAttribute('aria-haspopup'),"
@@ -595,6 +601,63 @@ mod script_syntax_tests {
     #[test]
     fn capture_script_is_valid_js() {
         node_check("capture", &super::CAPTURE_SCRIPT);
+    }
+
+    /// An SVG `<a href>` matches the `a[href]` selector and role() calls it a
+    /// link, but its `.href` is an SVGAnimatedString object, not a string.
+    /// Serialized as `{}`, it failed the whole capture with "JSON error:
+    /// invalid type: map, expected a string" - nav/see/attach all errored on
+    /// any page with a linked chart. Runs the REAL capture script against a
+    /// stub DOM and parses its result exactly like `capture()` does.
+    #[test]
+    fn capture_svg_link_href_is_a_string() {
+        let src = serde_json::to_string(&*super::CAPTURE_SCRIPT).expect("serialize capture");
+        let js = format!(
+            r#"const S = {src};
+globalThis.window = globalThis;
+globalThis.innerHeight = 800;
+globalThis.location = {{ href: 'http://fixture.test/page' }};
+globalThis.getComputedStyle = () => ({{ display: 'inline', visibility: 'visible', opacity: '1' }});
+// SVGAnimatedString: values live on the prototype, so returnByValue
+// serializes it as an empty object.
+const anim = (v) => Object.create({{ get baseVal() {{ return v; }}, get animVal() {{ return v; }} }});
+const doc = {{ title: 'fixture', readyState: 'complete' }};
+const el = (tag, href, text, abs) => ({{
+  nodeType: 1, tagName: tag, ownerDocument: doc, parentElement: null, id: '',
+  baseURI: 'http://fixture.test/page', children: [],
+  childNodes: [{{ nodeType: 3, textContent: text }}],
+  attrs: {{ href }}, href: abs,
+  getAttribute(k) {{ return this.attrs[k] === undefined ? null : this.attrs[k]; }},
+  closest() {{ return null; }}, getRootNode() {{ return doc; }},
+  getBoundingClientRect() {{ return {{ x: 10, y: 20, width: 60, height: 20 }}; }},
+}});
+const svgA = el('a', '/target', 'chart link', anim('/target'));
+const htmlA = el('A', '/plain', 'plain link', 'http://fixture.test/plain');
+doc.body = {{}};
+doc.documentElement = {{}};
+doc.querySelectorAll = (s) => (s === '*' || s === 'iframe' ? [] : [svgA, htmlA]);
+globalThis.document = doc;
+console.log(JSON.stringify((0, eval)(S)));
+"#
+        );
+        let Some(out) = node_exec("capture-svg-href", &js) else {
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "capture script threw:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cap: super::PageCapture = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("capture result must parse: {e}"));
+        let hrefs: Vec<_> = cap.elements.iter().map(|e| e.href.as_deref()).collect();
+        assert_eq!(
+            hrefs,
+            [
+                Some("http://fixture.test/target"),
+                Some("http://fixture.test/plain")
+            ]
+        );
     }
 
     #[test]
