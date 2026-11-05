@@ -100,11 +100,22 @@ pub fn search_target(pathname: &str, raw_params: &str) -> Option<(String, String
     if !matches!(ty, "" | "posts" | "links" | "all") {
         return None;
     }
-    let query = kept
+    let mut query = kept
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("&");
+    // New reddit scopes `/r/<sub>/search/?q=…` by the path alone, but the
+    // JSON listing at that path searches ALL of reddit unless restrict_sr
+    // is set — the page's own scope must be stated. An explicit value on
+    // the page's url is the page's choice and is replayed as is.
+    let in_subreddit = path
+        .strip_prefix("/r/")
+        .and_then(|rest| rest.strip_suffix("/search"))
+        .is_some_and(|sub| !sub.is_empty() && !sub.contains('/'));
+    if in_subreddit && !kept.iter().any(|(k, _)| *k == "restrict_sr") {
+        query.push_str("&restrict_sr=1");
+    }
     Some((path.to_string(), query))
 }
 
@@ -310,6 +321,24 @@ mod tests {
                 .expect("scoped search accepted");
         assert_eq!(path, "/r/rust/search");
         assert_eq!(query, "q=lifetimes&restrict_sr=1&type=posts");
+    }
+
+    #[test]
+    fn subreddit_search_paths_stay_scoped_to_the_subreddit() {
+        // New reddit scopes `/r/<sub>/search/?q=…` by the path alone; the
+        // JSON listing at that path searches all of reddit unless
+        // restrict_sr is set.
+        let (path, query) =
+            search_target("/r/rust/search/", "?q=lifetimes&type=posts").expect("accepted");
+        assert_eq!(path, "/r/rust/search");
+        assert_eq!(query, "q=lifetimes&type=posts&restrict_sr=1");
+        // An explicit choice on the page's url is replayed as is.
+        let (_, query) =
+            search_target("/r/rust/search/", "?q=lifetimes&restrict_sr=0").expect("accepted");
+        assert_eq!(query, "q=lifetimes&restrict_sr=0");
+        // Site-wide search stays site-wide.
+        let (_, query) = search_target("/search/", "?q=lifetimes").expect("accepted");
+        assert_eq!(query, "q=lifetimes");
     }
 
     #[test]
