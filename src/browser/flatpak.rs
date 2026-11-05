@@ -9,8 +9,10 @@
 //! host filesystem (Chromium's manifest shares no home or /tmp paths). Run
 //! through the export as-is, Chrome silently creates the session profile
 //! inside the sandbox and it vanishes on exit — no cookies, localStorage or
-//! seasoning ever reach bladebro's profile dir. The agent lane therefore runs
-//! an export via `flatpak run --filesystem=<session dir>` itself.
+//! seasoning ever reach bladebro's profile dir. Downloads likewise complete
+//! into the sandbox's own copy of the downloads dir. The agent lane therefore
+//! runs an export via `flatpak run` itself, sharing the session dir and the
+//! downloads dir.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,26 +108,35 @@ fn is_app_id(id: &str) -> bool {
         })
 }
 
-/// Arguments before the browser's own flags. Flatpak ends a `--filesystem`
-/// path at the first unescaped `:` (the `:ro`/`:create` suffix), so `\` and
-/// `:` in the session dir are escaped.
-fn run_args(export: &Export, user_data_dir: &Path) -> Vec<String> {
+/// A read-write share of `dir` into the sandbox. Flatpak ends a
+/// `--filesystem` path at the first unescaped `:` (the `:ro`/`:create`
+/// suffix), so `\` and `:` in the path are escaped.
+fn filesystem_arg(dir: &Path) -> String {
     let mut shared = String::from("--filesystem=");
-    for c in user_data_dir.to_string_lossy().chars() {
+    for c in dir.to_string_lossy().chars() {
         if c == '\\' || c == ':' {
             shared.push('\\');
         }
         shared.push(c);
     }
+    shared
+}
+
+/// Arguments before the browser's own flags: the session profile and the
+/// downloads dir `Page.setDownloadBehavior` names, both shared into the
+/// sandbox.
+fn run_args(export: &Export, user_data_dir: &Path, downloads_dir: &Path) -> Vec<String> {
     let mut args = vec!["run".to_string()];
     args.extend(export.scope.map(String::from));
-    args.push(shared);
+    args.push(filesystem_arg(user_data_dir));
+    args.push(filesystem_arg(downloads_dir));
     args.push(export.app_id.clone());
     args
 }
 
-/// `flatpak run` for a Flatpak export with the session profile shared into
-/// the sandbox; `None` when `chrome_path` is not an export.
+/// `flatpak run` for a Flatpak export with the session profile and the
+/// downloads dir shared into the sandbox; `None` when `chrome_path` is not
+/// an export.
 pub(super) fn launch_command(chrome_path: &str, user_data_dir: &Path) -> Option<Command> {
     let export = parse_export(Path::new(chrome_path), &|key| std::env::var(key).ok())?;
     let flatpak = find_in_path("flatpak").or_else(|| {
@@ -142,8 +153,14 @@ pub(super) fn launch_command(chrome_path: &str, user_data_dir: &Path) -> Option<
         );
         return None;
     };
+    // Unshared, a download "completes" into the sandbox's private copy of
+    // this path and never reaches the host. Flatpak skips a path that does
+    // not exist, so create it now (0700, as the attach would) rather than
+    // let the share silently drop.
+    let downloads = crate::platform::downloads_dir();
+    let _ = crate::platform::secure_create_dir_all(&downloads);
     let mut cmd = Command::new(flatpak);
-    cmd.args(run_args(&export, user_data_dir));
+    cmd.args(run_args(&export, user_data_dir, &downloads));
     Some(cmd)
 }
 
@@ -231,8 +248,10 @@ mod tests {
 
     /// Run as-is, a Flatpak export starts Chrome on a sandbox-private copy of
     /// the session dir (measured: the host dir stayed empty and localStorage
-    /// was gone on the next launch). The launch must share the session dir
-    /// into the sandbox and start the installation the path names.
+    /// was gone on the next launch), and a download "completes" into a
+    /// sandbox-private downloads dir (measured: the host dir stayed empty).
+    /// The launch must share both dirs into the sandbox and start the
+    /// installation the path names.
     #[test]
     fn exports_launch_through_flatpak_run_with_the_profile_shared() {
         let root = std::env::temp_dir().join(format!("blade-flatpak-run-{}", std::process::id()));
@@ -249,11 +268,16 @@ mod tests {
 
         let parsed = parse_export(&user_export, &env).expect("user export");
         assert_eq!(
-            run_args(&parsed, Path::new("/state/blade/profiles/sess-42")),
+            run_args(
+                &parsed,
+                Path::new("/state/blade/profiles/sess-42"),
+                Path::new("/state/blade/downloads")
+            ),
             [
                 "run",
                 "--user",
                 "--filesystem=/state/blade/profiles/sess-42",
+                "--filesystem=/state/blade/downloads",
                 "org.chromium.Chromium"
             ]
         );
@@ -270,9 +294,16 @@ mod tests {
             "an export in another installation still runs, with flatpak's own lookup"
         );
         assert_eq!(
-            run_args(&parsed, Path::new("/odd:dir\\x/sess-1"))[2],
-            "--filesystem=/odd\\:dir\\\\x/sess-1",
-            "a ':' must not end the shared path"
+            run_args(
+                &parsed,
+                Path::new("/odd:dir\\x/sess-1"),
+                Path::new("/odd:dir\\x/downloads")
+            )[2..4],
+            [
+                "--filesystem=/odd\\:dir\\\\x/sess-1",
+                "--filesystem=/odd\\:dir\\\\x/downloads"
+            ],
+            "a ':' must not end a shared path"
         );
         for native in [
             "/usr/bin/chromium",

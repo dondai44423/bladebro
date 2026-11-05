@@ -83,6 +83,13 @@ pub fn blade_dir() -> PathBuf {
     )
 }
 
+/// Where the browser saves downloads (`Page.setDownloadBehavior`). A
+/// sandboxed launch (Flatpak) shares this exact dir into the sandbox, so
+/// both sides take it from here.
+pub fn downloads_dir() -> PathBuf {
+    blade_dir().join("downloads")
+}
+
 /// Can `$HOME/.local/state/blade` be created? True when the parent exists
 /// or `.local` does (so `state`/`blade` only need a mkdir under it).
 fn local_state_creatable(home: &std::path::Path) -> bool {
