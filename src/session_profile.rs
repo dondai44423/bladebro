@@ -53,6 +53,11 @@ pub(crate) use self::copy::copy_profile_ex;
 pub use self::reap::reap_orphans;
 pub(crate) use self::reap::{profile_in_use, session_owner_dead, session_roots};
 
+/// Import-generation marker at the top of a real-lane clone template. Every
+/// import writes a fresh value; session copies carry it, and a sync-back only
+/// replaces a template of the SAME generation (see `sync_back_impl`).
+pub(crate) const IMPORT_MARKER: &str = ".blade-import";
+
 /// A per-process session profile. Cleaned up by [`cleanup`]
 /// after Chrome has exited (never while Chrome holds it).
 #[derive(Clone)]
@@ -592,11 +597,26 @@ impl SessionProfile {
             let Some(_lock) = Self::acquire_lock_at(root) else {
                 return;
             };
-            let tmp = root.join(tmp_name);
-            let _ = std::fs::remove_dir_all(&tmp);
-            copy_profile(dir, &tmp);
-            if tmp.is_dir() {
-                Self::swap_into_template(&tmp, &root.join(template_name), &root.join(old_name));
+            let template = root.join(template_name);
+            // Checked under the lock the importer holds: a session cloned
+            // from an earlier import (`rb refresh`, a re-import for another
+            // profile root) would otherwise swap its stale copy back over
+            // the fresh template on exit — or via the reaper if it died.
+            // Templates without the marker (agent lane) match sessions
+            // without one, so their sync-back is unchanged.
+            if import_generation(dir) != import_generation(&template) {
+                eprintln!(
+                    "[bladebro] the clone was re-imported while session {} ran — its copy \
+                     is discarded instead of overwriting the new import",
+                    dir.display()
+                );
+            } else {
+                let tmp = root.join(tmp_name);
+                let _ = std::fs::remove_dir_all(&tmp);
+                copy_profile(dir, &tmp);
+                if tmp.is_dir() {
+                    Self::swap_into_template(&tmp, &template, &root.join(old_name));
+                }
             }
         }
         let _ = std::fs::remove_dir_all(dir);
@@ -626,6 +646,39 @@ fn marker_superseded_by_guard(marker: &Path) -> bool {
     it.next()
         .and_then(|ts| ts.parse::<u64>().ok())
         .is_some_and(|ts| now.saturating_sub(ts) > TEMPLATE_LOCK_GRACE_SECS)
+}
+
+/// The import generation a profile tree carries (`IMPORT_MARKER`), if any.
+fn import_generation(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(IMPORT_MARKER))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Owner pids of live bladebro sessions under `profiles` (this process
+/// excluded) — what `rb refresh` / `rb forget` must not run under. A dir
+/// still being created has no `.blade-owner` yet; its `sess-<pid>` name
+/// stands in, as in the reaper.
+pub(crate) fn live_session_owners(profiles: &Path) -> Vec<u32> {
+    let my_pid = std::process::id();
+    let Ok(entries) = std::fs::read_dir(profiles) else {
+        return Vec::new();
+    };
+    let mut pids: Vec<u32> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let named = name.strip_prefix("sess-")?.parse::<u32>().ok();
+            std::fs::read_to_string(entry.path().join(".blade-owner"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .or(named)
+        })
+        .filter(|&pid| pid != my_pid && platform::process_alive(pid))
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
 /// Is the template-copy lock stale (owner dead or older than a grace
@@ -1176,6 +1229,59 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `rb refresh` (or a re-import for another profile root) replaces the
+    /// clone template while an older session may still run on a copy of the
+    /// previous import. That session's exit — or the reaper, if it died —
+    /// must not swap its stale copy back over the fresh import.
+    #[test]
+    fn real_sync_back_never_overwrites_a_newer_import() {
+        let home =
+            std::env::temp_dir().join(format!("bladebro-test-reimport-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let root = home.join("realbrowser/helium");
+        let template = root.join("template");
+        std::fs::create_dir_all(template.join("Default")).unwrap();
+        std::fs::write(template.join(IMPORT_MARKER), "import-2").unwrap();
+        std::fs::write(template.join("Default/Cookies"), b"fresh-import").unwrap();
+
+        // Graceful exit of a session cloned from the previous import.
+        let stale = root.join("profiles/sess-999999998");
+        std::fs::create_dir_all(stale.join("Default")).unwrap();
+        std::fs::write(stale.join(IMPORT_MARKER), "import-1").unwrap();
+        std::fs::write(stale.join("Default/Cookies"), b"stale-clone").unwrap();
+        SessionProfile::sync_back_real(&root, &stale);
+        let after_exit = std::fs::read(template.join("Default/Cookies")).unwrap();
+
+        // A dead session from the previous import, found by the reaper.
+        std::fs::create_dir_all(stale.join("Default")).unwrap();
+        std::fs::write(stale.join(".blade-owner"), "999999998").unwrap();
+        std::fs::write(stale.join(IMPORT_MARKER), "import-1").unwrap();
+        std::fs::write(stale.join("Default/Cookies"), b"stale-clone").unwrap();
+        reap_orphans_at(&home);
+        let reaped = !stale.exists();
+        let after_reap = std::fs::read(template.join("Default/Cookies")).unwrap();
+
+        // A session cloned from THIS import still syncs back as before.
+        let current = root.join("profiles/sess-999999997");
+        std::fs::create_dir_all(current.join("Default")).unwrap();
+        std::fs::write(current.join(IMPORT_MARKER), "import-2").unwrap();
+        std::fs::write(current.join("Default/Cookies"), b"aged-clone").unwrap();
+        SessionProfile::sync_back_real(&root, &current);
+        let after_current = std::fs::read(template.join("Default/Cookies")).unwrap();
+
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(
+            after_exit, b"fresh-import",
+            "stale session exit clobbered the import"
+        );
+        assert!(reaped, "the dead stale session must still be removed");
+        assert_eq!(after_reap, b"fresh-import", "reaper clobbered the import");
+        assert_eq!(
+            after_current, b"aged-clone",
+            "current session must still age the clone"
+        );
     }
 
     /// The reaper must not delete the template when a sync-swap was SIGKILLed

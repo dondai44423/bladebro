@@ -72,8 +72,8 @@ pub use self::select::{
     validate_binary_override,
 };
 pub use self::template::{
-    forget, has_template, human_bytes, import_template, root_for, source_meta_path, template_dir,
-    template_source, template_stats, ImportStats,
+    forget, has_template, human_bytes, import_template, live_clone_sessions, root_for,
+    source_meta_path, template_dir, template_source, template_stats, ImportStats,
 };
 
 // ── Lane switch ─────────────────────────────────────────────────────────
