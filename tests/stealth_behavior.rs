@@ -1,19 +1,31 @@
 //! Regression coverage for native call/argument/promise semantics. Browser
 //! conformance and exact Chromium error messages live in audit + diff_oracle.
-fn regression(scenario: &str) {
-    let result = std::process::Command::new("node")
+fn run(scenario: &str) -> std::process::Output {
+    std::process::Command::new("node")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/stealth_behavior.cjs"
         ))
         .arg(scenario)
         .output()
-        .expect("node is required for injected-script tests");
+        .expect("node is required for injected-script tests")
+}
+
+fn regression(scenario: &str) {
+    let result = run(scenario);
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+// A misspelled scenario name used to fall back to `permissions` and pass.
+#[test]
+fn unknown_scenario_fails_instead_of_running_a_default() {
+    let result = run("no-such-scenario");
+    assert!(!result.status.success(), "an unknown scenario must fail");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("unknown scenario"));
 }
 
 #[test]

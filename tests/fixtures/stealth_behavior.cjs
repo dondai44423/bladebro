@@ -276,4 +276,8 @@ async function consoleCapture() {
   console.log('console capture: no page code, plain values unchanged, bounded work');
 }
 const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp, noise, console: consoleCapture };
-(scenarios[process.argv[2]] || permissions)().catch(error => { console.error(error); process.exitCode = 1; });
+// An unknown name must fail: falling back to a default scenario let a
+// misspelled scenario in a Rust test pass without checking anything.
+const scenario = Object.hasOwn(scenarios, process.argv[2]) ? scenarios[process.argv[2]]
+  : async () => { throw new Error(`unknown scenario ${JSON.stringify(process.argv[2])}; known: ${Object.keys(scenarios).join(', ')}`); };
+scenario().catch(error => { console.error(error); process.exitCode = 1; });
