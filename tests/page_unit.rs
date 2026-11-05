@@ -591,3 +591,59 @@ assert.equal(!!isProductPage(),true,'cart text still marks a product page');
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+fn titled(url: &str, title: &str, els: Vec<RawElement>) -> bladebro::page::PageCapture {
+    let mut c = cap(url, els);
+    c.title = title.into();
+    c
+}
+
+/// Budget-truncated delta views say how many elements were cut. The count
+/// used to be derived from the printed LINE count, which includes one to
+/// three header lines (page, title, title change): off by the title lines
+/// in general, and an unsigned underflow (debug panic, release "…(huge
+/// number more)") when nothing but the headers fit — reachable with the
+/// 500-char ultra-compact act budget.
+#[test]
+fn truncated_delta_counts_the_elements_it_cut() {
+    let more = |s: &str| -> String {
+        s.lines()
+            .find(|l| l.starts_with('\u{2026}'))
+            .unwrap_or_else(|| panic!("no truncation marker in:\n{s}"))
+            .to_string()
+    };
+    let els = |n: usize| -> Vec<RawElement> {
+        (1..=n)
+            .map(|i| {
+                let nm = format!("Button number {i}");
+                el("button", &nm, &format!("|button|{nm}|1"), None, false)
+            })
+            .collect()
+    };
+    let head = |s: &str, n: usize| -> usize { s.lines().take(n).map(|l| l.len() + 1).sum() };
+
+    // Small page (full list with markers): 3 elements, a title line, room
+    // for exactly one element.
+    let mut lpm = LivePageModel::new();
+    let d = lpm.ingest(titled("https://x.test/", "Fixture title", els(3)));
+    let full = lpm.compress_delta(&d, 100_000, 0);
+    let view = lpm.compress_delta(&d, head(&full, 3) + 1, 0);
+    assert_eq!(more(&view), "\u{2026}(2 more)", "{view}");
+
+    // Title changed (three header lines) and only the headers fit: the
+    // single element is the one that was cut.
+    let mut lpm = LivePageModel::new();
+    lpm.ingest(titled("https://x.test/", "Old title", els(1)));
+    let d = lpm.ingest(titled("https://x.test/", "New title", els(1)));
+    assert!(d.title_changed);
+    let full = lpm.compress_delta(&d, 100_000, 0);
+    let view = lpm.compress_delta(&d, head(&full, 3) + 1, 0);
+    assert_eq!(more(&view), "\u{2026}(1 more)", "{view}");
+
+    // Large page (diff view): 20 added, a title line, room for two.
+    let mut lpm = LivePageModel::new();
+    let d = lpm.ingest(titled("https://x.test/", "Fixture title", els(20)));
+    let full = lpm.compress_delta(&d, 100_000, 0);
+    let view = lpm.compress_delta(&d, head(&full, 4) + 1, 0);
+    assert_eq!(more(&view), "\u{2026}(18 more)", "{view}");
+}

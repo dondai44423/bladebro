@@ -504,7 +504,7 @@ impl LivePageModel {
             let removed_refs: std::collections::HashSet<&str> =
                 d.removed.iter().map(|r| r.as_str()).collect();
 
-            for el in &self.elements {
+            for (idx, el) in self.elements.iter().enumerate() {
                 let prefix = if added_refs.contains(el.ref_id.as_str()) {
                     "+ "
                 } else if changed_refs.contains(el.ref_id.as_str()) {
@@ -514,10 +514,11 @@ impl LivePageModel {
                 };
                 let line = format!("{}{}\n", prefix, format_element(el));
                 if out.len() + line.len() > budget {
-                    out.push_str(&format!(
-                        "…({} more)\n",
-                        self.elements.len() - out.lines().count() + 1
-                    ));
+                    // Count the elements not printed, never lines: `out`
+                    // also holds one to three header lines, and deriving
+                    // the count from them was off by the title lines and
+                    // underflowed when only the headers fit.
+                    out.push_str(&format!("…({} more)\n", self.elements.len() - idx));
                     break;
                 }
                 out.push_str(&line);
@@ -557,12 +558,14 @@ impl LivePageModel {
         }
 
         // For large pages or navigation, show the diff.
-        for el in &d.added {
+        for (idx, el) in d.added.iter().enumerate() {
             let line = format!("+ {}\n", format_element(el));
             if out.len() + line.len() > budget {
+                // Unprinted added entries plus the removals still to come,
+                // counted directly (see the small-page branch above).
                 out.push_str(&format!(
                     "…({} more)\n",
-                    d.added.len() + d.removed.len() - out.lines().count() + 1
+                    d.added.len() - idx + d.removed.len()
                 ));
                 break;
             }
