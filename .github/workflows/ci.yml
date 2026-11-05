@@ -15,16 +15,30 @@ on:
     branches: [main]
     paths-ignore: *docs-ignore
 
+# A newer push to the same PR supersedes the older run; it only wastes (scarce) native runners.
+# Never cancel main/dispatch runs: the release gate reads the exact head's result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 5
 
 jobs:
   lint-test-build:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Native Mac tests run on the arm64 pool. The macos-26-intel image wedges headful Chrome's
+        # main thread in a synchronous IconServices XPC call (process samples of Chrome 157:
+        # NSMenu/ShareKit -> ISIconManager), timing out Input.* calls for minutes on fresh Chrome
+        # instances; the same suite passes every assertion on arm64. The darwin-x64 binary is still
+        # cross-built and checked by release.sh.
+        os: [ubuntu-latest, macos-26, windows-latest]
         rust-version: ["stable"]
 
     steps:
@@ -45,19 +59,37 @@ jobs:
           # Use the browser installed for this fixture, not a runner's Chromium wrapper.
           echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
 
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-registry-
+      - name: Install signed stable Chrome (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Use current stock Chrome, as on Linux, instead of the image's copy.
+          dmg="$RUNNER_TEMP/googlechrome.dmg"
+          mount="$RUNNER_TEMP/chrome-installer"
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --output "$dmg" https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg
+          mkdir -p "$mount"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount"' EXIT
+          # DMG Finder/resource-fork metadata is not valid on signed code.
+          # Copy without that metadata, then verify the actual installed bytes.
+          app="$RUNNER_TEMP/Google Chrome.app"
+          ditto --noextattr --norsrc "$mount/Google Chrome.app" "$app"
+          codesign --verify --deep --strict "$app"
+          codesign --verify -R='anchor apple generic and certificate leaf[subject.OU] = "EQHXZ8M8AV"' "$app"
+          # Only replace the disposable GitHub runner's preinstalled browser.
+          sudo rm -rf '/Applications/Google Chrome.app'
+          sudo ditto "$app" '/Applications/Google Chrome.app'
+          chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          echo "CHROME_PATH=$chrome" >> "$GITHUB_ENV"
+          "$chrome" --version
 
-      - name: Cache cargo build
-        uses: actions/cache@v6
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: target
-          key: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-build-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.rust-version }}-cargo-build-
+          cache-on-failure: true
+          key: ${{ matrix.os }}
 
       - name: Format check
         run: cargo fmt --check
@@ -84,6 +116,8 @@ jobs:
         shell: bash
         run: |
           set -e
+          # Hermetic: a cache from an earlier (even failed) attempt must never supply this tree.
+          rm -rf target/dsh-runtime
           npm pack ./npm/bladebro --pack-destination .
           version=$(node -p "require('./npm/bladebro/package.json').version")
           # Test unpublished versions using this job's real native binary.
@@ -96,8 +130,66 @@ jobs:
           node tools/dsh_probe/package.mjs
           export DSH_RUNTIME=target/dsh-runtime
           export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
+          export BLADE_DUMP_INJECT="$RUNNER_TEMP/bladebro-inject.js"
+          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
+          mkdir -p "$BLADE_DSH_FAILURE_DIR"
+          export BLADE_DBG_WORKERS=1
+          export NAV_TIMING=1
           node tools/dsh_probe/run.mjs
           node tools/dsh_probe/run.mjs
+
+      - name: Diagnose macOS stock browser after failure
+        if: failure() && startsWith(matrix.os, 'macos-')
+        timeout-minutes: 2
+        run: |
+          node tools/dsh_probe/stock-browser.mjs
+          node tools/dsh_probe/stock-browser.mjs "$RUNNER_TEMP/bladebro-inject.js"
+
+      - name: Diagnose macOS without WebGL masking after failure
+        if: failure() && startsWith(matrix.os, 'macos-')
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BLADE_WEBGL: real
+          DSH_RUNTIME: target/dsh-runtime
+        run: |
+          export BLADEBRO="$PWD/target/release/bladebro"
+          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
+          node tools/dsh_probe/run.mjs
+
+      - name: Diagnose macOS mask without hardware detection
+        if: failure() && startsWith(matrix.os, 'macos-')
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BLADE_WEBGL: spoof
+          BLADE_GPU: apple
+          DSH_RUNTIME: target/dsh-runtime
+        run: |
+          export BLADEBRO="$PWD/target/release/bladebro"
+          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
+          node tools/dsh_probe/run.mjs
+
+      - name: Diagnose macOS native Metal backend
+        if: failure() && startsWith(matrix.os, 'macos-')
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BLADE_CHROME_FLAGS: --use-angle=metal
+          DSH_RUNTIME: target/dsh-runtime
+        run: |
+          export BLADEBRO="$PWD/target/release/bladebro"
+          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
+          node tools/dsh_probe/run.mjs
+
+      - name: Preserve macOS native failure evidence
+        if: failure() && startsWith(matrix.os, 'macos-')
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-native-failure
+          path: ${{ runner.temp }}/bladebro-dsh-failure
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Authenticated cross-origin downloads — native browser
         timeout-minutes: 10
@@ -146,6 +238,14 @@ jobs:
           export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
           POLISH_OUT=work/persistence-1.json python tools/reliability_probe/persistence.py
           POLISH_OUT=work/persistence-2.json python tools/reliability_probe/persistence.py
+
+      - name: Tiny native targets — no miss or replay
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
+          BLADE_INCOGNITO=0 POLISH_OUT=work/tiny-native.json python tools/reliability_probe/tiny_click.py
+          BLADE_INCOGNITO=1 POLISH_OUT=work/tiny-incognito.json python tools/reliability_probe/tiny_click.py
 
       - name: Agent control reads and structured runs — native browser
         timeout-minutes: 5

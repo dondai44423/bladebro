@@ -305,18 +305,17 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                 }
                                 Err(e) => {
                                     eprintln!("[bladebro] Chrome launch failed: {e}");
-                                    let resp = json!({
-                                        "jsonrpc": "2.0",
-                                        "id": id,
-                                        "result": {
+                                    if !is_notification {
+                                        let mut result = json!({
                                             "content": [{ "type": "text", "text":
-                                                format!("\u{2717} Could not launch Chrome: {e}. Check that Chromium is installed and try again.") }],
+                                                format!("\u{2717} Could not launch Chrome: {e}. Check browser/CHROME_PATH settings and startup diagnostics; the tool was not dispatched.") }],
                                             "isError": true,
-                                        }
-                                    });
-                                    let resp_str = serde_json::to_string(&resp)?;
-                                    writeln!(out, "{resp_str}")?;
-                                    out.flush()?;
+                                        });
+                                        // This early return bypasses the normal result shaping.
+                                        shape_result(&mut result, version);
+                                        writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+                                        out.flush()?;
+                                    }
                                     continue;
                                 }
                             }

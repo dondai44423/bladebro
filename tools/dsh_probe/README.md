@@ -15,11 +15,27 @@ its inference entry throws. No credentials or paid API are needed.
 
 Assertions cover exact live schemas/descriptions, all five tools, an exact
 Unicode form POST and server receipt, hidden text exclusion, Unicode storage,
-a real PNG in the native durable attachment store, honest errors, permission
+a real screenshot in the native durable attachment store (declared PNG/JPEG/WebP
+format checked against saved bytes), honest errors, permission
 and cancellation gates, failed handshake cleanup, duplicate namespace refusal,
 MCP-child crash/reconnect without mutation replay, unload and re-enable.
 Child tracking instruments Node's spawn only to observe/kill owned fixture
 processes. The production plugin uses DSH's unmodified MCP supervisor.
+Failed tool assertions retain the last fixture call, elapsed time and full result.
+Receipt checks wait for visible acknowledgement and require completed structured
+steps, so an error containing the expected text cannot pass.
+
+`CHROME_PATH=/absolute/browser node tools/dsh_probe/stock-browser.mjs` separately
+checks stock CDP evaluation, DOM layout reads and WebGL access with disposable
+data. It adds no driver patches and makes no stealth claim. On failed Mac CI,
+this and a separate DSH run with `BLADE_WEBGL=real` diagnose browser/driver
+boundaries. Diagnostic passes cannot turn the failed required job green.
+An optional script-path argument registers that exact generated injection in a
+second isolated Chrome, then verifies navigation, layout and WebGL readback.
+Further failure-only Mac controls keep the mask while skipping hardware
+detection, and select the native Metal backend. `BLADE_DSH_FAILURE_DIR` enables
+bounded desktop screenshots and samples of owned MCP child processes before
+cleanup; these fixture diagnostics are preserved as CI artifacts.
 
 Run `node tools/dsh_probe/package.mjs` for portable package/resolver boundaries
 (all five mapped platforms plus unsupported platforms, paths, config and missing

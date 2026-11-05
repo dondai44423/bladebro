@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 
 const runtime = resolve(process.env.DSH_RUNTIME || 'work/dsh/runtime');
 const host = createRequire(join(runtime, 'package.json'));
@@ -32,7 +33,31 @@ const { LlmRuntime, LlmAdapter } = await load('@deepseek-ai/dsh-llm');
 const plugin = await import(pathToFileURL(host.resolve('bladebro/dsh-plugin.mjs')).href);
 const { resolveBinary } = host('bladebro/binary.cjs');
 let checks = 0;
-function check(label, value) { assert.ok(value, label); checks++; console.log(`PASS ${label}`); }
+let lastCall;
+const diagnostic = value => JSON.stringify(value, (key, value) =>
+  key === 'data' && typeof value === 'string' && value.length > 256
+    ? { base64_chars: value.length, sha256: createHash('sha256').update(Buffer.from(value, 'base64')).digest('hex') }
+    : value);
+function check(label, value) {
+  if (!value && lastCall) console.error('Last tool call:', diagnostic(lastCall));
+  if (!value && process.platform === 'darwin' && process.env.BLADE_DSH_FAILURE_DIR) {
+    const dir = process.env.BLADE_DSH_FAILURE_DIR;
+    try {
+      childProcess.execFileSync('/usr/sbin/screencapture', ['-x', join(dir, `failure-${process.pid}.png`)], { timeout: 5000 });
+    } catch (error) { console.error('Native screenshot unavailable:', error.message); }
+    // Sample only direct children of the owned MCP fixture processes.
+    // Native modal dialogs and renderer stalls can be invisible to CDP.
+    for (const child of children.filter(child => child.exitCode === null && child.signalCode === null)) {
+      try {
+        const pids = childProcess.execFileSync('pgrep', ['-P', String(child.pid)], { encoding: 'utf8', timeout: 2000 });
+        for (const pid of pids.trim().split(/\s+/).filter(pid => /^\d+$/.test(pid))) {
+          childProcess.execFileSync('/usr/bin/sample', [pid, '1', '1', '-file', join(dir, `sample-${pid}.txt`)], { timeout: 5000 });
+        }
+      } catch (error) { console.error('Owned browser sample unavailable:', error.message); }
+    }
+  }
+  assert.ok(value, label); checks++; console.log(`PASS ${label}`);
+}
 async function until(predicate) {
   const deadline = Date.now() + 15000;
   while (!predicate()) {
@@ -60,10 +85,16 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const url = `http://127.0.0.1:${server.address().port}/`;
 let id = 0;
-const call = (tool, args, extra = {}) => ctx.tools.execute({
-  signal: new AbortController().signal, callId: `probe-${++id}`,
-  name: `mcp__bladebro__${tool}`, arguments: args, ...extra,
-});
+const call = async (tool, args, extra = {}) => {
+  const started = Date.now();
+  const result = await ctx.tools.execute({
+    signal: new AbortController().signal, callId: `probe-${++id}`,
+    name: `mcp__bladebro__${tool}`, arguments: args, ...extra,
+  });
+  // Only this probe's isolated fixture data; preserve errors before cleanup.
+  lastCall = { tool, args, elapsed_ms: Date.now() - started, result };
+  return result;
+};
 const text = r => r.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
 const config = {};
 if (process.env.BLADEBRO) {
@@ -117,14 +148,37 @@ try {
   check('native form fill succeeds', !result.isError);
   await until(() => posts.length === 1);
   check('server received exact Unicode exactly once', posts[0] === unicode && posts.length === 1);
-  result = await call('run', { steps: [{ action: 'see', mode: 'content' }] });
-  check('run surfaces server-side receipt', !result.isError && text(result).includes('DSH_RECEIPT_1'));
+  // Server acceptance precedes the browser consuming the response and
+  // rendering it. Verify the visible acknowledgement, not that race window.
+  result = await call('run', { format: 'json', steps: [
+    { action: 'wait', condition: 'text', text: 'DSH_RECEIPT_1', timeout: 10 },
+    { action: 'see', mode: 'content' },
+  ] });
+  let receipt;
+  try {
+    receipt = JSON.parse(text(result));
+    if (receipt && Object.hasOwn(receipt, 'data') && Object.hasOwn(receipt, 'note')) receipt = receipt.data;
+  } catch { /* Keep the original tool payload in the failure diagnostic. */ }
+  const receiptVisible = !result.isError && receipt?.status === 'completed' &&
+    receipt.results?.length === 2 && receipt.results.every(step => step.status === 'ok') &&
+    receipt.results[1].output.includes('DSH_RECEIPT_1');
+  if (!receiptVisible) {
+    console.error('Receipt readback:', JSON.stringify({ posts, result }));
+  }
+  check('run surfaces server-side receipt', receiptVisible);
   const agent = { options: { provider: 'fixture', model: 'vision' }, session: { requestHeader: () => undefined } };
   result = await call('vision', { marks: true }, { agent });
   const image = result.content.find(c => c.type === 'image');
-  check('vision becomes a native durable image attachment', !result.isError && image?.attachment?.mediaType === 'image/png');
+  // The host can normalize an opaque screenshot to JPEG or an alpha image
+  // to WebP. Verify stored bytes against its declared format, not source PNG.
+  const signatures = {
+    'image/png': bytes => bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])),
+    'image/jpeg': bytes => bytes.subarray(0, 3).equals(Buffer.from([255,216,255])),
+    'image/webp': bytes => bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP',
+  };
+  check('vision becomes a native durable image attachment', !result.isError && Object.hasOwn(signatures, image?.attachment?.mediaType));
   const saved = await ctx.attachments.readImage(image.attachment);
-  check('stored attachment contains real PNG bytes', Buffer.from(saved.data).subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])));
+  check('stored attachment contains valid image bytes', signatures[image.attachment.mediaType](Buffer.from(saved.data)));
   result = await call('state', { op: 'not-an-operation' });
   check('invalid operation is a native tool error', result.isError === true && text(result).length > 0);
   const abort = new AbortController(); abort.abort();

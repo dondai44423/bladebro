@@ -18,6 +18,15 @@ pub(super) async fn dispatch_mouse_move(
     target: (f64, f64),
     last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> Result<(f64, f64)> {
+    dispatch_mouse_move_bounded(cdp, target, last_mouse, None).await
+}
+
+async fn dispatch_mouse_move_bounded(
+    cdp: &CdpSession,
+    target: (f64, f64),
+    last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
+    bounds: Option<[f64; 4]>,
+) -> Result<(f64, f64)> {
     let mut rng = crate::stealth::Rng::new();
     // Random start point — offset from the target by 100-300px.
     // If we have a last position, start from there instead (continuity).
@@ -36,7 +45,14 @@ pub(super) async fn dispatch_mouse_move(
     };
 
     // Generate the bezier path with overshoot + gaussian click offset.
-    let path = crate::stealth::mouse_path(start, target, &mut rng);
+    let mut path = crate::stealth::mouse_path(start, target, &mut rng);
+    if let Some(box_) = bounds {
+        // Overshoot is natural; the correction/hesitation must land on the
+        // addressed control. Unbounded Gaussian tails miss small checkboxes.
+        for point in path.iter_mut().rev().take(2) {
+            (point.x, point.y) = bounded_click_point((point.x, point.y), box_);
+        }
+    }
 
     // Move along the path, dispatching mouseMoved events with natural delays.
     // Include movementX/movementY deltas — PerimeterX/HUMAN tracks these
@@ -76,7 +92,51 @@ pub(crate) async fn dispatch_mouse_click(
     y: f64,
     last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> Result<()> {
-    let (cx, cy) = dispatch_mouse_move(cdp, (x, y), last_mouse).await?;
+    dispatch_mouse_click_bounded(cdp, x, y, last_mouse, None).await
+}
+
+pub(super) async fn dispatch_mouse_click_in_box(
+    cdp: &CdpSession,
+    box_: [f64; 4],
+    last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
+) -> Result<()> {
+    if box_.iter().any(|v| !v.is_finite()) || box_[2] <= 0.0 || box_[3] <= 0.0 {
+        return Err(BladeError::NotInteractable(
+            "click target has no positive area; refresh the target before clicking".into(),
+        ));
+    }
+    dispatch_mouse_click_bounded(
+        cdp,
+        box_[0] + box_[2] / 2.0,
+        box_[1] + box_[3] / 2.0,
+        last_mouse,
+        Some(box_),
+    )
+    .await
+}
+
+// A continuous bounded distribution preserves variation without clipping
+// many samples onto one edge. Relative precision adapts to the control size.
+fn bounded_click_point(point: (f64, f64), box_: [f64; 4]) -> (f64, f64) {
+    let axis = |p: f64, origin: f64, size: f64| {
+        let center = origin + size / 2.0;
+        let radius = size / 4.0;
+        center + radius * ((p - center) / radius).tanh()
+    };
+    (
+        axis(point.0, box_[0], box_[2]),
+        axis(point.1, box_[1], box_[3]),
+    )
+}
+
+async fn dispatch_mouse_click_bounded(
+    cdp: &CdpSession,
+    x: f64,
+    y: f64,
+    last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
+    bounds: Option<[f64; 4]>,
+) -> Result<()> {
+    let (cx, cy) = dispatch_mouse_move_bounded(cdp, (x, y), last_mouse, bounds).await?;
 
     let mut rng = crate::stealth::Rng::new();
     let to = Duration::from_secs(5);
@@ -87,8 +147,9 @@ pub(crate) async fn dispatch_mouse_click(
     for _ in 0..tremor_count {
         let jx = gaussian(&mut rng, 0.0, 1.5).clamp(-3.0, 3.0);
         let jy = gaussian(&mut rng, 0.0, 1.5).clamp(-3.0, 3.0);
-        let tx = cx + jx;
-        let ty = cy + jy;
+        let (tx, ty) = bounds
+            .map(|box_| bounded_click_point((cx + jx, cy + jy), box_))
+            .unwrap_or((cx + jx, cy + jy));
         let (mx, my) = {
             let lm = last_mouse.lock().unwrap_or_else(|e| e.into_inner());
             lm.map(|(lx, ly)| ((tx - lx).round() as i64, (ty - ly).round() as i64))
@@ -128,7 +189,37 @@ pub(crate) async fn dispatch_mouse_click(
         to,
     )
     .await?;
+    *last_mouse.lock().unwrap_or_else(|e| e.into_inner()) = Some((cx, cy));
     Ok(())
+}
+
+#[cfg(test)]
+mod click_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn extreme_offsets_stay_inside_tiny_fractional_and_regular_targets() {
+        for box_ in [
+            [100.0, 100.0, 2.0, 2.0],
+            [200.75, 100.75, 0.5, 0.5],
+            [0.0, 0.0, 13.0, 13.0],
+            [50.0, 80.0, 200.0, 40.0],
+        ] {
+            let center = (box_[0] + box_[2] / 2.0, box_[1] + box_[3] / 2.0);
+            assert_eq!(bounded_click_point(center, box_), center);
+            for offset in [-1e6, -20.0, -5.0, 0.5, 5.0, 20.0, 1e6] {
+                let (x, y) = bounded_click_point((center.0 + offset, center.1 - offset), box_);
+                assert!(
+                    x > box_[0] && x < box_[0] + box_[2] && y > box_[1] && y < box_[1] + box_[3],
+                    "{box_:?}: {x},{y}"
+                );
+            }
+            assert_ne!(
+                bounded_click_point((center.0 + 0.5, center.1 + 0.5), box_),
+                center
+            );
+        }
+    }
 }
 
 /// A parsed key chord ("Control+a", "Meta+Enter", "Shift+Tab").

@@ -198,9 +198,7 @@ pub async fn perform_with_network(
                 match strategy {
                     "mouse" => {
                         if let Some(box_) = found.box_ {
-                            let cx = box_[0] + box_[2] / 2.0;
-                            let cy = box_[1] + box_[3] / 2.0;
-                            dispatch_mouse_click(cdp, cx, cy, last_mouse).await?;
+                            dispatch_mouse_click_in_box(cdp, box_, last_mouse).await?;
                             dispatched = true;
                         } else {
                             continue;

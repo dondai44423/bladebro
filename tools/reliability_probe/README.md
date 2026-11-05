@@ -1,4 +1,7 @@
 Run `python3 tools/reliability_probe/run.py` after `cargo build --release`.
+Run `python3 tools/reliability_probe/tiny_click.py` for trusted, single-dispatch
+activation of tiny buttons and fractional-pixel checkboxes. It compares actual
+page event counts and state; `--baseline` records misses on an old binary.
 Set `BLADEBRO` or `CHROME` to select binaries. Each run owns a fresh Chrome,
 data home and local fixture; no real browser or login data is used.
 Assertions check HTTP mutation counts, full-fidelity state readback,
