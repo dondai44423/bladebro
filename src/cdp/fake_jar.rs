@@ -10,7 +10,8 @@
 //! - `Network.deleteCookies` matches the cookie domain exactly, against
 //!   `domain` or the `url` host (`fixture.test` does not delete a
 //!   `.fixture.test` cookie);
-//! - `Storage.getCookies` / `Network.getCookies` return the jar;
+//! - `Network.getCookies` returns the cookies sent to its `urls`, or to the
+//!   current page when none are given; `Storage.getCookies` returns the jar;
 //! - `Runtime.evaluate` answers `location.origin` and storage writes.
 
 use std::sync::{Arc, Mutex};
@@ -56,6 +57,11 @@ fn host_of(url: &str) -> String {
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))
         .unwrap_or_default()
+}
+
+/// Whether a cookie with `domain` is sent to `host`.
+fn sent_to(domain: &str, host: &str) -> bool {
+    domain == host || (domain.starts_with('.') && (host == &domain[1..] || host.ends_with(domain)))
 }
 
 /// A cookie Chrome rejects while parsing the CookieParam.
@@ -117,7 +123,25 @@ fn answer(
             }
             json!({})
         }
-        "Network.getCookies" | "Storage.getCookies" => json!({ "cookies": jar.clone() }),
+        "Storage.getCookies" => json!({ "cookies": jar.clone() }),
+        "Network.getCookies" => {
+            let hosts: Vec<String> = match params["urls"].as_array() {
+                Some(urls) => urls
+                    .iter()
+                    .map(|u| host_of(u.as_str().unwrap_or_default()))
+                    .collect(),
+                None => vec![host_of(origin)],
+            };
+            let sent: Vec<Value> = jar
+                .iter()
+                .filter(|c| {
+                    let d = c["domain"].as_str().unwrap_or_default();
+                    hosts.iter().any(|h| sent_to(d, h))
+                })
+                .cloned()
+                .collect();
+            json!({ "cookies": sent })
+        }
         "Network.deleteCookies" => {
             let name = params["name"].clone();
             let domain = params["domain"]

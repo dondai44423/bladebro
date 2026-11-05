@@ -13,8 +13,12 @@ use crate::error::{BladeError, Result};
 /// What the agent wants to do with page/browser state.
 #[derive(Debug, Clone)]
 pub enum StateOp {
-    /// Read cookies for the current page (or all browser cookies if `urls` empty).
-    GetCookies { urls: Vec<String> },
+    /// Read cookies for `urls` (the current page if empty), or the
+    /// browser-wide cookies of `domain` and its subdomains.
+    GetCookies {
+        urls: Vec<String>,
+        domain: Option<String>,
+    },
     /// Set a cookie.
     SetCookie {
         name: String,
@@ -106,19 +110,34 @@ pub struct Tab {
 pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
     match op {
         // ---- cookies ----
-        StateOp::GetCookies { urls } => {
+        StateOp::GetCookies { urls, domain } => {
             cdp.enable("Network").await?;
-            let params = if urls.is_empty() {
-                json!({})
+            let res = if domain.is_some() && urls.is_empty() {
+                // `Network.getCookies {}` answers with the current page's
+                // cookies only, so a domain filter reads the browser-wide
+                // store instead of silently returning the page's cookies.
+                cdp.cookie_store().await?
             } else {
-                json!({ "urls": urls })
+                let params = if urls.is_empty() {
+                    json!({})
+                } else {
+                    json!({ "urls": urls })
+                };
+                cdp.send("Network.getCookies", Some(params)).await?
             };
-            let res = cdp.send("Network.getCookies", Some(params)).await?;
-            let cookies: Vec<Cookie> = serde_json::from_value(
-                res.get("cookies")
+            let all = res
+                .get("cookies")
+                .and_then(Value::as_array)
+                .ok_or_else(|| BladeError::Other("no cookies field".into()))?;
+            let raw: Vec<Value> = match domain {
+                Some(d) => all
+                    .iter()
+                    .filter(|c| cookie_in_domain(c, d))
                     .cloned()
-                    .ok_or_else(|| BladeError::Other("no cookies field".into()))?,
-            )?;
+                    .collect(),
+                None => all.clone(),
+            };
+            let cookies: Vec<Cookie> = serde_json::from_value(Value::Array(raw.clone()))?;
             if cookies.is_empty() {
                 return Ok("(no cookies)".into());
             }
@@ -133,7 +152,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                     if c.http_only { " httpOnly" } else { "" },
                 ));
             }
-            bounded_state_read(out, &res["cookies"])
+            bounded_state_read(out, &raw)
         }
 
         StateOp::SetCookie {
@@ -391,6 +410,18 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             restore_session(cdp, name, &session).await
         }
     }
+}
+
+/// The `cookies` domain filter: the cookie belongs to `filter` or one of
+/// its subdomains.
+fn cookie_in_domain(cookie: &Value, filter: &str) -> bool {
+    let filter = filter.trim_start_matches('.').to_ascii_lowercase();
+    let domain = cookie["domain"]
+        .as_str()
+        .unwrap_or_default()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    !filter.is_empty() && (domain == filter || domain.ends_with(&format!(".{filter}")))
 }
 
 /// Domains of the unpartitioned cookies named `name` that Chrome would
@@ -905,5 +936,44 @@ mod cookie_jar_tests {
             .unwrap();
         assert!(!out.starts_with('✓'), "nothing left to delete: {out}");
         assert!(out.contains("nothing deleted"), "{out}");
+    }
+
+    fn get_cookies(domain: Option<&str>) -> StateOp {
+        StateOp::GetCookies {
+            urls: vec![],
+            domain: domain.map(str::to_owned),
+        }
+    }
+
+    /// `state op=cookies domain=x` sent `Network.getCookies {}`, which
+    /// answers with the current page's cookies: the domain was ignored and
+    /// no error said so.
+    #[tokio::test]
+    async fn cookies_domain_filter_returns_that_domain() {
+        let (cdp, _jar) = fake_jar::start(
+            ORIGIN,
+            vec![
+                cookie("page", "127.0.0.1", -1.0),
+                cookie("sid", ".fixture.test", -1.0),
+                cookie("www", "www.fixture.test", -1.0),
+                cookie("near", "notfixture.test", -1.0),
+                cookie("other", "other.test", -1.0),
+            ],
+        )
+        .await;
+        let out = perform(&cdp, &get_cookies(Some("fixture.test")))
+            .await
+            .unwrap();
+        let names: Vec<&str> = out.lines().filter_map(|l| l.split('=').next()).collect();
+        assert_eq!(names, ["sid", "www"], "{out}");
+
+        let out = perform(&cdp, &get_cookies(Some("none.test")))
+            .await
+            .unwrap();
+        assert_eq!(out, "(no cookies)");
+
+        // Without a domain the page-scoped read is unchanged.
+        let out = perform(&cdp, &get_cookies(None)).await.unwrap();
+        assert_eq!(out, "page=v domain=127.0.0.1\n");
     }
 }

@@ -143,6 +143,7 @@ async fn handle_state_inner(args: &Value, page: &mut Page) -> Result<String> {
     let op = match op_str {
         "cookies" => {
             // If url is provided, filter cookies to that domain.
+            // A domain reads that domain (and subdomains) browser-wide.
             // Otherwise, use the current page URL so the agent gets
             // relevant cookies, not a 100+ line dump of all browser cookies.
             let filter_url = if !url.is_empty() {
@@ -159,6 +160,11 @@ async fn handle_state_inner(args: &Value, page: &mut Page) -> Result<String> {
             };
             StateOp::GetCookies {
                 urls: filter_url.map(|u| vec![u]).unwrap_or_default(),
+                domain: args
+                    .get("domain")
+                    .and_then(Value::as_str)
+                    .filter(|d| !d.is_empty())
+                    .map(String::from),
             }
         }
         "set-cookie" => StateOp::SetCookie {
