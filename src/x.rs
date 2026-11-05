@@ -12,6 +12,8 @@
 //! - status pages → the whole conversation (TweetDetail): the focal tweet
 //!   plus every reply and nested reply the ranking returns, cursor-paginated
 //!   while the timeline is not terminated, thread-ordered with depth.
+//!   Sections X collapses behind a "Show replies" cursor are not expanded;
+//!   they keep `complete` false, with a note.
 //! - profile / search / home → the timeline (UserTweets / SearchTimeline /
 //!   HomeTimeline), cursor-paginated to the requested cap.
 //!
@@ -545,6 +547,36 @@ mod tests {
         .expect("thread walk");
         assert_eq!(p.count, 0);
         assert!(p.complete, "no replies is the whole thread: {:?}", p.note);
+    }
+
+    #[tokio::test]
+    async fn collapsed_reply_branches_keep_a_thread_incomplete() {
+        // The captured page holds three conversation modules that end in a
+        // "Show replies" (ShowMore) cursor; the replies behind them are not
+        // fetched, so a terminated walk is still not the whole thread.
+        let (cdp, served) = fake_cdp(vec![
+            Ok((200, fixture().to_string())),
+            Ok((200, thread_body(vec![terminate_bottom()]))),
+        ])
+        .await;
+        let p = thread_walk(
+            &cdp,
+            &template("TweetDetail"),
+            FOCAL,
+            100,
+            &mut Budget::new(),
+        )
+        .await
+        .expect("thread walk");
+        assert_eq!(served.load(SeqCst), 2);
+        assert_eq!(p.count, 30);
+        assert!(!p.complete, "3 reply branches were never expanded");
+        let note = p.note.unwrap_or_default();
+        assert!(note.contains("3 collapsed reply"), "{note}");
+        assert!(
+            !note.contains("capped"),
+            "nothing was cut at the cap: {note}"
+        );
     }
 
     #[test]

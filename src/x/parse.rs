@@ -36,6 +36,10 @@ pub(super) struct PageBits {
     /// cursors — X's end-of-timeline page — as opposed to a page whose
     /// content was all filtered out.
     pub(super) entries: usize,
+    /// Cursors that are neither Top nor Bottom — the "Show replies" (ShowMore)
+    /// cursor closing a conversation module, "Show more replies"
+    /// (ShowMoreThreads…) — each hiding replies the walk does not fetch.
+    pub(super) collapsed: usize,
 }
 
 /// Walk one graphql response page: find the instructions array, collect
@@ -47,6 +51,7 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
         bottom_cursor: None,
         terminated: false,
         entries: 0,
+        collapsed: 0,
     };
     let Some(instructions) = find_instructions(j) else {
         return bits;
@@ -132,7 +137,10 @@ fn walk_entry(bits: &mut PageBits, content: Option<&Value>) {
 /// Cursors inside a module page that module, never the timeline.
 fn module_item(bits: &mut PageBits, it: &Value) {
     let ic = it.pointer("/item/itemContent");
-    if ic.is_some_and(is_cursor) {
+    if let Some(cur) = ic.filter(|ic| is_cursor(ic)) {
+        if !matches!(cursor_type(cur), "Top" | "Bottom") {
+            bits.collapsed += 1;
+        }
         return;
     }
     bits.entries += 1;
@@ -144,12 +152,21 @@ fn is_cursor(v: &Value) -> bool {
     v.get("cursorType").is_some()
 }
 
-/// A top-level cursor: the Bottom one continues the timeline.
+fn cursor_type(c: &Value) -> &str {
+    c.get("cursorType").and_then(|t| t.as_str()).unwrap_or("")
+}
+
+/// A top-level cursor: Bottom continues the timeline; any type but Top
+/// hides content behind a click.
 fn timeline_cursor(bits: &mut PageBits, c: &Value) {
-    if c.get("cursorType").and_then(|t| t.as_str()) == Some("Bottom") {
-        if let Some(v) = c.get("value").and_then(|v| v.as_str()) {
-            bits.bottom_cursor = Some(v.to_string());
+    match cursor_type(c) {
+        "Bottom" => {
+            if let Some(v) = c.get("value").and_then(|v| v.as_str()) {
+                bits.bottom_cursor = Some(v.to_string());
+            }
         }
+        "Top" => {}
+        _ => bits.collapsed += 1,
     }
 }
 
@@ -171,6 +188,8 @@ pub(super) struct ThreadPage {
     pub(super) terminated: bool,
     /// See [`PageBits::entries`].
     pub(super) entries: usize,
+    /// See [`PageBits::collapsed`].
+    pub(super) collapsed: usize,
 }
 
 /// Parse one TweetDetail page: the focal tweet (its own entry) and every
@@ -195,6 +214,7 @@ pub(super) fn parse_thread_page(j: &Value, focal_id: &str) -> ThreadPage {
         bottom_cursor: bits.bottom_cursor,
         terminated: bits.terminated,
         entries: bits.entries,
+        collapsed: bits.collapsed,
     }
 }
 
@@ -212,6 +232,7 @@ pub(super) fn parse_timeline_page(j: &Value) -> ThreadPage {
         bottom_cursor: bits.bottom_cursor,
         terminated: bits.terminated,
         entries: bits.entries,
+        collapsed: bits.collapsed,
     }
 }
 

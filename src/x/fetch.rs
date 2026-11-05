@@ -206,6 +206,10 @@ struct Walk {
     complete: bool,
     /// Why the walk stopped early, when it did.
     note: Option<String>,
+    /// Thread only: reply sections X left collapsed behind a cursor
+    /// ("Show replies", "Show more replies"). They are not replayed, so
+    /// the replies behind them are missing from the harvest.
+    collapsed: usize,
 }
 
 impl Walk {
@@ -216,15 +220,23 @@ impl Walk {
         // harvest past it — and the payload keeps just the first `cap`. A
         // timeline that ended still is not complete once that cut drops
         // real items.
-        let complete = self.complete && self.tweets.len() <= cap;
-        let mut note = self.note.clone();
-        if !complete && note.is_none() {
-            note = Some(format!(
+        let cut = self.tweets.len() > cap;
+        let mut notes: Vec<String> = self.note.iter().cloned().collect();
+        // No end and no stop reason: the loop broke on the cap.
+        if cut || (!self.complete && self.note.is_none()) {
+            notes.push(format!(
                 "x: partial — capped at {} items, the {what} continues",
                 self.tweets.len().min(cap)
             ));
         }
-        (complete, note)
+        if self.collapsed > 0 {
+            notes.push(format!(
+                "x: {} collapsed reply section(s) ('Show replies') not fetched — the replies behind them are missing; open a reply's url to read its branch",
+                self.collapsed
+            ));
+        }
+        let complete = self.complete && !cut && self.collapsed == 0;
+        (complete, (!notes.is_empty()).then(|| notes.join("; ")))
     }
 }
 
@@ -244,6 +256,7 @@ async fn walk(
         tweets: Vec::new(),
         complete: false,
         note: None,
+        collapsed: 0,
     };
     let mut seen: HashSet<String> = HashSet::new();
     let mut cursor: Option<String> = None;
@@ -319,6 +332,11 @@ async fn walk(
                 w.tweets.push(t);
                 new_items += 1;
             }
+        }
+        // Collapsed sections matter to the conversation only: a timeline's
+        // own walk is whole without the threads it previews.
+        if focal_id.is_some() {
+            w.collapsed += parsed.collapsed;
         }
         pages += 1;
         // `complete` is claimed only on X's own end signals: a Bottom
