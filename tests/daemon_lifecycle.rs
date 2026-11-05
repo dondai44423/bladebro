@@ -401,3 +401,48 @@ fn daemon_error_text_never_marks_a_live_daemon_unreachable() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn auto_started_daemon_failure_is_not_rerun_one_shot() {
+    // The request reached the auto-started daemon and failed there. Any
+    // such failure — "outcome UNKNOWN", a client timeout while the daemon
+    // still works — used to be followed by a second run of the same command
+    // in a one-shot browser: a click could land twice.
+    let home = tmp_home("rerun");
+    let (status, value, stderr) = client_json(&home, &[], &["nav", "http://127.0.0.1:9/"]);
+    stop_daemon(&home);
+    assert!(
+        !stderr.contains("falling back to one-shot"),
+        "a delivered command must never be re-run one-shot: {stderr}"
+    );
+    assert_eq!(status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        value["text"]
+            .as_str()
+            .unwrap()
+            .contains("Chrome launch failed"),
+        "the daemon's own error must be surfaced: {value}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn daemon_closing_without_a_reply_reports_an_unknown_outcome() {
+    // A daemon that dies mid-command (crash, OOM kill) closes the socket
+    // without replying. That surfaced as "invalid daemon response: EOF
+    // while parsing…" — or, right after an auto-start, as a one-shot re-run
+    // of the command. The agent must be told the command may have run.
+    let home = tmp_home("eof");
+    let fake = fake_daemon(&home, "");
+    let (status, value, stderr) = client_json(&home, &[], &["nav", "http://127.0.0.1:9/"]);
+    let requests = fake.requests.lock().unwrap().len();
+    assert_eq!(requests, 1, "stderr: {stderr}");
+    assert_eq!(status.code(), Some(1), "stderr: {stderr}");
+    let text = value["text"].as_str().unwrap();
+    assert!(
+        text.contains("may have run") && text.contains("before repeating"),
+        "the error must say the outcome is unknown: {text}"
+    );
+    assert!(!stderr.contains("one-shot"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -344,16 +344,6 @@ impl From<BladeError> for DaemonCallError {
     }
 }
 
-#[cfg(unix)]
-impl std::fmt::Display for DaemonCallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DaemonCallError::Unreachable(e) => write!(f, "daemon not running: {e}"),
-            DaemonCallError::Failed(e) => write!(f, "{e}"),
-        }
-    }
-}
-
 /// Send a tool call to the daemon over Unix socket.
 ///
 /// Hardening: the read has a timeout (`BLADE_CMD_TIMEOUT` seconds, default
@@ -408,6 +398,17 @@ fn send_to_daemon(tool: &str, args: &Value) -> std::result::Result<ToolResult, D
         }
     }
 
+    // EOF without a reply: the daemon died (crash, OOM kill) after taking
+    // the request — the command may have run, and the agent must look
+    // before repeating it, not get a JSON parse error.
+    if resp.trim().is_empty() {
+        return Err(BladeError::Other(
+            "the daemon closed the connection without replying — the command may have run.\n\
+             Check with 'bladebro state tabs' before repeating it."
+                .into(),
+        )
+        .into());
+    }
     let v: Value = serde_json::from_str(&resp)
         .map_err(|e| BladeError::Other(format!("invalid daemon response: {e}")))?;
 
@@ -641,9 +642,15 @@ async fn run_tool(
                         }
                         return Ok(());
                     }
-                    Err(e) => eprintln!(
-                        "[bladebro] daemon failed after auto-start ({e}), falling back to one-shot"
+                    // Never delivered: running it one-shot is its first run.
+                    Err(DaemonCallError::Unreachable(e)) => eprintln!(
+                        "[bladebro] daemon unreachable after auto-start ({e}), falling back to one-shot"
                     ),
+                    // Delivered: the daemon may have acted (a click that
+                    // landed before "outcome UNKNOWN", a command still
+                    // running past BLADE_CMD_TIMEOUT). A one-shot fallback
+                    // here would run it a second time.
+                    Err(DaemonCallError::Failed(e)) => return Err(e),
                 }
             } else {
                 eprintln!(
