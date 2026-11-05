@@ -204,7 +204,7 @@ impl Browser {
         let mode_str = "headful";
         eprintln!("[bladebro] launching Chrome from {chrome_path} on port {port} ({mode_str})");
 
-        let mut cmd = Command::new(&chrome_path);
+        let mut cmd = browser_command(&chrome_path, &user_data_dir);
         browser_temp_env(&mut cmd);
         // G11: bounded startup-stderr capture — a failed launch must be
         // diagnosable instead of guessed at (the runner investigation lost
@@ -679,6 +679,19 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
         }
         crate::realbrowser::Mode::Auto => unreachable!("effective_mode resolves Auto"),
     }
+}
+
+/// The agent-lane browser process. A Flatpak export is started through
+/// `flatpak run` with the session profile shared into the sandbox — run
+/// as-is, Chrome would use a sandbox-private profile that vanishes on exit.
+pub(super) fn browser_command(chrome_path: &str, user_data_dir: &std::path::Path) -> Command {
+    #[cfg(target_os = "linux")]
+    if let Some(cmd) = super::flatpak::launch_command(chrome_path, user_data_dir) {
+        return cmd;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = user_data_dir;
+    Command::new(chrome_path)
 }
 
 /// S15: warn when no emoji font is installed. Kasada/Akamai render emoji on

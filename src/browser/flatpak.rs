@@ -4,10 +4,18 @@
 //! through its export, `<installation>/exports/bin/<app-id>`: a launcher
 //! script around `flatpak run`. Discovery checks the known Chromium-family
 //! app ids after every native location.
+//!
+//! Launching: the browser runs in a bubblewrap sandbox that does not see the
+//! host filesystem (Chromium's manifest shares no home or /tmp paths). Run
+//! through the export as-is, Chrome silently creates the session profile
+//! inside the sandbox and it vanishes on exit — no cookies, localStorage or
+//! seasoning ever reach bladebro's profile dir. The agent lane therefore runs
+//! an export via `flatpak run --filesystem=<session dir>` itself.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use super::discover::is_executable;
+use super::discover::{find_in_path, is_executable};
 
 /// Chromium-family Flatpak apps, in preference order (Chromium first, as in
 /// native discovery).
@@ -47,6 +55,96 @@ pub(super) fn find_flatpak_browser(env: &dyn Fn(&str) -> Option<String>) -> Opti
             .find(|export| is_executable(export))
             .map(|export| export.to_string_lossy().into_owned())
     })
+}
+
+/// A Flatpak export, recognised by its path: `<installation>/exports/bin/<app-id>`.
+#[derive(Debug, PartialEq)]
+struct Export {
+    app_id: String,
+    /// `--user`/`--system` when the export lives in that installation, so
+    /// `flatpak run` starts exactly the copy the path names.
+    scope: Option<&'static str>,
+}
+
+fn parse_export(path: &Path, env: &dyn Fn(&str) -> Option<String>) -> Option<Export> {
+    let app_id = path.file_name()?.to_str()?;
+    let bin = path.parent()?;
+    let exports = bin.parent()?;
+    if bin.file_name()? != "bin" || exports.file_name()? != "exports" || !is_app_id(app_id) {
+        return None;
+    }
+    let installation = exports.parent()?;
+    let same = |root: &Path| {
+        root == installation
+            || std::fs::canonicalize(root)
+                .is_ok_and(|r| std::fs::canonicalize(installation).is_ok_and(|i| r == i))
+    };
+    let [user, system] = installations(env);
+    let scope = if user.as_deref().is_some_and(same) {
+        Some("--user")
+    } else if system.as_deref().is_some_and(same) {
+        Some("--system")
+    } else {
+        None
+    };
+    Some(Export {
+        app_id: app_id.to_string(),
+        scope,
+    })
+}
+
+/// Reverse-DNS app id with at least three parts. It becomes a `flatpak run`
+/// argument, so it must never be mistaken for an option.
+fn is_app_id(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('.').collect();
+    parts.len() >= 3
+        && id.starts_with(|c: char| c.is_ascii_alphabetic())
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+}
+
+/// Arguments before the browser's own flags. Flatpak ends a `--filesystem`
+/// path at the first unescaped `:` (the `:ro`/`:create` suffix), so `\` and
+/// `:` in the session dir are escaped.
+fn run_args(export: &Export, user_data_dir: &Path) -> Vec<String> {
+    let mut shared = String::from("--filesystem=");
+    for c in user_data_dir.to_string_lossy().chars() {
+        if c == '\\' || c == ':' {
+            shared.push('\\');
+        }
+        shared.push(c);
+    }
+    let mut args = vec!["run".to_string()];
+    args.extend(export.scope.map(String::from));
+    args.push(shared);
+    args.push(export.app_id.clone());
+    args
+}
+
+/// `flatpak run` for a Flatpak export with the session profile shared into
+/// the sandbox; `None` when `chrome_path` is not an export.
+pub(super) fn launch_command(chrome_path: &str, user_data_dir: &Path) -> Option<Command> {
+    let export = parse_export(Path::new(chrome_path), &|key| std::env::var(key).ok())?;
+    let flatpak = find_in_path("flatpak").or_else(|| {
+        ["/usr/bin/flatpak", "/usr/local/bin/flatpak"]
+            .into_iter()
+            .find(|p| is_executable(Path::new(p)))
+            .map(String::from)
+    });
+    let Some(flatpak) = flatpak else {
+        eprintln!(
+            "[bladebro] WARNING: {chrome_path} is a Flatpak export but `flatpak` was not found; \
+             launching the export directly — the sandbox cannot see the session profile, so \
+             cookies and storage will not persist"
+        );
+        return None;
+    };
+    let mut cmd = Command::new(flatpak);
+    cmd.args(run_args(&export, user_data_dir));
+    Some(cmd)
 }
 
 #[cfg(test)]
@@ -129,5 +227,61 @@ mod tests {
             installations(&env_of(&[]))[1],
             Some(PathBuf::from("/var/lib/flatpak"))
         );
+    }
+
+    /// Run as-is, a Flatpak export starts Chrome on a sandbox-private copy of
+    /// the session dir (measured: the host dir stayed empty and localStorage
+    /// was gone on the next launch). The launch must share the session dir
+    /// into the sandbox and start the installation the path names.
+    #[test]
+    fn exports_launch_through_flatpak_run_with_the_profile_shared() {
+        let root = std::env::temp_dir().join(format!("blade-flatpak-run-{}", std::process::id()));
+        let user = root.join("user");
+        let system = root.join("system");
+        let vars: HashMap<&str, String> = HashMap::from([
+            ("FLATPAK_USER_DIR", user.display().to_string()),
+            ("FLATPAK_SYSTEM_DIR", system.display().to_string()),
+        ]);
+        let env = |key: &str| vars.get(key).cloned();
+        let user_export = export(&user, "org.chromium.Chromium", 0o755);
+        let system_export = export(&system, "com.brave.Browser", 0o755);
+        let elsewhere = export(&root.join("extra"), "com.google.Chrome", 0o755);
+
+        let parsed = parse_export(&user_export, &env).expect("user export");
+        assert_eq!(
+            run_args(&parsed, Path::new("/state/blade/profiles/sess-42")),
+            [
+                "run",
+                "--user",
+                "--filesystem=/state/blade/profiles/sess-42",
+                "org.chromium.Chromium"
+            ]
+        );
+        assert_eq!(
+            parse_export(&system_export, &env).map(|e| e.scope),
+            Some(Some("--system"))
+        );
+        assert_eq!(
+            parse_export(&elsewhere, &env),
+            Some(Export {
+                app_id: "com.google.Chrome".into(),
+                scope: None
+            }),
+            "an export in another installation still runs, with flatpak's own lookup"
+        );
+        assert_eq!(
+            run_args(&parsed, Path::new("/odd:dir\\x/sess-1"))[2],
+            "--filesystem=/odd\\:dir\\\\x/sess-1",
+            "a ':' must not end the shared path"
+        );
+        for native in [
+            "/usr/bin/chromium",
+            "/opt/exports/bin/chromium",
+            "/x/exports/bin/--command=sh.a.b",
+            "/x/exports/lib/org.chromium.Chromium",
+        ] {
+            assert_eq!(parse_export(Path::new(native), &env), None, "{native}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

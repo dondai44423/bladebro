@@ -200,7 +200,7 @@ impl Browser {
         let mode_str = "headful";
         eprintln!("[bladebro] launching Chrome from {chrome_path} on CDP pipe ({mode_str})");
 
-        let mut cmd = Command::new(&chrome_path);
+        let mut cmd = super::launch::browser_command(&chrome_path, &user_data_dir);
         browser_temp_env(&mut cmd);
         // G11: bounded startup-stderr capture (shared with the WS lane) —
         // a failed launch must be diagnosable instead of guessed at.
