@@ -2,7 +2,7 @@
 // separate from the real native host/browser probe in run.mjs.
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, constants as osConstants } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
@@ -61,6 +61,28 @@ try {
     const loader = spawnSync(process.execPath, [join(isolated, 'bin.js'), '--version'], { encoding: 'utf8' });
     if (!loader.stderr.includes('glibc >= 2.28')) process.stderr.write(loader.stderr);
     check('missing Linux loader names glibc and source-build recovery', loader.status === 1 && loader.stdout === '' && loader.stderr.includes('glibc >= 2.28') && loader.stderr.includes('build from source'));
+  }
+  const host = process.platform + '-' + process.arch;
+  if (['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64'].includes(host)) {
+    // The launcher must be invisible to whoever runs it: the binary's exit
+    // status or death signal comes back unchanged, and termination sent to the
+    // launcher reaches the binary (a harness stopping `npx bladebro mcp` with
+    // SIGTERM must not orphan the MCP server and its browser).
+    const native = join(isolated, 'node_modules', 'bladebro-' + host);
+    mkdirSync(native, { recursive: true });
+    writeFileSync(join(native, 'package.json'), JSON.stringify({ name: 'bladebro-' + host }));
+    const fake = body => { writeFileSync(join(native, 'bladebro'), '#!/bin/sh\n' + body); chmodSync(join(native, 'bladebro'), 0o755); };
+    const launch = () => spawnSync(process.execPath, [join(isolated, 'bin.js')], { encoding: 'utf8' });
+    fake('exit 7\n');
+    check('binary exit status passes through the launcher', launch().status === 7);
+    // Node ignores SIGPIPE, so re-raising it on the launcher is a no-op: the
+    // launcher must still not report success for `bladebro see | head`.
+    fake('kill -s PIPE $$\n');
+    const pipe = launch();
+    if (pipe.status !== 128 + osConstants.signals.SIGPIPE) process.stderr.write(`SIGPIPE death came back as status=${pipe.status} signal=${pipe.signal}\n`);
+    check('binary killed by SIGPIPE makes the launcher exit 128+SIGPIPE, not 0', pipe.status === 128 + osConstants.signals.SIGPIPE);
+    fake('kill -s TERM $$\n');
+    check('binary killed by SIGTERM kills the launcher by SIGTERM', launch().signal === 'SIGTERM');
   }
   console.log(`DSH package probe: ${checks} checks passed`);
 } finally { rmSync(scratch, { recursive: true, force: true }); }

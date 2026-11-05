@@ -2,6 +2,7 @@
 'use strict';
 
 const { spawnSync } = require('child_process');
+const { constants } = require('os');
 const { resolveBinary } = require('./binary.cjs');
 
 let binPath;
@@ -23,6 +24,10 @@ const result = spawnSync(binPath, process.argv.slice(2), {
 if (result.signal) {
   // Re-raise the signal so the parent process sees it
   process.kill(process.pid, result.signal);
+  // Still running: Node ignores SIGPIPE, so that re-raise was a no-op and the
+  // launcher fell through to exit 0 — `npx bladebro see | head` reported
+  // success after the binary died. Report the death the way a shell does.
+  process.exit(128 + (constants.signals[result.signal] || 0));
 } else if (result.error) {
   // The binary could not be spawned (missing exec bit, wrong arch, deleted
   // file). Without this branch the shim exited 0 while nothing ran — a
