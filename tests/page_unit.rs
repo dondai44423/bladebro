@@ -687,6 +687,76 @@ fn fingerprint_rebind_follows_a_select_named_by_its_selection() {
     assert_eq!(d.added.len(), 1);
 }
 
+/// Regression: a heal could leave one sig owned by two live refs. An
+/// element scrolled out of the capture window (its ref died), scrolled back
+/// (fresh ref), then the agent acted on the old ref: the heal matched the
+/// exact sig and `adopt_as` re-adopted the old ref next to the fresh one.
+/// The next ingest kept one of them in HashMap order and reported the other
+/// `- eN (gone)` while the element was still on the page (live: the click's
+/// verdict read `dom-changed (+0 −1)`).
+#[test]
+fn heal_never_leaves_two_refs_on_one_element() {
+    let mut lpm = LivePageModel::new();
+    let top = || el("button", "Top", "|button|Top|1", None, false);
+    let docs = || el("button", "Docs", "|button|Docs|1", None, false);
+    lpm.ingest(cap("https://x.test/", vec![top(), docs()]));
+    let old = lpm.elements()[1].ref_id.clone();
+    // Scrolled away: Docs left the capture window, its ref died.
+    let d = lpm.ingest(cap("https://x.test/", vec![top()]));
+    assert_eq!(d.removed, vec![old.clone()]);
+    // Scrolled back: the same element is minted a fresh ref.
+    let d = lpm.ingest(cap("https://x.test/", vec![top(), docs()]));
+    let fresh = d.added[0].ref_id.clone();
+    assert_ne!(fresh, old);
+    // The agent acts on its old ref: the heal finds the exact sig.
+    let (sig, role, name) = lpm.graveyard_lookup(&old).expect("buried");
+    lpm.adopt_as(&old, &sig, &role, &name, &[]);
+    let owners: Vec<String> = lpm
+        .elements()
+        .iter()
+        .filter(|e| e.raw.sig == sig)
+        .map(|e| e.ref_id.clone())
+        .collect();
+
+    let d = lpm.ingest(cap("https://x.test/", vec![top(), docs()]));
+    assert!(
+        d.removed.is_empty(),
+        "element is on the page but reported gone: {:?} (sig owners after heal: {owners:?})",
+        d.removed
+    );
+    assert_eq!(owners, vec![old.clone()], "one sig, one ref");
+    assert_eq!(
+        lpm.element(&old).map(|e| e.raw.name.as_str()),
+        Some("Docs"),
+        "the ref the agent acted through stays live"
+    );
+    // The retired ref still heals to the same element by its exact sig.
+    let (retired_sig, _, _) = lpm.graveyard_lookup(&fresh).expect("retired, healable");
+    assert_eq!(retired_sig, sig);
+}
+
+/// Regression: a healed ref kept its PRE-heal identity in the graveyard
+/// (ingest skips refs already recorded there), so when it died again its
+/// next heal looked for the element it named before the heal, not the one
+/// the heal note told the agent about.
+#[test]
+fn a_healed_ref_heals_to_the_element_it_named_last() {
+    let mut lpm = LivePageModel::new();
+    let first = el("link", "Docs", "|link|Docs|1", None, false);
+    lpm.ingest(cap("https://x.test/", vec![first]));
+    let r = lpm.elements()[0].ref_id.clone();
+    lpm.ingest(cap("https://x.test/", vec![]));
+    // Healed by name onto the other "Docs" link (a different sig).
+    lpm.adopt_as(&r, "|link|Docs|2", "link", "Docs", &[]);
+    let second = el("link", "Docs", "|link|Docs|2", None, false);
+    lpm.ingest(cap("https://x.test/", vec![second]));
+    assert!(lpm.element(&r).is_some());
+    // It dies again: its identity is the element it named last.
+    lpm.ingest(cap("https://x.test/", vec![]));
+    let (sig, _, _) = lpm.graveyard_lookup(&r).expect("buried");
+    assert_eq!(sig, "|link|Docs|2");
+}
+
 #[test]
 fn reddit_markdown_is_observational_and_preserves_live_dom() {
     let mock = r#"
