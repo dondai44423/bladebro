@@ -138,6 +138,11 @@ impl LivePageModel {
     pub fn phase(&self) -> &str {
         &self.phase
     }
+    /// The latest read went unanswered: `url()` and the elements are the last
+    /// answered state, not necessarily what the tab shows now.
+    pub fn read_unanswered(&self) -> bool {
+        self.unanswered
+    }
     /// Number of actionable elements currently modeled.
     pub fn actionables(&self) -> usize {
         self.elements.len()
