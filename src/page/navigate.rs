@@ -115,7 +115,7 @@ impl Page {
         };
         _t("frameNavigated");
         if matches!(nav_event, Some(result) if !matches!(result, Ok(Ok(_)))) {
-            if let Some(err) = nav_error {
+            if let Some(err) = nav_error.as_deref() {
                 let hint = if err.contains("ERR_ABORTED") {
                     " (the URL may be a file download - try act download url=...)"
                 } else {
@@ -124,6 +124,28 @@ impl Page {
                 return Err(crate::error::BladeError::Other(format!(
                     "navigation to {target} failed: {err}{hint}"
                 )));
+            }
+        }
+        // L7: an unreachable target (refused connection, DNS, TLS, unsafe
+        // port, dead proxy) is not refused - Chrome COMMITS its own error
+        // page in its place, so frameNavigated fires inside the grace above
+        // and this used to report "navigated" with "This site can't be
+        // reached" as the site's content (exit 0). A page-side navigation
+        // that superseded ours (ERR_ABORTED, then a real document) still
+        // proceeds: only Chrome's error document in the main frame fails.
+        if let Some(err) = nav_error.as_deref() {
+            let tree = self.cdp.send("Page.getFrameTree", None).await.ok();
+            let frame = tree.as_ref().and_then(|t| t.pointer("/frameTree/frame"));
+            // Name BLADE_PROXY only when it is the proxy this browser was
+            // launched with (the real lane runs the person's own Chrome).
+            let blade_proxy = !crate::realbrowser::real_lane()
+                && matches!(crate::browser::proxy::env_blade_proxy(), Ok(Some(_)));
+            if let Some(msg) = error_page_failure(&target, err, frame, blade_proxy) {
+                // Recapture so the error's page state is the tab's real
+                // state (Chrome's error page), not the page we left.
+                let _ = wait_for_load(&self.cdp, Duration::from_secs(3)).await;
+                let _ = self.recapture().await;
+                return Err(crate::error::BladeError::Other(msg));
             }
         }
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
@@ -504,6 +526,47 @@ impl Page {
             }
         }
     }
+}
+
+/// L7: the error for a navigation whose main frame committed Chrome's own
+/// error page (`chrome-error://chromewebdata/`, `unreachableUrl` set) in
+/// place of the target, or None when a real document is showing.
+/// `blade_proxy`: the browser runs behind BLADE_PROXY (names the recovery
+/// path for a proxy/tunnel failure).
+fn error_page_failure(
+    target: &str,
+    err: &str,
+    frame: Option<&Value>,
+    blade_proxy: bool,
+) -> Option<String> {
+    let frame = frame?;
+    let unreachable = frame
+        .get("unreachableUrl")
+        .and_then(Value::as_str)
+        .is_some_and(|u| !u.is_empty());
+    let error_doc = frame
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|u| u.starts_with("chrome-error://"));
+    if !(unreachable || error_doc) {
+        return None;
+    }
+    let hint = if err.contains("PROXY") || err.contains("TUNNEL") {
+        if blade_proxy {
+            "; the proxy in BLADE_PROXY refused or is down"
+        } else {
+            "; the browser's proxy refused or is down"
+        }
+    } else if err.contains("ERR_HTTP_RESPONSE_CODE_FAILURE") {
+        // The server did answer, but with an error status and no body of
+        // its own, so Chrome rendered its "HTTP ERROR" page instead.
+        "; the server answered with an HTTP error status and an empty body"
+    } else {
+        ""
+    };
+    Some(format!(
+        "navigation to {target} failed: {err} (the tab shows Chrome's error page, not the site{hint})"
+    ))
 }
 
 /// S11: per-domain stealth settings stored in ~/.blade/profiles.json.
@@ -912,9 +975,87 @@ fn normalize_url(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        already_here, extract_domain, landed, nav_params_note, normalize_url, query_params,
-        validate_nav_url,
+        already_here, error_page_failure, extract_domain, landed, nav_params_note, normalize_url,
+        query_params, validate_nav_url,
     };
+    use serde_json::json;
+
+    /// L7: an unreachable target (refused, DNS, TLS, unsafe port, dead
+    /// proxy) makes Chrome commit its own error page: errorText is set AND
+    /// frameNavigated fires. That main frame (CDP `Page.Frame`) is a failed
+    /// navigation, not "navigated → chrome-error://chromewebdata/".
+    #[test]
+    fn chrome_error_page_in_the_main_frame_fails_the_navigation() {
+        let error_page = json!({
+            "id": "MAIN",
+            "url": "chrome-error://chromewebdata/",
+            "unreachableUrl": "http://127.0.0.1:9/",
+        });
+        let msg = error_page_failure(
+            "http://127.0.0.1:9/",
+            "net::ERR_UNSAFE_PORT",
+            Some(&error_page),
+            false,
+        )
+        .expect("Chrome's error page must fail the navigation");
+        assert!(
+            msg.starts_with("navigation to http://127.0.0.1:9/ failed: net::ERR_UNSAFE_PORT"),
+            "{msg}"
+        );
+        assert!(msg.contains("Chrome's error page"), "{msg}");
+        // Either signal alone is enough.
+        let url_only = json!({"id": "MAIN", "url": "chrome-error://chromewebdata/"});
+        let msg = error_page_failure(
+            "http://site.test/",
+            "net::ERR_PROXY_CONNECTION_FAILED",
+            Some(&url_only),
+            true,
+        )
+        .expect("error document by url");
+        assert!(
+            msg.contains("BLADE_PROXY"),
+            "a proxy failure names the proxy: {msg}"
+        );
+        // Without BLADE_PROXY (the real lane, a system proxy) the hint must
+        // not send the agent to a variable that is not in play.
+        let msg = error_page_failure(
+            "http://site.test/",
+            "net::ERR_TUNNEL_CONNECTION_FAILED",
+            Some(&url_only),
+            false,
+        )
+        .expect("error document by url");
+        assert!(
+            msg.contains("the browser's proxy") && !msg.contains("BLADE_PROXY"),
+            "{msg}"
+        );
+        // An error status with an empty body also lands on Chrome's page.
+        let msg = error_page_failure(
+            "http://h/empty",
+            "net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+            Some(&url_only),
+            false,
+        )
+        .expect("error document by url");
+        assert!(msg.contains("HTTP error status"), "{msg}");
+        // A page-side navigation that superseded ours committed a REAL
+        // document: that is still a successful navigation.
+        let real = json!({"id": "MAIN", "url": "http://127.0.0.1:8080/next"});
+        assert_eq!(
+            error_page_failure(
+                "http://127.0.0.1:8080/a",
+                "net::ERR_ABORTED",
+                Some(&real),
+                false
+            ),
+            None
+        );
+        // Frame tree unavailable: no claim either way.
+        assert_eq!(
+            error_page_failure("http://h/", "net::ERR_ABORTED", None, false),
+            None
+        );
+    }
 
     #[test]
     fn extract_domain_strips_scheme_port_and_www() {
