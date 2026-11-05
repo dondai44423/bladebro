@@ -516,3 +516,78 @@ assert.equal(wrappedURL('https://www.google.com/goto?url=OPAQUE'),true);
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+/// Product-card heuristic (`see mode=content`): a currency amount anywhere +
+/// an h1 + a `/p/` URL is every Substack post that mentions "$5". The URL
+/// pattern alone must not turn an article into a product card that drops
+/// the body; a real cart/buy control still does.
+#[test]
+fn price_mention_under_a_p_slug_stays_an_article() {
+    let mock = r#"
+global.location={hostname:'writer.substack.com',href:'https://writer.substack.com/p/my-post',pathname:'/p/my-post'};
+const view={getComputedStyle(){return {display:'block',visibility:'visible',opacity:'1'}}};
+const art={nodeType:1,tagName:'ARTICLE',innerHTML:'x',innerText:'UNIQUEBODYMARKER the essay body. '.repeat(10),childNodes:[{nodeType:3,textContent:'UNIQUEBODYMARKER the essay body.'}],className:'',id:'',hidden:false,hasAttribute(){return false},getAttribute(){return null}};
+const h1={innerText:'Why I pay $5 a month for newsletters',closest(){return null}};
+global.document={body:{innerText:'Why I pay $5 a month for newsletters. It costs $5. UNIQUEBODYMARKER the essay body.',querySelectorAll(){return []}},title:'My post',defaultView:view,
+  querySelector(s){if(s==='h1')return h1;if(s==='main,[role="main"]')return art;if(s.includes('#add-to-cart-button'))return global.CART;return null},querySelectorAll(){return []}};
+art.ownerDocument=document;
+"#;
+    let script = include_str!("../src/page/js/markdown.js")
+        .replace("__SCOPE_FLAG__", "false")
+        .replace("__BUDGET__", "8000")
+        .replace("__SCOPE_MAIN__", "findMain(document)");
+    // Article: no cart control, no cart text -> the body is the payload.
+    // Product: the same page WITH an add-to-cart control -> product card.
+    let probe = format!(
+        "{mock}\nglobal.CART=null;const a={script};\nglobal.CART={{}};const p={script};\n\
+         if(!a.includes('UNIQUEBODYMARKER')||a.includes('**Price:**'))throw Error('article rendered as a product card: '+JSON.stringify(a));\n\
+         if(!p.includes('**Price:** $5'))throw Error('product page lost its card: '+JSON.stringify(p));"
+    );
+    let output = std::process::Command::new("node")
+        .arg("-e")
+        .arg(probe)
+        .output()
+        .expect("node is required for injected-script tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `extract=auto` mirrors the markdown product heuristic: the same `/p/`
+/// article must not collapse into one product item either.
+#[test]
+fn extract_auto_product_page_needs_a_cart_signal() {
+    let script = include_str!("../src/mcp/server/js/auto_extract.js");
+    let prod_url = script
+        .lines()
+        .find(|l| l.starts_with("const PROD_URL="))
+        .unwrap();
+    let is_product = script
+        .lines()
+        .find(|l| l.starts_with("function isProductPage(){"))
+        .unwrap();
+    let probe = r#"
+const assert=require('node:assert/strict');
+global.location={href:'https://writer.substack.com/p/my-post'};
+const h1={innerText:'Why I pay $5 a month for newsletters'};
+const page=(text,cart)=>{global.document={body:{innerText:text},querySelector(s){if(s==='h1')return h1;if(s.includes('#add-to-cart-button'))return cart;return null}};};
+page('Why I pay $5 a month. UNIQUEBODYMARKER the essay body.',null);
+assert.equal(!!isProductPage(),false,'article with a price mention is not a product page');
+page('Why I pay $5 a month. UNIQUEBODYMARKER the essay body.',{});
+assert.equal(!!isProductPage(),true,'a cart control still marks a product page');
+page('Widget $5. Add to cart',null);
+assert.equal(!!isProductPage(),true,'cart text still marks a product page');
+"#;
+    let result = std::process::Command::new("node")
+        .arg("-e")
+        .arg(format!("{prod_url}\n{is_product}\n{probe}"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
