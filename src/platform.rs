@@ -1240,7 +1240,8 @@ impl TerminationSignal {
 
     /// Await `launch` to the end while listening. A launch is not safe to
     /// drop half-way (the real lane polls a bare `Child`), so a signal that
-    /// lands meanwhile is only recorded: the
+    /// lands meanwhile is recorded: the launch stops starting fresh browsers
+    /// for its retries and GL stages ([`termination_requested`]), the
     /// [`interruptible`](Self::interruptible) run that follows fails at once,
     /// and a launch that fails anyway still ends in death by the signal.
     pub async fn during_launch<T>(&mut self, launch: impl std::future::Future<Output = T>) -> T {
@@ -1275,7 +1276,9 @@ impl TerminationSignal {
 /// Process-wide, like the signal: the final exit reads it.
 static TERMINATED_BY: AtomicI32 = AtomicI32::new(0);
 
-/// True once a [`TerminationSignal`] received a termination signal.
+/// True once a [`TerminationSignal`] received a termination signal: the
+/// command is over, so a launch still in flight stops retrying — another
+/// browser would only be started to be closed again.
 pub fn termination_requested() -> bool {
     TERMINATED_BY.load(Ordering::SeqCst) != 0
 }

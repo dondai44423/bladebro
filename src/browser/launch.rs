@@ -48,6 +48,12 @@ impl Browser {
                     if !auto || !startup_exit {
                         break;
                     }
+                    if platform::termination_requested() {
+                        eprintln!(
+                            "[bladebro] termination signal received — not retrying the launch"
+                        );
+                        break;
+                    }
                     if attempt == 0 {
                         eprintln!(
                             "[bladebro] sandboxed Chrome died at startup (root or restricted container?) — retrying with --no-sandbox"
@@ -93,6 +99,14 @@ impl Browser {
                     return Ok(browser);
                 }
                 None => {
+                    if i + 1 < stages.len() && platform::termination_requested() {
+                        // The command is over: hand this browser back to be
+                        // closed rather than start another for a better stage.
+                        eprintln!(
+                            "[bladebro] termination signal received — not relaunching for WebGL"
+                        );
+                        return Ok(browser);
+                    }
                     if i + 1 < stages.len() {
                         let next = stages[i + 1];
                         if next == *stage {
@@ -548,6 +562,10 @@ impl Browser {
             }
             // Only a genuine startup death gets the --no-sandbox retry.
             if !startup_exit {
+                break;
+            }
+            if platform::termination_requested() {
+                eprintln!("[realbrowser] termination signal received — not retrying the launch");
                 break;
             }
             if attempt == 0 {

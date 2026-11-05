@@ -633,8 +633,8 @@ async fn run_tool(
     // not the process, which would never close Chrome (it runs in its own
     // process group); bladebro dies of the signal only once Chrome is closed
     // (`platform::reraise_termination_signal`, at exit). One that lands
-    // mid-launch is recorded and lets the launch finish: the launch paths
-    // are not all safe to drop half-way.
+    // mid-launch lets the launch finish (the launch paths are not all safe
+    // to drop half-way) but stops its retries.
     let mut signal = crate::platform::TerminationSignal::listen();
     let (browser, base) = signal.during_launch(crate::browser::launch_lane()).await?;
 

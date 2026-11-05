@@ -36,16 +36,17 @@ fn fake_browser(root: &Path) -> (PathBuf, PathBuf) {
     (fake, pids)
 }
 
-/// A stand-in browser that records its own pid and a forked helper's, then
-/// lingers at startup (no debug endpoint) long enough for a signal to land
-/// mid-launch, and dies.
+/// A stand-in browser that records its start (`starts`), its own pid and a
+/// forked helper's, then lingers at startup (no debug endpoint) long enough
+/// for a signal to land mid-launch, and dies.
 fn lingering_browser(root: &Path) -> (PathBuf, PathBuf) {
     let pids = root.join("helpers.pid");
     let fake = root.join("fake-chrome");
     std::fs::write(
         &fake,
         format!(
-            "#!/bin/sh\necho $$ >> '{p}'\nsleep 60 &\necho $! >> '{p}'\nsleep 1\nexit 1\n",
+            "#!/bin/sh\necho start >> '{s}'\necho $$ >> '{p}'\nsleep 60 &\necho $! >> '{p}'\nsleep 1\nexit 1\n",
+            s = root.join("starts").display(),
             p = pids.display()
         ),
     )
@@ -60,9 +61,10 @@ fn lingering_browser(root: &Path) -> (PathBuf, PathBuf) {
 /// ladder walks its stages and keeps the last one. Once the launch's GL probe
 /// has listed targets, the next `/json/version` (`probe`'s first request)
 /// writes `running` and takes 3s to answer: the command itself, not the
-/// launch, is in flight. Records its pid like the other stand-ins.
+/// launch, is in flight. Records its start and pid like the other stand-ins.
 fn endpoint_browser(root: &Path) -> (PathBuf, PathBuf) {
     let pids = root.join("helpers.pid");
+    let starts = root.join("starts");
     let running = root.join("running");
     let fake = root.join("fake-chrome");
     std::fs::write(
@@ -71,6 +73,8 @@ fn endpoint_browser(root: &Path) -> (PathBuf, PathBuf) {
             r#"#!/usr/bin/env python3
 import http.server, json, os, sys, time
 port = int(next(a for a in sys.argv if a.startswith('--remote-debugging-port=')).split('=', 1)[1])
+with open({starts:?}, 'a') as f:
+    f.write('start\n')
 with open({pids:?}, 'a') as f:
     f.write('%d\n' % os.getpid())
 listed = []
@@ -95,6 +99,7 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         pass
 http.server.ThreadingHTTPServer(('127.0.0.1', port), Endpoint).serve_forever()
 "#,
+            starts = starts.to_string_lossy(),
             pids = pids.to_string_lossy(),
             running = running.to_string_lossy(),
         ),
@@ -229,10 +234,26 @@ fn running(root: &Path) -> bool {
     root.join("running").exists()
 }
 
+/// How many times the launch started the stand-in browser.
+fn starts(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("starts"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// The first browser of the launch has started (`endpoint_browser`: its GL
+/// probe, which finds no WebGL and walks the GL ladder, is still ahead).
+fn started(root: &Path) -> bool {
+    starts(root) >= 1
+}
+
 struct SignalledRun {
     status: std::process::ExitStatus,
     stdout: String,
     stderr: String,
+    /// Browser starts over the whole run (`starts`).
+    starts: usize,
 }
 
 /// Start an in-process run the way a shell starts a job: in its own process
@@ -297,6 +318,7 @@ fn signal_run(
     let display = display_leftovers(child.id());
     let stdout = std::fs::read_to_string(&outlog).unwrap_or_default();
     let stderr = std::fs::read_to_string(&errlog).unwrap_or_default();
+    let starts = starts(&root);
     let _ = std::fs::remove_dir_all(&root);
     assert!(
         was_ready,
@@ -312,6 +334,7 @@ fn signal_run(
         status,
         stdout,
         stderr,
+        starts,
     }
 }
 
@@ -319,7 +342,9 @@ fn signal_run(
 /// spot. It has to outlive the signal long enough to tear down the browser
 /// tree, the profile and the virtual display it started (`signal_run` checks
 /// that), and then die of the signal after all: a shell running it in a loop
-/// or a script stops at Ctrl-C only when its child died of SIGINT.
+/// or a script stops at Ctrl-C only when its child died of SIGINT. The
+/// browser dies at startup, but the launch must not retry it (--no-sandbox,
+/// a fresh port) once the signal is in.
 fn interrupt_mid_launch(name: &str, args: &[&str]) {
     let run = signal_run(
         name,
@@ -334,6 +359,11 @@ fn interrupt_mid_launch(name: &str, args: &[&str]) {
         Some(libc::SIGINT),
         "bladebro did not die of the SIGINT it cleaned up after ({:?})\n{}",
         run.status,
+        run.stderr
+    );
+    assert_eq!(
+        run.starts, 1,
+        "the launch kept starting browsers after the signal\n{}",
         run.stderr
     );
 }
@@ -423,6 +453,34 @@ fn sigint_while_probe_runs_closes_the_browser_it_launched() {
         run.stderr
             .contains("interrupted by a termination signal before the command finished"),
         "{}",
+        run.stderr
+    );
+}
+
+/// Ctrl-C while the launch walks its GL ladder (`endpoint_browser` offers no
+/// WebGL, so every stage is a fresh browser): the ladder stops at the browser
+/// it has, which is then closed, instead of starting the remaining stages'
+/// browsers first.
+#[test]
+fn sigint_during_the_gl_ladder_stops_relaunching() {
+    let run = signal_run(
+        "sigint-gl",
+        endpoint_browser,
+        &["probe"],
+        &[],
+        started,
+        &[libc::SIGINT],
+    );
+    assert_eq!(
+        run.status.signal(),
+        Some(libc::SIGINT),
+        "{:?}\n{}",
+        run.status,
+        run.stderr
+    );
+    assert_eq!(
+        run.starts, 1,
+        "the GL ladder kept starting browsers after the signal\n{}",
         run.stderr
     );
 }
