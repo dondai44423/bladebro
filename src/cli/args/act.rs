@@ -10,12 +10,12 @@ use serde_json::{json, Value};
 /// terse form: target first, value second.
 pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
     if args.is_empty() {
-        return Err(BladeError::Usage(
-            "act needs an action — click, type, fill, select, clear, press, scroll, hover, \
-             navigate, upload, download, wait, eval, collect, extract, read, batch, pdf, back, \
-             forward, reload, save, load, open-tab, close-tab, switch-tab (see 'bladebro help act')"
-                .into(),
-        ));
+        // Derived from ACT_ACTIONS: the hand-written list had drifted (it
+        // omitted dialog and paginate).
+        return Err(BladeError::Usage(format!(
+            "act needs an action — {} (see 'bladebro help act')",
+            crate::action::ACT_ACTIONS.join(", ")
+        )));
     }
 
     let action = args[0].as_str();
@@ -493,6 +493,39 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
                 )));
             }
         }
+        "dialog" => {
+            // Arms a one-use answer for the NEXT dialog; the kind is the
+            // terse positional (`act dialog confirm --accept false`) or the
+            // MCP field --expect. Without this arm the action passed the
+            // ACT_ACTIONS check and hit the unreachable! below (exit 101).
+            if j.get("expect").is_none() && !pos.is_empty() {
+                j["expect"] = json!(pos[0].clone());
+            }
+            if pos.len() > 1 {
+                return Err(BladeError::Usage(format!(
+                    "unexpected extra argument '{}' for dialog — quote --prompt-text/--message values",
+                    pos[1]
+                )));
+            }
+            match j.get("expect").and_then(|e| e.as_str()) {
+                Some("alert" | "confirm" | "prompt" | "beforeunload" | "any" | "clear") => {}
+                Some(other) => {
+                    return Err(BladeError::Usage(format!(
+                        "dialog kind must be alert, confirm, prompt, beforeunload, any (or clear to disarm), got '{other}'"
+                    )))
+                }
+                None => {
+                    return Err(BladeError::Usage(
+                        "dialog needs a kind — `act dialog <alert|confirm|prompt|beforeunload|any> \
+                         [--accept true|false] [--prompt-text <text>] [--message <match>]` \
+                         before the click that opens it; `act dialog clear` disarms"
+                            .into(),
+                    ))
+                }
+            }
+        }
+        // Every ACT_ACTIONS entry has an arm above; the args tests walk the
+        // whole list so a new action cannot reach this without a parser.
         _ => unreachable!("action validated above"),
     }
 

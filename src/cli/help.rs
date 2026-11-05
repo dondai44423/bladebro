@@ -261,6 +261,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro act batch @steps.json",
                 "bladebro act extract --format json",
                 "bladebro act wait settle",
+                "bladebro act dialog confirm --accept false",
                 "bladebro act eval \"document.title\""
             ],
             "notes": [
@@ -589,6 +590,8 @@ ACTIONS
   paginate <next> [--max N] [--extract auto]  bounded read/advance, retains pages
   download <url> --body   save an HTTP body without browser cookies (HTTP(S) proxy honored)
   extract [auto|links|forms|json]   structured data (same as 'see extract …')
+  dialog <alert|confirm|prompt|beforeunload|any|clear> [--accept true|false]
+         [--prompt-text <t>] [--message <m>]   arm the NEXT dialog's answer (one use)
   batch <steps|@file|->    pdf [--path] [--landscape]
   back / forward / reload  save <name> / load <name>
   open-tab [url] / switch-tab <id> / close-tab <id>

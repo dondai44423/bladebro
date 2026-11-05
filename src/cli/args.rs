@@ -434,6 +434,64 @@ mod tests {
         assert!(parse_act_args(&a(&["click", "e5", "--nth", "abc"])).is_err());
     }
 
+    /// Every action the CLI admits (ACT_ACTIONS, also what `help act` lists)
+    /// must reach a parser arm: `act dialog` used to pass validation and
+    /// panic on the catch-all unreachable! (exit 101, nothing on stdout).
+    #[test]
+    fn every_act_action_has_a_parser_arm() {
+        for &action in crate::action::ACT_ACTIONS {
+            let bare = std::panic::catch_unwind(|| parse_act_args(&a(&[action])));
+            assert!(
+                bare.is_ok(),
+                "act {action} panicked in the parser — add its arm"
+            );
+            if let Ok(Err(e)) = bare {
+                assert!(
+                    matches!(e, BladeError::Usage(_)),
+                    "act {action}: a bare action must be a usage error, got {e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn act_dialog_arms_by_kind_with_answer_fields() {
+        let v = parse_act_args(&a(&[
+            "dialog",
+            "prompt",
+            "--accept",
+            "true",
+            "--prompt-text",
+            "hello there",
+            "--message",
+            "name",
+            "--timeout",
+            "20",
+        ]))
+        .unwrap();
+        assert_eq!(v["action"], "dialog");
+        assert_eq!(v["expect"], "prompt");
+        assert_eq!(v["accept"], true);
+        assert_eq!(v["prompt_text"], "hello there");
+        assert_eq!(v["message"], "name");
+        assert_eq!(v["timeout"], 20);
+
+        let v = parse_act_args(&a(&["dialog", "--expect", "confirm", "--accept", "no"])).unwrap();
+        assert_eq!(v["expect"], "confirm");
+        assert_eq!(v["accept"], false);
+        assert_eq!(
+            parse_act_args(&a(&["dialog", "clear"])).unwrap()["expect"],
+            "clear"
+        );
+
+        // The live repro: flags without a kind are a usage error, not a panic.
+        let e = parse_act_args(&a(&["dialog", "--accept", "true"])).unwrap_err();
+        assert!(matches!(e, BladeError::Usage(_)), "{e}");
+        assert!(e.to_string().contains("dialog needs a kind"), "{e}");
+        assert!(parse_act_args(&a(&["dialog", "popup"])).is_err());
+        assert!(parse_act_args(&a(&["dialog", "confirm", "extra"])).is_err());
+    }
+
     #[test]
     fn act_eval_joins_and_reads_files() {
         let v = parse_act_args(&a(&["eval", "1", "+", "2"])).unwrap();
