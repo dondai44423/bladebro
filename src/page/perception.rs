@@ -741,7 +741,7 @@ const E = (tag, kids, extra) => {
 };
 // SVG-namespace elements: lowercase tagName, no `hidden`, className is an
 // SVGAnimatedString.
-const S = (tag, kids) => E(tag, kids, { hidden: undefined, className: anim('') });
+const S = (tag, kids) => E(tag, kids, { hidden: undefined, className: anim(''), namespaceURI: 'http://www.w3.org/2000/svg' });
 const icon = () => S('svg', [S('style', [T('.cls-1{fill:none;stroke:red}')]), S('title', [T('SVGTITLELEAK')]), S('rect', [])]);
 // Icon link: the SVG carries only presentation CSS, so the name is the text.
 const link = E('A', [S('svg', [S('style', [T('.ic{fill:blue}')]), S('rect', [])]), T('Search')], { attrs: { href: '/search' }, href: 'http://fixture.test/search', innerText: 'Search' });
@@ -776,6 +776,67 @@ process.exit(fail);
             assert!(
                 out.status.success(),
                 "SVG children leaked into a text read:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// Element conditions (`wait`/`if`/`while element=`) must find a control
+    /// the capture model shows. SVG-hosted controls (an `<svg role=button>`
+    /// icon, a `<g role=button>` inside a chart) are in the model, so the read
+    /// tree has to walk into inline SVG; only SVG's unrendered text (`<style>`
+    /// CSS, `<title>`) stays out of text conditions. Runs the REAL condition
+    /// expressions against a stub DOM.
+    #[test]
+    fn conditions_walk_inline_svg_but_skip_its_style_and_title() {
+        let probe = |label: &str, expr: &str, want: bool| {
+            format!(
+                "{{const got=(0,eval)({});if(got!=={want}){{fail=1;console.log('FAIL',{},'got',got);}}}}\n",
+                serde_json::to_string(expr).expect("serialize expr"),
+                serde_json::to_string(label).expect("serialize label"),
+            )
+        };
+        let mut js = String::from(
+            r#"
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const view = { getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }) };
+globalThis.getComputedStyle = view.getComputedStyle;
+const doc = { defaultView: view };
+const T = (s) => ({ nodeType: 3, textContent: s });
+const E = (tag, kids, attrs, extra) => Object.assign({
+  nodeType: 1, tagName: tag, childNodes: kids, hidden: false, ownerDocument: doc, shadowRoot: null,
+  namespaceURI: 'http://www.w3.org/1999/xhtml',
+  getAttribute(k) { return attrs && k in attrs ? attrs[k] : null; },
+  getBoundingClientRect() { return { x: 0, y: 0, width: 40, height: 20 }; },
+}, extra || {});
+// SVG-namespace elements: lowercase tagName, no `hidden`, no `innerText`.
+const S = (tag, kids, attrs) => E(tag, kids, attrs, { hidden: undefined, namespaceURI: SVG_NS });
+// innerText leaves out SVG text, so text conditions reach the read-tree
+// fallback for it.
+doc.body = E('BODY', [
+  E('BUTTON', [T('Plain button')], {}, { innerText: 'Plain button' }),
+  S('svg', [S('style', [T('.cls-1{fill:none;stroke:red}')]), S('title', [T('SVGTITLELEAK')]), S('path', [])],
+    { role: 'button', 'aria-label': 'Close dialog' }),
+  S('svg', [S('g', [S('rect', [])], { role: 'button', 'aria-label': 'Zoom in' }), S('text', [T('Q3 revenue')])]),
+], {}, { innerText: 'Plain button' });
+globalThis.document = doc;
+let fail = 0;
+"#,
+        );
+        let element = crate::action::element_condition_expr;
+        let text = crate::action::text_condition_expr;
+        js += &probe("element Plain button", &element("Plain button"), true);
+        js += &probe("element svg[role=button]", &element("Close dialog"), true);
+        js += &probe("element g[role=button] in svg", &element("Zoom in"), true);
+        js += &probe("text svg <text> label", &text("Q3 revenue"), true);
+        js += &probe("text svg <style> css", &text("cls-1"), false);
+        js += &probe("text svg <title>", &text("SVGTITLELEAK"), false);
+        js += "if (!fail) console.log('svg condition fixtures pass');\nprocess.exit(fail);\n";
+        if let Some(out) = node_exec("svg-condition-fixtures", &js) {
+            assert!(
+                out.status.success(),
+                "a condition misread inline SVG:\nstdout: {}\nstderr: {}",
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );

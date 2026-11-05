@@ -12,9 +12,14 @@ function walkReadTree(root, visit) {
     }
     if (n.nodeType !== 1 && n.nodeType !== 9 && n.nodeType !== 11) continue;
     if (n.nodeType === 1) {
-      // Case-insensitive: inline SVG children report lowercase tagNames, so
-      // an uppercase-only match let SVG <style> CSS into text conditions.
-      if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG|META|LINK)$/i.test(n.tagName) || n.hidden) continue;
+      // Inline SVG children report lowercase tagNames, so the match is
+      // case-insensitive (SVG <style> CSS stays out of text conditions).
+      // <svg> itself is walked: SVG-hosted controls (role=button icons,
+      // SVG <a> links) are in the capture model, and element conditions
+      // must find what the model shows. Only SVG's unrendered text carriers
+      // (<title>, <desc>, <metadata>) are skipped with it.
+      if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|META|LINK)$/i.test(n.tagName) || n.hidden) continue;
+      if (n.namespaceURI === 'http://www.w3.org/2000/svg' && /^(TITLE|DESC|METADATA)$/i.test(n.tagName)) continue;
       const style = n.ownerDocument.defaultView.getComputedStyle(n);
       if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
       if (visit(n) === false) return;
