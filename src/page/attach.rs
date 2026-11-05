@@ -659,6 +659,7 @@ impl Page {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let intercept_main_frame = main_frame.clone();
         let network_task = tokio::spawn(async move {
             use std::collections::HashMap;
             let mut rx = cdp_for_net.subscribe();
@@ -950,6 +951,7 @@ impl Page {
             cdp.clone(),
             intercept.clone(),
             cdp.subscribe(),
+            intercept_main_frame,
         ));
 
         // Construct the Page BEFORE the last fallible step (capture):

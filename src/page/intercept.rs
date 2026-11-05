@@ -115,11 +115,37 @@ impl InterceptState {
         if url.is_empty() {
             return;
         }
-        let host = url_host(url);
-        let domain = registrable_domain(&host);
+        // Only http(s) pages have a site to be first-party to. `about:blank`
+        // used to become "about" (every request third-party) and a `data:`
+        // URL took the domain of whatever URL its payload happened to embed.
+        // "" = unknown origin: tracker blocking stands down (see should_block).
+        let domain = if url.starts_with("http://") || url.starts_with("https://") {
+            registrable_domain(&url_host(url))
+        } else {
+            String::new()
+        };
         if let Ok(mut d) = self.page_domain.write() {
             *d = domain;
         }
+    }
+
+    /// The verdict for one paused request (true = fail it).
+    ///
+    /// The main frame's own document is the page being loaded, never a
+    /// third party to it — so it is never blocked, and it moves the
+    /// third-party baseline to the new site BEFORE that site's subresources
+    /// arrive. The baseline used to follow only the post-navigation
+    /// recapture: navigating from site A to a tracker-listed domain
+    /// (sentry.io, posthog.com, …) judged the new document against A and
+    /// failed the navigation with BlockedByClient, and the new site's own
+    /// scripts were blocked as third-party trackers. Iframe documents keep
+    /// the normal rules (ad frames are a large part of the saving).
+    fn verdict(&self, resource_type: &str, url: &str, frame_id: &str, main_frame: &str) -> bool {
+        if resource_type == "Document" && !main_frame.is_empty() && frame_id == main_frame {
+            self.set_page_url(url);
+            return false;
+        }
+        should_block(resource_type, url, self.rules(), &self.page_domain())
     }
 
     fn page_domain(&self) -> String {
@@ -373,10 +399,14 @@ pub fn should_block(resource_type: &str, url: &str, rules: u32, page_domain: &st
 /// every `Fetch.requestPaused` immediately with a block/continue
 /// verdict. Runs for the life of the session; only receives events
 /// while Fetch is enabled (i.e. while blocking is active).
+/// `main_frame` is the page's main frame id (`Page.getFrameTree`; stable
+/// across navigations), which tells the page's own document apart from
+/// iframe documents.
 pub async fn run_interception(
     cdp: CdpSession,
     state: InterceptState,
     mut events: SessionSubscription,
+    main_frame: String,
 ) {
     loop {
         let event = match events.recv().await {
@@ -408,11 +438,10 @@ pub async fn run_interception(
             .get("resourceType")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let frame_id = params.get("frameId").and_then(|v| v.as_str()).unwrap_or("");
 
         state.add_pending(request_id);
-        let rules = state.rules();
-        let page_domain = state.page_domain();
-        let block = should_block(resource_type, url, rules, &page_domain);
+        let block = state.verdict(resource_type, url, frame_id, &main_frame);
 
         let verdict = if block {
             cdp.send(
@@ -622,6 +651,39 @@ mod tests {
         ));
         st.set_page_url("https://shop.test/");
         assert_eq!(st.page_domain(), "shop.test");
+    }
+
+    #[test]
+    fn opaque_page_urls_have_no_site() {
+        let s = InterceptState::default();
+        s.set_page_url("https://www.example.co.uk/a");
+        assert_eq!(s.page_domain(), "example.co.uk");
+        // about:blank used to read as the site "about" (every request then
+        // third-party); a data: URL took the host its payload mentioned.
+        for url in [
+            "about:blank",
+            "data:text/html,<script src=https://www.google-analytics.com/a.js></script>",
+            "chrome-error://chromewebdata/",
+        ] {
+            s.set_page_url(url);
+            assert_eq!(s.page_domain(), "", "{url}");
+        }
+    }
+
+    #[test]
+    fn main_frame_document_is_never_blocked_and_moves_the_baseline() {
+        let s = InterceptState::default();
+        s.set_rules(BLOCK_TRACKERS);
+        s.set_page_url("https://example.com/");
+        assert!(!s.verdict("Document", "https://posthog.com/", "MAIN", "MAIN"));
+        assert_eq!(s.page_domain(), "posthog.com");
+        assert!(!s.verdict("XHR", "https://us.i.posthog.com/e/", "MAIN", "MAIN"));
+        // An iframe document is still subject to tracker rules.
+        assert!(s.verdict("Document", "https://ad.doubleclick.net/f", "SUB", "MAIN"));
+        assert_eq!(s.page_domain(), "posthog.com");
+        // Unknown main frame id: no exemption, no baseline move.
+        assert!(s.verdict("Document", "https://sentry.io/", "", ""));
+        assert_eq!(s.page_domain(), "posthog.com");
     }
 
     #[test]
