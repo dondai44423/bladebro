@@ -98,3 +98,70 @@ fn help_is_routed_to_the_named_command() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `--json` means ONE object on stdout, also for errors raised before the
+/// CLI module owns the command. These used to print only the human line on
+/// stderr, leaving an agent's JSON parse an empty read.
+#[test]
+fn json_errors_before_dispatch_are_one_object_on_stdout() {
+    let home = home("json");
+    for (args, needle) in [
+        (&["nva", "--json"][..], "did you mean `nav`"),
+        (
+            &["nav", "x", "--port", "abc", "--json"],
+            "--port needs a number",
+        ),
+        (&["--json", "nav", "x", "--host"], "--host needs a value"),
+    ] {
+        let out = bladebro(&home, args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        let text = stdout(&out);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "{args:?}: exactly one object, got {text:?}");
+        let v: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["is_error"], true);
+        assert!(
+            v["text"].as_str().unwrap().contains(needle),
+            "{args:?}: {v}"
+        );
+    }
+    // Without --json, stdout stays empty: the human error is on stderr.
+    let out = bladebro(&home, &["nva"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown command"));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A non-UTF-8 argument (an upload path with a stray byte) panicked in
+/// std::env::args() — exit 101, nothing on stdout. It is a usage error.
+#[cfg(unix)]
+#[test]
+fn non_utf8_argument_is_a_usage_error() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let home = home("utf8");
+    let bad = OsStr::from_bytes(b"/tmp/bad\xffname.pdf");
+    let out = command(&home)
+        .args(["act", "upload", "e5"])
+        .arg(bad)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).expect("one JSON object");
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["text"].as_str().unwrap().contains("not valid UTF-8"),
+        "{v}"
+    );
+    let out = command(&home)
+        .args(["act", "upload", "e5"])
+        .arg(bad)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("argument 4 is not valid UTF-8"));
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -12,10 +12,16 @@ use bladebro::ui;
 use bladebro::Result;
 
 fn main() {
+    // argv as the OS hands it over: std::env::args() panics on an argument
+    // that is not valid UTF-8 (an upload path with a stray byte), which
+    // bypassed both the exit-code and the --json contracts with exit 101.
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let json_mode = raw.iter().any(|a| a == "--json");
+
     // Initialize structured logging; respect RUST_LOG.
     // In MCP mode, default to warn only — info logs leak to the agent's
     // TUI via stderr. RUST_LOG still overrides if explicitly set.
-    let default_filter = if std::env::args().any(|a| a == "mcp") {
+    let default_filter = if raw.iter().any(|a| a == "mcp") {
         "warn"
     } else {
         "warn,bladebro=info"
@@ -30,9 +36,17 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let code = match run() {
+    let code = match utf8_args(raw).and_then(|args| run(args, json_mode)) {
         Ok(()) => 0,
         Err(e) => {
+            // Errors raised before the CLI module owns the command (argv
+            // decoding, global --host/--port parsing) must still honor the
+            // --json contract: ONE object on stdout, never an empty read.
+            // run() exits by itself once a command has been dispatched, so
+            // this never doubles an object run_cli already printed.
+            if json_mode {
+                print_json_error(&e.to_string());
+            }
             print_error(&e);
             if matches!(e, bladebro::BladeError::Usage(_)) {
                 2
@@ -77,9 +91,33 @@ fn print_error(e: &bladebro::BladeError) {
     eprintln!("{} {styled}", ui::dim("bladebro:"));
 }
 
-fn run() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// The `--json` failure object — the same shape run_cli prints.
+fn print_json_error(text: &str) {
+    println!(
+        "{}",
+        serde_json::json!({ "ok": false, "is_error": true, "text": text })
+    );
+}
 
+/// Decode argv as UTF-8, or fail as a usage error naming the argument. Every
+/// value ends up in JSON tool args, which cannot carry raw bytes anyway.
+fn utf8_args(raw: Vec<std::ffi::OsString>) -> Result<Vec<String>> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, a)| {
+            a.into_string().map_err(|a| {
+                bladebro::BladeError::Usage(format!(
+                    "argument {} is not valid UTF-8 ('{}') — bladebro takes UTF-8 arguments only; \
+                     rename the file or pass a UTF-8 symlink to it",
+                    i + 1,
+                    a.to_string_lossy()
+                ))
+            })
+        })
+        .collect()
+}
+
+fn run(args: Vec<String>, json_mode: bool) -> Result<()> {
     // Parse global flags (--host/--port) anywhere before or after the command.
     // port=0 means auto-launch Chrome (find binary, pick free port, manage lifecycle).
     let mut host = String::from("127.0.0.1");
@@ -196,11 +234,15 @@ fn run() -> Result<()> {
     // an error.
     let is_known = is_known_command(&cmd);
     if !is_known {
-        let mut line = format!("{} unknown command `{cmd}`", ui::red("✗"));
-        if let Some(s) = bladebro::cli::suggest_command(&cmd) {
-            line.push_str(&format!(" — did you mean `{s}`?"));
+        let suggestion = bladebro::cli::suggest_command(&cmd)
+            .map(|s| format!(" — did you mean `{s}`?"))
+            .unwrap_or_default();
+        if json_mode {
+            print_json_error(&format!(
+                "unknown command `{cmd}`{suggestion} (run `bladebro help` for the command list)"
+            ));
         }
-        eprintln!("{line}");
+        eprintln!("{} unknown command `{cmd}`{suggestion}", ui::red("✗"));
         eprintln!("  {}", ui::dim("run `bladebro help` for the command list"));
         std::process::exit(2);
     }
