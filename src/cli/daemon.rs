@@ -229,16 +229,9 @@ pub async fn run_daemon() -> Result<()> {
                 }
 
                 // The command's own lane/settings vs this daemon's (see
-                // `settings_mismatch`). Refused, not relaunched: the live
-                // browser may hold another command stream's page state.
-                // `refresh_lane` first so an `rb on|off` since the last call
-                // counts as this daemon's lane; a switch consumed by a
-                // refusal is still caught below — the launch fingerprint
-                // covers the lane.
-                let lane_switched = crate::realbrowser::refresh_lane();
-                if let Some(why) = settings_mismatch(&req, crate::realbrowser::real_lane(), |k| {
-                    std::env::var(k).ok()
-                }) {
+                // `refusal`). Refused, not relaunched: the live browser may
+                // hold another command stream's page state.
+                if let Some(why) = refusal(&req) {
                     let resp = json!({ "ok": false, "error": why });
                     let resp_str = serde_json::to_string(&resp).unwrap_or_default();
                     let _ = reader.get_mut().write_all(resp_str.as_bytes()).await;
@@ -254,6 +247,7 @@ pub async fn run_daemon() -> Result<()> {
                 // None): the same switch must DETACH it — a lane-flag flip
                 // alone would keep steering the user's browser, and a tab
                 // opened after it would get agent-lane page patches.
+                let lane_switched = crate::realbrowser::refresh_lane();
                 let session_live = browser.is_some()
                     || page.as_ref().map(|p| !p.is_closed()).unwrap_or(false);
                 let drifted = crate::realbrowser::session_drifted(
@@ -630,6 +624,24 @@ fn settings_mismatch(
     ))
 }
 
+/// Why this daemon must not serve `req` ([`settings_mismatch`]), judged
+/// against the lane it would serve it in — `BLADE_LANE`, else the `rb`
+/// config, so an `rb on|off` since the last command counts. That lane is
+/// computed here, never switched: the lane flag describes the browser that
+/// is RUNNING, and the login snapshots (periodic, idle, shutdown) and the
+/// idle hum consult it until a served command relaunches. A refusal that
+/// switched it relabelled a live real-lane session as agent, so the
+/// `bladebro stop` the refusal recommends snapshotted the user's own
+/// cookies into the agent's logins.json.
+#[cfg(unix)]
+fn refusal(req: &Value) -> Option<String> {
+    let serving_lane = crate::realbrowser::lane_from(
+        std::env::var("BLADE_LANE").ok().as_deref(),
+        crate::realbrowser::config().enabled,
+    );
+    settings_mismatch(req, serving_lane, |k| std::env::var(k).ok())
+}
+
 // ── Daemon lifecycle helpers ───────────────────────────────────────────
 
 /// Path of the daemon pid file. Stale files (SIGKILL) are detected by
@@ -812,5 +824,59 @@ mod tests {
         );
         // An older CLI's request (no lane/env fields) is served as before.
         assert_eq!(check(json!({"tool": "see", "args": {}}), true), None);
+    }
+
+    #[test]
+    fn a_refused_request_leaves_the_lane_flag_alone() {
+        // The lane flag and BLADE_HOME are process-global (other tests read
+        // the flag through `hum_enabled`), so the check runs in a child copy
+        // of this test binary with its own scratch home.
+        const CHILD: &str = "BLADE_DAEMON_REFUSAL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            // A daemon whose browser was launched on the agent lane; the rb
+            // config has since been switched on without a daemon restart (a
+            // hand edit, a racing toggle). A command that resolved the agent
+            // lane would now be served on the real one: refused.
+            crate::realbrowser::set_real_lane(false);
+            let why = refusal(&json!({"tool": "see", "lane": "agent", "env": {}}))
+                .expect("a command from the other lane must be refused");
+            assert!(why.contains("daemon: real"), "{why}");
+            // The flag still describes the browser that is running — the
+            // login snapshots and the idle hum consult it until the next
+            // served command relaunches. A refusal that switched it let
+            // `bladebro stop` snapshot a real-lane session's cookies into
+            // the agent's logins.json (lane_from is symmetric; this is the
+            // direction that never sets the real lane in a test).
+            assert!(
+                !crate::realbrowser::real_lane(),
+                "a refused request switched the daemon's lane"
+            );
+            return;
+        }
+        let home = std::env::temp_dir().join(format!("blade-refusal-lane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("realbrowser.json"), br#"{"enabled":true}"#).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::daemon::tests::a_refused_request_leaves_the_lane_flag_alone",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("BLADE_HOME", &home)
+            .env_remove("BLADE_LANE")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "child check failed:\n{report}");
+        // The child must have run the check, not filtered it away.
+        assert!(report.contains("1 passed"), "child ran no test:\n{report}");
     }
 }
