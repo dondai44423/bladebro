@@ -36,7 +36,7 @@ jobs:
         # macos-latest routes to the ARM64 pool; repeated allocation failures
         # prevented even starting the release gate. Keep full native Mac tests
         # on the supported standard Intel pool. Both Mac targets still ship.
-        os: [ubuntu-latest, macos-26-intel, windows-latest]
+        os: [ubuntu-latest, macos-26, macos-26-intel, windows-latest]
         rust-version: ["stable"]
 
     steps:
