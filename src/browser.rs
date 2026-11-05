@@ -13,11 +13,12 @@
 //! If Xvfb isn't available, falls back to `--headless=new`.
 //!
 //! Module map: this file is the `Browser` struct, its accessors and the
-//! shutdown/drop contract; `flags` builds the command line, `probe` runs the
-//! GL healthcheck, `display` owns the Xvfb + WM layer (Linux), `launch` is the
-//! launch ladder + lane dispatch, `pipe` is the pipe-transport launch, and
-//! `discover` finds Chrome/Xvfb on this system (`flatpak`: Flatpak browsers,
-//! Linux).
+//! shutdown/drop contract (plus `LaunchGuard`, the same contract for a
+//! launch attempt that has not become a `Browser` yet); `flags` builds the
+//! command line, `probe` runs the GL healthcheck, `display` owns the Xvfb +
+//! WM layer (Linux), `launch` is the launch ladder + lane dispatch, `pipe` is
+//! the pipe-transport launch, and `discover` finds Chrome/Xvfb on this system
+//! (`flatpak`: Flatpak browsers, Linux).
 
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -233,6 +234,68 @@ impl Browser {
     }
 }
 
+/// An owned launch attempt in flight: holds the session profile and, once
+/// spawned, the browser child until [`LaunchGuard::finish`] hands both to a
+/// [`Browser`]. Every other exit — an error return, a `?`, a timeout — tears
+/// the process tree down first (group SIGTERM, bounded wait, SIGKILL: a
+/// launcher that died at startup can leave forked helpers in its group) and
+/// only then removes the profile, exactly as a shut-down `Browser` would.
+/// Before this only the incognito error path cleaned up: with BLADE_FRESH=1
+/// each failed attempt (up to three per launch) left a `bladebro-chrome-*`
+/// profile in the temp dir, and a failed status poll dropped the child
+/// without killing anything.
+struct LaunchGuard {
+    profile: Option<crate::session_profile::SessionProfile>,
+    child: Option<Child>,
+}
+
+impl LaunchGuard {
+    fn new(profile: crate::session_profile::SessionProfile) -> Self {
+        Self {
+            profile: Some(profile),
+            child: None,
+        }
+    }
+
+    /// Spawn the browser under the guard.
+    fn spawn(&mut self, cmd: &mut Command) -> std::io::Result<&mut Child> {
+        Ok(self.child.insert(cmd.spawn()?))
+    }
+
+    /// The launch succeeded: release the child and profile to the caller.
+    fn finish(mut self) -> Result<(Child, crate::session_profile::SessionProfile)> {
+        match (self.child.take(), self.profile.take()) {
+            (Some(child), Some(profile)) => Ok((child, profile)),
+            (child, profile) => {
+                // Unreachable by construction (finish follows spawn); keep
+                // both so Drop still cleans up instead of leaking.
+                self.child = child;
+                self.profile = profile;
+                Err(BladeError::Other(
+                    "browser launch finished without a spawned process".into(),
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        let spawned = self.child.is_some();
+        if let Some(mut child) = self.child.take() {
+            platform::shutdown_child(&mut child);
+        }
+        if let Some(profile) = self.profile.take() {
+            // A sandboxed helper the launcher started can outlive its group
+            // (Flatpak portal spawns): stop it before the profile goes.
+            if spawned {
+                stop_profile_processes(&profile, false);
+            }
+            profile.cleanup();
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod cleanup_tests {
     use super::*;
@@ -313,6 +376,52 @@ mod cleanup_tests {
         assert!(
             neighbour_alive,
             "a process on a different profile (shared prefix) must never be signalled"
+        );
+    }
+
+    /// The same sweep on a failed launch attempt: every agent-lane failure
+    /// arm ends by dropping its LaunchGuard, which must stop a sandboxed
+    /// helper left on the attempt's profile before removing the profile.
+    #[test]
+    fn failed_launch_attempt_stops_profile_processes_outside_the_launcher_group() {
+        use std::os::unix::process::CommandExt;
+        let root = std::env::temp_dir().join(format!(
+            "blade-guard-sweep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = root.join("sess-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut zygote = spawn_sleeper(&format!("--user-data-dir={}", dir.display()));
+
+        let mut guard =
+            LaunchGuard::new(crate::session_profile::SessionProfile::owned_for_test(&dir));
+        let mut launcher = Command::new("sh");
+        launcher
+            .args(["-c", "while :; do sleep 0.2; done", "launcher"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        guard.spawn(&mut launcher).expect("spawn fixture launcher");
+        drop(guard);
+
+        let zygote_stopped = exits_within(&mut zygote, Duration::from_secs(3));
+        let _ = zygote.kill();
+        let _ = zygote.wait();
+        let profile_removed = !dir.exists();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(
+            zygote_stopped,
+            "a browser process on a failed attempt's profile must not outlive the attempt"
+        );
+        assert!(
+            profile_removed,
+            "the failed attempt's profile must be removed"
         );
     }
 }

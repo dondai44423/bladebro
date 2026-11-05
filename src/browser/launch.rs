@@ -176,6 +176,11 @@ impl Browser {
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let headful = true; // macOS/Windows have native window servers
 
+        // From here on every failure path tears down whatever this attempt
+        // started and removes its profile (declared after the display, so it
+        // drops — and stops Chrome — before Xvfb goes away).
+        let mut guard = super::LaunchGuard::new(profile);
+
         // After both bindings: the recording must compile on every target.
         set_launched_headless(!headful);
         set_launched_no_sandbox(no_sandbox);
@@ -231,8 +236,8 @@ impl Browser {
         }
 
         platform::isolate_owned_child(&mut cmd);
-        let mut child = cmd
-            .spawn()
+        let child = guard
+            .spawn(&mut cmd)
             .map_err(|e| BladeError::Other(format!("failed to launch Chrome: {e}")))?;
 
         let base = format!("127.0.0.1:{port}");
@@ -256,8 +261,6 @@ impl Browser {
                     // check is skipped.
                     if !endpoint_owned_by_pid(port, child.id()) {
                         if Instant::now() >= deadline {
-                            platform::kill_child_tree(&mut child);
-                            stop_profile_processes(&profile, false);
                             return Err(BladeError::Other(
                                 "the debug endpoint on this port is not served by the browser process — refusing it (possible local port hijack)".into(),
                             ));
@@ -281,17 +284,13 @@ impl Browser {
                             super::compat::prepare_incognito(&client).await
                         }
                         .await;
-                        if let Err(error) = prepared {
-                            platform::shutdown_child(&mut child);
-                            stop_profile_processes(&profile, false);
-                            profile.cleanup();
-                            return Err(error);
-                        }
+                        prepared?;
                     }
                     let probe = probe_gl_ws(&base).await;
                     if timing {
                         eprintln!("[launch-timing] healthcheck: {:?}", t0.elapsed());
                     }
+                    let (child, profile) = guard.finish()?;
                     return Ok((
                         Self {
                             child,
@@ -311,8 +310,8 @@ impl Browser {
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             // The launcher is gone, but a sandboxed helper
-                            // it started may not be (Flatpak portal spawns).
-                            stop_profile_processes(&profile, false);
+                            // it started may not be (Flatpak portal spawns):
+                            // the guard sweeps the profile on return.
                             return Err(BladeError::Other(format!(
                                 "Chrome exited during startup: {status}{}",
                                 chrome_stderr_tail()
@@ -326,8 +325,6 @@ impl Browser {
                         }
                     }
                     if Instant::now() >= deadline {
-                        platform::kill_child_tree(&mut child);
-                        stop_profile_processes(&profile, false);
                         return Err(BladeError::Other(format!(
                             "Chrome debug endpoint not responding after 20s{}",
                             chrome_stderr_tail()
@@ -509,6 +506,10 @@ impl Browser {
                     Err(_) => {
                         match child.try_wait() {
                             Ok(Some(status)) => {
+                                // The launcher is gone, but helpers it forked
+                                // into our group can outlive it (and hold the
+                                // profile the retry is about to reuse).
+                                platform::kill_child_tree(&mut child);
                                 if spawned_at.elapsed() < Duration::from_secs(5) && status.success()
                                 {
                                     last_err = Some(BladeError::Other(
@@ -529,6 +530,7 @@ impl Browser {
                             }
                             Ok(None) => {}
                             Err(e) => {
+                                platform::kill_child_tree(&mut child);
                                 return Err(BladeError::Other(format!(
                                     "failed to poll browser status: {e}"
                                 )));
