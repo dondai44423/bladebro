@@ -442,7 +442,7 @@ pub(super) fn launch_args_real(cfg: &RealLaunchCfg<'_>) -> Vec<String> {
 
 /// `BLADE_CHROME_FLAGS` as arguments (empty when unset). Both lanes read it
 /// here so they split it identically.
-pub(super) fn env_chrome_flags() -> crate::error::Result<Vec<String>> {
+pub(crate) fn env_chrome_flags() -> crate::error::Result<Vec<String>> {
     match std::env::var("BLADE_CHROME_FLAGS") {
         Ok(raw) => split_chrome_flags(&raw).map_err(crate::error::BladeError::Other),
         Err(_) => Ok(Vec::new()),

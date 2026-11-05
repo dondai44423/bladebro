@@ -47,6 +47,7 @@ pub(crate) use self::discover::endpoint_owned_by_own_browser;
 pub(crate) use self::discover::find_chrome;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use self::display::VirtualDisplay;
+pub(crate) use self::flags::env_chrome_flags;
 pub use self::flags::{
     gl_mid_session_loss, gpu_state, is_software_renderer, launched_headless, launched_no_sandbox,
     launched_pipe, mark_gl_mid_session_loss, reconcile_gl, set_gpu_state, set_launched_headless,

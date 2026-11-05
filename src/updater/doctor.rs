@@ -207,6 +207,19 @@ fn check_data_dir() -> Check {
 }
 
 fn check_browser_mode() -> Check {
+    // Every launch parses BLADE_CHROME_FLAGS first, and so does the incognito
+    // policy: a malformed value is its own failure with its own fix, never a
+    // BLADE_INCOGNITO problem.
+    if let Err(error) = crate::browser::env_chrome_flags() {
+        return Check {
+            name: "Chrome flags",
+            status: Status::Fail,
+            detail: error.to_string(),
+            fix: Some(
+                "Fix or unset BLADE_CHROME_FLAGS; every browser launch fails until then".into(),
+            ),
+        };
+    }
     match crate::browser::incognito_policy() {
         Ok(true) => Check {
             name: "Agent browser mode",
