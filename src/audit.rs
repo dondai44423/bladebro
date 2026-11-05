@@ -1,7 +1,8 @@
 //! `bladebro audit` — runs the S13 stealth audit for the CLI.
 //!
 //! Executed by main.rs with an owned, guarded browser. The vector suite and
-//! the injection-lint fixtures live in `tests/vectors.html`; the bar is the
+//! the injection-lint fixtures live in `tests/vectors.html` (embedded in the
+//! binary, so npm and release installs can run it too); the bar is the
 //! suite's own total (111/111 on the reference machine with native behavior
 //! conformance, after the 4.6.0
 //! shell-torture + platform-truth checks and the 4.6.1 worker-renderer /
@@ -14,6 +15,14 @@ use crate::cdp;
 use crate::error::{BladeError, Result};
 use crate::page::Page;
 use crate::ui;
+use std::path::{Path, PathBuf};
+
+/// The vector suite and the fixture script it loads by relative path,
+/// compiled in: npm and release installs ship only the binary, so an audit
+/// that needed `tests/` on disk failed on every one of them with
+/// "vectors.html not found".
+const VECTORS_HTML: &str = include_str!("../tests/vectors.html");
+const NATIVE_BEHAVIOR_JS: &str = include_str!("../tests/fixtures/native_behavior.js");
 
 /// S13: `bladebro audit` — run the stealth vectors, the boot self-check (S2),
 /// and a cross-restart consistency stamp (v3.9.12); print a scorecard.
@@ -23,17 +32,15 @@ pub async fn run_audit(base: &str) -> Result<()> {
     let client = cdp::CdpClient::connect(target.ws_url()?).await?;
     let mut page = Page::attach(cdp::CdpSession::root(client), base, None).await?;
 
-    // Find vectors.html — project root or CARGO_MANIFEST_DIR.
-    let vectors_url = {
-        let candidates = [
-            std::path::PathBuf::from("tests/vectors.html"),
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors.html"),
-        ];
-        let path = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
-            BladeError::Other("vectors.html not found. Run from project root.".into())
-        })?;
-        file_url(path)
-    };
+    // Find vectors.html — project root, CARGO_MANIFEST_DIR, else the copy
+    // embedded in this binary.
+    let vectors_url = file_url(&vectors_page(
+        &[
+            PathBuf::from("tests/vectors.html"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors.html"),
+        ],
+        &crate::platform::blade_dir().join("audit"),
+    )?);
 
     if crate::realbrowser::real_lane() {
         eprintln!(
@@ -207,6 +214,36 @@ return JSON.stringify(out);
     }
 }
 
+/// Resolve the vector page to load. An on-disk suite (the first existing
+/// candidate) wins, so edits to `tests/vectors.html` take effect without a
+/// rebuild. Otherwise the embedded copy and its fixture are written under
+/// `dir` (in the data dir, which the browser can already read — its profile
+/// lives there) and loaded from `file://`, as the on-disk suite is: the
+/// permissions, worker and iframe vectors are origin-sensitive, and a
+/// `data:` URL would run them in an opaque origin.
+fn vectors_page(candidates: &[PathBuf], dir: &Path) -> Result<PathBuf> {
+    if let Some(found) = candidates.iter().find(|p| p.exists()) {
+        return Ok(found.clone());
+    }
+    let page = dir.join("vectors.html");
+    let fixtures = dir.join("fixtures");
+    crate::platform::secure_create_dir_all(&fixtures)
+        .and_then(|()| {
+            crate::platform::secure_write_file(
+                &fixtures.join("native_behavior.js"),
+                NATIVE_BEHAVIOR_JS.as_bytes(),
+            )
+        })
+        .and_then(|()| crate::platform::secure_write_file(&page, VECTORS_HTML.as_bytes()))
+        .map_err(|e| {
+            BladeError::Other(format!(
+                "cannot write the built-in vector suite to {}: {e}",
+                dir.display()
+            ))
+        })?;
+    Ok(page)
+}
+
 /// Gate the vector suite's own report, failing closed. `finished` is the
 /// wait for the suite's `DONE` title. A suite that threw or hung never
 /// reaches DONE and never writes its SCORE footer; this gate used to record
@@ -250,7 +287,7 @@ fn vector_failures(finished: std::result::Result<(), String>, content: &str) -> 
 /// a drive-rooted slash (`file:///D:/a/b.html`); a raw `file://D:\a\b.html`
 /// is not a valid URL and Chrome refuses it (caught by the first CI run on
 /// Windows). The `\\?\` prefix canonicalize() adds on Windows is stripped.
-fn file_url(path: &std::path::Path) -> String {
+fn file_url(path: &Path) -> String {
     let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     file_url_from_str(&p.display().to_string(), cfg!(windows))
 }
@@ -267,6 +304,63 @@ fn file_url_from_str(s: &str, windows: bool) -> String {
         format!("file://{t}")
     } else {
         format!("file://{s}")
+    }
+}
+
+#[cfg(test)]
+mod embedded_suite_tests {
+    use super::{vectors_page, VECTORS_HTML};
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("blade-audit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_binary_install_runs_the_embedded_suite_with_its_fixtures() {
+        // No checkout anywhere: the npm / release-asset case.
+        let dir = scratch("embedded");
+        let page = vectors_page(
+            &[dir.join("checkout/tests/vectors.html")],
+            &dir.join("audit"),
+        )
+        .expect("the embedded suite needs no files on disk");
+        assert_eq!(std::fs::read_to_string(&page).unwrap(), VECTORS_HTML);
+        // Every script the page loads by relative path must be written next
+        // to it, or the suite dies on its first reference on every install.
+        let mut scripts = 0;
+        for seg in VECTORS_HTML.split("src=\"").skip(1) {
+            let src = seg.split('"').next().unwrap_or_default();
+            scripts += 1;
+            assert!(
+                page.parent().unwrap().join(src).is_file(),
+                "{src} is loaded by tests/vectors.html but not embedded"
+            );
+        }
+        assert!(scripts > 0);
+        // A second run rewrites the files in place.
+        assert_eq!(vectors_page(&[], &dir.join("audit")).unwrap(), page);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_on_disk_suite_still_wins() {
+        let dir = scratch("ondisk");
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkout = dir.join("vectors.html");
+        std::fs::write(&checkout, "<title>edited</title>").unwrap();
+        let page = vectors_page(
+            &[dir.join("absent.html"), checkout.clone()],
+            &dir.join("audit"),
+        )
+        .unwrap();
+        assert_eq!(page, checkout);
+        assert!(
+            !dir.join("audit").exists(),
+            "nothing written when a suite is on disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -849,7 +849,8 @@ worker/iframe propagation) plus a boot self-check and a cross-restart
 consistency stamp (canvas/audio/geometry/UA/GL must not drift between
 runs). Run it after any stealth-affecting change; every check must pass —
 the run prints its own total (it depends on platform and profile), and
-any FAIL line exits non-zero.
+any FAIL line exits non-zero. The suite is built into the binary; a
+tests/vectors.html in the current directory overrides it.
 "#
         }
         "update" => {
