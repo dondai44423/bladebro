@@ -62,6 +62,11 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
     // Set when Chrome is relaunched after a crash/idle — the
     // next response tells the agent its page state was reset.
     let mut relaunch_note: Option<String> = None;
+    // Set only when the idle timer actually closed Chrome. Inferring it
+    // from "no page + idle time elapsed" also matched a client whose first
+    // call came after BLADE_IDLE_TIMEOUT, telling it Chrome "was restarted"
+    // when it had never run.
+    let mut idle_closed = false;
     // Fingerprint of the launch inputs the live browser started with; the
     // per-call drift check compares against it so `rb on|off` under a running
     // browser relaunches instead of being silently ignored.
@@ -255,9 +260,10 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                 } else {
                                     "note: the real-browser lane is now OFF — bladebro detached from the attached browser (left running, untouched) and relaunched as the isolated agent browser. Page state reset to about:blank; navigate to continue.".into()
                                 });
-                            } else if page.is_none() && relaunch_note.is_none() && last_activity.elapsed().as_secs() > idle_secs && idle_secs > 0 {
+                            } else if idle_closed && relaunch_note.is_none() {
                                 // Post-idle relaunch: the agent's refs
                                 // are all gone. Say so explicitly.
+                                idle_closed = false;
                                 relaunch_note = Some(
                                     "note: Chrome was restarted after idle shutdown — page state reset to about:blank. Navigate to continue.".into()
                                 );
@@ -628,6 +634,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         shutdown_browser(b).await;
                     }
                     page = None;
+                    idle_closed = true;
                 }
             }
         }

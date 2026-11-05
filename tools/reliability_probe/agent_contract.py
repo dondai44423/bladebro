@@ -195,6 +195,19 @@ try:
                     except subprocess.TimeoutExpired:
                         proc.kill(); proc.wait(timeout=10)
                 proc.stdout.close()
+        # Notes must be true: a first call made after BLADE_IDLE_TIMEOUT has
+        # elapsed must not claim an idle restart of a Chrome that never ran.
+        with tempfile.TemporaryDirectory(prefix='blade-contract-idle-') as idle_home:
+            idle = subprocess.Popen([BINARY, 'mcp'], env=dict(env, BLADE_HOME=idle_home, BLADE_IDLE_TIMEOUT='1'), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding='utf-8')
+            time.sleep(3)
+            request = dict(jsonrpc='2.0', id=1, method='tools/call', params=dict(name='act', arguments=dict(action='navigate', url=origin + '/?idle')))
+            try: out, _ = idle.communicate(json.dumps(request) + '\n', timeout=60)
+            except subprocess.TimeoutExpired:
+                idle.kill(); out, _ = idle.communicate()
+            response = json.loads(out.splitlines()[0]) if out.strip() else {}
+            receipts.append(dict(idle=True, request=request, response=response))
+            text = '\n'.join(c.get('text', '') for c in response.get('result', {}).get('content', []))
+            check('first call after the idle timeout claims no idle restart', 'Agent contract fixture' in text and 'idle shutdown' not in text)
 finally:
     server.shutdown()
     server.server_close()
