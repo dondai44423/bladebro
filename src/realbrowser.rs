@@ -461,6 +461,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&rel);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn binary_paths_keep_argv0_dispatch_symlinks() {
+        // `/snap/bin/chromium` is a symlink to `/usr/bin/snap`, which picks
+        // the app from argv[0]. Resolving the link stores the dispatcher, and
+        // the launch then runs snap itself with Chrome's flags.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("blade-rb-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dispatcher = dir.join("snap");
+        std::fs::write(&dispatcher, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&dispatcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.join("chromium");
+        std::os::unix::fs::symlink(&dispatcher, &link).unwrap();
+
+        let got = validate_binary_override(&link.display().to_string()).expect("symlinked binary");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            got, link,
+            "the stored binary must keep the name argv[0] carries"
+        );
+    }
+
     #[test]
     fn config_round_trips_and_survives_corruption() {
         let dir = std::env::temp_dir().join(format!("blade-rb-cfg-{}", std::process::id()));

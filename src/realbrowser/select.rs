@@ -62,12 +62,10 @@ pub fn validate_binary_override(path: &str) -> Result<PathBuf> {
     }
     // Store ABSOLUTE: a relative override resolved against the spawning
     // shell's cwd would silently break in another process (daemon, MCP) that
-    // runs with a different cwd.
-    let p = p.canonicalize().unwrap_or_else(|_| {
-        std::env::current_dir()
-            .map(|c| c.join(&p))
-            .unwrap_or_else(|_| p.clone())
-    });
+    // runs with a different cwd. Never resolve symlinks: launchers that
+    // dispatch on argv[0] (`/snap/bin/chromium` → `/usr/bin/snap`) only work
+    // under the name they were invoked by.
+    let p = std::path::absolute(&p).unwrap_or(p);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
