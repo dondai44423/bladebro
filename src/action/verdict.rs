@@ -125,12 +125,23 @@ pub struct ScrollReport {
     pub scroller: String,
     pub scroller_before: Option<f64>,
     pub scroller_after: Option<f64>,
+    /// Horizontal axis: window scrollLeft before/after and its range, plus
+    /// the horizontal scroller under the wheel point (a carousel, a wide
+    /// table) - a vertical-only probe reported a carousel that DID scroll as
+    /// "no movement - page already at the top".
+    pub before_x: f64,
+    pub after_x: f64,
+    pub max_x: f64,
+    pub scroller_x: String,
+    pub scroller_x_before: Option<f64>,
+    pub scroller_x_after: Option<f64>,
 }
 
-/// Build the scroll-position probe: window scroller state + the deepest
-/// scrollable element under (cx, cy). One evaluate, best-effort.
+/// Build the scroll-position probe: window scroller state on both axes + the
+/// deepest vertical and horizontal scrollable elements under (cx, cy). One
+/// evaluate, best-effort.
 pub(super) fn scroll_probe_expr(cx: f64, cy: f64) -> String {
-    let js = "(()=>{var d=document;var se=d.scrollingElement||d.documentElement;var out={y:se?se.scrollTop:0,max:Math.max(0,(se?se.scrollHeight:0)-(window.innerHeight||0)),el:'',elTop:null};try{var hit=d.elementFromPoint(__X__,__Y__);var hops=0;while(hit&&hops<40){if(hit!==d.body&&hit!==d.documentElement){var cs=getComputedStyle(hit);if((cs.overflowY==='auto'||cs.overflowY==='scroll'||cs.overflowY==='overlay')&&hit.scrollHeight>hit.clientHeight+1){out.el=hit.tagName.toLowerCase()+((hit.getAttribute&&hit.getAttribute('id'))?('#'+String(hit.getAttribute('id')).slice(0,24)):'');out.elTop=hit.scrollTop;break;}}hit=hit.parentElement||(hit.getRootNode&&hit.getRootNode().host)||null;hops++;}}catch(e){}return out;})()";
+    let js = "(()=>{var d=document;var se=d.scrollingElement||d.documentElement;var out={y:se?se.scrollTop:0,max:Math.max(0,(se?se.scrollHeight:0)-(window.innerHeight||0)),el:'',elTop:null,x:se?se.scrollLeft:0,maxX:Math.max(0,(se?se.scrollWidth:0)-(window.innerWidth||0)),elx:'',elLeft:null};try{var desc=function(e){return e.tagName.toLowerCase()+((e.getAttribute&&e.getAttribute('id'))?('#'+String(e.getAttribute('id')).slice(0,24)):'');};var can=function(v){return v==='auto'||v==='scroll'||v==='overlay';};var hit=d.elementFromPoint(__X__,__Y__);var hops=0;while(hit&&hops<40&&(out.elTop===null||out.elLeft===null)){if(hit!==d.body&&hit!==d.documentElement){var cs=getComputedStyle(hit);if(out.elTop===null&&can(cs.overflowY)&&hit.scrollHeight>hit.clientHeight+1){out.el=desc(hit);out.elTop=hit.scrollTop;}if(out.elLeft===null&&can(cs.overflowX)&&hit.scrollWidth>hit.clientWidth+1){out.elx=desc(hit);out.elLeft=hit.scrollLeft;}}hit=hit.parentElement||(hit.getRootNode&&hit.getRootNode().host)||null;hops++;}}catch(e){}return out;})()";
     js.replace("__X__", &format!("{cx}"))
         .replace("__Y__", &format!("{cy}"))
 }
@@ -190,7 +201,10 @@ pub(super) fn compute_verdict(
     match action {
         Action::ClickCoord { x, y } => {
             if delta.navigated {
-                format!("outcome: navigated \u{2192} {} via coord-click({x:.0},{y:.0})", shorten_url(&delta.url))
+                format!(
+                    "outcome: navigated \u{2192} {} via coord-click({x:.0},{y:.0})",
+                    shorten_url(&delta.url)
+                )
             } else if let Some(eff) = dom_effect_summary(delta) {
                 let note = match toggle.filter(|t| t.changed()) {
                     Some(t) => format!(
@@ -239,7 +253,11 @@ pub(super) fn compute_verdict(
                 _ => via.to_string(),
             };
             if delta.navigated {
-                format!("outcome: navigated \u{2192} {} via {}", shorten_url(&delta.url), via)
+                format!(
+                    "outcome: navigated \u{2192} {} via {}",
+                    shorten_url(&delta.url),
+                    via
+                )
             } else if let Some(eff) = dom_effect_summary(delta) {
                 let note = match toggle.filter(|t| t.changed()) {
                     Some(t) => format!(
@@ -316,7 +334,10 @@ pub(super) fn compute_verdict(
         Action::Select { option, .. } => format!("outcome: selected \"{}\"", clip(option, 40)),
         Action::Press { key } => {
             if delta.navigated {
-                format!("outcome: pressed {key} \u{2192} navigated \u{2192} {}", shorten_url(&delta.url))
+                format!(
+                    "outcome: pressed {key} \u{2192} navigated \u{2192} {}",
+                    shorten_url(&delta.url)
+                )
             } else if let Some(eff) = dom_effect_summary(delta) {
                 format!("outcome: pressed {key} \u{2192} dom-changed ({eff})")
             } else if delta.content_changed {
@@ -327,55 +348,15 @@ pub(super) fn compute_verdict(
                 format!("outcome: pressed {key}")
             }
         }
-        Action::Scroll { dx, dy } => match scroll {
-            // Report MEASURED movement. The old unconditional "scrolled
-            // (dx, dy)" claimed success when the wheel hit a boundary and
-            // nothing moved - agents read the lie as a broken tool.
-            Some(s) => {
-                let moved = s.after_y - s.before_y;
-                let el_moved = match (s.scroller_before, s.scroller_after) {
-                    (Some(a), Some(b)) => b - a,
-                    _ => 0.0,
-                };
-                if moved.abs() >= 1.0 {
-                    format!(
-                        "outcome: scrolled page delta{moved:+.0} (y {:.0} -> {:.0})",
-                        s.before_y, s.after_y
-                    )
-                } else if el_moved.abs() >= 1.0 {
-                    let who = if s.scroller.is_empty() {
-                        "nested scroller".to_string()
-                    } else {
-                        s.scroller.clone()
-                    };
-                    format!(
-                        "outcome: scrolled {who} delta{el_moved:+.0} (page unchanged at y {:.0})",
-                        s.after_y
-                    )
-                } else if s.max_y > 1.0 && (s.after_y - s.max_y).abs() < 2.0 {
-                    format!(
-                        "outcome: no movement - page already at the bottom (y {:.0} of {:.0})",
-                        s.after_y, s.max_y
-                    )
-                } else if s.after_y <= 0.5 {
-                    "outcome: no movement - page already at the top".to_string()
-                } else {
-                    format!(
-                        "outcome: no movement - wheel dispatched, nothing scrolled (y {:.0} of {:.0})",
-                        s.after_y, s.max_y
-                    )
-                }
-            }
-            // Probe failed on this burst: claim the dispatch, not movement.
-            None => format!(
-                "outcome: scroll dispatched ({dx}, {dy}) - movement not measured (probe unavailable)"
-            ),
-        },
+        Action::Scroll { dx, dy } => scroll_verdict(*dx, *dy, scroll),
         Action::Read { .. } => "outcome: read".to_string(),
         Action::Wait { condition, .. } => format!("outcome: waited ({condition})"),
         Action::Back => {
             if delta.navigated {
-                format!("outcome: navigated back \u{2192} {}", shorten_url(&delta.url))
+                format!(
+                    "outcome: navigated back \u{2192} {}",
+                    shorten_url(&delta.url)
+                )
             } else if delta.unanswered {
                 format!("outcome: back - {UNANSWERED_EFFECT}")
             } else {
@@ -384,7 +365,10 @@ pub(super) fn compute_verdict(
         }
         Action::Forward => {
             if delta.navigated {
-                format!("outcome: navigated forward \u{2192} {}", shorten_url(&delta.url))
+                format!(
+                    "outcome: navigated forward \u{2192} {}",
+                    shorten_url(&delta.url)
+                )
             } else if delta.unanswered {
                 format!("outcome: forward - {UNANSWERED_EFFECT}")
             } else {
@@ -396,7 +380,10 @@ pub(super) fn compute_verdict(
         }
         Action::Hover { ref_id } => {
             if delta.navigated {
-                format!("outcome: hovered {ref_id} \u{2192} navigated \u{2192} {}", shorten_url(&delta.url))
+                format!(
+                    "outcome: hovered {ref_id} \u{2192} navigated \u{2192} {}",
+                    shorten_url(&delta.url)
+                )
             } else if let Some(eff) = dom_effect_summary(delta) {
                 format!("outcome: hovered {ref_id} \u{2192} dom-changed ({eff})")
             } else if delta.content_changed {
@@ -408,6 +395,93 @@ pub(super) fn compute_verdict(
             }
         }
         Action::Upload { path, .. } => format!("outcome: uploaded \"{}\"", clip(path, 40)),
+    }
+}
+
+/// Scroll verdict from MEASURED movement. The old unconditional "scrolled
+/// (dx, dy)" claimed success when the wheel hit a boundary and nothing
+/// moved; agents read the lie as a broken tool. Both axes are measured:
+/// page movement first, then the nested scrollers under the wheel point,
+/// then the boundary the request ran into.
+pub(super) fn scroll_verdict(dx: i64, dy: i64, scroll: Option<&ScrollReport>) -> String {
+    // Probe failed on this burst: claim the dispatch, not movement.
+    let Some(s) = scroll else {
+        return format!(
+            "outcome: scroll dispatched ({dx}, {dy}) - movement not measured (probe unavailable)"
+        );
+    };
+    let delta = |a: Option<f64>, b: Option<f64>| match (a, b) {
+        (Some(a), Some(b)) => b - a,
+        _ => 0.0,
+    };
+    let moved = s.after_y - s.before_y;
+    let moved_x = s.after_x - s.before_x;
+    let el_moved = delta(s.scroller_before, s.scroller_after);
+    let el_moved_x = delta(s.scroller_x_before, s.scroller_x_after);
+    let name = |who: &str| {
+        if who.is_empty() {
+            "nested scroller".to_string()
+        } else {
+            who.to_string()
+        }
+    };
+    if moved.abs() >= 1.0 || moved_x.abs() >= 1.0 {
+        let mut parts = Vec::new();
+        if moved.abs() >= 1.0 {
+            parts.push(format!(
+                "delta{moved:+.0} (y {:.0} -> {:.0})",
+                s.before_y, s.after_y
+            ));
+        }
+        if moved_x.abs() >= 1.0 {
+            parts.push(format!(
+                "delta x{moved_x:+.0} (x {:.0} -> {:.0})",
+                s.before_x, s.after_x
+            ));
+        }
+        format!("outcome: scrolled page {}", parts.join(", "))
+    } else if el_moved.abs() >= 1.0 || el_moved_x.abs() >= 1.0 {
+        let mut parts = Vec::new();
+        if el_moved.abs() >= 1.0 {
+            parts.push(format!("{} delta{el_moved:+.0}", name(&s.scroller)));
+        }
+        if el_moved_x.abs() >= 1.0 {
+            parts.push(format!("{} delta x{el_moved_x:+.0}", name(&s.scroller_x)));
+        }
+        format!(
+            "outcome: scrolled {} (page unchanged at y {:.0})",
+            parts.join(", "),
+            s.after_y
+        )
+    } else if dy == 0 && dx != 0 {
+        // A horizontal-only request reports the horizontal boundary.
+        if s.max_x <= 1.0 && s.scroller_x.is_empty() {
+            "outcome: no movement - nothing scrolls horizontally here (the page fits the viewport width)".to_string()
+        } else if dx > 0 && s.max_x > 1.0 && (s.after_x - s.max_x).abs() < 2.0 {
+            format!(
+                "outcome: no movement - page already at the right edge (x {:.0} of {:.0})",
+                s.after_x, s.max_x
+            )
+        } else if dx < 0 && s.after_x <= 0.5 {
+            "outcome: no movement - page already at the left edge".to_string()
+        } else {
+            format!(
+                "outcome: no movement - wheel dispatched, nothing scrolled (x {:.0} of {:.0})",
+                s.after_x, s.max_x
+            )
+        }
+    } else if s.max_y > 1.0 && (s.after_y - s.max_y).abs() < 2.0 {
+        format!(
+            "outcome: no movement - page already at the bottom (y {:.0} of {:.0})",
+            s.after_y, s.max_y
+        )
+    } else if s.after_y <= 0.5 {
+        "outcome: no movement - page already at the top".to_string()
+    } else {
+        format!(
+            "outcome: no movement - wheel dispatched, nothing scrolled (y {:.0} of {:.0})",
+            s.after_y, s.max_y
+        )
     }
 }
 

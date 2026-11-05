@@ -747,6 +747,19 @@ pub async fn perform_with_network(
                         .to_string(),
                     scroller_before: jnum(&before_v, "elTop"),
                     scroller_after: jnum(&after_v, "elTop"),
+                    // A-hscroll: the horizontal axis, measured the same way
+                    // (absent from a probe means unmeasured, never moved).
+                    before_x: jnum(&before_v, "x").unwrap_or(0.0),
+                    after_x: jnum(&after_v, "x").unwrap_or(0.0),
+                    max_x: jnum(&after_v, "maxX").unwrap_or(0.0),
+                    scroller_x: after_v
+                        .as_ref()
+                        .and_then(|o| o.get("elx"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    scroller_x_before: jnum(&before_v, "elLeft"),
+                    scroller_x_after: jnum(&after_v, "elLeft"),
                 });
             }
         }

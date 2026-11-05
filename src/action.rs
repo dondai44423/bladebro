@@ -537,6 +537,79 @@ mod action_tests {
         );
     }
 
+    #[test]
+    fn scroll_verdict_reports_both_axes() {
+        // A-hscroll: a carousel / wide page that DID scroll horizontally was
+        // reported as "no movement - page already at the top".
+        use super::verdict::{scroll_verdict, ScrollReport};
+        let at_rest = ScrollReport::default();
+        let page_x = ScrollReport {
+            after_x: 500.0,
+            max_x: 3200.0,
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(500, 0, Some(&page_x)),
+            "outcome: scrolled page delta x+500 (x 0 -> 500)"
+        );
+        let carousel = ScrollReport {
+            scroller_x: "div#car".into(),
+            scroller_x_before: Some(0.0),
+            scroller_x_after: Some(500.0),
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(500, 0, Some(&carousel)),
+            "outcome: scrolled div#car delta x+500 (page unchanged at y 0)"
+        );
+        let right_edge = ScrollReport {
+            before_x: 3200.0,
+            after_x: 3200.0,
+            max_x: 3200.0,
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(500, 0, Some(&right_edge)),
+            "outcome: no movement - page already at the right edge (x 3200 of 3200)"
+        );
+        assert!(scroll_verdict(500, 0, Some(&at_rest)).contains("nothing scrolls horizontally"));
+        // The vertical wording is unchanged (qol_probe locks it).
+        let page_y = ScrollReport {
+            after_y: 300.0,
+            max_y: 2000.0,
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(0, 300, Some(&page_y)),
+            "outcome: scrolled page delta+300 (y 0 -> 300)"
+        );
+        let nested_y = ScrollReport {
+            scroller: "div#inner-scroll".into(),
+            scroller_before: Some(0.0),
+            scroller_after: Some(300.0),
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(0, 300, Some(&nested_y)),
+            "outcome: scrolled div#inner-scroll delta+300 (page unchanged at y 0)"
+        );
+        let bottom = ScrollReport {
+            before_y: 2000.0,
+            after_y: 2000.0,
+            max_y: 2000.0,
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(0, 300, Some(&bottom)),
+            "outcome: no movement - page already at the bottom (y 2000 of 2000)"
+        );
+        assert_eq!(
+            scroll_verdict(0, 300, Some(&at_rest)),
+            "outcome: no movement - page already at the top"
+        );
+        assert!(scroll_verdict(0, 300, None).contains("movement not measured"));
+    }
+
     // Guards the leaf-targeting JS fragment: the box-mode resolver must stay
     // wired into the injected script, or container-matched clicks silently
     // regress to the no-effect they were built to fix.

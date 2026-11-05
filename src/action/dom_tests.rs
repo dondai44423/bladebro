@@ -5,6 +5,7 @@
 //! injected-script tests under `tests/`.
 
 use super::find::find_sig_expr;
+use super::verdict::scroll_probe_expr;
 
 const MINI_DOM: &str = include_str!("../../tests/fixtures/mini_dom.js");
 
@@ -431,5 +432,23 @@ eq(r && r.box, [54, 54, 8, 8], 'box = iframe border box + border + padding + ele
             "__TINY__",
             sig_in("0|button|Tiny corner|1", "box", None, &[0]),
         )],
+    );
+}
+
+// ---- A-hscroll: the scroll probe measures horizontal movement too ----
+#[test]
+fn scroll_probe_measures_the_horizontal_axis() {
+    let body = r#"
+const d = use(page({vw: 800, vh: 600, w: 4000},
+  h('div', {id: 'car', rect: [0, 240, 800, 120], style: {overflowX: 'auto', overflowY: 'hidden'}, props: {scrollWidth: 6200, clientWidth: 800, scrollLeft: 300, scrollHeight: 120, clientHeight: 120}},
+    h('div', {id: 'card', rect: [0, 245, 300, 100]}, 'card'))));
+const p = __PROBE__;
+eq([p.x, p.maxX], [0, 3200], 'window horizontal position and range');
+eq([p.elx, p.elLeft], ['div#car', 300], 'the horizontal scroller under the wheel point');
+"#;
+    run(
+        "hscroll_probe",
+        body,
+        &[("__PROBE__", scroll_probe_expr(400.0, 300.0))],
     );
 }
