@@ -44,13 +44,15 @@ pub async fn run_audit(base: &str) -> Result<()> {
     }
     println!("[audit] running stealth vectors...");
     page.navigate(&vectors_url).await?;
-    let _ = page
+    let finished = page
         .act(Action::Wait {
             condition: "title".into(),
             text: "DONE".into(),
             timeout: std::time::Duration::from_secs(15),
         })
-        .await;
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string());
 
     // The rendered report is ONE flattened text blob (and a tight budget
     // truncated it mid-check — 2000 chars cut the tail). 16k fits the whole
@@ -81,32 +83,14 @@ pub async fn run_audit(base: &str) -> Result<()> {
     // non-zero, so CI and scripts can trust the exit code. The rendered
     // report arrives as one flattened text blob, so vector failures are
     // gated by the SCORE footer (pass == total) — the "FAIL " marker scan
-    // names them; it never gates on its own.
-    let mut failures: Vec<String> = Vec::new();
+    // names them; it never gates on its own. A suite that never finished,
+    // or a footer that is missing or unreadable, fails the gate too.
     for line in content.lines() {
         if line.contains("SCORE:") {
             println!("  {line}");
         }
     }
-    if let Some(at) = content.find("SCORE: ") {
-        let mut nums = content[at + 7..].split_whitespace();
-        if let Some((pass, total)) = nums.next().and_then(|s| s.split_once('/')) {
-            let (pass, total) = (
-                pass.parse::<u32>().unwrap_or(0),
-                total.parse::<u32>().unwrap_or(u32::MAX),
-            );
-            if pass < total {
-                failures.push(format!("vectors: {pass}/{total} passed"));
-            }
-        }
-    }
-    for seg in content.split("FAIL ").skip(1) {
-        let detail: String = seg.chars().take(140).collect();
-        let detail = detail.trim();
-        if !detail.is_empty() {
-            failures.push(format!("vector FAIL: {detail}"));
-        }
-    }
+    let mut failures = vector_failures(finished, &content);
 
     if let Some(ref result) = selfcheck {
         let v: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
@@ -223,6 +207,45 @@ return JSON.stringify(out);
     }
 }
 
+/// Gate the vector suite's own report, failing closed. `finished` is the
+/// wait for the suite's `DONE` title. A suite that threw or hung never
+/// reaches DONE and never writes its SCORE footer; this gate used to record
+/// no failure for either (and none for a footer it could not parse), so a
+/// crashed suite printed VERDICT: PASS and exited 0 — the CI stealth gate
+/// passed without a single vector having run.
+fn vector_failures(finished: std::result::Result<(), String>, content: &str) -> Vec<String> {
+    let mut failures: Vec<String> = Vec::new();
+    if let Err(e) = finished {
+        failures.push(format!("vectors: suite did not finish ({e})"));
+    }
+    match content.find("SCORE: ") {
+        None => failures.push(
+            "vectors: no SCORE footer in the report (the suite threw, hung or was truncated)"
+                .into(),
+        ),
+        Some(at) => {
+            let token = content[at + 7..].split_whitespace().next().unwrap_or("");
+            let score = token
+                .split_once('/')
+                .and_then(|(p, t)| Some((p.parse::<u32>().ok()?, t.parse::<u32>().ok()?)));
+            match score {
+                // Zero checks run is not a pass.
+                Some((pass, total)) if total > 0 && pass == total => {}
+                Some((pass, total)) => failures.push(format!("vectors: {pass}/{total} passed")),
+                None => failures.push(format!("vectors: unparseable SCORE footer ({token:?})")),
+            }
+        }
+    }
+    for seg in content.split("FAIL ").skip(1) {
+        let detail: String = seg.chars().take(140).collect();
+        let detail = detail.trim();
+        if !detail.is_empty() {
+            failures.push(format!("vector FAIL: {detail}"));
+        }
+    }
+    failures
+}
+
 /// Build a `file://` URL from a path. Windows paths need forward slashes and
 /// a drive-rooted slash (`file:///D:/a/b.html`); a raw `file://D:\a\b.html`
 /// is not a valid URL and Chrome refuses it (caught by the first CI run on
@@ -244,6 +267,62 @@ fn file_url_from_str(s: &str, windows: bool) -> String {
         format!("file://{t}")
     } else {
         format!("file://{s}")
+    }
+}
+
+#[cfg(test)]
+mod vector_gate_tests {
+    use super::vector_failures;
+
+    const TIMEOUT: &str = "wait timeout: condition 'title' not met within 15s";
+
+    #[test]
+    fn a_complete_passing_report_passes() {
+        let report = "Bladebro Stealth Vector Suite\nSCORE: 111/111 pass\nPASS webdriver: false";
+        assert_eq!(vector_failures(Ok(()), report), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_suite_that_never_finished_fails() {
+        // The suite threw or hung: the title never reached DONE and the
+        // page still shows its placeholder. This used to print VERDICT: PASS.
+        let f = vector_failures(
+            Err(TIMEOUT.into()),
+            "Bladebro Stealth Vector Suite\nRUNNING",
+        );
+        assert!(f.iter().any(|x| x.contains("did not finish")), "{f:?}");
+        assert!(f.iter().any(|x| x.contains("no SCORE")), "{f:?}");
+    }
+
+    #[test]
+    fn a_failed_wait_fails_even_when_a_score_is_present() {
+        let f = vector_failures(Err(TIMEOUT.into()), "SCORE: 111/111 pass");
+        assert!(f.iter().any(|x| x.contains("did not finish")), "{f:?}");
+    }
+
+    #[test]
+    fn a_missing_or_unparseable_score_fails() {
+        for report in [
+            "Bladebro Stealth Vector Suite\nRUNNING",
+            "SCORE: ",
+            "SCORE: pending",
+            "SCORE: 111 of 111 pass",
+            "SCORE: 111/x pass",
+            "SCORE: 0/0 pass",
+        ] {
+            let f = vector_failures(Ok(()), report);
+            assert!(!f.is_empty(), "{report:?} must fail the gate");
+        }
+    }
+
+    #[test]
+    fn failing_vectors_are_named() {
+        let f = vector_failures(Ok(()), "SCORE: 110/111 pass\nFAIL plugins: 0\nPASS x: y");
+        assert!(f.iter().any(|x| x == "vectors: 110/111 passed"), "{f:?}");
+        assert!(
+            f.iter().any(|x| x.starts_with("vector FAIL: plugins: 0")),
+            "{f:?}"
+        );
     }
 }
 
