@@ -399,76 +399,115 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             if content.len() > 8 * 1024 * 1024 {
                 return Err(BladeError::Other("saved session exceeds 8 MiB".into()));
             }
-            #[derive(Deserialize)]
-            struct SavedSession {
-                origin: String,
-                cookies: Vec<Value>,
-                #[serde(rename = "localStorage")]
-                storage: Vec<StorageEntry>,
-            }
             let session: SavedSession = serde_json::from_slice(&content)?;
-            // Validate every cookie and the origin before changing browser state.
-            let cookies = session
-                .cookies
-                .iter()
-                .map(crate::logins::cookie_params)
-                .collect::<Result<Vec<_>>>()?;
-            let origin_res = cdp
-                .send(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": "location.origin", "returnByValue": true,
-                    })),
-                )
-                .await?;
-            let origin = extract_eval_value(&origin_res)?;
-            if session.origin == "null" || origin.as_str() != Some(session.origin.as_str()) {
-                return Err(BladeError::Other(format!(
-                    "session '{name}' belongs to {}; navigate there before loading it",
-                    session.origin
-                )));
-            }
-            cdp.enable("Network").await?;
-            for cookie in &cookies {
-                let result = cdp.send("Network.setCookie", Some(cookie.clone())).await?;
-                if result.get("success").and_then(Value::as_bool) == Some(false) {
-                    return Err(BladeError::Other(format!(
-                        "Chrome rejected saved cookie {}; session only partially restored",
-                        cookie["name"]
-                    )));
-                }
-            }
-            let restored = cdp.cookie_store().await?;
-            let all = restored
-                .get("cookies")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    BladeError::Other("cookie readback missing after session restore".into())
-                })?;
-            for saved in &session.cookies {
-                if !all.iter().any(|c| {
-                    c["name"] == saved["name"]
-                        && c["value"] == saved["value"]
-                        && c["domain"] == saved["domain"]
-                        && c["path"] == saved["path"]
-                }) {
-                    return Err(BladeError::Other(format!(
-                        "saved cookie {} did not match readback; session only partially restored",
-                        saved["name"]
-                    )));
-                }
-            }
-            for entry in &session.storage {
-                set_storage(cdp, "localStorage", &entry.key, &entry.value).await?;
-            }
-            Ok(format!(
-                "✓ loaded session '{}': {} cookies, {} localStorage entries — reload to apply",
-                name,
-                cookies.len(),
-                session.storage.len()
-            ))
+            restore_session(cdp, name, &session).await
         }
     }
+}
+
+/// A named session file (`state save`), as read back by `state load`.
+#[derive(Deserialize)]
+struct SavedSession {
+    origin: String,
+    cookies: Vec<Value>,
+    #[serde(rename = "localStorage")]
+    storage: Vec<StorageEntry>,
+}
+
+/// Apply a saved session to the current page: cookies, readback, then
+/// localStorage. Split from the file read so the restore contract can be
+/// exercised against a CDP double.
+async fn restore_session(cdp: &CdpSession, name: &str, session: &SavedSession) -> Result<String> {
+    // A saved cookie that has since expired (`_gat` lives one minute) is
+    // accepted by setCookie but never stored, so requiring it at readback
+    // failed every later load after some cookies were already set. Skip it
+    // in both places, as the login sidecar restore does, and say so.
+    let now = unix_now()?;
+    let live: Vec<&Value> = session
+        .cookies
+        .iter()
+        .filter(|c| !cookie_expired(c, now))
+        .collect();
+    let expired = session.cookies.len() - live.len();
+    // Validate every cookie and the origin before changing browser state.
+    let cookies = live
+        .iter()
+        .map(|c| crate::logins::cookie_params(c))
+        .collect::<Result<Vec<_>>>()?;
+    let origin_res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "location.origin", "returnByValue": true,
+            })),
+        )
+        .await?;
+    let origin = extract_eval_value(&origin_res)?;
+    if session.origin == "null" || origin.as_str() != Some(session.origin.as_str()) {
+        return Err(BladeError::Other(format!(
+            "session '{name}' belongs to {}; navigate there before loading it",
+            session.origin
+        )));
+    }
+    cdp.enable("Network").await?;
+    for cookie in &cookies {
+        let result = cdp.send("Network.setCookie", Some(cookie.clone())).await?;
+        if result.get("success").and_then(Value::as_bool) == Some(false) {
+            return Err(BladeError::Other(format!(
+                "Chrome rejected saved cookie {}; session only partially restored",
+                cookie["name"]
+            )));
+        }
+    }
+    let restored = cdp.cookie_store().await?;
+    let all = restored
+        .get("cookies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| BladeError::Other("cookie readback missing after session restore".into()))?;
+    // Re-read the clock: a cookie may expire between set and readback.
+    let now = unix_now()?;
+    for saved in live.iter().filter(|c| !cookie_expired(c, now)) {
+        if !all.iter().any(|c| {
+            c["name"] == saved["name"]
+                && c["value"] == saved["value"]
+                && c["domain"] == saved["domain"]
+                && c["path"] == saved["path"]
+        }) {
+            return Err(BladeError::Other(format!(
+                "saved cookie {} did not match readback; session only partially restored",
+                saved["name"]
+            )));
+        }
+    }
+    for entry in &session.storage {
+        set_storage(cdp, "localStorage", &entry.key, &entry.value).await?;
+    }
+    let skipped = if expired > 0 {
+        format!(" ({expired} expired, skipped)")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "✓ loaded session '{}': {} cookies{skipped}, {} localStorage entries — reload to apply",
+        name,
+        cookies.len(),
+        session.storage.len()
+    ))
+}
+
+/// A persistent cookie whose expiry has passed. Session cookies report
+/// `expires: -1` and never count as expired.
+fn cookie_expired(cookie: &Value, now: f64) -> bool {
+    cookie["expires"]
+        .as_f64()
+        .is_some_and(|e| e >= 0.0 && e <= now)
+}
+
+fn unix_now() -> Result<f64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(BladeError::other)?
+        .as_secs_f64())
 }
 
 async fn get_storage(cdp: &CdpSession, storage: &str) -> Result<String> {
@@ -648,5 +687,48 @@ mod reliability_tests {
             .to_string()
             .contains("SecurityError"));
         assert!(extract_eval_value(&json!({"result":{}})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cookie_jar_tests {
+    use super::*;
+    use crate::cdp::fake_jar;
+
+    const ORIGIN: &str = "http://127.0.0.1:8080";
+
+    fn cookie(name: &str, domain: &str, expires: f64) -> Value {
+        json!({"name": name, "value": "v", "domain": domain, "path": "/",
+               "secure": false, "httpOnly": false, "sameSite": "Lax", "expires": expires})
+    }
+
+    fn session(cookies: Vec<Value>) -> SavedSession {
+        SavedSession {
+            origin: ORIGIN.into(),
+            cookies,
+            storage: vec![StorageEntry {
+                key: "k".into(),
+                value: "v".into(),
+            }],
+        }
+    }
+
+    /// A session saved with a short-lived cookie (`_gat`, max-age 60) must
+    /// still load once that cookie has expired: Chrome accepts the expired
+    /// cookie and stores nothing, so requiring it at readback failed every
+    /// later load halfway through.
+    #[tokio::test]
+    async fn expired_saved_cookie_does_not_abort_session_load() {
+        let (cdp, jar) = fake_jar::start(ORIGIN, vec![]).await;
+        let saved = session(vec![
+            cookie("_gat", "127.0.0.1", 1_000_000_000.0),
+            cookie("sid", "127.0.0.1", 4_000_000_000.0),
+        ]);
+        let out = restore_session(&cdp, "s1", &saved)
+            .await
+            .expect("an expired cookie must not fail the load");
+        assert!(out.contains("1 cookies"), "{out}");
+        assert!(out.contains("1 expired"), "{out}");
+        assert_eq!(jar.names(), ["sid"]);
     }
 }
