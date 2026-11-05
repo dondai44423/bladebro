@@ -119,6 +119,9 @@ impl InterceptState {
         // used to become "about" (every request third-party) and a `data:`
         // URL took the domain of whatever URL its payload happened to embed.
         // "" = unknown origin: tracker blocking stands down (see should_block).
+        // A blob: URL carries its creator's origin (blob:https://site/<uuid>)
+        // and the page is same-origin with it, so it keeps that site.
+        let url = url.strip_prefix("blob:").unwrap_or(url);
         let domain = if url.starts_with("http://") || url.starts_with("https://") {
             registrable_domain(&url_host(url))
         } else {
@@ -140,6 +143,11 @@ impl InterceptState {
     /// failed the navigation with BlockedByClient, and the new site's own
     /// scripts were blocked as third-party trackers. Iframe documents keep
     /// the normal rules (ad frames are a large part of the saving).
+    ///
+    /// The baseline moved here is provisional: if that request never
+    /// commits (a download, a 204, a cancelled navigation) the old page
+    /// stays loaded but is judged against the new site until the next
+    /// recapture (Page::recapture) resets the baseline from the live URL.
     fn verdict(&self, resource_type: &str, url: &str, frame_id: &str, main_frame: &str) -> bool {
         if resource_type == "Document" && !main_frame.is_empty() && frame_id == main_frame {
             self.set_page_url(url);
@@ -757,6 +765,10 @@ mod tests {
             s.set_page_url(url);
             assert_eq!(s.page_domain(), "", "{url}");
         }
+        // A blob: page belongs to the http(s) origin that created it, as it
+        // did before the http(s) gate.
+        s.set_page_url("blob:https://www.example.co.uk/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0");
+        assert_eq!(s.page_domain(), "example.co.uk");
     }
 
     #[test]
