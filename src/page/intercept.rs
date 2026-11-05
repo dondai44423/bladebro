@@ -220,9 +220,12 @@ pub fn registrable_domain(host: &str) -> String {
     last2
 }
 
-/// Third-party tracker/analytics/ad domains. Matched against the
-/// registrable domain of a THIRD-PARTY request only. Deliberately
-/// excludes bot-detection vendors (see NEVER_BLOCK).
+/// Third-party tracker/analytics/ad domains, checked for THIRD-PARTY
+/// requests only. Matched as a host suffix on a label boundary (see
+/// `tracker_host`): a registrable-domain entry covers its subdomains, a
+/// host entry (`snap.licdn.com`) covers only that host and below — never
+/// the rest of its registrable domain. Deliberately excludes
+/// bot-detection vendors (see NEVER_BLOCK).
 const TRACKER_DOMAINS: &[&str] = &[
     // Google ads/analytics (not the bot-detection side)
     "doubleclick.net",
@@ -348,6 +351,16 @@ const NEVER_BLOCK_DOMAINS: &[&str] = &[
     "geetest.com",
 ];
 
+/// `host` is a TRACKER_DOMAINS entry or a subdomain of one. Comparing
+/// the request's registrable domain instead could never match the
+/// host-level entries (`ads.twitter.com` reduces to `twitter.com`).
+fn tracker_host(host: &str) -> bool {
+    TRACKER_DOMAINS.iter().any(|t| {
+        host.strip_suffix(t)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
+    })
+}
+
 /// Decide whether a request should be blocked.
 ///
 /// `resource_type`: CDP Network.ResourceType string ("Image", "Script", ...).
@@ -387,7 +400,7 @@ pub fn should_block(resource_type: &str, url: &str, rules: u32, page_domain: &st
     // only third-party, never same-site.
     if rules & BLOCK_TRACKERS != 0 {
         let third_party = !page_domain.is_empty() && req_domain != page_domain;
-        if third_party && TRACKER_DOMAINS.contains(&req_domain.as_str()) {
+        if third_party && tracker_host(&host) {
             return true;
         }
     }
@@ -614,6 +627,47 @@ mod tests {
         assert!(should_block(
             "Image",
             "https://pixel.doubleclick.net/x.gif",
+            r,
+            "example.com"
+        ));
+    }
+
+    #[test]
+    fn host_level_tracker_entries_match() {
+        let r = BLOCK_TRACKERS;
+        // Entries that name a single host (not a registrable domain) must
+        // match that host and its subdomains.
+        for url in [
+            "https://snap.licdn.com/li.lms-analytics/insight.min.js",
+            "https://ads.twitter.com/uwt.js",
+            "https://analytics.twitter.com/i/adsct",
+            "https://px.ads.twitter.com/x.gif",
+            "https://connect.facebook.net/en_US/fbevents.js",
+            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+        ] {
+            assert!(should_block("Script", url, r, "example.com"), "{url}");
+        }
+        // ...without widening to the rest of their registrable domain, and
+        // only on a label boundary.
+        for url in [
+            "https://twitter.com/home",
+            "https://platform.twitter.com/widgets.js",
+            "https://static.licdn.com/aero/app.js",
+            "https://notads.twitter.com/x.js",
+        ] {
+            assert!(!should_block("Script", url, r, "example.com"), "{url}");
+        }
+        // Still third-party only: the site's own tracker host is first-party.
+        assert!(!should_block(
+            "Script",
+            "https://ads.twitter.com/uwt.js",
+            r,
+            "twitter.com"
+        ));
+        // NEVER_BLOCK keeps winning over a host entry under google.com.
+        assert!(!should_block(
+            "Script",
+            "https://analytics.google.com/g/collect",
             r,
             "example.com"
         ));
