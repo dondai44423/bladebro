@@ -120,5 +120,63 @@ async function page() {
   assert.equal(g.SharedWorker, SharedWorker, 'SharedWorker must stay the native constructor');
   console.log('assembled page script checks passed');
 }
-const scenarios = { permissions, media, page };
+function installRtc(sdp) {
+  class EventTargetImpl extends EventTarget {}
+  const native = { aic: 0 };
+  const sentinel = new TypeError('native addIceCandidate sentinel');
+  let handler = null;
+  class RTCPeerConnection extends EventTargetImpl {
+    createOffer() { return Promise.resolve({ type: 'offer', sdp }); }
+    createAnswer() { return Promise.resolve({ type: 'answer', sdp }); }
+    addIceCandidate() { native.aic++; return Promise.reject(sentinel); }
+    get onicecandidate() { return handler; }
+    set onicecandidate(v) { handler = v; }
+  }
+  const aic = RTCPeerConnection.prototype.addIceCandidate;
+  install('rtc_patch.js', { EventTarget: EventTargetImpl, RTCPeerConnection });
+  return { EventTargetImpl, RTCPeerConnection, native, sentinel, aic };
+}
+function iceEvent(candidate) { const e = new Event('icecandidate'); e.candidate = candidate; return e; }
+async function rtcListeners() {
+  const { EventTargetImpl, RTCPeerConnection } = installRtc('');
+  const pc = new RTCPeerConnection();
+  let n = 0;
+  const fn = () => { n++; };
+  pc.addEventListener('icecandidate', fn);
+  pc.addEventListener('icecandidate', fn);
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 1, 'the same listener added twice is registered once (native dedupe)');
+  pc.removeEventListener('icecandidate', fn);
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 1, 'removeEventListener(fn) removes what addEventListener(fn) registered');
+  pc.addEventListener('icecandidate', fn, true);
+  pc.addEventListener('icecandidate', fn, false);
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 3, 'capture is part of the listener key');
+  pc.removeEventListener('icecandidate', fn, { capture: true });
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 4);
+  pc.removeEventListener('icecandidate', fn);
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 4);
+  const seen = [];
+  pc.addEventListener('icecandidate', e => { if (e.candidate) seen.push(e.candidate.candidate.split(' ')[4]); });
+  for (const c of ['1 1 udp 1 203.0.113.5 50000 typ srflx raddr 0.0.0.0 rport 0', '2 1 udp 1 192.168.1.5 50000 typ host',
+    '3 1 udp 1 abc.local 50000 typ host', '4 1 udp 1 198.51.100.1 3478 typ relay raddr 0.0.0.0 rport 0']) {
+    pc.dispatchEvent(iceEvent({ candidate: 'candidate:' + c }));
+  }
+  assert.deepEqual(seen, ['abc.local', '198.51.100.1'], 'srflx and raw-IP host candidates stay hidden');
+  const other = new EventTargetImpl();
+  let m = 0;
+  const g = () => { m++; };
+  other.addEventListener('icecandidate', g);
+  pc.addEventListener('icecandidate', g);
+  other.removeEventListener('icecandidate', g);
+  other.dispatchEvent(new Event('icecandidate'));
+  assert.equal(m, 0, 'a non-RTC target removes the listener it was given');
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(m, 1);
+  console.log('icecandidate listener dedupe, removal, capture keys and filtering checks passed');
+}
+const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners };
 (scenarios[process.argv[2]] || permissions)().catch(error => { console.error(error); process.exitCode = 1; });

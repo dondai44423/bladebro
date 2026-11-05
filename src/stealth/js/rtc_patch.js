@@ -32,17 +32,24 @@ if(typeof RTCPeerConnection!=='undefined'){
   // the native locations (EventTarget.prototype already owns add/removeEvent
   // Listener; proxy over the native keeps the descriptor shape and the
   // native-shaped toString) and scoped to RTCPeerConnection receivers.
+  // One wrapper per page listener, reused on every add and looked up on
+  // remove: the engine keys listeners on (type, callback, capture), so it must
+  // see the SAME wrapper for the same fn — a fresh wrapper per add defeated the
+  // native de-duplication (handler ran twice) and removeEventListener(fn)
+  // removed nothing.
+  var _icw=new WeakMap();
+  function _icRecv(th,a){return a[0]==='icecandidate'&&typeof a[1]==='function'&&typeof RTCPeerConnection!=='undefined'&&th instanceof RTCPeerConnection;}
   var _ael=EventTarget.prototype.addEventListener,_rel=EventTarget.prototype.removeEventListener;
   _defFn(EventTarget.prototype,'addEventListener',_ael,function(th,a,og){
-    if(a[0]==='icecandidate'&&typeof a[1]==='function'&&!a[1].__ocWrap&&typeof RTCPeerConnection!=='undefined'&&th instanceof RTCPeerConnection){
-      var fn=a[1];
-      var wrap=function(ev){if(ev&&ev.candidate&&_leakyCand(ev.candidate.candidate))return;return fn.apply(this,arguments);};
-      wrap.__ocWrap=fn;a=Array.prototype.slice.call(a);a[1]=wrap;
+    if(_icRecv(th,a)){
+      var fn=a[1],wrap=_icw.get(fn);
+      if(!wrap){wrap=function(ev){if(ev&&ev.candidate&&_leakyCand(ev.candidate.candidate))return;return fn.apply(this,arguments);};_icw.set(fn,wrap);}
+      a=Array.prototype.slice.call(a);a[1]=wrap;
     }
     return og.apply(th,a);
   });
   _defFn(EventTarget.prototype,'removeEventListener',_rel,function(th,a,og){
-    if(a[0]==='icecandidate'&&typeof a[1]==='function'&&a[1].__ocWrap){a=Array.prototype.slice.call(a);a[1]=a[1].__ocWrap;}
+    if(_icRecv(th,a)){var w=_icw.get(a[1]);if(w){a=Array.prototype.slice.call(a);a[1]=w;}}
     return og.apply(th,a);
   });
   // onicecandidate handler property (own accessor on the prototype, the

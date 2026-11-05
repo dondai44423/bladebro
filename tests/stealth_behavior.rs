@@ -25,3 +25,8 @@ fn permissions_preserve_native_arguments_promises_and_receiver_errors() {
 fn media_preserves_native_rejection_timing_and_real_devices() {
     regression("media");
 }
+
+#[test]
+fn rtc_icecandidate_listeners_keep_native_dedupe_and_removal() {
+    regression("rtc-listeners");
+}
