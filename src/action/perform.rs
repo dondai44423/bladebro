@@ -850,22 +850,21 @@ pub async fn perform_with_network(
             // Bezier mouse move to element center — no click.
             // The human-like path triggers CSS :hover and JS
             // mouseover/mouseenter. On dispatch failure (page
-            // navigating mid-hover), re-resolve and retry once.
-            if dispatch_mouse_move(cdp, (cx, cy), last_mouse)
-                .await
-                .is_err()
-            {
+            // navigating mid-hover), re-resolve and retry once. A retry
+            // that cannot re-locate the element is an error: no pointer
+            // reached it, so "hovered" would be a false claim.
+            if let Err(first) = dispatch_mouse_move(cdp, (cx, cy), last_mouse).await {
                 let retry = find_by_sig(cdp, sig, frame, "hover", None).await?;
-                if retry.ok {
-                    if let Some(b2) = retry.box_ {
-                        dispatch_mouse_move(
-                            cdp,
-                            (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0),
-                            last_mouse,
-                        )
-                        .await?;
+                let b2 = match (retry.ok, retry.box_) {
+                    (true, Some(b2)) => b2,
+                    _ => {
+                        return Err(BladeError::ElementNotFound(format!(
+                            "{ref_id} ({sig}) — hover failed: the mouse move did not dispatch ({first}) and the element could not be re-located"
+                        )))
                     }
-                }
+                };
+                dispatch_mouse_move(cdp, (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0), last_mouse)
+                    .await?;
             }
             // Hover-driven dropdowns appear within ~150ms — the settle
             // quiet threshold (150ms) catches them. No extra sleep needed.

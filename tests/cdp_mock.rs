@@ -490,6 +490,60 @@ async fn type_never_presses_keys_when_the_target_cannot_take_them() {
 }
 
 #[tokio::test]
+async fn hover_that_cannot_re_resolve_after_a_failed_move_is_an_error() {
+    // A-hover: the first mouse move failed and the re-resolve found nothing;
+    // no pointer reached the element, so "hovered eN" would be a false claim.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let finds = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = finds.clone();
+    let respond: Responder = Box::new(move |method, expression| {
+        if method == "Input.dispatchMouseEvent" {
+            json!({"error":{"code":-32000,"message":"page navigating"}})
+        } else if method == "Runtime.evaluate" && expression.contains(",\"hover\",null,") {
+            let value = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                json!({"ok":true,"box":[10,10,80,30],"isTopmost":true})
+            } else {
+                json!({"ok":false,"reason":"not found"})
+            };
+            json!({"result":{"result":{"type":"object","value":value}}})
+        } else if method == "Runtime.evaluate" {
+            page_basics(expression)
+        } else {
+            json!({"result":{}})
+        }
+    });
+    let (cdp, _log, server) = scripted_page(respond).await;
+    let (mut lpm, ref_id) = one_element_model("button", "button", "Hover me");
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        bladebro::action::perform(
+            &cdp,
+            &mut lpm,
+            &bladebro::action::Action::Hover {
+                ref_id: ref_id.clone(),
+            },
+            &std::sync::Arc::new(std::sync::Mutex::new(None)),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        finds.load(Ordering::SeqCst),
+        2,
+        "one re-resolve after the failed move"
+    );
+    let err = match result {
+        Ok((_, verdict)) => panic!("claimed a hover that never reached the element: {verdict}"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, BladeError::ElementNotFound(_)) && err.to_string().contains(&ref_id),
+        "{err}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn clear_of_a_vanished_target_touches_no_other_field() {
     // L2: the readback may re-adopt a focused unlabelled editor (its sig
     // drifts with its own text). A clear whose target is gone must stop at
