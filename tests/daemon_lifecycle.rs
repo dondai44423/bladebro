@@ -13,10 +13,14 @@
 //! own, and an oversized request fails with a message instead of a bare
 //! "Broken pipe" error.
 //!
+//! Plus the busy daemon: a SIGTERM that lands while a request is in flight
+//! must not be lost.
+//!
 //! Subprocess-based with an isolated BLADE_HOME — no Chrome involved (the
 //! daemon binds lazily; Chrome starts on the first tool call only). Tests
 //! that send tool calls pin `BLADE_LANE=agent` and a missing `CHROME_PATH`,
-//! so a launch fails fast and the real-browser lane is never entered.
+//! so a launch fails fast and the real-browser lane is never entered; the
+//! one test that needs a launch in flight uses a stand-in browser script.
 
 #![cfg(unix)]
 
@@ -574,4 +578,72 @@ fn oversized_request_fails_with_an_actionable_message() {
     );
     assert!(alive, "the daemon must survive an oversized request");
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A stand-in browser: touches `started`, then exits during "startup"
+/// without ever opening a debug endpoint. The daemon's launch polls it,
+/// retries twice and reports a launch failure — seconds of a request in
+/// flight with no real Chrome.
+fn fake_chrome(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let started = dir.join("started");
+    let script = dir.join("fake-chrome");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\n: > '{}'\nsleep 1\nexit 1\n", started.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (script, started)
+}
+
+#[test]
+fn sigterm_during_a_request_is_not_lost() {
+    use std::io::Write;
+    let home = tmp_home("busy-signal");
+    let tools = tmp_home("busy-signal-bin");
+    let (chrome, started) = fake_chrome(&tools);
+    let mut cmd = Command::new(bin());
+    cmd.env("CHROME_PATH", &chrome)
+        .env("BLADE_LANE", "agent")
+        .env("BLADE_INCOGNITO", "0")
+        .env("BLADE_NO_WARMING", "1")
+        .env("BLADE_NO_UPDATE_CHECK", "1");
+    let mut daemon = start_daemon_with(&home, cmd);
+    let sock = home.join("cli.sock");
+    let client = std::thread::spawn(move || {
+        let mut stream = std::os::unix::net::UnixStream::connect(sock).unwrap();
+        stream
+            .write_all(b"{\"tool\":\"see\",\"args\":{\"mode\":\"content\"}}\n")
+            .unwrap();
+        let mut reply = String::new();
+        let _ = stream.read_to_string(&mut reply);
+        reply
+    });
+    // The request is now in flight: the daemon is launching its browser.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        if Instant::now() >= deadline {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+            panic!("the request never reached the browser launch");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    term(&daemon);
+    let status = wait_exit(&mut daemon, 30);
+    if status.is_none() {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+    }
+    let reply = client.join().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&tools);
+    let status =
+        status.expect("SIGTERM during a request was lost: daemon still running 30 s later");
+    assert!(status.success(), "daemon exit: {status:?}");
+    assert!(
+        reply.contains("\"ok\":false"),
+        "the in-flight request still gets its answer: {reply:?}"
+    );
 }

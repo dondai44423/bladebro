@@ -18,29 +18,6 @@ use crate::page::Page;
 #[cfg(unix)]
 use serde_json::{json, Value};
 
-/// Wait for a termination signal (SIGTERM/SIGINT/SIGHUP on Unix, Ctrl+C on Windows).
-/// Same as the MCP server's signal handler.
-#[cfg(unix)]
-async fn wait_for_shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        // Only catch SIGTERM and SIGINT. NOT SIGHUP — SIGHUP is sent
-        // when the parent process exits, which would kill the daemon
-        // immediately after the first CLI command. Daemons ignore SIGHUP.
-        let mut term = signal(SignalKind::terminate()).ok();
-        let mut int = signal(SignalKind::interrupt()).ok();
-        tokio::select! {
-            _ = async { if let Some(s) = &mut term { s.recv().await } else { std::future::pending().await } } => {}
-            _ = async { if let Some(s) = &mut int { s.recv().await } else { std::future::pending().await } } => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
 /// Best-effort daemon restart so a lane switch takes effect immediately:
 /// a running daemon holds the OLD lane's browser. Unix only (daemon mode is).
 pub(super) async fn restart_daemon_for_lane() {
@@ -62,6 +39,10 @@ pub async fn run_daemon() -> Result<()> {
     // Ignore SIGHUP — the daemon must survive the parent CLI exiting.
     #[cfg(unix)]
     ignore_sighup();
+    // SIGTERM/SIGINT listeners for the daemon's whole lifetime (not SIGHUP,
+    // see above). Registered before anything can keep the daemon busy, so
+    // a signal that lands mid-request or mid-launch is buffered, not lost.
+    let mut signals = crate::platform::ShutdownSignals::new(false);
 
     let path = socket_path();
     // Hold an OS lock for the daemon lifetime. A connect/remove/bind sequence
@@ -155,8 +136,11 @@ pub async fn run_daemon() -> Result<()> {
 
     loop {
         tokio::select! {
-            // Graceful shutdown on SIGTERM/SIGINT/SIGHUP.
-            _ = wait_for_shutdown_signal() => {
+            // Graceful shutdown on SIGTERM/SIGINT — checked first, so a
+            // signal buffered during the last request ends the loop before
+            // another connection is served.
+            biased;
+            _ = signals.recv() => {
                 eprintln!("[bladebro] termination signal \u{2014} shutting down Chrome gracefully");
                 break;
             }
@@ -185,7 +169,8 @@ pub async fn run_daemon() -> Result<()> {
                 // dies mid-request) must not stall the whole daemon — accepts,
                 // signals and the idle timer all sit behind this await.
                 let read = tokio::select! {
-                    _ = wait_for_shutdown_signal() => break,
+                    biased;
+                    _ = signals.recv() => break,
                     read = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     crate::framing::read_until_limited(&mut reader, b'\n', &mut input, MAX_REQUEST_BYTES),
@@ -313,7 +298,14 @@ pub async fn run_daemon() -> Result<()> {
                 // Dispatch.
                 let result = {
                     let p = page.as_mut().unwrap();
-                    dispatch(tool, &args, p).await
+                    dispatch_or_shutdown(&mut signals, tool, &args, p).await
+                };
+                let Some(result) = result else {
+                    eprintln!("[bladebro] termination signal during a command \u{2014} cancelled it; shutting down Chrome gracefully");
+                    let resp_str = serde_json::to_string(&cancelled_by_signal()).unwrap_or_default();
+                    let _ = reader.get_mut().write_all(resp_str.as_bytes()).await;
+                    let _ = reader.get_mut().write_all(b"\n").await;
+                    break;
                 };
 
                 // GL cadence revalidation (see `Page::gl_health_refresh`):
@@ -351,6 +343,7 @@ pub async fn run_daemon() -> Result<()> {
                     }
                 };
 
+                let mut cancelled = false;
                 let resp = match result {
                     Ok(r) => json!({
                         "ok": true,
@@ -375,14 +368,18 @@ pub async fn run_daemon() -> Result<()> {
                                 let p = page.as_mut().unwrap();
                                 if !crate::mcp::server::retry_safe(tool, &args) {
                                     json!({"ok":false,"error":"Browser connection lost mid-action; outcome UNKNOWN. Chrome restarted. Inspect the destination before repeating the action."})
-                                } else { match dispatch(tool, &args, p).await {
-                                    Ok(r) => json!({
+                                } else { match dispatch_or_shutdown(&mut signals, tool, &args, p).await {
+                                    Some(Ok(r)) => json!({
                                         "ok": true,
                                         "text": with_notes(r.text),
                                         "image": r.image,
                                         "is_error": r.is_error,
                                     }),
-                                    Err(e) => json!({ "ok": false, "error": e.to_string() }),
+                                    Some(Err(e)) => json!({ "ok": false, "error": e.to_string() }),
+                                    None => {
+                                        cancelled = true;
+                                        cancelled_by_signal()
+                                    }
                                 } }
                             }
                             Err(e) => json!({ "ok": false, "error": format!("reconnect failed: {e}") }),
@@ -394,6 +391,10 @@ pub async fn run_daemon() -> Result<()> {
                 let resp_str = serde_json::to_string(&resp).unwrap_or_default();
                 let _ = reader.get_mut().write_all(resp_str.as_bytes()).await;
                 let _ = reader.get_mut().write_all(b"\n").await;
+                if cancelled {
+                    eprintln!("[bladebro] termination signal during a command \u{2014} cancelled it; shutting down Chrome gracefully");
+                    break;
+                }
 
                 last_activity = std::time::Instant::now();
             }
@@ -470,6 +471,35 @@ pub async fn run_daemon() -> Result<()> {
     }
     eprintln!("[bladebro] daemon stopped");
     Ok(())
+}
+
+/// Run one command unless a termination signal arrives first (`None`).
+/// Cancel rather than finish: `bladebro stop` on a busy daemon and a
+/// service manager both escalate to SIGKILL after a short grace, and a long
+/// command (a navigate to a slow server) would outlive it, forfeiting the
+/// graceful Chrome flush the signal is meant to trigger.
+#[cfg(unix)]
+async fn dispatch_or_shutdown(
+    signals: &mut crate::platform::ShutdownSignals,
+    tool: &str,
+    args: &Value,
+    page: &mut Page,
+) -> Option<Result<super::ToolResult>> {
+    tokio::select! {
+        biased;
+        _ = signals.recv() => None,
+        result = dispatch(tool, args, page) => Some(result),
+    }
+}
+
+/// The reply to a command cut short by a termination signal. Its effect is
+/// unknowable: a click/submit may already have landed.
+#[cfg(unix)]
+fn cancelled_by_signal() -> Value {
+    json!({
+        "ok": false,
+        "error": "daemon shutting down (termination signal): the command was cancelled mid-flight and its outcome is UNKNOWN. Inspect the destination before repeating it (the next command starts a fresh daemon).",
+    })
 }
 
 #[cfg(not(unix))]
