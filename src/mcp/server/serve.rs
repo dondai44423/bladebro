@@ -331,15 +331,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                             call_tool(&mut signals, handle_tools_call(id, &params, p)).await
                         };
                         let Some(res) = res else {
-                            eprintln!("[bladebro] termination signal during a tool call — cancelled it; shutting down Chrome gracefully");
-                            if !is_notification {
-                                let mut result = json!({
-                                    "content": [{ "type": "text", "text": CANCELLED_BY_SIGNAL }],
-                                    "isError": true,
-                                });
-                                shape_result(&mut result, version);
-                                send(&mut out, &json!({"jsonrpc":"2.0","id":id_retry,"result":result}));
-                            }
+                            cancelled_by_signal(&mut out, id_retry, is_notification, version);
                             break;
                         };
                         if std::env::var("NAV_TIMING").is_ok() {
@@ -387,9 +379,17 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                             );
                                             let id_retry2 = id_retry.clone();
                                             let p = page.as_mut().unwrap();
-                                            match handle_tools_call(id_retry2, &params, p).await {
-                                                Ok(v) => v,
-                                                Err(e) => {
+                                            // Same guard as the first attempt: a
+                                            // panic here used to unwind out of
+                                            // serve() and kill the whole session.
+                                            match call_tool(&mut signals, handle_tools_call(id_retry2, &params, p)).await {
+                                                None => {
+                                                    cancelled_by_signal(&mut out, id_retry, is_notification, version);
+                                                    break;
+                                                }
+                                                Some(Err(_)) => panicked(id_retry),
+                                                Some(Ok(Ok(v))) => v,
+                                                Some(Ok(Err(e))) => {
                                                     eprintln!("[bladebro] retry after reconnect failed: {e}");
                                                     json!({
                                                         "jsonrpc": "2.0",
@@ -448,9 +448,14 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                             &params["arguments"],
                                         ) => {
                                             let p = page.as_mut().unwrap();
-                                            match handle_tools_call(id_retry.clone(), &params, p).await {
-                                                Ok(v) => v,
-                                                Err(e2) => json!({
+                                            match call_tool(&mut signals, handle_tools_call(id_retry.clone(), &params, p)).await {
+                                                None => {
+                                                    cancelled_by_signal(&mut out, id_retry, is_notification, version);
+                                                    break;
+                                                }
+                                                Some(Err(_)) => panicked(id_retry),
+                                                Some(Ok(Ok(v))) => v,
+                                                Some(Ok(Err(e2))) => json!({
                                                     "jsonrpc": "2.0",
                                                     "id": id_retry,
                                                     "error": { "code": -32603, "message": e2.to_string() }
@@ -478,14 +483,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                     })
                                 }
                             }
-                            Err(_) => json!({
-                                "jsonrpc": "2.0",
-                                "id": id_retry,
-                                "error": {
-                                    "code": -32603,
-                                    "message": "internal panic in tool handler (see stderr) — session survived, retry or re-see",
-                                }
-                            }),
+                            Err(_) => panicked(id_retry),
                         };
                         // Revalidate GL liveness on a bounded cadence: a
                         // mid-session GPU crash degrades the browser to null
@@ -689,9 +687,42 @@ fn send(out: &mut impl Write, msg: &Value) -> bool {
     }
 }
 
-/// The verdict for a call cut short by a termination signal. Its effect is
-/// unknowable: a click/submit may already have landed.
-const CANCELLED_BY_SIGNAL: &str = "\u{2717} bladebro is shutting down (termination signal): this call was cancelled mid-flight and its outcome is UNKNOWN. After the restart, inspect the destination before repeating it.";
+/// Answer a call cut short by a termination signal (the caller then breaks
+/// to the teardown). Its effect is unknowable: a click/submit may already
+/// have landed.
+fn cancelled_by_signal(
+    out: &mut impl Write,
+    id: Option<Value>,
+    is_notification: bool,
+    version: Option<&str>,
+) {
+    // Not eprintln!: a SIGHUP can mean the host (and its stderr) is gone.
+    let _ = writeln!(
+        std::io::stderr(),
+        "[bladebro] termination signal during a tool call — cancelled it; shutting down Chrome gracefully"
+    );
+    if is_notification {
+        return;
+    }
+    let mut result = json!({
+        "content": [{ "type": "text", "text": "\u{2717} bladebro is shutting down (termination signal): this call was cancelled mid-flight and its outcome is UNKNOWN. After the restart, inspect the destination before repeating it." }],
+        "isError": true,
+    });
+    shape_result(&mut result, version);
+    send(out, &json!({"jsonrpc":"2.0","id":id,"result":result}));
+}
+
+/// The answer to a tool handler that panicked (caught by `call_tool`).
+fn panicked(id: Option<Value>) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32603,
+            "message": "internal panic in tool handler (see stderr) — session survived, retry or re-see",
+        }
+    })
+}
 
 /// Run one tool call unless a termination signal arrives first (`None`).
 ///
@@ -713,5 +744,28 @@ where
         biased;
         _ = signals.recv() => None,
         res = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(call)) => Some(res),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every dispatch site (first attempt, crash retry, dead-tab retry) runs
+    // its handler through `call_tool`; this pins the guard they rely on.
+    #[tokio::test]
+    async fn call_tool_contains_a_panicking_handler() {
+        let mut signals = ShutdownSignals::new(false);
+        let handler = async {
+            if std::hint::black_box(true) {
+                panic!("tool handler bug");
+            }
+            Ok(Value::Null)
+        };
+        let res = call_tool(&mut signals, handler).await;
+        assert!(
+            matches!(res, Some(Err(_))),
+            "a handler panic must be caught, not unwind out of serve()"
+        );
     }
 }
