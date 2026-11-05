@@ -327,6 +327,75 @@ async fn adaptive_gl_spoof(env: &EnvProbe, cdp: &CdpSession) -> bool {
 /// Legacy alias kept for external references (doc/examples).
 pub const STEALTH_SCRIPT_TEMPLATE: &str = STEALTH_CORE;
 
+/// Which conditional segments `apply` decided to install. Assembly is a pure
+/// function of this plan, so the test suite builds and runs the exact page
+/// script without a browser.
+struct ScriptPlan<'a> {
+    seed: u32,
+    rtc: bool,
+    gl: Option<&'a gpu::GpuProfile>,
+    media: bool,
+    perms: bool,
+    webdriver: bool,
+    locale: Option<&'a str>,
+    noise: bool,
+}
+
+/// Assemble the page script: core, the conditional segments in their fixed
+/// order, tail, then the placeholder substitutions.
+fn assemble_page_script(plan: &ScriptPlan<'_>) -> String {
+    let mut script = String::with_capacity(
+        STEALTH_CORE.len()
+            + 2048
+            + MEDIA_PATCH.len()
+            + PERMISSIONS_PATCH.len()
+            + LOCALE_OVERRIDE.len()
+            + NOISE.len()
+            + RTC_PATCH.len()
+            + STEALTH_TAIL.len(),
+    );
+    script.push_str(STEALTH_CORE);
+    if plan.rtc {
+        script.push_str(RTC_PATCH);
+    }
+    if let Some(profile) = plan.gl {
+        script.push_str(&build_gl_spoof(profile));
+        // SharedWorker constructor wrapper (issue #8): CDP doesn't emit
+        // attachedToTarget for shared_worker targets, so we intercept the
+        // constructor on the main page and inject GL spoof via blob URL.
+        if let Some(sw) = sharedworker_wrapper(plan.locale) {
+            script.push_str(&sw);
+        }
+    }
+    if plan.media {
+        script.push_str(MEDIA_PATCH);
+    }
+    if plan.perms {
+        script.push_str(PERMISSIONS_PATCH);
+    }
+    if plan.webdriver {
+        script.push_str(WEBDRIVER_PATCH);
+    }
+    if plan.locale.is_some() {
+        script.push_str(LOCALE_OVERRIDE);
+    }
+    if plan.noise {
+        script.push_str(NOISE);
+    }
+    script.push_str(STEALTH_TAIL);
+    let script = script.replace("__SEED__", &plan.seed.to_string());
+    // Shared proxy-mask helpers (also used by the worker scripts).
+    let script = script.replace("__PROXY_HELPERS__", PROXY_HELPERS);
+    if let Some(l) = plan.locale {
+        let base = l.split('-').next().unwrap_or(l);
+        script
+            .replace("__LOCALE__", l)
+            .replace("__LOCALE_BASE__", base)
+    } else {
+        script
+    }
+}
+
 /// Apply the stealth script to a CDP client via `Page.addScriptToEvaluateOnNewDocument`.
 /// Adaptive: the launch healthcheck's GL verdict (browser.rs) drives the
 /// WebGL spoof — a real GPU is reported honestly (no mask), software GL
@@ -401,41 +470,17 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         eprintln!("[stealth] registering locale override: {l}");
     }
 
-    let mut script = String::with_capacity(
-        STEALTH_CORE.len()
-            + 2048
-            + MEDIA_PATCH.len()
-            + PERMISSIONS_PATCH.len()
-            + LOCALE_OVERRIDE.len()
-            + NOISE.len()
-            + RTC_PATCH.len()
-            + STEALTH_TAIL.len(),
-    );
-    script.push_str(STEALTH_CORE);
     // WebRTC candidate filtering only under a proxy (see RTC_PATCH docs).
-    if std::env::var("BLADE_PROXY")
+    let rtc = std::env::var("BLADE_PROXY")
         .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        script.push_str(RTC_PATCH);
-    }
+        .unwrap_or(false);
     GL_SPOOFED.store(spoof_gl, Ordering::Relaxed);
-    if spoof_gl {
-        let profile = get_gpu_profile();
+    let gl_profile = spoof_gl.then(get_gpu_profile);
+    if let Some(ref profile) = gl_profile {
         eprintln!(
             "[stealth] registering WebGL spoof: {} (page + worker)",
             profile.gl_renderer
         );
-        script.push_str(&build_gl_spoof(&profile));
-        // SharedWorker constructor wrapper (issue #8): CDP doesn't emit
-        // attachedToTarget for shared_worker targets, so we intercept the
-        // constructor on the main page and inject GL spoof via blob URL.
-        if let Some(sw) = sharedworker_wrapper(locale.as_deref()) {
-            script.push_str(&sw);
-        }
-    }
-    if patch_media {
-        script.push_str(MEDIA_PATCH);
     }
     // Notifications relay: only the headless lane needs it. Headless-New
     // reports 'denied' for notifications on real origins — a server tell —
@@ -448,32 +493,18 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         Ok("real") => false,
         _ => crate::browser::launched_headless(),
     };
-    if patch_perms {
-        script.push_str(PERMISSIONS_PATCH);
-    }
-    // Pipe transport: the automation flag makes navigator.webdriver true
-    // (see WEBDRIVER_PATCH).
-    if crate::browser::launched_pipe() {
-        script.push_str(WEBDRIVER_PATCH);
-    }
-    if locale.is_some() {
-        script.push_str(LOCALE_OVERRIDE);
-    }
-    if noise {
-        script.push_str(NOISE);
-    }
-    script.push_str(STEALTH_TAIL);
-    let script = script.replace("__SEED__", &seed.to_string());
-    // Shared proxy-mask helpers (also used by the worker scripts).
-    let script = script.replace("__PROXY_HELPERS__", PROXY_HELPERS);
-    let script = if let Some(ref l) = locale {
-        let base = l.split('-').next().unwrap_or(l).to_string();
-        script
-            .replace("__LOCALE__", l)
-            .replace("__LOCALE_BASE__", &base)
-    } else {
-        script
-    };
+    let script = assemble_page_script(&ScriptPlan {
+        seed,
+        rtc,
+        gl: gl_profile.as_ref(),
+        media: patch_media,
+        perms: patch_perms,
+        // Pipe transport: the automation flag makes navigator.webdriver true
+        // (see WEBDRIVER_PATCH).
+        webdriver: crate::browser::launched_pipe(),
+        locale: locale.as_deref(),
+        noise,
+    });
 
     // Register for the OOPIF auto-attach handler (see FULL_SCRIPT).
     if let Ok(mut guard) = FULL_SCRIPT.write() {
@@ -617,4 +648,76 @@ try{{
 "#,
         escaped = escaped
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_available() -> bool {
+        std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Run an assembled script through `tests/fixtures/stealth_behavior.cjs
+    /// <scenario> <file>` (the harness gives it a mock window). Skips without
+    /// node, like the other script checks in the lib tests.
+    fn run_scenario(scenario: &str, script: &str) {
+        if !node_available() {
+            eprintln!("node not available — skipping the {scenario} script check");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!(
+            "bladebro-inject-{scenario}-{}.js",
+            std::process::id()
+        ));
+        std::fs::write(&path, script).expect("write assembled script");
+        let out = std::process::Command::new("node")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/stealth_behavior.cjs"
+            ))
+            .arg(scenario)
+            .arg(&path)
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "{scenario} scenario failed:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn plan<'a>(gl: Option<&'a gpu::GpuProfile>, locale: Option<&'a str>) -> ScriptPlan<'a> {
+        ScriptPlan {
+            seed: 7,
+            rtc: true,
+            gl,
+            media: true,
+            perms: true,
+            webdriver: true,
+            locale,
+            noise: true,
+        }
+    }
+
+    // Every segment at once, GL spoof on (the software-GL / Xvfb default):
+    // the assembled script must run top to bottom.
+    #[test]
+    fn assembled_page_script_runs_to_the_tail() {
+        // The production state when the plan carries a GL profile: `apply`
+        // stores the decision before assembling, and GL-gated code reads it.
+        // Nothing else in the lib tests reads it.
+        GL_SPOOFED.store(true, Ordering::Relaxed);
+        let profile = gpu::test_profile();
+        let script = assemble_page_script(&plan(Some(&profile), Some("en-US")));
+        run_scenario("page", &script);
+    }
 }

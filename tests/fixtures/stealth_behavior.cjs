@@ -90,4 +90,32 @@ async function media() {
   sync = true; assert.throws(() => md.enumerateDevices(), e => e === sentinel);
   console.log('media native rejection timing, identity, arity, dispatch, real devices and fallback checks passed');
 }
-(process.argv[2] === 'media' ? media() : permissions()).catch(error => { console.error(error); process.exitCode = 1; });
+// A mock window with just the surface the core's unguarded statements touch;
+// every other block sits in its own try and skips what the mock lacks.
+function mockWindow() {
+  const ctx = vm.createContext({});
+  const g = vm.runInContext('this', ctx);
+  Object.assign(g, {
+    window: g,
+    document: {},
+    navigator: { platform: 'Linux x86_64' },
+    MutationObserver: class { observe() {} disconnect() {} },
+    setTimeout: () => 0,
+    addEventListener() {},
+    console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
+  });
+  return { ctx, g };
+}
+// The exact assembled page script (written by the inject.rs lib test).
+async function page() {
+  const { ctx, g } = mockWindow();
+  // The tail's cdc_ watcher is the last statement of the script: its
+  // observe() call proves every conditional segment before it ran through.
+  let observed = 0;
+  g.MutationObserver = class { observe() { observed++; } disconnect() {} };
+  vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), ctx);
+  assert.equal(observed, 1, 'the script ran through to the tail');
+  console.log('assembled page script checks passed');
+}
+const scenarios = { permissions, media, page };
+(scenarios[process.argv[2]] || permissions)().catch(error => { console.error(error); process.exitCode = 1; });

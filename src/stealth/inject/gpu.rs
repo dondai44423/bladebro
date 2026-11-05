@@ -271,6 +271,13 @@ fn fallback_profile() -> GpuProfile {
     intel_profile(intel_fallback_name(OsStyle::LinuxMesa), OsStyle::LinuxMesa)
 }
 
+/// A deterministic profile for the parent's script-assembly tests (real
+/// detection shells out to lspci / PowerShell / system_profiler).
+#[cfg(test)]
+pub(super) fn test_profile() -> GpuProfile {
+    fallback_profile()
+}
+
 /// Run a detection command, capturing stdout on success.
 fn run_capture(cmd: &str, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new(cmd).args(args).output().ok()?;
