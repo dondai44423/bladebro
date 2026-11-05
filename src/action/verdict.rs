@@ -186,6 +186,26 @@ pub struct ClickEvidence<'a> {
 /// confirmed nor denied - never "navigated", never "no observable change".
 const UNANSWERED_EFFECT: &str = "effect unverified - the page did not answer the post-action read (busy or mid-navigation); observe before repeating";
 
+/// The lane a click went through, naming the inner control when the mouse
+/// lane was leaf-forwarded (L3). Only the mouse lane aims at the forwarded
+/// box; js/enter/space act on the addressed element itself.
+fn click_lane(via: &str, leaf: Option<&str>) -> String {
+    match leaf {
+        Some(inner) if via == "mouse" => format!("{via} on inner {inner}"),
+        _ => via.to_string(),
+    }
+}
+
+/// Verdict for a click whose only effect was a JS dialog (auto-handled).
+/// A forwarded click names its control here too: an inner Delete that asks
+/// confirm() is the common destructive case.
+pub(super) fn dialog_verdict(via: &str, leaf: Option<&str>) -> String {
+    format!(
+        "outcome: dialog opened via {} (handled — see ambient)",
+        click_lane(via, leaf)
+    )
+}
+
 /// Compute a one-line outcome verdict from the action + delta + click info.
 /// This is the M1 verdict — every act tells the agent what happened.
 pub(super) fn compute_verdict(
@@ -246,12 +266,7 @@ pub(super) fn compute_verdict(
         }
         Action::Click { .. } => {
             let (via, tried, tgt_meta) = click_via.unwrap_or(("", &[][..], ""));
-            // Only the mouse lane aims at the forwarded box; js/enter/space
-            // act on the addressed element itself.
-            let via = match click.leaf {
-                Some(inner) if via == "mouse" => format!("{via} on inner {inner}"),
-                _ => via.to_string(),
-            };
+            let via = click_lane(via, click.leaf);
             if delta.navigated {
                 format!(
                     "outcome: navigated \u{2192} {} via {}",

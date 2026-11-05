@@ -538,6 +538,26 @@ mod action_tests {
     }
 
     #[test]
+    fn dialog_verdict_names_a_leaf_forwarded_control() {
+        // L3: a container click forwarded to an inner Delete that calls
+        // confirm() is the common destructive case; its dialog verdict must
+        // name the control that received the click, like the other verdicts.
+        use super::verdict::dialog_verdict;
+        assert_eq!(
+            dialog_verdict("mouse", Some("button [Delete]")),
+            "outcome: dialog opened via mouse on inner button [Delete] (handled — see ambient)"
+        );
+        assert_eq!(
+            dialog_verdict("js", Some("button [Delete]")),
+            "outcome: dialog opened via js (handled — see ambient)"
+        );
+        assert_eq!(
+            dialog_verdict("mouse", None),
+            "outcome: dialog opened via mouse (handled — see ambient)"
+        );
+    }
+
+    #[test]
     fn scroll_verdict_reports_both_axes() {
         // A-hscroll: a carousel / wide page that DID scroll horizontally was
         // reported as "no movement - page already at the top".

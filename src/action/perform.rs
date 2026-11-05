@@ -349,7 +349,7 @@ pub async fn perform_with_network(
                 None,
             );
             if dialog_fired && !delta.navigated && delta.is_empty() && !delta.content_changed {
-                verdict = format!("outcome: dialog opened via {via} (handled — see ambient)");
+                verdict = dialog_verdict(via, leaf);
             }
             return Ok((delta, verdict));
         }
