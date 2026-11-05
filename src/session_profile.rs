@@ -937,6 +937,23 @@ mod tests {
             .as_secs()
     }
 
+    /// Take a guard this test has just released. A test on another thread
+    /// may be spawning a child at that moment: between fork and exec the
+    /// child holds a copy of every open descriptor (close-on-exec only fires
+    /// at exec), our dropped `.template.guard` included, so its flock
+    /// outlives our drop briefly. Retry for up to 1 s instead of failing on
+    /// that; a lock that is really still held keeps returning None.
+    fn acquire_after_release(root: &Path) -> Option<TemplateLock> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let lock = SessionProfile::acquire_lock_at(root);
+            if lock.is_some() || std::time::Instant::now() >= deadline {
+                return lock;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn template_guard_supersedes_a_leftover_marker_naming_this_pid() {
         // A holder crashed mid-copy and left its marker; the restart reused
@@ -970,24 +987,17 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("blade-template-reused-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let mut unrelated = std::process::Command::new("cat")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        // Our parent (the test runner) is a live process that is not us.
+        // Spawning a stand-in would hand a copy of other tests' held guards
+        // to the child until its exec (see `acquire_after_release`).
+        let unrelated = std::os::unix::process::parent_id();
         let marker = root.join(".template.lock");
-        std::fs::write(&marker, format!("{} {}\n", unrelated.id(), unix_now())).unwrap();
+        std::fs::write(&marker, format!("{unrelated} {}\n", unix_now())).unwrap();
         let fresh = SessionProfile::acquire_lock_at(&root).is_some();
-        std::fs::write(
-            &marker,
-            format!("{} {}\n", unrelated.id(), unix_now() - 3600),
-        )
-        .unwrap();
-        let old = SessionProfile::acquire_lock_at(&root);
+        std::fs::write(&marker, format!("{unrelated} {}\n", unix_now() - 3600)).unwrap();
+        let old = acquire_after_release(&root);
         let old_acquired = old.is_some();
         drop(old);
-        let _ = unrelated.kill();
-        let _ = unrelated.wait();
         std::fs::remove_dir_all(&root).unwrap();
         assert!(!fresh, "a fresh live marker is a pre-4.1 copy in progress");
         assert!(
@@ -1044,7 +1054,7 @@ mod tests {
             "missing marker must not bypass OS ownership"
         );
         drop(held);
-        let next = SessionProfile::acquire_lock_at(&root).expect("released lock must be reusable");
+        let next = acquire_after_release(&root).expect("released lock must be reusable");
         assert!(root.join(".template.lock").exists());
         drop(next);
         assert!(!root.join(".template.lock").exists());
