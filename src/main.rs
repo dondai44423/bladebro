@@ -12,10 +12,16 @@ use bladebro::ui;
 use bladebro::Result;
 
 fn main() {
+    // argv as the OS hands it over: std::env::args() panics on an argument
+    // that is not valid UTF-8 (an upload path with a stray byte), which
+    // bypassed both the exit-code and the --json contracts with exit 101.
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let json_mode = raw.iter().any(|a| a == "--json");
+
     // Initialize structured logging; respect RUST_LOG.
     // In MCP mode, default to warn only — info logs leak to the agent's
     // TUI via stderr. RUST_LOG still overrides if explicitly set.
-    let default_filter = if std::env::args().any(|a| a == "mcp") {
+    let default_filter = if raw.iter().any(|a| a == "mcp") {
         "warn"
     } else {
         "warn,bladebro=info"
@@ -30,9 +36,17 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let code = match run() {
+    let code = match utf8_args(raw).and_then(|args| run(args, json_mode)) {
         Ok(()) => 0,
         Err(e) => {
+            // Errors raised before the CLI module owns the command (argv
+            // decoding, global --host/--port parsing) must still honor the
+            // --json contract: ONE object on stdout, never an empty read.
+            // run() exits by itself once a command has been dispatched, so
+            // this never doubles an object run_cli already printed.
+            if json_mode {
+                print_json_error(&e.to_string());
+            }
             print_error(&e);
             if matches!(e, bladebro::BladeError::Usage(_)) {
                 2
@@ -70,16 +84,40 @@ fn exit_immediately(code: i32) -> ! {
 fn print_error(e: &bladebro::BladeError) {
     let msg = e.to_string();
     let styled = if matches!(e, bladebro::BladeError::Usage(_)) {
-        ui::yellow(&msg)
+        ui::err::yellow(&msg)
     } else {
-        ui::red(&msg)
+        ui::err::red(&msg)
     };
-    eprintln!("{} {styled}", ui::dim("bladebro:"));
+    eprintln!("{} {styled}", ui::err::dim("bladebro:"));
 }
 
-fn run() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// The `--json` failure object — the same shape run_cli prints.
+fn print_json_error(text: &str) {
+    println!(
+        "{}",
+        serde_json::json!({ "ok": false, "is_error": true, "text": text })
+    );
+}
 
+/// Decode argv as UTF-8, or fail as a usage error naming the argument. Every
+/// value ends up in JSON tool args, which cannot carry raw bytes anyway.
+fn utf8_args(raw: Vec<std::ffi::OsString>) -> Result<Vec<String>> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, a)| {
+            a.into_string().map_err(|a| {
+                bladebro::BladeError::Usage(format!(
+                    "argument {} is not valid UTF-8 ('{}') — bladebro takes UTF-8 arguments only; \
+                     rename the file or pass a UTF-8 symlink to it",
+                    i + 1,
+                    a.to_string_lossy()
+                ))
+            })
+        })
+        .collect()
+}
+
+fn run(args: Vec<String>, json_mode: bool) -> Result<()> {
     // Parse global flags (--host/--port) anywhere before or after the command.
     // port=0 means auto-launch Chrome (find binary, pick free port, manage lifecycle).
     let mut host = String::from("127.0.0.1");
@@ -123,7 +161,12 @@ fn run() -> Result<()> {
                 })?;
                 port_given = true;
             }
-            "-h" | "--help" => {
+            // Only BEFORE a command is -h/--help the global switch. After
+            // one it belongs to that command (kept in `positional`), so
+            // `act --help` is act's help and `act type e3 x --help` asks
+            // for help instead of typing — it used to print the global
+            // manual for both, leaving per-command help unreachable.
+            "-h" | "--help" if cmd.is_none() => {
                 help_flag = true;
             }
             "-u" | "-doc" | "-v" | "--version" | "--rollback" if cmd.is_none() => {
@@ -138,6 +181,27 @@ fn run() -> Result<()> {
     }
     let cmd = cmd.unwrap_or_else(|| "help".to_string());
 
+    // Help routing. A global -h/--help becomes `help [<cmd>]`. A -h/--help
+    // after a known command the CLI module does not own (mcp, audit,
+    // update, doctor, …) is answered the same way here: that command's
+    // handler must never run for it (`mcp --help` would start a server,
+    // `-u --help` would self-update). CLI-module commands keep the flag —
+    // run_cli serves their per-command help, in its --json form too.
+    // Unknown commands fall through to the unknown-command error.
+    let help_after = positional.iter().any(|a| a == "-h" || a == "--help");
+    let (cmd, positional) =
+        if help_flag || (help_after && !is_cli_command(&cmd) && is_known_command(&cmd)) {
+            let topic =
+                Some(cmd).filter(|c| c != "help" && bladebro::cli::command_help_text(c).is_some());
+            let json = positional
+                .iter()
+                .any(|a| a == "--json")
+                .then(|| "--json".to_string());
+            ("help".to_string(), topic.into_iter().chain(json).collect())
+        } else {
+            (cmd, positional)
+        };
+
     // S18: pick this process's lane (config + BLADE_LANE env override). Every
     // surface — one-shot CLI, daemon, MCP — reads the same switch.
     bladebro::realbrowser::init_lane();
@@ -149,7 +213,7 @@ fn run() -> Result<()> {
     // teardown still runs and their socket writes handle EPIPE as an error).
     #[cfg(unix)]
     {
-        let effective = if help_flag { "help" } else { cmd.as_str() };
+        let effective = if help_after { "help" } else { cmd.as_str() };
         if effective != "daemon" && effective != "mcp" {
             unsafe {
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -157,66 +221,32 @@ fn run() -> Result<()> {
         }
     }
 
-    if help_flag {
-        print!("{}", bladebro::cli::help_text());
-        return Ok(());
-    }
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(bladebro::BladeError::other)?;
 
-    // Update hub commands don't need Chrome. Handle them before launch.
-    let is_update_cmd = matches!(
-        cmd.as_str(),
-        "update"
-            | "-u"
-            | "doctor"
-            | "-doc"
-            | "rollback"
-            | "--rollback"
-            | "-v"
-            | "--version"
-            | "version"
-    );
-
-    // CLI commands go through the new CLI module (own Chrome management).
-    let is_cli_cmd = matches!(
-        cmd.as_str(),
-        "nav"
-            | "see"
-            | "act"
-            | "state"
-            | "run"
-            | "vision"
-            | "daemon"
-            | "stop"
-            | "help"
-            | "rb"
-            | "realbrowser"
-            | "hermes"
-    );
-
-    // Legacy debug commands that need a launched browser. They share the
-    // same guard discipline as the CLI: the browser is ALWAYS shut down,
-    // even on error — `exit_immediately` (below) skips destructors, so a
-    // browser left alive on the stack here would leak Chrome + Xvfb on
-    // every invocation (observed: `bladebro version` orphaned a full
-    // Chrome tree per call).
-    let is_debug_cmd = matches!(cmd.as_str(), "probe" | "targets" | "audit");
+    let is_update_cmd = is_update_command(&cmd);
+    let is_cli_cmd = is_cli_command(&cmd);
 
     // Reject unknown commands BEFORE launching Chrome. Without this,
     // `bladebro bogus` would launch a full Chrome+Xvfb tree just to print
     // an error.
-    let is_known = is_update_cmd || is_cli_cmd || is_debug_cmd || cmd == "mcp";
+    let is_known = is_known_command(&cmd);
     if !is_known {
-        let mut line = format!("{} unknown command `{cmd}`", ui::red("✗"));
-        if let Some(s) = bladebro::cli::suggest_command(&cmd) {
-            line.push_str(&format!(" — did you mean `{s}`?"));
+        let suggestion = bladebro::cli::suggest_command(&cmd)
+            .map(|s| format!(" — did you mean `{s}`?"))
+            .unwrap_or_default();
+        if json_mode {
+            print_json_error(&format!(
+                "unknown command `{cmd}`{suggestion} (run `bladebro help` for the command list)"
+            ));
         }
-        eprintln!("{line}");
-        eprintln!("  {}", ui::dim("run `bladebro help` for the command list"));
+        eprintln!("{} unknown command `{cmd}`{suggestion}", ui::err::red("✗"));
+        eprintln!(
+            "  {}",
+            ui::err::dim("run `bladebro help` for the command list")
+        );
         std::process::exit(2);
     }
 
@@ -320,6 +350,54 @@ fn run() -> Result<()> {
             });
         }
     }
+}
+
+/// Update hub commands don't need Chrome. Handled before any launch.
+fn is_update_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "update"
+            | "-u"
+            | "doctor"
+            | "-doc"
+            | "rollback"
+            | "--rollback"
+            | "-v"
+            | "--version"
+            | "version"
+    )
+}
+
+/// CLI commands go through the CLI module (own Chrome management).
+fn is_cli_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "nav"
+            | "see"
+            | "act"
+            | "state"
+            | "run"
+            | "vision"
+            | "daemon"
+            | "stop"
+            | "help"
+            | "rb"
+            | "realbrowser"
+            | "hermes"
+    )
+}
+
+/// Legacy debug commands that need a launched browser. They share the
+/// same guard discipline as the CLI: the browser is ALWAYS shut down,
+/// even on error — `exit_immediately` skips destructors, so a browser left
+/// alive on the stack would leak Chrome + Xvfb on every invocation
+/// (observed: `bladebro version` orphaned a full Chrome tree per call).
+fn is_debug_command(cmd: &str) -> bool {
+    matches!(cmd, "probe" | "targets" | "audit")
+}
+
+fn is_known_command(cmd: &str) -> bool {
+    is_update_command(cmd) || is_cli_command(cmd) || is_debug_command(cmd) || cmd == "mcp"
 }
 
 /// Run a legacy debug command (probe/targets/audit) and ALWAYS shut the

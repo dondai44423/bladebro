@@ -48,6 +48,7 @@ pub use proto::handle_tools_call;
 pub use run::handle_run;
 pub use see::handle_see;
 pub use state::handle_state;
+pub(crate) use vision::capture_vision;
 pub use vision::handle_vision;
 
 /// Default protocol version for legacy clients that don't negotiate.

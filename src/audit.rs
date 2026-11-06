@@ -39,7 +39,7 @@ pub async fn run_audit(base: &str) -> Result<()> {
         eprintln!(
             "{} the real-browser lane is ON — this audit measures YOUR browser (zero page patches); \
              the mask vectors below are N/A. `bladebro rb off` (or BLADE_LANE=agent) audits the agent lane.",
-            ui::yellow("⚠")
+            ui::err::yellow("⚠")
         );
     }
     println!("[audit] running stealth vectors...");

@@ -515,7 +515,7 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 eprintln!(
                     "{} note: your browser ({owner}) is open — the copy may miss the last writes \
                      (the source is never touched).",
-                    ui::dim("[realbrowser]")
+                    ui::err::dim("[realbrowser]")
                 );
             }
             // A live clone session syncs back over the template on exit —
