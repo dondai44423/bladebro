@@ -15,6 +15,8 @@
 
 pub mod client;
 pub mod discovery;
+#[cfg(test)]
+pub(crate) mod fake_jar;
 pub mod protocol;
 pub mod session;
 

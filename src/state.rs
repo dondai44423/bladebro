@@ -13,8 +13,12 @@ use crate::error::{BladeError, Result};
 /// What the agent wants to do with page/browser state.
 #[derive(Debug, Clone)]
 pub enum StateOp {
-    /// Read cookies for the current page (or all browser cookies if `urls` empty).
-    GetCookies { urls: Vec<String> },
+    /// Read cookies for `urls` (the current page if empty), or the
+    /// browser-wide cookies of `domain` and its subdomains.
+    GetCookies {
+        urls: Vec<String>,
+        domain: Option<String>,
+    },
     /// Set a cookie.
     SetCookie {
         name: String,
@@ -106,19 +110,34 @@ pub struct Tab {
 pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
     match op {
         // ---- cookies ----
-        StateOp::GetCookies { urls } => {
+        StateOp::GetCookies { urls, domain } => {
             cdp.enable("Network").await?;
-            let params = if urls.is_empty() {
-                json!({})
+            let res = if domain.is_some() && urls.is_empty() {
+                // `Network.getCookies {}` answers with the current page's
+                // cookies only, so a domain filter reads the browser-wide
+                // store instead of silently returning the page's cookies.
+                cdp.cookie_store().await?
             } else {
-                json!({ "urls": urls })
+                let params = if urls.is_empty() {
+                    json!({})
+                } else {
+                    json!({ "urls": urls })
+                };
+                cdp.send("Network.getCookies", Some(params)).await?
             };
-            let res = cdp.send("Network.getCookies", Some(params)).await?;
-            let cookies: Vec<Cookie> = serde_json::from_value(
-                res.get("cookies")
+            let all = res
+                .get("cookies")
+                .and_then(Value::as_array)
+                .ok_or_else(|| BladeError::Other("no cookies field".into()))?;
+            let raw: Vec<Value> = match domain {
+                Some(d) => all
+                    .iter()
+                    .filter(|c| cookie_in_domain(c, d))
                     .cloned()
-                    .ok_or_else(|| BladeError::Other("no cookies field".into()))?,
-            )?;
+                    .collect(),
+                None => all.clone(),
+            };
+            let cookies: Vec<Cookie> = serde_json::from_value(Value::Array(raw.clone()))?;
             if cookies.is_empty() {
                 return Ok("(no cookies)".into());
             }
@@ -133,7 +152,7 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                     if c.http_only { " httpOnly" } else { "" },
                 ));
             }
-            bounded_state_read(out, &res["cookies"])
+            bounded_state_read(out, &raw)
         }
 
         StateOp::SetCookie {
@@ -217,12 +236,33 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             let mut params = json!({ "name": name });
             // CDP Network.deleteCookies requires either url or domain.
             // Prefer url when given (Chrome derives domain), fall back to domain.
+            let mut host = String::new();
             if let Some(u) = url {
                 params["url"] = json!(u);
+                host = url::Url::parse(u)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_owned))
+                    .unwrap_or_default();
             } else if let Some(d) = domain {
                 params["domain"] = json!(d);
+                host = d.trim_start_matches('.').to_string();
             }
+            // Chrome deletes only cookies whose domain equals `domain` (or
+            // the url host) exactly, so `--domain example.com` leaves a
+            // `.example.com` cookie in place. Read the store back on both
+            // sides of the call rather than claiming a deletion.
+            let before = cookie_domains_sent_to(cdp, name, &host).await?;
             cdp.send("Network.deleteCookies", Some(params)).await?;
+            let after = cookie_domains_sent_to(cdp, name, &host).await?;
+            if let Some(first) = after.first() {
+                return Err(BladeError::Other(format!(
+                    "cookie {name:?} is still set for {} — Chrome deletes only an exact domain match; retry del-cookie with domain {first}",
+                    after.join(", ")
+                )));
+            }
+            if before.is_empty() {
+                return Ok(format!("no cookie {name:?} for {host}; nothing deleted"));
+            }
             Ok(format!("✓ cookie deleted: {name}"))
         }
 
@@ -316,49 +356,12 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             }
             validate_session_name(name)?;
 
-            cdp.enable("Network").await?;
-            let origin_res = cdp
-                .send(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": "location.origin",
-                        "returnByValue": true,
-                    })),
-                )
-                .await?;
-            let origin = origin_res
-                .get("result")
-                .and_then(|r| r.get("value"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            // Error pages (chrome-error://) and untouched about:blank report
-            // a literal "null" origin.
-            if origin.is_empty() || origin == "null" {
-                return Err(BladeError::Other(
-                    "cannot save a session without an open page: navigate to a site first so cookies and storage have an origin".into(),
-                ));
-            }
-            let res = cdp.send("Network.getCookies", Some(json!({}))).await?;
-            let cookies = res
-                .get("cookies")
-                .filter(|v| v.is_array())
-                .cloned()
-                .ok_or_else(|| BladeError::Other("cookie snapshot missing cookie array".into()))?;
-            // Save structured entries, never the display representation:
-            // values may contain '=' or newlines.
-            let ls_result = cdp.send("Runtime.evaluate", Some(json!({
-                "expression": "Object.keys(localStorage).map(k=>({key:k,value:localStorage.getItem(k)}))",
-                "returnByValue": true,
-            }))).await?;
-            let ls_entries: Vec<StorageEntry> =
-                serde_json::from_value(extract_eval_value(&ls_result)?)?;
-            let session =
-                json!({ "cookies": cookies, "localStorage": ls_entries, "origin": origin });
+            let captured = capture_session(cdp).await?;
             let dir = crate::platform::blade_dir().join("sessions");
             crate::platform::secure_create_dir_all(&dir)
                 .map_err(|e| BladeError::Other(format!("cannot create sessions dir: {e}")))?;
             let path = dir.join(format!("{name}.json"));
-            let bytes = serde_json::to_vec_pretty(&session)?;
+            let bytes = serde_json::to_vec_pretty(&captured.session)?;
             if bytes.len() > 8 * 1024 * 1024 {
                 return Err(BladeError::Other(
                     "session exceeds 8 MiB; existing snapshot preserved".into(),
@@ -366,12 +369,16 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             }
             crate::platform::secure_write_file(&path, &bytes)
                 .map_err(|e| BladeError::Other(format!("cannot write session: {e}")))?;
-            let cookie_count = cookies.as_array().map(|a| a.len()).unwrap_or(0);
+            let skipped = if captured.partitioned > 0 {
+                format!(" ({} partitioned, skipped)", captured.partitioned)
+            } else {
+                String::new()
+            };
             Ok(format!(
-                "✓ saved session '{}': {} cookies, {} localStorage entries\n  → {}",
+                "✓ saved session '{}': {} cookies{skipped}, {} localStorage entries\n  → {}",
                 name,
-                cookie_count,
-                ls_entries.len(),
+                captured.cookies,
+                captured.storage,
                 path.display()
             ))
         }
@@ -399,76 +406,228 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             if content.len() > 8 * 1024 * 1024 {
                 return Err(BladeError::Other("saved session exceeds 8 MiB".into()));
             }
-            #[derive(Deserialize)]
-            struct SavedSession {
-                origin: String,
-                cookies: Vec<Value>,
-                #[serde(rename = "localStorage")]
-                storage: Vec<StorageEntry>,
-            }
             let session: SavedSession = serde_json::from_slice(&content)?;
-            // Validate every cookie and the origin before changing browser state.
-            let cookies = session
-                .cookies
-                .iter()
-                .map(crate::logins::cookie_params)
-                .collect::<Result<Vec<_>>>()?;
-            let origin_res = cdp
-                .send(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": "location.origin", "returnByValue": true,
-                    })),
-                )
-                .await?;
-            let origin = extract_eval_value(&origin_res)?;
-            if session.origin == "null" || origin.as_str() != Some(session.origin.as_str()) {
-                return Err(BladeError::Other(format!(
-                    "session '{name}' belongs to {}; navigate there before loading it",
-                    session.origin
-                )));
-            }
-            cdp.enable("Network").await?;
-            for cookie in &cookies {
-                let result = cdp.send("Network.setCookie", Some(cookie.clone())).await?;
-                if result.get("success").and_then(Value::as_bool) == Some(false) {
-                    return Err(BladeError::Other(format!(
-                        "Chrome rejected saved cookie {}; session only partially restored",
-                        cookie["name"]
-                    )));
-                }
-            }
-            let restored = cdp.cookie_store().await?;
-            let all = restored
-                .get("cookies")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    BladeError::Other("cookie readback missing after session restore".into())
-                })?;
-            for saved in &session.cookies {
-                if !all.iter().any(|c| {
-                    c["name"] == saved["name"]
-                        && c["value"] == saved["value"]
-                        && c["domain"] == saved["domain"]
-                        && c["path"] == saved["path"]
-                }) {
-                    return Err(BladeError::Other(format!(
-                        "saved cookie {} did not match readback; session only partially restored",
-                        saved["name"]
-                    )));
-                }
-            }
-            for entry in &session.storage {
-                set_storage(cdp, "localStorage", &entry.key, &entry.value).await?;
-            }
-            Ok(format!(
-                "✓ loaded session '{}': {} cookies, {} localStorage entries — reload to apply",
-                name,
-                cookies.len(),
-                session.storage.len()
-            ))
+            restore_session(cdp, name, &session).await
         }
     }
+}
+
+/// The `cookies` domain filter: the cookie belongs to `filter` or one of
+/// its subdomains.
+fn cookie_in_domain(cookie: &Value, filter: &str) -> bool {
+    let filter = filter.trim_start_matches('.').to_ascii_lowercase();
+    let domain = cookie["domain"]
+        .as_str()
+        .unwrap_or_default()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    !filter.is_empty() && (domain == filter || domain.ends_with(&format!(".{filter}")))
+}
+
+/// Domains of the unpartitioned cookies named `name` that Chrome would
+/// send to `host` (deleteCookies never touches partitioned ones).
+async fn cookie_domains_sent_to(cdp: &CdpSession, name: &str, host: &str) -> Result<Vec<String>> {
+    let store = cdp.cookie_store().await?;
+    let all = store
+        .get("cookies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| BladeError::Other("cookie readback missing cookie store".into()))?;
+    let mut domains: Vec<String> = all
+        .iter()
+        .filter(|c| c["name"].as_str() == Some(name) && !cookie_partitioned(c))
+        .filter_map(|c| c["domain"].as_str())
+        .filter(|d| {
+            !host.is_empty()
+                && (d.trim_start_matches('.') == host || (d.starts_with('.') && host.ends_with(d)))
+        })
+        .map(str::to_owned)
+        .collect();
+    domains.sort();
+    domains.dedup();
+    Ok(domains)
+}
+
+/// What `state save` writes, plus the counts its verdict reports.
+struct CapturedSession {
+    session: Value,
+    cookies: usize,
+    partitioned: usize,
+    storage: usize,
+}
+
+/// Read the current page's cookies + localStorage into a session document.
+async fn capture_session(cdp: &CdpSession) -> Result<CapturedSession> {
+    cdp.enable("Network").await?;
+    let origin_res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "location.origin",
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    let origin = origin_res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // Error pages (chrome-error://) and untouched about:blank report
+    // a literal "null" origin.
+    if origin.is_empty() || origin == "null" {
+        return Err(BladeError::Other(
+            "cannot save a session without an open page: navigate to a site first so cookies and storage have an origin".into(),
+        ));
+    }
+    let res = cdp.send("Network.getCookies", Some(json!({}))).await?;
+    let all = res
+        .get("cookies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| BladeError::Other("cookie snapshot missing cookie array".into()))?;
+    // getCookies includes partitioned (CHIPS) cookies, which `state load`
+    // cannot set as ordinary cookies: saving one made the whole session
+    // unloadable. Leave them out, as the login snapshot does, and count them.
+    let cookies: Vec<&Value> = all.iter().filter(|c| !cookie_partitioned(c)).collect();
+    let partitioned = all.len() - cookies.len();
+    // Save structured entries, never the display representation:
+    // values may contain '=' or newlines.
+    let ls_result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "Object.keys(localStorage).map(k=>({key:k,value:localStorage.getItem(k)}))",
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    let ls_entries: Vec<StorageEntry> = serde_json::from_value(extract_eval_value(&ls_result)?)?;
+    Ok(CapturedSession {
+        storage: ls_entries.len(),
+        cookies: cookies.len(),
+        session: json!({ "cookies": cookies, "localStorage": ls_entries, "origin": origin }),
+        partitioned,
+    })
+}
+
+/// A named session file (`state save`), as read back by `state load`.
+#[derive(Deserialize)]
+struct SavedSession {
+    origin: String,
+    cookies: Vec<Value>,
+    #[serde(rename = "localStorage")]
+    storage: Vec<StorageEntry>,
+}
+
+/// Apply a saved session to the current page: cookies, readback, then
+/// localStorage. Split from the file read so the restore contract can be
+/// exercised against a CDP double.
+async fn restore_session(cdp: &CdpSession, name: &str, session: &SavedSession) -> Result<String> {
+    // A saved cookie that has since expired (`_gat` lives one minute) is
+    // accepted by setCookie but never stored, so requiring it at readback
+    // failed every later load after some cookies were already set. Skip it
+    // in both places, as the login sidecar restore does, and say so.
+    // Partitioned cookies in sessions saved before `state save` dropped
+    // them cannot be set as ordinary cookies; they are skipped the same way.
+    let now = unix_now()?;
+    let partitioned = session
+        .cookies
+        .iter()
+        .filter(|c| cookie_partitioned(c))
+        .count();
+    let unpartitioned = || session.cookies.iter().filter(|c| !cookie_partitioned(c));
+    let live: Vec<&Value> = unpartitioned()
+        .filter(|c| !cookie_expired(c, now))
+        .collect();
+    let expired = unpartitioned().count() - live.len();
+    // Validate every cookie and the origin before changing browser state.
+    let cookies = live
+        .iter()
+        .map(|c| crate::logins::cookie_params(c))
+        .collect::<Result<Vec<_>>>()?;
+    let origin_res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "location.origin", "returnByValue": true,
+            })),
+        )
+        .await?;
+    let origin = extract_eval_value(&origin_res)?;
+    if session.origin == "null" || origin.as_str() != Some(session.origin.as_str()) {
+        return Err(BladeError::Other(format!(
+            "session '{name}' belongs to {}; navigate there before loading it",
+            session.origin
+        )));
+    }
+    cdp.enable("Network").await?;
+    for cookie in &cookies {
+        let result = cdp.send("Network.setCookie", Some(cookie.clone())).await?;
+        if result.get("success").and_then(Value::as_bool) == Some(false) {
+            return Err(BladeError::Other(format!(
+                "Chrome rejected saved cookie {}; session only partially restored",
+                cookie["name"]
+            )));
+        }
+    }
+    let restored = cdp.cookie_store().await?;
+    let all = restored
+        .get("cookies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| BladeError::Other("cookie readback missing after session restore".into()))?;
+    // Re-read the clock: a cookie may expire between set and readback.
+    let now = unix_now()?;
+    for saved in live.iter().filter(|c| !cookie_expired(c, now)) {
+        if !all.iter().any(|c| {
+            c["name"] == saved["name"]
+                && c["value"] == saved["value"]
+                && c["domain"] == saved["domain"]
+                && c["path"] == saved["path"]
+        }) {
+            return Err(BladeError::Other(format!(
+                "saved cookie {} did not match readback; session only partially restored",
+                saved["name"]
+            )));
+        }
+    }
+    for entry in &session.storage {
+        set_storage(cdp, "localStorage", &entry.key, &entry.value).await?;
+    }
+    let skipped: Vec<String> = [(expired, "expired"), (partitioned, "partitioned")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, kind)| format!("{n} {kind}"))
+        .collect();
+    let skipped = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(" ({}, skipped)", skipped.join(", "))
+    };
+    Ok(format!(
+        "✓ loaded session '{}': {} cookies{skipped}, {} localStorage entries — reload to apply",
+        name,
+        cookies.len(),
+        session.storage.len()
+    ))
+}
+
+/// A partitioned (CHIPS) cookie: its jar is keyed by a top-level site.
+fn cookie_partitioned(cookie: &Value) -> bool {
+    cookie.get("partitionKey").is_some_and(|k| !k.is_null())
+}
+
+/// A persistent cookie whose expiry has passed. Session cookies report
+/// `expires: -1` and never count as expired.
+fn cookie_expired(cookie: &Value, now: f64) -> bool {
+    cookie["expires"]
+        .as_f64()
+        .is_some_and(|e| e >= 0.0 && e <= now)
+}
+
+fn unix_now() -> Result<f64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(BladeError::other)?
+        .as_secs_f64())
 }
 
 async fn get_storage(cdp: &CdpSession, storage: &str) -> Result<String> {
@@ -648,5 +807,173 @@ mod reliability_tests {
             .to_string()
             .contains("SecurityError"));
         assert!(extract_eval_value(&json!({"result":{}})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cookie_jar_tests {
+    use super::*;
+    use crate::cdp::fake_jar;
+
+    const ORIGIN: &str = "http://127.0.0.1:8080";
+
+    fn cookie(name: &str, domain: &str, expires: f64) -> Value {
+        json!({"name": name, "value": "v", "domain": domain, "path": "/",
+               "secure": false, "httpOnly": false, "sameSite": "Lax", "expires": expires})
+    }
+
+    fn session(cookies: Vec<Value>) -> SavedSession {
+        SavedSession {
+            origin: ORIGIN.into(),
+            cookies,
+            storage: vec![StorageEntry {
+                key: "k".into(),
+                value: "v".into(),
+            }],
+        }
+    }
+
+    /// A session saved with a short-lived cookie (`_gat`, max-age 60) must
+    /// still load once that cookie has expired: Chrome accepts the expired
+    /// cookie and stores nothing, so requiring it at readback failed every
+    /// later load halfway through.
+    #[tokio::test]
+    async fn expired_saved_cookie_does_not_abort_session_load() {
+        let (cdp, jar) = fake_jar::start(ORIGIN, vec![]).await;
+        let saved = session(vec![
+            cookie("_gat", "127.0.0.1", 1_000_000_000.0),
+            cookie("sid", "127.0.0.1", 4_000_000_000.0),
+        ]);
+        let out = restore_session(&cdp, "s1", &saved)
+            .await
+            .expect("an expired cookie must not fail the load");
+        assert!(out.contains("1 cookies"), "{out}");
+        assert!(out.contains("1 expired"), "{out}");
+        assert_eq!(jar.names(), ["sid"]);
+    }
+
+    fn partitioned(name: &str) -> Value {
+        let mut c = cookie(name, "127.0.0.1", -1.0);
+        c["secure"] = json!(true);
+        c["partitionKey"] =
+            json!({"topLevelSite": "http://127.0.0.1", "hasCrossSiteAncestor": false});
+        c
+    }
+
+    /// `Network.getCookies` returns partitioned (CHIPS) cookies, which a
+    /// restore cannot set as ordinary cookies: a session that captured one
+    /// saved fine and then could never load. Save leaves them out and says
+    /// so; a session file written before that still loads without them.
+    #[tokio::test]
+    async fn partitioned_cookies_neither_poison_a_save_nor_fail_a_load() {
+        let (cdp, _jar) = fake_jar::start(
+            ORIGIN,
+            vec![partitioned("chip"), cookie("plain", "127.0.0.1", -1.0)],
+        )
+        .await;
+        let captured = capture_session(&cdp).await.unwrap();
+        let names: Vec<&str> = captured.session["cookies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert_eq!(names, ["plain"], "partitioned cookie must not be saved");
+        assert_eq!(captured.cookies, 1);
+        assert_eq!(captured.partitioned, 1);
+
+        let (cdp, jar) = fake_jar::start(ORIGIN, vec![]).await;
+        let legacy = session(vec![
+            partitioned("chip"),
+            cookie("plain", "127.0.0.1", -1.0),
+        ]);
+        let out = restore_session(&cdp, "c1", &legacy)
+            .await
+            .expect("a partitioned cookie must not fail the load");
+        assert!(out.contains("1 partitioned"), "{out}");
+        assert_eq!(jar.names(), ["plain"]);
+    }
+
+    fn delete(name: &str, domain: Option<&str>, url: Option<&str>) -> StateOp {
+        StateOp::DeleteCookies {
+            name: name.into(),
+            domain: domain.map(str::to_owned),
+            url: url.map(str::to_owned),
+        }
+    }
+
+    /// `Network.deleteCookies` matches the cookie domain exactly, so
+    /// `del-cookie sid --domain fixture.test` against a `.fixture.test`
+    /// cookie deleted nothing and still reported "✓ cookie deleted".
+    #[tokio::test]
+    async fn del_cookie_reports_a_cookie_it_did_not_delete() {
+        let (cdp, jar) = fake_jar::start(ORIGIN, vec![cookie("sid", ".fixture.test", -1.0)]).await;
+        let err = perform(&cdp, &delete("sid", Some("fixture.test"), None))
+            .await
+            .expect_err("the cookie is still set; success would be a lie");
+        let err = err.to_string();
+        assert!(err.contains("still set for .fixture.test"), "{err}");
+        assert!(
+            err.contains("domain .fixture.test"),
+            "names the retry: {err}"
+        );
+        assert_eq!(jar.names(), ["sid"]);
+
+        // The same holds for a url scope: the url host is matched exactly too.
+        let err = perform(&cdp, &delete("sid", None, Some("http://fixture.test/")))
+            .await
+            .expect_err("a url scope does not delete a domain cookie");
+        assert!(err.to_string().contains(".fixture.test"), "{err}");
+
+        let out = perform(&cdp, &delete("sid", Some(".fixture.test"), None))
+            .await
+            .unwrap();
+        assert_eq!(out, "✓ cookie deleted: sid");
+        assert!(jar.names().is_empty());
+
+        let out = perform(&cdp, &delete("sid", Some(".fixture.test"), None))
+            .await
+            .unwrap();
+        assert!(!out.starts_with('✓'), "nothing left to delete: {out}");
+        assert!(out.contains("nothing deleted"), "{out}");
+    }
+
+    fn get_cookies(domain: Option<&str>) -> StateOp {
+        StateOp::GetCookies {
+            urls: vec![],
+            domain: domain.map(str::to_owned),
+        }
+    }
+
+    /// `state op=cookies domain=x` sent `Network.getCookies {}`, which
+    /// answers with the current page's cookies: the domain was ignored and
+    /// no error said so.
+    #[tokio::test]
+    async fn cookies_domain_filter_returns_that_domain() {
+        let (cdp, _jar) = fake_jar::start(
+            ORIGIN,
+            vec![
+                cookie("page", "127.0.0.1", -1.0),
+                cookie("sid", ".fixture.test", -1.0),
+                cookie("www", "www.fixture.test", -1.0),
+                cookie("near", "notfixture.test", -1.0),
+                cookie("other", "other.test", -1.0),
+            ],
+        )
+        .await;
+        let out = perform(&cdp, &get_cookies(Some("fixture.test")))
+            .await
+            .unwrap();
+        let names: Vec<&str> = out.lines().filter_map(|l| l.split('=').next()).collect();
+        assert_eq!(names, ["sid", "www"], "{out}");
+
+        let out = perform(&cdp, &get_cookies(Some("none.test")))
+            .await
+            .unwrap();
+        assert_eq!(out, "(no cookies)");
+
+        // Without a domain the page-scoped read is unchanged.
+        let out = perform(&cdp, &get_cookies(None)).await.unwrap();
+        assert_eq!(out, "page=v domain=127.0.0.1\n");
     }
 }

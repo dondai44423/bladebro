@@ -11,7 +11,10 @@
 //! `blade-<pid>-<seq>.<ext>` — the pid namespace means two
 //! concurrent sessions can never overwrite each other's
 //! artifacts (they used to share a bare sequence counter).
-//! Rotation keeps the newest 300 files; older ones are
+//! Each name is claimed with an exclusive create before the
+//! write, so a reused pid (containers, wrapped pid counters)
+//! skips past an earlier session's files instead of replacing
+//! them. Rotation keeps the newest 300 files; older ones are
 //! deleted on write.
 
 use std::io::Read;
@@ -26,16 +29,7 @@ const MAX_ARTIFACTS: usize = 300;
 
 /// Write `data` to an artifact file and return its absolute path.
 pub fn write_artifact(data: &str, ext: &str) -> Result<String> {
-    let dir = artifact_dir();
-    crate::platform::secure_create_dir_all(&dir)
-        .map_err(|e| crate::error::BladeError::Other(format!("artifact dir: {e}")))?;
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let path = dir.join(format!("blade-{pid}-{seq:04}.{ext}"));
-    crate::platform::secure_write_file(&path, data.as_bytes())
-        .map_err(|e| crate::error::BladeError::Other(format!("artifact write: {e}")))?;
-    rotate_artifacts(&dir);
-    Ok(path.display().to_string())
+    write_artifact_bytes(data.as_bytes(), ext)
 }
 
 /// Write binary `data` to an artifact file and return its absolute path.
@@ -44,13 +38,51 @@ pub fn write_artifact_bytes(data: &[u8], ext: &str) -> Result<String> {
     let dir = artifact_dir();
     crate::platform::secure_create_dir_all(&dir)
         .map_err(|e| crate::error::BladeError::Other(format!("artifact dir: {e}")))?;
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let path = dir.join(format!("blade-{pid}-{seq:04}.{ext}"));
-    crate::platform::secure_write_file(&path, data)
-        .map_err(|e| crate::error::BladeError::Other(format!("artifact write: {e}")))?;
+    let path = write_in(&dir, data, ext)?;
     rotate_artifacts(&dir);
     Ok(path.display().to_string())
+}
+
+fn write_in(dir: &std::path::Path, data: &[u8], ext: &str) -> Result<std::path::PathBuf> {
+    let path = claim_name(dir, ext)?;
+    if let Err(e) = crate::platform::secure_write_file(&path, data) {
+        // Release the claimed (still empty) name.
+        let _ = std::fs::remove_file(&path);
+        return Err(crate::error::BladeError::Other(format!(
+            "artifact write: {e}"
+        )));
+    }
+    Ok(path)
+}
+
+/// Reserve the next free `blade-<pid>-<seq>` name. SEQ restarts at 1 in
+/// every process, so with a reused pid the next name can belong to an
+/// earlier session whose path an agent still holds; the atomic write
+/// renames over whatever is there. An exclusive create claims the name
+/// first (the write then replaces only our own empty placeholder) and
+/// a taken name moves on to the next sequence number.
+fn claim_name(dir: &std::path::Path, ext: &str) -> Result<std::path::PathBuf> {
+    let pid = std::process::id();
+    loop {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("blade-{pid}-{seq:04}.{ext}"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(crate::error::BladeError::Other(format!(
+                    "artifact write: {e}"
+                )))
+            }
+        }
+    }
 }
 
 /// Delete the oldest artifacts beyond MAX_ARTIFACTS.
@@ -233,6 +265,37 @@ pub fn artifact_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod artifact_tests {
     use super::*;
+
+    /// Names are `blade-<pid>-<seq>` with the sequence restarting at 1 in
+    /// every process. A reused pid (containers start at pid 1; pids wrap
+    /// after reboots) therefore renamed a new artifact over an earlier
+    /// session's file, whose path an agent may still hold.
+    #[test]
+    fn a_reused_pid_never_overwrites_an_earlier_artifact() {
+        let dir = std::env::temp_dir().join(format!("blade-artifact-pid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // An earlier process with this pid left the next names behind.
+        let pid = std::process::id();
+        let next = SEQ.load(Ordering::Relaxed);
+        let earlier: Vec<_> = (next..next + 64)
+            .map(|seq| dir.join(format!("blade-{pid}-{seq:04}.json")))
+            .collect();
+        for path in &earlier {
+            std::fs::write(path, "earlier").unwrap();
+        }
+        let written = write_in(&dir, b"new", "json").unwrap();
+        for path in &earlier {
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                "earlier",
+                "{} was overwritten",
+                path.display()
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&written).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// W2: JSON-mode pages are always parseable, the next_offset chain
     /// terminates, and the pages reassemble to the exact payload — the

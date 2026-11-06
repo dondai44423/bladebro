@@ -102,6 +102,17 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
         .get("cookies")
         .and_then(Value::as_array)
         .ok_or_else(|| BladeError::Other("cookie snapshot missing cookie store".into()))?;
+    let out = snapshot_cookies(arr);
+    let bytes = serde_json::to_vec(&out)?;
+    // The browser-wide store is authoritative, including logout/deletion.
+    let path = logins_path();
+    platform::secure_create_dir_all(&platform::blade_dir())?;
+    platform::secure_write_file(&path, &bytes)?;
+    Ok(())
+}
+
+/// The cookies of a store read that the sidecar keeps.
+fn snapshot_cookies(arr: &[Value]) -> Vec<SavedCookie> {
     let mut out: Vec<SavedCookie> = Vec::with_capacity(arr.len());
     for c in arr {
         let domain = c
@@ -114,7 +125,12 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
         if c.get("partitionKey").map(|p| !p.is_null()).unwrap_or(false) {
             continue;
         }
-        if domain.is_empty() || domain.starts_with("chrome") || domain == "file" {
+        // Internal pseudo-hosts are matched exactly: a "chrome" prefix test
+        // also dropped real sites (chromestatus.com, chrome.google.com).
+        if matches!(
+            domain.as_str(),
+            "" | "file" | "chrome" | "chrome-extension" | "chrome-untrusted" | "devtools"
+        ) {
             continue;
         }
         out.push(SavedCookie {
@@ -143,12 +159,7 @@ pub async fn snapshot(cdp: &CdpSession) -> Result<()> {
             expires: c.get("expires").and_then(|v| v.as_f64()),
         });
     }
-    let bytes = serde_json::to_vec(&out)?;
-    // The browser-wide store is authoritative, including logout/deletion.
-    let path = logins_path();
-    platform::secure_create_dir_all(&platform::blade_dir())?;
-    platform::secure_write_file(&path, &bytes)?;
-    Ok(())
+    out
 }
 
 /// Inject the sidecar snapshot into the fresh browser context at launch.
@@ -175,54 +186,65 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
     if list.is_empty() || cdp.is_closed() {
         return Ok(());
     }
+    let missing = restore_cookies(cdp, &list).await?;
+    if missing > 0 {
+        // A cookie Chrome refuses at this launch is refused at every launch.
+        // Failing the launch over it shut Chrome down with the sidecar kept,
+        // so every later launch failed the same way. Go on without those
+        // cookies (the next snapshot records the store as it really is) and
+        // say how many were lost.
+        eprintln!(
+            "[bladebro] login restore: {missing}/{} saved cookies were not restored (rejected or did not read back); continuing without them",
+            list.len()
+        );
+    }
+    Ok(())
+}
+
+/// Set `list` in the live store and read it back. Returns how many saved
+/// cookies are missing from the store afterwards; only a failed readback
+/// is an error.
+async fn restore_cookies(cdp: &CdpSession, list: &[SavedCookie]) -> Result<usize> {
     // Enable the Network domain (matches the `state` tool); setCookies is
     // rejected on some Chrome builds unless the domain is live.
     cdp.enable("Network").await?;
-    // Chrome caps cookies set in one call; chunk at 150.
-    // Track per-cookie rejections (setCookies reports each in `data`) so a
-    // silently partial restore is VISIBLE instead of the user just being
-    // quietly logged out with no signal.
-    let mut rejected = 0usize;
-    let total = list.len();
+    // Chrome caps cookies set in one call; chunk at 150. Whether each cookie
+    // landed is judged by the readback below rather than the call result:
+    // builds differ in what setCookies reports, and some drop cookies whose
+    // origin has no loaded page yet.
     for chunk in list.chunks(150) {
-        let cookies = chunk
+        // An entry that cannot be encoded is not sent; the readback counts it.
+        let cookies: Vec<Value> = chunk
             .iter()
-            .map(saved_cookie_params)
-            .collect::<Result<Vec<_>>>()?;
+            .filter_map(|c| saved_cookie_params(c).ok())
+            .collect();
+        if cookies.is_empty() {
+            continue;
+        }
         match cdp
             .send("Network.setCookies", Some(json!({ "cookies": cookies })))
             .await
         {
-            Ok(res) => {
-                // Chrome 150+ returns success in `data` per cookie; count the
-                // rejected ones so a partial restore is visible. (Some builds
-                // drop cookies whose origin has no loaded page yet — warning
-                // here, rather than silently losing the login.)
-                if let Some(data) = res.get("data").and_then(|d| d.as_array()) {
-                    for item in data {
-                        if !item
-                            .get("success")
-                            .and_then(|s| s.as_bool())
-                            .unwrap_or(true)
-                        {
-                            rejected += 1;
-                        }
+            Ok(_) => {}
+            // One cookie Chrome cannot parse fails the whole call ("Invalid
+            // cookie fields"). Now that a restore goes on without missing
+            // cookies, the next snapshot would then drop every login in
+            // the chunk, so set them one by one and lose only that cookie.
+            Err(BladeError::Cdp { .. }) => {
+                for cookie in cookies {
+                    match cdp.send("Network.setCookie", Some(cookie)).await {
+                        Ok(_) | Err(BladeError::Cdp { .. }) => {}
+                        // A dead or wedged transport: stop rather than wait
+                        // out a timeout per cookie; the readback decides.
+                        Err(_) => break,
                     }
                 }
             }
-            Err(e) => {
-                rejected += chunk.len();
-                eprintln!(
-                    "[bladebro] logins restore call failed ({} cookies): {e}",
-                    chunk.len()
-                );
-            }
+            Err(e) => eprintln!(
+                "[bladebro] logins restore call failed ({} cookies): {e}",
+                cookies.len()
+            ),
         }
-    }
-    if rejected > 0 {
-        return Err(BladeError::Other(format!(
-            "{rejected}/{total} saved cookies were rejected; login sidecar preserved"
-        )));
     }
     let store = cdp.cookie_store().await?;
     let restored = store
@@ -233,26 +255,22 @@ pub async fn restore(cdp: &CdpSession) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(BladeError::other)?
         .as_secs_f64();
-    for saved in &list {
+    let missing = list
+        .iter()
         // Expired persistent cookies should remain deleted.
-        if saved.expires.is_some_and(|e| e >= 0.0 && e <= now) {
-            continue;
-        }
-        if !restored.iter().any(|cookie| {
-            cookie["name"] == saved.name
-                && cookie["value"] == saved.value
-                && cookie["domain"] == saved.domain
-                && cookie["path"] == saved.path
-                && cookie["httpOnly"] == saved.http_only
-                && cookie["secure"] == saved.secure
-        }) {
-            return Err(BladeError::Other(format!(
-                "saved cookie {:?} did not match readback; login sidecar preserved",
-                saved.name
-            )));
-        }
-    }
-    Ok(())
+        .filter(|saved| !saved.expires.is_some_and(|e| e >= 0.0 && e <= now))
+        .filter(|saved| {
+            !restored.iter().any(|cookie| {
+                cookie["name"] == saved.name
+                    && cookie["value"] == saved.value
+                    && cookie["domain"] == saved.domain
+                    && cookie["path"] == saved.path
+                    && cookie["httpOnly"] == saved.http_only
+                    && cookie["secure"] == saved.secure
+            })
+        })
+        .count();
+    Ok(missing)
 }
 
 /// Shared restore encoding for named sessions and the login sidecar.
@@ -390,6 +408,76 @@ mod tests {
         assert_eq!(
             cookie_target(&ip)["url"].as_str(),
             Some("http://127.0.0.1/")
+        );
+    }
+
+    fn saved(name: &str, same_site: &str) -> SavedCookie {
+        SavedCookie {
+            name: name.into(),
+            value: "v".into(),
+            domain: ".fixture.test".into(),
+            path: "/".into(),
+            secure: false,
+            http_only: false,
+            same_site: Some(same_site.into()),
+            expires: Some(4_000_000_000.0),
+        }
+    }
+
+    /// One cookie Chrome refuses (SameSite=None without Secure) used to fail
+    /// the whole restore, and with it every browser launch: the launcher
+    /// shut Chrome down, the sidecar was kept, and the next launch failed
+    /// the same way. The good cookies must be restored and the launch go on.
+    /// A cookie Chrome cannot parse at all (`__Secure-` without Secure)
+    /// fails the whole setCookies batch; it must not take the good cookies
+    /// of its batch with it.
+    #[tokio::test]
+    async fn a_refused_cookie_does_not_fail_the_login_restore() {
+        let (cdp, jar) = crate::cdp::fake_jar::start("http://127.0.0.1:8080", vec![]).await;
+        let list = [
+            saved("good", "Lax"),
+            saved("bad", "None"),
+            saved("__Secure-bad", "Lax"),
+            saved("other", "Lax"),
+        ];
+        let missing = restore_cookies(&cdp, &list)
+            .await
+            .expect("a refused cookie must not fail the restore");
+        assert_eq!(missing, 2, "the refused cookies are counted, not fatal");
+        assert_eq!(jar.names(), ["good", "other"]);
+    }
+
+    /// The internal-origin filter was `domain.starts_with("chrome")`, which
+    /// also dropped real sites (chromestatus.com, chrome.google.com
+    /// host-only cookies) from the login snapshot, logging the user out of
+    /// them at every launch.
+    #[test]
+    fn snapshot_keeps_real_sites_whose_name_starts_with_chrome() {
+        let store: Vec<Value> = [
+            "chromestatus.com",
+            "chrome.google.com",
+            ".chromestatus.com",
+            "example.com",
+            "",
+            "file",
+            "chrome",
+            "chrome-extension",
+        ]
+        .iter()
+        .map(|d| json!({"name": "c", "value": "v", "domain": d, "path": "/"}))
+        .collect();
+        let kept: Vec<String> = snapshot_cookies(&store)
+            .into_iter()
+            .map(|c| c.domain)
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "chromestatus.com",
+                "chrome.google.com",
+                ".chromestatus.com",
+                "example.com"
+            ]
         );
     }
 
