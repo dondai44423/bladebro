@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.8] - 2026-11-06
+
 ### Added
 - Flatpak Chromium-family browsers are discovered on Linux when no native install exists (SteamOS, Bazzite, Silverblue): six known app ids, the user installation before the system one, and a not-found error plus `doctor` hint naming `flatpak install flathub org.chromium.Chromium`. The agent lane launches the export through `flatpak run` with the session profile and the downloads dir shared into the sandbox, owns the browser across the sandbox pid, and stops leftover profile processes on teardown.
 
@@ -2178,7 +2180,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.7...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.8...HEAD
+[4.6.8]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.8
 [4.6.7]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.7
 [4.6.6]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.6
 [4.6.5]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.5
