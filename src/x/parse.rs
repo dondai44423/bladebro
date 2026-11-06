@@ -31,6 +31,26 @@ pub(super) struct PageBits {
     items: Vec<(String, Value)>,
     bottom_cursor: Option<String>,
     pub(super) terminated: bool,
+    /// The page carried timeline instructions (entries added, replaced,
+    /// pinned or terminated). A 200 body without them — X's graphql errors
+    /// body (`{"errors":[…],"data":{}}`), or a shape this walker does not
+    /// know — says nothing about where the timeline ends.
+    pub(super) timeline: bool,
+    /// Non-cursor entries and module items on the page (tweets, ads,
+    /// tombstones, unknown kinds). Zero on a page that carried a timeline
+    /// (see `timeline`) means it held nothing but cursors — X's
+    /// end-of-timeline page — as opposed to a page whose content was all
+    /// filtered out. A page without a timeline also counts zero.
+    pub(super) entries: usize,
+    /// Module cursors that are neither Top nor Bottom — the "Show replies"
+    /// (ShowMore) cursor closing a conversation module — each hiding part of
+    /// one reply's branch that the walk does not fetch.
+    pub(super) collapsed: usize,
+    /// Top-level cursors that are neither Top nor Bottom — "Show more
+    /// replies" (ShowMoreThreads), "Show probable spam"
+    /// (ShowMoreThreadsPrompt) — each hiding replies to the post itself,
+    /// under no harvested reply.
+    pub(super) hidden: usize,
 }
 
 /// Walk one graphql response page: find the instructions array, collect
@@ -41,12 +61,26 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
         items: Vec::new(),
         bottom_cursor: None,
         terminated: false,
+        timeline: false,
+        entries: 0,
+        collapsed: 0,
+        hidden: 0,
     };
     let Some(instructions) = find_instructions(j) else {
         return bits;
     };
     for ins in instructions {
         let ty = ins.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        // Only instructions that deliver or end the timeline count: an
+        // instructions array holding just a cache clear is no end signal.
+        bits.timeline |= matches!(
+            ty,
+            "TimelineAddEntries"
+                | "TimelineReplaceEntry"
+                | "TimelinePinEntry"
+                | "TimelineAddToModule"
+                | "TimelineTerminateTimeline"
+        );
         match ty {
             "TimelineAddEntries" => {
                 if let Some(entries) = ins.get("entries").and_then(|e| e.as_array()) {
@@ -55,11 +89,18 @@ pub(super) fn collect_page(j: &Value) -> PageBits {
                     }
                 }
             }
+            // Later pages of SearchTimeline (and other timelines) deliver
+            // their Top/Bottom cursors by replacing the previous cursor
+            // entries instead of adding new ones; missing this ended the
+            // walk after two pages as if the timeline were exhausted.
+            "TimelineReplaceEntry" => walk_entry(&mut bits, ins.pointer("/entry/content")),
+            // A profile's pinned post comes in its own instruction, ahead of
+            // the timeline entries — first, as the page shows it.
+            "TimelinePinEntry" => walk_entry(&mut bits, ins.pointer("/entry/content")),
             "TimelineAddToModule" => {
                 if let Some(arr) = ins.get("moduleItems").and_then(|e| e.as_array()) {
                     for it in arr {
-                        let eid = it.get("entryId").and_then(|e| e.as_str()).unwrap_or("");
-                        push_item(&mut bits, eid, it.pointer("/item/itemContent"));
+                        module_item(&mut bits, it);
                     }
                 }
             }
@@ -96,26 +137,62 @@ fn walk_entry(bits: &mut PageBits, content: Option<&Value>) {
     let Some(c) = content else { return };
     match c.get("entryType").and_then(|t| t.as_str()).unwrap_or("") {
         "TimelineTimelineItem" => {
+            let ic = c.get("itemContent");
+            // X also ships timeline cursors wrapped as an item.
+            if let Some(cur) = ic.filter(|ic| is_cursor(ic)) {
+                timeline_cursor(bits, cur);
+                return;
+            }
+            bits.entries += 1;
             let eid = c.get("entryId").and_then(|e| e.as_str()).unwrap_or("");
-            push_item(bits, eid, c.get("itemContent"));
+            push_item(bits, eid, ic);
         }
         "TimelineTimelineModule" => {
             if let Some(items) = c.get("items").and_then(|i| i.as_array()) {
                 for it in items {
-                    let eid = it.get("entryId").and_then(|e| e.as_str()).unwrap_or("");
-                    push_item(bits, eid, it.pointer("/item/itemContent"));
+                    module_item(bits, it);
                 }
             }
         }
-        "TimelineTimelineCursor" => {
-            let ct = c.get("cursorType").and_then(|t| t.as_str()).unwrap_or("");
-            if ct == "Bottom" {
-                if let Some(v) = c.get("value").and_then(|v| v.as_str()) {
-                    bits.bottom_cursor = Some(v.to_string());
-                }
+        "TimelineTimelineCursor" => timeline_cursor(bits, c),
+        _ => bits.entries += 1,
+    }
+}
+
+/// One item of a module (a conversation thread, a profile conversation…).
+/// Cursors inside a module page that module, never the timeline.
+fn module_item(bits: &mut PageBits, it: &Value) {
+    let ic = it.pointer("/item/itemContent");
+    if let Some(cur) = ic.filter(|ic| is_cursor(ic)) {
+        if !matches!(cursor_type(cur), "Top" | "Bottom") {
+            bits.collapsed += 1;
+        }
+        return;
+    }
+    bits.entries += 1;
+    let eid = it.get("entryId").and_then(|e| e.as_str()).unwrap_or("");
+    push_item(bits, eid, ic);
+}
+
+fn is_cursor(v: &Value) -> bool {
+    v.get("cursorType").is_some()
+}
+
+fn cursor_type(c: &Value) -> &str {
+    c.get("cursorType").and_then(|t| t.as_str()).unwrap_or("")
+}
+
+/// A top-level cursor: Bottom continues the timeline; any type but Top
+/// hides content behind a click.
+fn timeline_cursor(bits: &mut PageBits, c: &Value) {
+    match cursor_type(c) {
+        "Bottom" => {
+            if let Some(v) = c.get("value").and_then(|v| v.as_str()) {
+                bits.bottom_cursor = Some(v.to_string());
             }
         }
-        _ => {}
+        "Top" => {}
+        _ => bits.hidden += 1,
     }
 }
 
@@ -128,11 +205,21 @@ fn push_item(bits: &mut PageBits, entry_id: &str, item_content: Option<&Value>) 
     }
 }
 
+/// One parsed response page (TweetDetail or timeline; `focal` is only ever
+/// set for TweetDetail).
 pub(super) struct ThreadPage {
     pub(super) focal: Option<T>,
     pub(super) tweets: Vec<T>,
     pub(super) bottom_cursor: Option<String>,
     pub(super) terminated: bool,
+    /// See [`PageBits::timeline`].
+    pub(super) timeline: bool,
+    /// See [`PageBits::entries`].
+    pub(super) entries: usize,
+    /// See [`PageBits::collapsed`].
+    pub(super) collapsed: usize,
+    /// See [`PageBits::hidden`].
+    pub(super) hidden: usize,
 }
 
 /// Parse one TweetDetail page: the focal tweet (its own entry) and every
@@ -156,18 +243,40 @@ pub(super) fn parse_thread_page(j: &Value, focal_id: &str) -> ThreadPage {
         tweets,
         bottom_cursor: bits.bottom_cursor,
         terminated: bits.terminated,
+        timeline: bits.timeline,
+        entries: bits.entries,
+        collapsed: bits.collapsed,
+        hidden: bits.hidden,
     }
 }
 
-/// Parse one timeline page → (tweets, bottom cursor, terminated).
-pub(super) fn parse_timeline_page(j: &Value) -> (Vec<T>, Option<String>, bool) {
+/// Parse one timeline page (no focal tweet).
+pub(super) fn parse_timeline_page(j: &Value) -> ThreadPage {
     let bits = collect_page(j);
     let tweets = bits
         .items
         .iter()
         .filter_map(|(_, ic)| tweet_from_item(ic))
         .collect();
-    (tweets, bits.bottom_cursor, bits.terminated)
+    ThreadPage {
+        focal: None,
+        tweets,
+        bottom_cursor: bits.bottom_cursor,
+        terminated: bits.terminated,
+        timeline: bits.timeline,
+        entries: bits.entries,
+        collapsed: bits.collapsed,
+        hidden: bits.hidden,
+    }
+}
+
+/// Why a 200 body carried no timeline, for the note: X's first graphql
+/// error message when it sent one.
+pub(super) fn no_timeline_reason(j: &Value) -> String {
+    match j.pointer("/errors/0/message").and_then(|m| m.as_str()) {
+        Some(m) => format!("graphql errors: {}", cut_chars(m, 160)),
+        None => "unrecognized response".into(),
+    }
 }
 
 /// Extract a tweet from a TimelineTweet itemContent. Handles the visibility
@@ -199,16 +308,23 @@ fn tweet_from_item(ic: &Value) -> Option<T> {
         .unwrap_or("")
         .to_string();
     let legacy = tr.get("legacy");
-    let note = tr
-        .pointer("/note_tweet/note_tweet_results/result/text")
-        .and_then(|s| s.as_str());
-    let text_raw = note
-        .or_else(|| {
-            legacy
-                .and_then(|l| l.get("full_text"))
-                .and_then(|s| s.as_str())
-        })
-        .unwrap_or("");
+    // A retweet's own full_text is X's truncated "RT @user: …" stub; the
+    // original rides along whole in retweeted_status_result. Keep the
+    // "RT @user: " shape, with the whole text.
+    let retweet = legacy
+        .and_then(|l| l.pointer("/retweeted_status_result/result"))
+        .map(unwrap_visibility)
+        .and_then(|rt| {
+            let who = rt
+                .pointer("/core/user_results/result/core/screen_name")
+                .or_else(|| rt.pointer("/core/user_results/result/legacy/screen_name"))
+                .and_then(|s| s.as_str())?;
+            Some(format!("RT @{who}: {}", tweet_text(rt)?))
+        });
+    let text_raw = match &retweet {
+        Some(t) => t.as_str(),
+        None => tweet_text(tr).unwrap_or(""),
+    };
     let date = legacy
         .and_then(|l| l.get("created_at"))
         .and_then(|s| s.as_str())
@@ -250,6 +366,13 @@ fn tweet_from_item(ic: &Value) -> Option<T> {
         views,
         media,
     })
+}
+
+/// A tweet's text: the long-form note when present, else legacy full_text.
+fn tweet_text(tr: &Value) -> Option<&str> {
+    tr.pointer("/note_tweet/note_tweet_results/result/text")
+        .or_else(|| tr.pointer("/legacy/full_text"))
+        .and_then(|s| s.as_str())
 }
 
 fn unwrap_visibility(raw: &Value) -> &Value {

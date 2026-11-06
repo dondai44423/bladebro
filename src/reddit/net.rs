@@ -209,10 +209,14 @@ return fetch(u,{{credentials:'include',signal:c.signal}}).then(r=>r.text().then(
     Ok(out)
 }
 
-/// Rate-limit signal: Reddit throttles with 429s (and empty bodies).
+/// Rate-limit signal: Reddit throttles with 429s (and empty bodies). Match
+/// the exact endings the fetchers above mint for those, never a bare
+/// "429"/"throttled": other errors carry the request path, and base36 ids
+/// or a subreddit name can spell either (a plain HTTP 500 then read as
+/// "rate limit, retry in a minute").
 pub(super) fn is_rate_limit(e: &BladeError) -> bool {
     let s = e.to_string();
-    s.contains("429") || s.contains("throttled")
+    s.ends_with("rate limited (HTTP 429)") || s.ends_with("empty response (throttled?)")
 }
 
 /// Security-wall signal: the sweep hit reddit's network-security block page

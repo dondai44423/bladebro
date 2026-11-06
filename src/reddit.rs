@@ -243,196 +243,237 @@ pub async fn fetch_comments(
     let mut rate_limited = false;
     let mut security_blocked = false;
     let mut gaps: Vec<String> = Vec::new();
+    let post_key = tree.post_id.clone();
 
-    // Phase A — one batched id sweep across every "more" region. Both nested
-    // and top-level stubs expose comment ids, and /api/info returns full
-    // things for up to 100 ids per call — so ALL ids go through one queue
-    // (deduplicated, listing order) instead of one request per region. Large
-    // threads carry hundreds of tiny nested regions; per-region requests burn
-    // the whole budget before the big top-level region is ever reached.
-    let mut pending: Vec<String> = Vec::new();
+    let mut residue_regions = 0usize;
+    let mut residue_comments: i64 = 0;
+    // Regions that hide retrievable comments but were left collapsed once
+    // the per-sweep recovery cap was spent.
+    let mut unexpanded = 0usize;
+    let mut recovered = 0usize;
+    let mut expanded: HashSet<String> = HashSet::new();
+    let mut queued: HashSet<String> = HashSet::new();
+    // Stubs before `resolved` have been handled. A Phase B subtree can carry
+    // stubs of its own (a deeper "continue this thread", a wide "more"
+    // region), so both phases repeat over each new generation of stubs until
+    // none appear or the sweep has to stop — within the same budget.
+    let mut resolved = 0usize;
+    while resolved < tree.stubs.len()
+        && !capped
+        && !budget_hit
+        && !rate_limited
+        && !security_blocked
     {
-        let mut seen = HashSet::new();
-        for s in &tree.stubs {
+        let generation: Vec<Stub> = tree.stubs[resolved..].to_vec();
+        resolved = tree.stubs.len();
+
+        // Phase A — one batched id sweep across every "more" region. Both
+        // nested and top-level stubs expose comment ids, and /api/info
+        // returns full things for up to 100 ids per call — so ALL ids go
+        // through one queue (deduplicated, listing order) instead of one
+        // request per region. Large threads carry hundreds of tiny nested
+        // regions; per-region requests burn the whole budget before the big
+        // top-level region is ever reached.
+        let mut pending: Vec<String> = Vec::new();
+        for s in &generation {
             for id in &s.ids {
-                if seen.insert(id.clone()) {
+                if !tree.nodes.contains_key(id) && queued.insert(id.clone()) {
                     pending.push(id.clone());
                 }
             }
         }
-    }
-    let post_key = tree.post_id.clone();
-    let mut cursor = 0usize;
-    while cursor < pending.len() {
-        if rate_limited || security_blocked {
-            break;
-        }
-        let need = cap.saturating_sub(tree.nodes.len());
-        if need == 0 {
-            capped = true;
-            break;
-        }
-        // Round up to whole batches so the cap is never overshot by more
-        // than one batch, and cap the wave at WAVE_BATCHES.
-        let take = need
-            .div_ceil(INFO_BATCH)
-            .saturating_mul(INFO_BATCH)
-            .min(WAVE_BATCHES * INFO_BATCH)
-            .min(pending.len() - cursor);
-        let wave = &pending[cursor..cursor + take];
-        let sub_batches: Vec<&[String]> = wave.chunks(INFO_BATCH).collect();
-        if !budget.take(sub_batches.len() as u32) {
-            budget_hit = true;
-            break;
-        }
-        let urls: Vec<String> = sub_batches
-            .iter()
-            .map(|chunk| {
-                let ids_param = chunk
-                    .iter()
-                    .map(|i| format!("t1_{i}"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("/api/info.json?id={ids_param}&raw_json=1")
-            })
-            .collect();
-        match fetch_json_many(cdp, &urls).await {
-            Ok(results) => {
-                let mut failed = false;
-                let mut attached = 0usize;
-                for (chunk, res) in sub_batches.iter().zip(results) {
-                    match res {
-                        Ok(raw) => {
-                            let things = raw["data"]["children"]
-                                .as_array()
-                                .cloned()
-                                .unwrap_or_default();
-                            let got = attach_info_things(&mut tree, &things, &post_key);
-                            attached += got;
-                            if got < chunk.len() {
-                                gaps.push(format!(
-                                    "{} comments no longer retrievable",
-                                    chunk.len() - got
-                                ));
+        let mut cursor = 0usize;
+        while cursor < pending.len() {
+            if rate_limited || security_blocked {
+                break;
+            }
+            let need = cap.saturating_sub(tree.nodes.len());
+            if need == 0 {
+                capped = true;
+                break;
+            }
+            // Round up to whole batches so the cap is never overshot by more
+            // than one batch, and cap the wave at WAVE_BATCHES.
+            let take = need
+                .div_ceil(INFO_BATCH)
+                .saturating_mul(INFO_BATCH)
+                .min(WAVE_BATCHES * INFO_BATCH)
+                .min(pending.len() - cursor);
+            let wave = &pending[cursor..cursor + take];
+            let sub_batches: Vec<&[String]> = wave.chunks(INFO_BATCH).collect();
+            if !budget.take(sub_batches.len() as u32) {
+                budget_hit = true;
+                break;
+            }
+            let urls: Vec<String> = sub_batches
+                .iter()
+                .map(|chunk| {
+                    let ids_param = chunk
+                        .iter()
+                        .map(|i| format!("t1_{i}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("/api/info.json?id={ids_param}&raw_json=1")
+                })
+                .collect();
+            match fetch_json_many(cdp, &urls).await {
+                Ok(results) => {
+                    let mut failed = false;
+                    let mut attached = 0usize;
+                    for (chunk, res) in sub_batches.iter().zip(results) {
+                        match res {
+                            Ok(raw) => {
+                                let things = raw["data"]["children"]
+                                    .as_array()
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let got = attach_info_things(&mut tree, &things, &post_key);
+                                attached += got;
+                                if got < chunk.len() {
+                                    gaps.push(format!(
+                                        "{} comments no longer retrievable",
+                                        chunk.len() - got
+                                    ));
+                                }
                             }
-                        }
-                        Err(e) => {
-                            if is_rate_limit(&e) {
-                                rate_limited = true;
-                            } else if is_security_block(&e) {
-                                security_blocked = true;
-                            } else {
-                                gaps.push(format!("comment batch fetch failed ({e})"));
+                            Err(e) => {
+                                if is_rate_limit(&e) {
+                                    rate_limited = true;
+                                } else if is_security_block(&e) {
+                                    security_blocked = true;
+                                } else {
+                                    gaps.push(format!("comment batch fetch failed ({e})"));
+                                }
+                                failed = true;
                             }
-                            failed = true;
                         }
                     }
+                    tracing::debug!(
+                        batches = sub_batches.len(),
+                        attached,
+                        nodes = tree.nodes.len(),
+                        requests = budget.requests,
+                        "reddit info wave done"
+                    );
+                    if failed {
+                        break;
+                    }
                 }
-                tracing::debug!(
-                    batches = sub_batches.len(),
-                    attached,
-                    nodes = tree.nodes.len(),
-                    requests = budget.requests,
-                    "reddit info wave done"
-                );
-                if failed {
+                Err(e) => {
+                    if is_rate_limit(&e) {
+                        rate_limited = true;
+                    } else if is_security_block(&e) {
+                        security_blocked = true;
+                    } else {
+                        gaps.push(format!("comment batch wave failed ({e})"));
+                    }
                     break;
                 }
             }
-            Err(e) => {
-                if is_rate_limit(&e) {
-                    rate_limited = true;
-                } else if is_security_block(&e) {
-                    security_blocked = true;
-                } else {
-                    gaps.push(format!("comment batch wave failed ({e})"));
-                }
-                break;
+            cursor += take;
+
+            // Human-ish gap between waves — the burst pattern is the one
+            // thing reddit's rate-scoring can object to, and only multi-wave
+            // sweeps pay it (a few hundred ms), never small threads.
+            if cursor < pending.len() && !rate_limited && !security_blocked {
+                let pause = 180
+                    + std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_millis() as u64)
+                        .unwrap_or(120)
+                        % 320;
+                tokio::time::sleep(Duration::from_millis(pause)).await;
             }
         }
-        cursor += take;
 
-        // Human-ish gap between waves — the burst pattern is the one thing
-        // reddit's rate-scoring can object to, and only multi-wave sweeps
-        // pay it (a few hundred ms), never small threads.
-        if cursor < pending.len() && !rate_limited && !security_blocked {
-            let pause = 180
-                + std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_millis() as u64)
-                    .unwrap_or(120)
-                    % 320;
-            tokio::time::sleep(Duration::from_millis(pause)).await;
+        // Phase B — parent-subtree recovery for regions the listing
+        // collapsed. Two shapes: (a) a region that claims N comments but
+        // exposes fewer ids, and (b) an EMPTY stub (count 0, no ids) — reddit
+        // truncates deep subtrees like that, but the parent's own permalink
+        // listing still serves the whole subtree (verified live: an
+        // 81-comment thread exposed 60 inline + 2 empty stubs whose parents
+        // held 9 more retrievable comments). Both get a dedicated fetch; one
+        // listing returns the parent's entire subtree.
+        if capped || budget_hit || rate_limited || security_blocked {
+            break;
         }
-    }
-
-    // Phase B — parent-subtree recovery for regions the listing collapsed.
-    // Two shapes: (a) a region that claims N comments but exposes fewer ids,
-    // and (b) an EMPTY stub (count 0, no ids) — reddit truncates deep
-    // subtrees like that, but the parent's own permalink listing still
-    // serves the whole subtree (verified live: an 81-comment thread exposed
-    // 60 inline + 2 empty stubs whose parents held 9 more retrievable
-    // comments). Both get a dedicated fetch; one listing returns the
-    // parent's entire subtree.
-    let mut residue_regions = 0usize;
-    let mut residue_comments: i64 = 0;
-    if !capped && !budget_hit && !rate_limited && !security_blocked {
-        let mut recovered = 0usize;
-        // Snapshot: the loop merges into `tree` while reading the stub list.
-        let stubs_snapshot = tree.stubs.clone();
-        for s in &stubs_snapshot {
+        // Parents expanded in THIS generation: a second stub under one of
+        // them was covered by that same subtree fetch.
+        let mut this_generation: HashSet<String> = HashSet::new();
+        for s in &generation {
             let empty = s.count == 0 && s.ids.is_empty();
             if !empty && s.count <= s.ids.len() as i64 {
                 continue;
             }
             let shortfall = (s.count - s.ids.len() as i64).max(0);
-            if stub_hides_comments(s) && recovered < MAX_RECOVERY_FETCHES {
-                if tree.nodes.len() >= cap {
-                    capped = true;
-                    break;
+            if stub_hides_comments(s) {
+                if this_generation.contains(&s.parent) {
+                    continue;
                 }
-                if !budget.take(1) {
-                    budget_hit = true;
-                    break;
-                }
-                recovered += 1;
-                let url = format!(
-                    "/comments/{}/comment/{}.json?limit=500&raw_json=1&sort={sort}",
-                    tree.post_id, s.parent
-                );
-                match fetch_json(cdp, &url).await {
-                    Ok(raw) => match parse_subtree(&raw) {
-                        Ok((root, sub)) if root == s.parent => {
-                            merge_subtree(&mut tree, &root, sub);
-                            continue;
-                        }
-                        Ok((root, _)) => {
-                            gaps.push(format!(
-                                "subtree fetch returned {root}, expected {}",
-                                s.parent
-                            ));
-                        }
-                        Err(e) => {
-                            if empty {
+                if expanded.contains(&s.parent) {
+                    // The parent's own listing, already merged, still
+                    // collapses this region: fetching it again would only
+                    // repeat that.
+                    if empty {
+                        gaps.push(format!(
+                            "a collapsed region under {} stayed collapsed after expanding it",
+                            s.parent
+                        ));
+                    }
+                } else if recovered >= MAX_RECOVERY_FETCHES {
+                    // Retrievable, just past this sweep's recovery cap:
+                    // neither resolved nor "not retrievable".
+                    unexpanded += 1;
+                    continue;
+                } else {
+                    if tree.nodes.len() >= cap {
+                        capped = true;
+                        break;
+                    }
+                    if !budget.take(1) {
+                        budget_hit = true;
+                        break;
+                    }
+                    recovered += 1;
+                    this_generation.insert(s.parent.clone());
+                    let url = format!(
+                        "/comments/{}/comment/{}.json?limit=500&raw_json=1&sort={sort}",
+                        tree.post_id, s.parent
+                    );
+                    match fetch_json(cdp, &url).await {
+                        Ok(raw) => match parse_subtree(&raw) {
+                            Ok((root, sub)) if root == s.parent => {
+                                merge_subtree(&mut tree, &root, sub);
+                                continue;
+                            }
+                            Ok((root, _)) => {
                                 gaps.push(format!(
-                                    "a collapsed region under {} could not be expanded ({e})",
+                                    "subtree fetch returned {root}, expected {}",
                                     s.parent
                                 ));
-                            } else {
-                                gaps.push(e.to_string());
                             }
+                            Err(e) => {
+                                if empty {
+                                    gaps.push(format!(
+                                        "a collapsed region under {} could not be expanded ({e})",
+                                        s.parent
+                                    ));
+                                } else {
+                                    gaps.push(e.to_string());
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            if is_rate_limit(&e) {
+                                rate_limited = true;
+                                break;
+                            }
+                            if is_security_block(&e) {
+                                security_blocked = true;
+                                break;
+                            }
+                            gaps.push(format!("subtree fetch failed ({e})"));
                         }
-                    },
-                    Err(e) => {
-                        if is_rate_limit(&e) {
-                            rate_limited = true;
-                            break;
-                        }
-                        if is_security_block(&e) {
-                            security_blocked = true;
-                            break;
-                        }
-                        gaps.push(format!("subtree fetch failed ({e})"));
                     }
                 }
             }
@@ -443,11 +484,19 @@ pub async fn fetch_comments(
                 residue_comments += shortfall;
             }
         }
+        expanded.extend(this_generation);
     }
-    if residue_regions > 0 && !capped && !budget_hit && !rate_limited && !security_blocked {
-        gaps.push(format!(
-            "{residue_regions} more-regions incomplete ({residue_comments} comments not retrievable)"
-        ));
+    if !capped && !budget_hit && !rate_limited && !security_blocked {
+        if residue_regions > 0 {
+            gaps.push(format!(
+                "{residue_regions} more-regions incomplete ({residue_comments} comments not retrievable)"
+            ));
+        }
+        if unexpanded > 0 {
+            gaps.push(format!(
+                "{unexpanded} collapsed region(s) not expanded (per-sweep limit of {MAX_RECOVERY_FETCHES} subtree fetches; open a comment's url to read its replies)"
+            ));
+        }
     }
 
     let (items, dfs_capped) = render_items(&tree, cap);
@@ -504,12 +553,18 @@ fn assemble(
             "fetch budget exhausted: {count} of {total_s} comments loaded"
         ));
     } else if total.is_some_and(|t| (count as i64) < t) {
-        // Every sweep-side cause is excluded above, and every region the API
-        // exposed was resolved (Phase A + B) — the leftover is comments
-        // reddit counts but does not serve to this account.
-        status = Some(format!(
-            "loaded {count} of {total_s} comments — every region reddit exposed was resolved; the remainder are deleted/removed comments reddit still counts (not retrievable)"
-        ));
+        status = Some(if gaps.is_empty() {
+            // Every sweep-side cause is excluded above, and every region the
+            // API exposed was resolved (Phase A + B) — the leftover is
+            // comments reddit counts but does not serve to this account.
+            format!(
+                "loaded {count} of {total_s} comments — every region reddit exposed was resolved; the remainder are deleted/removed comments reddit still counts (not retrievable)"
+            )
+        } else {
+            // A named gap (a failed fetch, a region left collapsed) is part
+            // of the shortfall; claiming all was resolved would contradict it.
+            format!("loaded {count} of {total_s} comments")
+        });
     }
     if let Some(s) = status {
         notes.push(s);
@@ -537,6 +592,7 @@ fn assemble(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     use super::net::classify_gate_body;
     use super::tree::{format_epoch, normalize_text};
@@ -713,6 +769,194 @@ mod tests {
         assert!(payload.complete);
     }
 
+    // ── Whole sweeps against a fake page ──────────────────────────────────
+    // A fake CDP endpoint answers the sweep's in-page fetches from a route
+    // table (path → status, body), so `fetch_comments` runs end to end.
+
+    type Route = Box<dyn Fn(&str) -> (i64, String) + Send>;
+
+    /// Serve the sweep; the loid check passes. Returns every fetched path.
+    async fn fake_page(route: Route) -> (CdpSession, Arc<Mutex<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let fetched = Arc::new(Mutex::new(Vec::new()));
+        let log = fetched.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // The first JSON value in `s` (a url string or a url array).
+            fn first<T: serde::de::DeserializeOwned>(s: &str) -> T {
+                serde_json::Deserializer::from_str(s)
+                    .into_iter::<T>()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+            }
+            let answer = move |url: &str| {
+                log.lock().unwrap().push(url.to_string());
+                let (s, t) = route(url);
+                json!({"s": s, "t": t})
+            };
+            while let Some(Ok(msg)) = socket.next().await {
+                let req: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+                let expr = req["params"]["expression"].as_str().unwrap_or_default();
+                let value = if expr.contains("loid=") {
+                    json!(true)
+                } else if let Some(rest) = expr.split("const us=").nth(1) {
+                    let urls: Vec<String> = first(rest);
+                    Value::Array(urls.iter().map(|u| answer(u)).collect())
+                } else {
+                    let url: String = first(expr.split("fetch(").nth(1).unwrap());
+                    answer(&url)
+                };
+                let reply = json!({"id": req["id"], "result": {"result": {"value": value}}});
+                socket
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        (CdpSession::root(client), fetched)
+    }
+
+    fn listing(children: Vec<Value>) -> Value {
+        json!({"kind": "Listing", "data": {"children": children}})
+    }
+
+    /// `[post, comments]` for post `abc` reporting `total` comments.
+    fn discussion(total: i64, comments: Vec<Value>) -> String {
+        let mut post = post_listing("abc", "opuser");
+        post["data"]["children"][0]["data"]["num_comments"] = json!(total);
+        json!([post, listing(comments)]).to_string()
+    }
+
+    fn info(things: Vec<Value>) -> String {
+        json!({"kind": "Listing", "data": {"children": things}}).to_string()
+    }
+
+    #[tokio::test]
+    async fn stubs_found_inside_recovered_subtrees_are_resolved_too() {
+        // `a` is collapsed behind an empty stub. Its subtree brings two NEW
+        // regions: another "continue this thread" under `c` and a "more"
+        // (x, y) under `a`. Both must be followed, not left behind while the
+        // note blames deletions.
+        let route: Route = Box::new(|url: &str| {
+            let body = if url.starts_with("/r/test/comments/abc.json") {
+                discussion(
+                    6,
+                    vec![t1(
+                        "a",
+                        "alice",
+                        "t3_abc",
+                        "A",
+                        listing(vec![more("t1_a", 0, &[])]),
+                    )],
+                )
+            } else if url.starts_with("/comments/abc/comment/a.json") {
+                let c = t1(
+                    "c",
+                    "carol",
+                    "t1_b",
+                    "C",
+                    listing(vec![more("t1_c", 0, &[])]),
+                );
+                let b = t1("b", "bob", "t1_a", "B", listing(vec![c]));
+                let a = t1(
+                    "a",
+                    "alice",
+                    "t3_abc",
+                    "A",
+                    listing(vec![b, more("t1_a", 2, &["x", "y"])]),
+                );
+                discussion(6, vec![a])
+            } else if url.starts_with("/comments/abc/comment/c.json") {
+                let d = t1("d", "dan", "t1_c", "D", json!(""));
+                discussion(6, vec![t1("c", "carol", "t1_b", "C", listing(vec![d]))])
+            } else if url.starts_with("/api/info.json?id=t1_x,t1_y&") {
+                info(vec![
+                    t1("x", "xena", "t1_a", "X", json!("")),
+                    t1("y", "yuri", "t1_a", "Y", json!("")),
+                ])
+            } else {
+                return (404, format!("unexpected fetch {url}"));
+            };
+            (200, body)
+        });
+        let (cdp, fetched) = fake_page(route).await;
+        let p = fetch_comments(&cdp, "/r/test/comments/abc", "confidence", 100)
+            .await
+            .expect("sweep");
+        let ids: Vec<&str> = p.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["a", "b", "c", "d", "x", "y"],
+            "fetched: {:?}, note: {:?}",
+            fetched.lock().unwrap(),
+            p.note
+        );
+        assert!(p.complete, "{:?}", p.note);
+    }
+
+    #[tokio::test]
+    async fn regions_left_collapsed_are_named_not_blamed_on_deletions() {
+        // 13 top-level comments, each hiding one reply behind an empty stub:
+        // the sweep's recovery cap (12) leaves one region collapsed. That is
+        // a retrievable region the sweep did not open, not a deletion.
+        let route: Route = Box::new(|url: &str| {
+            if url.starts_with("/r/test/comments/abc.json") {
+                let roots = (0..13)
+                    .map(|i| {
+                        let id = format!("r{i}");
+                        let stub = more(&format!("t1_{id}"), 0, &[]);
+                        t1(&id, "u", "t3_abc", "R", listing(vec![stub]))
+                    })
+                    .collect();
+                return (200, discussion(26, roots));
+            }
+            let Some(id) = url
+                .strip_prefix("/comments/abc/comment/")
+                .and_then(|r| r.split(".json").next())
+            else {
+                return (404, format!("unexpected fetch {url}"));
+            };
+            let reply = t1(&format!("{id}k"), "u", &format!("t1_{id}"), "K", json!(""));
+            let root = t1(id, "u", "t3_abc", "R", listing(vec![reply]));
+            (200, discussion(26, vec![root]))
+        });
+        let (cdp, _) = fake_page(route).await;
+        let p = fetch_comments(&cdp, "/r/test/comments/abc", "confidence", 100)
+            .await
+            .expect("sweep");
+        assert_eq!(p.count, 25);
+        assert!(!p.complete);
+        let note = p.note.unwrap_or_default();
+        assert!(
+            !note.contains("every region reddit exposed was resolved"),
+            "{note}"
+        );
+        assert!(note.contains("1 collapsed region"), "{note}");
+    }
+
+    #[test]
+    fn a_gap_note_never_sits_next_to_an_all_resolved_claim() {
+        let (post, tree) = parse_discussion(&fixture()).unwrap();
+        let (items, _) = render_items(&tree, 3);
+        let gap = "subtree fetch failed (reddit: GET /x.json → HTTP 500)".to_string();
+        let p = assemble(post, items, false, false, false, false, vec![gap]);
+        let note = p.note.unwrap_or_default();
+        assert!(note.contains("loaded 3 of 26 comments"), "{note}");
+        assert!(note.contains("subtree fetch failed"), "{note}");
+        assert!(
+            !note.contains("every region reddit exposed was resolved"),
+            "a known gap contradicts the claim: {note}"
+        );
+    }
+
     #[test]
     fn empty_stubs_and_partial_regions_are_recovery_targets() {
         let mk = |parent: &str, top: bool, count: i64, ids: usize| Stub {
@@ -820,6 +1064,30 @@ mod tests {
             classify_gate_body("/x.json", "<html><body>Service Unavailable</body></html>")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn rate_limit_is_the_429_status_not_a_429_in_a_path() {
+        // Sweep errors carry the request path, and base36 post/comment ids
+        // (or a subreddit name) can spell "429" or "throttled".
+        for plain in [
+            "reddit: GET /comments/1ab429c/comment/k2xq.json?limit=500&raw_json=1&sort=confidence → HTTP 500",
+            "reddit: GET /r/throttled/comments/1wn7jni/comment/k2xq.json?limit=500&raw_json=1&sort=new → HTTP 502",
+            "reddit: non-JSON response from /comments/1x429/comment/a.json (expected value at line 1 column 1)",
+        ] {
+            assert!(!is_rate_limit(&BladeError::Other(plain.into())), "{plain}");
+        }
+        for limited in [
+            "reddit: rate limited (HTTP 429)",
+            "rate limited (HTTP 429)",
+            "reddit: empty response (throttled?)",
+            "empty response (throttled?)",
+        ] {
+            assert!(
+                is_rate_limit(&BladeError::Other(limited.into())),
+                "{limited}"
+            );
+        }
     }
 
     #[test]
