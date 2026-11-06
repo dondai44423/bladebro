@@ -24,6 +24,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::cdp::protocol::{CdpEvent, CdpIncoming, CdpMessage, CdpRequest};
@@ -44,12 +45,18 @@ const EVENT_BUS_CAPACITY: usize = 16384;
 /// its slot count; without a byte bound, page-authored bulk payloads
 /// (WebSocket frames, SSE data, oversized URLs) are retained up to
 /// capacity-fold while any subscriber lags (16384 × 1 MB ≈ 16 GiB).
-/// Consumers match on `method` and read small identity fields via `.get()`
-/// accessors that degrade to defaults, so stripping oversized params
-/// preserves event delivery (attach/dialog/download/network tracking)
-/// while capping worst-case ring retention at
-/// EVENT_BUS_CAPACITY × MAX_EVENT_BYTES.
+/// Oversized params are shrunk to fit (see [`shrink_oversized_event`]),
+/// keeping the small identity fields consumers read, which caps
+/// worst-case ring retention at EVENT_BUS_CAPACITY × MAX_EVENT_BYTES.
 const MAX_EVENT_BYTES: usize = 16 * 1024;
+
+/// Largest single CDP message accepted, on both transports. Chrome sends
+/// each DevTools message as ONE WebSocket frame, so the frame cap has to
+/// equal the message cap: tungstenite's default 16 MiB frame cap turned a
+/// bigger reply or event (a large eval result, a full-page screenshot) into
+/// a read error that closed the connection and forced a browser relaunch,
+/// while the pipe lane accepted it.
+const MAX_CDP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The result delivered to a pending command caller.
 type CdpOutcome = std::result::Result<Value, BladeError>;
@@ -65,7 +72,12 @@ type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpOutcome>>>>;
 pub struct CdpClient {
     writer_tx: mpsc::Sender<Message>,
     pending: PendingMap,
-    events_tx: broadcast::Sender<CdpEvent>,
+    /// Weak on purpose: the reader task owns the only strong sender, so the
+    /// bus closes with the transport and every subscriber and `wait_for`
+    /// sees `Closed` at once. A strong sender here kept the bus open for as
+    /// long as any client clone lived, so after the browser died waiters
+    /// ran out their full deadlines and subscriber loops never ended.
+    events_tx: broadcast::WeakSender<CdpEvent>,
     next_id: Arc<AtomicU64>,
     /// Set when the reader task ends (browser died / socket closed).
     /// drain_pending runs ONCE at reader exit — sends registered afterward
@@ -80,7 +92,11 @@ impl CdpClient {
     /// [`crate::cdp::discovery`], e.g. `ws://127.0.0.1:9222/devtools/page/<id>`.
     pub async fn connect(ws_url: &str) -> Result<Self> {
         let deadline = Duration::from_secs(5);
-        let (ws, _resp) = timeout(deadline, tokio_tungstenite::connect_async(ws_url))
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_CDP_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_CDP_MESSAGE_BYTES));
+        let connecting = tokio_tungstenite::connect_async_with_config(ws_url, Some(config), false);
+        let (ws, _resp) = timeout(deadline, connecting)
             .await
             .map_err(|_| BladeError::Timeout(deadline))?
             .map_err(|e| BladeError::Transport(e.to_string()))?;
@@ -97,6 +113,7 @@ impl CdpClient {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (events_tx, _events_rx) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let events_weak = events_tx.downgrade();
         let (writer_tx, writer_rx) = mpsc::channel::<Message>(256);
         let next_id = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -120,7 +137,6 @@ impl CdpClient {
         // Reader: parse frames, route responses to pending callers, fan out events.
         {
             let pending = pending.clone();
-            let events_tx = events_tx.clone();
             let closed_reader = closed.clone();
             tokio::spawn(async move {
                 let mut stream = stream;
@@ -148,13 +164,15 @@ impl CdpClient {
 
                 closed_reader.store(true, Ordering::Relaxed);
                 drain_pending(&pending);
+                // The only strong sender: dropping it closes the bus.
+                drop(events_tx);
             });
         }
 
         Ok(Self {
             writer_tx,
             pending,
-            events_tx,
+            events_tx: events_weak,
             next_id,
             closed,
         })
@@ -177,6 +195,7 @@ impl CdpClient {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (events_tx, _events_rx) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let events_weak = events_tx.downgrade();
         let (writer_tx, writer_rx) = mpsc::channel::<Message>(256);
         let next_id = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -205,7 +224,6 @@ impl CdpClient {
         // Reader: accumulate bytes until NUL, parse, route.
         {
             let pending = pending.clone();
-            let events_tx = events_tx.clone();
             let closed_reader = closed.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(reader);
@@ -216,7 +234,7 @@ impl CdpClient {
                         &mut reader,
                         0,
                         &mut buf,
-                        64 * 1024 * 1024,
+                        MAX_CDP_MESSAGE_BYTES,
                     )
                     .await
                     {
@@ -238,13 +256,15 @@ impl CdpClient {
                 }
                 closed_reader.store(true, Ordering::Relaxed);
                 drain_pending(&pending);
+                // The only strong sender: dropping it closes the bus.
+                drop(events_tx);
             });
         }
 
         Ok(Self {
             writer_tx,
             pending,
-            events_tx,
+            events_tx: events_weak,
             next_id,
             closed,
         })
@@ -330,7 +350,12 @@ impl CdpClient {
 
     /// Subscribe to the event stream. Multiple subscribers are supported.
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
-        self.events_tx.subscribe()
+        match self.events_tx.upgrade() {
+            Some(tx) => tx.subscribe(),
+            // Transport already gone: a receiver whose sender is dropped
+            // reports Closed on its first recv.
+            None => broadcast::channel(1).1,
+        }
     }
 
     /// Has the transport been closed (Chrome died or pipe broke)?
@@ -341,7 +366,8 @@ impl CdpClient {
 
     /// Wait for the next event whose method equals `method`, up to `deadline`.
     ///
-    /// Other events are skipped. A lagged bus is recovered transparently.
+    /// Other events are skipped. A lagged bus is recovered transparently; a
+    /// closed transport ends the wait with [`BladeError::Closed`] at once.
     pub fn wait_for(
         &self,
         method: &str,
@@ -384,68 +410,73 @@ impl CdpClient {
     }
 }
 
-/// Shrink an oversized event's `params` to its small identity fields.
-/// Bulk payloads (WS/SSE frame data, headers, long URLs) have no consumer
-/// in the driver; the fields tracking consumers read are kept so attach/
-/// dialog/download/network bookkeeping degrades gracefully at worst.
-fn shrink_oversized_event(method: &str, params: &mut Value) {
-    use serde_json::Map;
-    let trunc = |v: &Value, cap: usize| -> Option<Value> {
-        v.as_str()
-            .map(|s| Value::String(crate::platform::truncate_utf8(s, cap).to_string()))
-    };
-    let mut keep = Map::new();
-    match method {
-        "Network.requestWillBeSent" => {
-            if let Some(id) = params.get("requestId") {
-                keep.insert("requestId".into(), id.clone());
-            }
-            if let Some(ty) = params.get("type") {
-                keep.insert("type".into(), ty.clone());
-            }
-            if let Some(req) = params.get("request") {
-                let mut r = Map::new();
-                if let Some(m) = req.get("method") {
-                    r.insert("method".into(), m.clone());
-                }
-                if let Some(u) = trunc(req.get("url").unwrap_or(&Value::Null), 4096) {
-                    r.insert("url".into(), u);
-                }
-                keep.insert("request".into(), Value::Object(r));
+/// Shrink an oversized event's `params` under [`MAX_EVENT_BYTES`] without
+/// losing the identity fields consumers key on (`sessionId` of an
+/// auto-attached target, a download's `guid`, a paused request's
+/// `requestId`, `frame.parentId`, ...). A per-method whitelist missed every
+/// event it did not name: an attach with a long data: URL arrived as `{}`
+/// and its `waitForDebuggerOnStart` target stayed paused forever.
+///
+/// Identity fields are short and shallow; the bulk is long page-authored
+/// strings (data: URLs, frame payloads, post bodies) or big nested lists
+/// and maps (headers, cookies, stack frames). So long strings are capped
+/// first, then containers below the top levels are dropped, each step
+/// harsher than the last, until the params fit.
+fn shrink_oversized_event(params: &mut Value) {
+    // (deepest container level kept, per-string byte cap); `params` is
+    // level 0. 4096 keeps the URL length the network tracker always got.
+    const STEPS: [(usize, usize); 4] = [(usize::MAX, 4096), (1, 4096), (1, 512), (0, 512)];
+    for (max_depth, cap) in STEPS {
+        clip_event_value(params, 0, max_depth, cap);
+        if encodes_within(params, MAX_EVENT_BYTES) {
+            return;
+        }
+    }
+    *params = Value::Object(serde_json::Map::new());
+}
+
+/// Truncate strings longer than `cap` bytes and drop arrays/objects nested
+/// deeper than `max_depth`, in place.
+fn clip_event_value(v: &mut Value, depth: usize, max_depth: usize, cap: usize) {
+    let too_deep = |c: &Value| depth >= max_depth && (c.is_array() || c.is_object());
+    match v {
+        Value::String(s) => {
+            let keep = crate::platform::truncate_utf8(s, cap).len();
+            s.truncate(keep);
+        }
+        Value::Array(items) => {
+            items.retain(|c| !too_deep(c));
+            for c in items {
+                clip_event_value(c, depth + 1, max_depth, cap);
             }
         }
-        "Network.responseReceived" => {
-            if let Some(id) = params.get("requestId") {
-                keep.insert("requestId".into(), id.clone());
-            }
-            if let Some(status) = params.get("response").and_then(|r| r.get("status")) {
-                keep.insert(
-                    "response".into(),
-                    serde_json::json!({ "status": status.clone() }),
-                );
+        Value::Object(map) => {
+            map.retain(|_, c| !too_deep(c));
+            for c in map.values_mut() {
+                clip_event_value(c, depth + 1, max_depth, cap);
             }
         }
-        "Network.loadingFinished" | "Network.loadingFailed" => {
-            if let Some(id) = params.get("requestId") {
-                keep.insert("requestId".into(), id.clone());
-            }
-            if let Some(err) = trunc(params.get("errorText").unwrap_or(&Value::Null), 512) {
-                keep.insert("errorText".into(), err);
-            }
-        }
-        "Page.javascriptDialogOpening" => {
-            if let Some(ty) = params.get("type") {
-                keep.insert("type".into(), ty.clone());
-            }
-            if let Some(msg) = trunc(params.get("message").unwrap_or(&Value::Null), 2048) {
-                keep.insert("message".into(), msg);
-            }
-        }
-        // WS/SSE frames and everything else have no consumer — an empty
-        // identity set is safe and nothing bulk is retained.
         _ => {}
     }
-    *params = Value::Object(keep);
+}
+
+/// Does `v` serialize to at most `limit` bytes? Stops at the limit instead
+/// of buffering the whole encoding.
+fn encodes_within(v: &Value, limit: usize) -> bool {
+    struct Budget(usize);
+    impl std::io::Write for Budget {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(buf.len())
+                .ok_or(std::io::ErrorKind::WriteZero)?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Budget(limit), v).is_ok()
 }
 
 /// Route one decoded JSON text frame: responses go to their pending caller,
@@ -487,7 +518,7 @@ fn route_cdp_text(
                 // small identity fields and drop the bulk payloads nobody
                 // consumes.
                 if text.len() > MAX_EVENT_BYTES {
-                    shrink_oversized_event(&ev.method, &mut ev.params);
+                    shrink_oversized_event(&mut ev.params);
                 }
                 let _ = events_tx.send(ev);
             }
@@ -555,9 +586,10 @@ mod reliability_tests {
         let ev = rx.recv().await.unwrap();
         assert_eq!(ev.method, "Network.webSocketFrameReceived");
         assert!(
-            ev.params.as_object().map(|o| o.is_empty()).unwrap_or(false),
+            encoded(&ev.params) <= MAX_EVENT_BYTES,
             "bulk payload must not be retained"
         );
+        assert_eq!(ev.params["requestId"], "r1");
         // A small event passes through untouched.
         let small = "{\"method\":\"Page.javascriptDialogOpening\",\"params\":{\"type\":\"alert\",\"message\":\"hi\"}}";
         assert!(route_cdp_text(small, &pending, &events_tx));
@@ -595,7 +627,7 @@ mod reliability_tests {
         let client = CdpClient {
             writer_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
-            events_tx,
+            events_tx: events_tx.downgrade(),
             next_id: Arc::new(AtomicU64::new(0)),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -630,5 +662,215 @@ mod reliability_tests {
             matches!(result, Ok(Err(BladeError::Timeout(_)))),
             "a peer that never upgrades must time out: {result:?}"
         );
+    }
+    /// Route one event frame and return what reached the bus.
+    async fn routed(event: serde_json::Value) -> CdpEvent {
+        let (events_tx, mut rx) = broadcast::channel(8);
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let text = event.to_string();
+        assert!(text.len() > MAX_EVENT_BYTES, "fixture must be oversized");
+        assert!(route_cdp_text(&text, &pending, &events_tx));
+        rx.recv().await.unwrap()
+    }
+
+    fn encoded(v: &Value) -> usize {
+        serde_json::to_vec(v).unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn oversized_events_keep_the_identity_fields_consumers_read() {
+        // Regression: an oversized event outside a four-method whitelist
+        // reached the bus with params = {}.
+        let big = "x".repeat(20 * 1024);
+
+        // Auto-attached worker with a long data: URL — without sessionId the
+        // attach handler skips it and the target stays paused forever.
+        let ev = routed(serde_json::json!({
+            "method": "Target.attachedToTarget", "sessionId": "PAGE",
+            "params": {"sessionId": "W1", "waitingForDebugger": true,
+                "targetInfo": {"targetId": "T1", "type": "worker", "url": format!("data:text/javascript,{big}")}}
+        }))
+        .await;
+        assert_eq!(ev.params["sessionId"], "W1", "{}", ev.params);
+        assert_eq!(ev.params["targetInfo"]["type"], "worker", "{}", ev.params);
+
+        // Download of a large data: URL — guid ties progress events to it.
+        let ev = routed(serde_json::json!({
+            "method": "Page.downloadWillBegin",
+            "params": {"frameId": "F1", "guid": "G1", "url": format!("data:text/csv,{big}"), "suggestedFilename": "report.csv"}
+        }))
+        .await;
+        assert_eq!(ev.params["guid"], "G1", "{}", ev.params);
+        assert_eq!(
+            ev.params["suggestedFilename"], "report.csv",
+            "{}",
+            ev.params
+        );
+
+        // A subframe navigating to a long URL must still read as a subframe.
+        let ev = routed(serde_json::json!({
+            "method": "Page.frameNavigated",
+            "params": {"type": "Navigation", "frame": {"id": "F2", "parentId": "F1", "loaderId": "L1",
+                "url": format!("https://a.test/?q={big}"), "securityOrigin": "https://a.test", "mimeType": "text/html"}}
+        }))
+        .await;
+        assert_eq!(ev.params["frame"]["parentId"], "F1", "{}", ev.params);
+        assert!(ev.params["frame"]["url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("https://a.test/?q=x")));
+
+        // A paused request with a large body — without requestId the
+        // interception task cannot continue it and the request hangs.
+        let ev = routed(serde_json::json!({
+            "method": "Fetch.requestPaused",
+            "params": {"requestId": "interception-1", "frameId": "F1", "resourceType": "XHR",
+                "request": {"url": "https://a.test/upload", "method": "POST", "headers": {"Content-Type": "text/plain"}, "postData": big}}
+        }))
+        .await;
+        assert_eq!(ev.params["requestId"], "interception-1", "{}", ev.params);
+        assert_eq!(ev.params["resourceType"], "XHR");
+        assert_eq!(ev.params["request"]["url"], "https://a.test/upload");
+    }
+
+    #[tokio::test]
+    async fn shrunk_events_stay_within_the_byte_bound() {
+        let long = "y".repeat(5 * 1024);
+        // Structural bulk (a big header map / cookie list) is dropped below
+        // the levels identity fields live on.
+        let headers: serde_json::Map<String, Value> = (0..200)
+            .map(|i| (format!("x-h{i}"), Value::String("v".repeat(400))))
+            .collect();
+        let cookies: Vec<Value> =
+            (0..500).map(|i| serde_json::json!({"cookie": {"name": format!("c{i}"), "value": "v".repeat(64)}})).collect();
+        let ev = routed(serde_json::json!({
+            "method": "Fetch.requestPaused",
+            "params": {"requestId": "r9", "resourceType": "Fetch",
+                "request": {"url": "https://a.test/x", "method": "GET", "headers": headers}}
+        }))
+        .await;
+        assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
+        assert_eq!(ev.params["requestId"], "r9");
+        assert_eq!(ev.params["request"]["url"], "https://a.test/x");
+        let ev = routed(serde_json::json!({
+            "method": "Network.requestWillBeSentExtraInfo",
+            "params": {"requestId": "r10", "associatedCookies": cookies}
+        }))
+        .await;
+        assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
+        assert_eq!(ev.params["requestId"], "r10");
+        // Pathological shapes still end inside the bound.
+        let wide: serde_json::Map<String, Value> = (0..100)
+            .map(|i| (format!("k{i}"), Value::String(long.clone())))
+            .collect();
+        let ev = routed(serde_json::json!({"method": "X.wide", "params": wide})).await;
+        assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
+        let numbers: Vec<Value> = (0..20_000).map(Value::from).collect();
+        let ev = routed(
+            serde_json::json!({"method": "X.numbers", "params": {"id": 1, "args": numbers}}),
+        )
+        .await;
+        assert!(encoded(&ev.params) <= MAX_EVENT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn websocket_carries_a_message_larger_than_16_mib() {
+        // Regression: tungstenite's default 16 MiB frame cap. Chrome sends
+        // each DevTools message as ONE frame, so a bigger reply (a large
+        // eval result, a full-page screenshot) was a read error that closed
+        // the connection. The pipe lane always allowed 64 MiB.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let Some(Ok(Message::Text(req))) = ws.next().await else {
+                return;
+            };
+            let req: Value = serde_json::from_str(req.as_str()).unwrap();
+            let reply = serde_json::json!({
+                "id": req["id"],
+                "result": {"result": {"type": "string", "value": "x".repeat(17 << 20)}}
+            });
+            ws.send(Message::Text(reply.to_string().into()))
+                .await
+                .unwrap();
+            let _ = ws.next().await;
+        });
+        let client = CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let res = client
+            .send_with_timeout("Runtime.evaluate", None, Duration::from_secs(30))
+            .await;
+        server.abort();
+        let value = res.expect("a 17 MiB CDP reply must arrive intact");
+        assert_eq!(
+            value["result"]["value"].as_str().map(str::len),
+            Some(17 << 20)
+        );
+        assert!(!client.is_closed());
+    }
+
+    #[tokio::test]
+    async fn event_waiters_wake_with_closed_when_the_browser_dies() {
+        // Regression: the client kept its own broadcast sender alive, so the
+        // bus never closed — after the browser died every waiter ran out its
+        // full deadline (10 s in navigate) and subscriber loops never ended.
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        use tokio_tungstenite::WebSocketStream;
+        let (near, far) = tokio::io::duplex(64 * 1024);
+        let client_ws = WebSocketStream::from_raw_socket(near, Role::Client, None).await;
+        let browser = WebSocketStream::from_raw_socket(far, Role::Server, None).await;
+        let client = CdpClient::from_socket(client_ws).unwrap();
+        let session = crate::cdp::CdpSession::child(client.clone(), "S1");
+        let client_wait = client.wait_for("Page.frameNavigated", Duration::from_secs(5));
+        let session_wait = session.wait_for("Page.frameNavigated", Duration::from_secs(5));
+        let mut sub = session.subscribe();
+
+        let started = std::time::Instant::now();
+        drop(browser); // the browser dies: the socket hits EOF
+        let (a, b) = tokio::join!(client_wait, session_wait);
+        assert!(
+            matches!(a, Err(BladeError::Closed)),
+            "client wait_for: {a:?}"
+        );
+        assert!(
+            matches!(b, Err(BladeError::Closed)),
+            "session wait_for: {b:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let next = timeout(Duration::from_secs(1), sub.recv()).await;
+        assert!(
+            matches!(next, Ok(Err(broadcast::error::RecvError::Closed))),
+            "subscriber loop must see Closed: {next:?}"
+        );
+        // A waiter created after the death fails at once, too.
+        let late = timeout(
+            Duration::from_secs(1),
+            client.wait_for("Page.loadEventFired", Duration::from_secs(5)),
+        )
+        .await;
+        assert!(
+            matches!(late, Ok(Err(BladeError::Closed))),
+            "late wait_for: {late:?}"
+        );
+        assert!(client.is_closed());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipe_lane_event_waiters_wake_with_closed_when_the_browser_dies() {
+        use tokio::net::unix::pipe;
+        let (browser_out, client_in) = pipe::pipe().unwrap();
+        let (client_out, _browser_in) = pipe::pipe().unwrap();
+        let client = CdpClient::from_pipe(client_in, client_out).unwrap();
+        let wait = client.wait_for("Page.frameNavigated", Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        drop(browser_out); // Chrome exited: its CDP output pipe hits EOF
+        let res = wait.await;
+        assert!(
+            matches!(res, Err(BladeError::Closed)),
+            "pipe wait_for: {res:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
