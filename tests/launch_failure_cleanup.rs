@@ -9,8 +9,10 @@
 //! in its own group, so bladebro dying on the signal's default action used to
 //! orphan it instead of cleaning up. A signal the run inherited as ignored
 //! (`nohup`, a non-interactive shell's `cmd &`) must stay ignored: the command
-//! finishes as it did before signals were caught. SIGKILL to the run's group,
-//! which nothing can catch, must still take the virtual display with it.
+//! finishes as it did before signals were caught. The virtual display must
+//! outlive a Ctrl-C to the run's group until the browser is closed, yet a
+//! SIGKILL, which nothing can catch, to the group or to bladebro alone must
+//! still take it down.
 #![cfg(unix)]
 
 use std::io::Write;
@@ -63,6 +65,43 @@ fn lingering_browser(root: &Path) -> (PathBuf, PathBuf) {
 /// writes `running` and takes 3s to answer: the command itself, not the
 /// launch, is in flight. Records its start and pid like the other stand-ins.
 fn endpoint_browser(root: &Path) -> (PathBuf, PathBuf) {
+    endpoint_browser_with(root, "")
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// `endpoint_browser` that, when bladebro stops it (SIGTERM), first records in
+/// `display-at-close` whether its X display is still served: `up`, `down`, or
+/// `none` without a virtual display. Real Chrome exits on losing its display,
+/// so `down` means a real browser would already be gone, unflushed. The pause
+/// lets a display that is dying anyway finish dying.
+fn display_checking_browser(root: &Path) -> (PathBuf, PathBuf) {
+    let hook = format!(
+        r#"
+import signal, socket
+def closing(*_):
+    time.sleep(0.3)
+    display = os.environ.get('DISPLAY', '')
+    state = 'none'
+    if display.startswith(':'):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.connect('/tmp/.X11-unix/X' + display[1:].split('.')[0])
+            state = 'up'
+        except OSError:
+            state = 'down'
+        s.close()
+    with open({out:?}, 'w') as f:
+        f.write(state)
+    os._exit(0)
+signal.signal(signal.SIGTERM, closing)
+"#,
+        out = root.join("display-at-close").to_string_lossy()
+    );
+    endpoint_browser_with(root, &hook)
+}
+
+/// `endpoint_browser` with `hook` (python) run before it starts serving.
+fn endpoint_browser_with(root: &Path, hook: &str) -> (PathBuf, PathBuf) {
     let pids = root.join("helpers.pid");
     let starts = root.join("starts");
     let running = root.join("running");
@@ -97,11 +136,13 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
     def log_message(self, *args):
         pass
+{hook}
 http.server.ThreadingHTTPServer(('127.0.0.1', port), Endpoint).serve_forever()
 "#,
             starts = starts.to_string_lossy(),
             pids = pids.to_string_lossy(),
             running = running.to_string_lossy(),
+            hook = hook,
         ),
     )
     .unwrap();
@@ -183,33 +224,55 @@ fn scenario_with(
     (root, temp, fake, pids)
 }
 
+/// Linux: live processes tied to bladebro `pid`'s virtual display (see
+/// `display_leftovers`). Elsewhere there is no Xvfb: nothing to find.
+fn display_processes(pid: u32) -> Vec<i32> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let marker = format!("-xauth-{pid}-");
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter(|p| {
+            ["cmdline", "environ"].iter().any(|f| {
+                let raw = std::fs::read(format!("/proc/{p}/{f}")).unwrap_or_default();
+                String::from_utf8_lossy(&raw).contains(&marker)
+            })
+        })
+        .collect()
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Whether bladebro finds an Xvfb here (its fixed locations, then PATH). A
+/// display test then fails, rather than skips, when no display came up.
+fn xvfb_installed() -> bool {
+    let fixed = [
+        "/run/current-system/sw/bin",
+        "/usr/bin",
+        "/usr/local/bin",
+        "/opt/Xvfb/bin",
+    ];
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    cfg!(target_os = "linux")
+        && fixed
+            .into_iter()
+            .map(PathBuf::from)
+            .chain(std::env::split_paths(&path))
+            .any(|dir| dir.join("Xvfb").is_file())
+}
+
 /// Linux: live processes still tied to bladebro `pid`'s virtual display.
 /// Xvfb names the session's Xauthority file (`…-xauth-<pid>-…`) in its
 /// command line; the WM and the browser tree carry it in XAUTHORITY. Killed
 /// here either way. Elsewhere there is no Xvfb: nothing to find.
 fn display_leftovers(pid: u32) -> Vec<i32> {
-    if !cfg!(target_os = "linux") {
-        return Vec::new();
-    }
-    let marker = format!("-xauth-{pid}-");
-    let scan = || -> Vec<i32> {
-        std::fs::read_dir("/proc")
-            .unwrap()
-            .flatten()
-            .filter_map(|e| e.file_name().to_string_lossy().parse::<i32>().ok())
-            .filter(|p| {
-                ["cmdline", "environ"].iter().any(|f| {
-                    let raw = std::fs::read(format!("/proc/{p}/{f}")).unwrap_or_default();
-                    String::from_utf8_lossy(&raw).contains(&marker)
-                })
-            })
-            .collect()
-    };
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !scan().is_empty() && Instant::now() < deadline {
+    while !display_processes(pid).is_empty() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let survivors = scan();
+    let survivors = display_processes(pid);
     for pid in &survivors {
         unsafe {
             libc::kill(*pid, libc::SIGKILL);
@@ -262,6 +325,10 @@ struct SignalledRun {
     stderr: String,
     /// Browser starts over the whole run (`starts`).
     starts: usize,
+    /// What `display_checking_browser` saw when it was stopped. Read by the
+    /// Linux-only display test; kept elsewhere for a uniform constructor.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    display_at_close: Option<String>,
 }
 
 /// Start an in-process run the way a shell starts a job: in its own process
@@ -327,6 +394,7 @@ fn signal_run(
     let stdout = std::fs::read_to_string(&outlog).unwrap_or_default();
     let stderr = std::fs::read_to_string(&errlog).unwrap_or_default();
     let starts = starts(&root);
+    let display_at_close = std::fs::read_to_string(root.join("display-at-close")).ok();
     let _ = std::fs::remove_dir_all(&root);
     assert!(
         was_ready,
@@ -343,6 +411,7 @@ fn signal_run(
         stdout,
         stderr,
         starts,
+        display_at_close,
     }
 }
 
@@ -522,17 +591,59 @@ fn signals_ignored_on_entry_stay_ignored() {
     );
 }
 
-/// SIGKILL to an in-process run's process group (`timeout -s KILL`, a
-/// harness's killpg, a cancelled CI job) leaves bladebro no chance to clean
-/// up. The virtual display must die with the group, so Xvfb and the window
-/// manager stay in bladebro's process group; a real Chrome then exits on
-/// losing its display. (This stand-in browser does not, and is not what is
-/// checked: it runs in its own group by design and is cleared first.)
+/// Ctrl-C to the job's process group (the terminal's ^C) reaches bladebro and,
+/// unless kept out of that group, the virtual display: Xvfb died on the spot
+/// while bladebro was still closing the browser, and a real Chrome exited on
+/// losing its display before its graceful close could flush storage. The
+/// display must still be up when bladebro stops the browser.
+/// (`tools/reliability_probe/persistence.py` checks the flush itself with a
+/// real Chrome.)
 #[cfg(target_os = "linux")]
 #[test]
-fn sigkill_to_the_process_group_takes_the_virtual_display_with_it() {
+fn sigint_to_the_process_group_keeps_the_display_up_until_the_browser_is_closed() {
+    let run = signal_run(
+        "sigint-display",
+        display_checking_browser,
+        &["probe"],
+        &[],
+        running,
+        &[libc::SIGINT],
+    );
+    assert_eq!(
+        run.status.signal(),
+        Some(libc::SIGINT),
+        "{:?}\n{}",
+        run.status,
+        run.stderr
+    );
+    if run.display_at_close.as_deref() == Some("none") && !xvfb_installed() {
+        eprintln!("no virtual display here (no Xvfb); skipping the display check");
+        return;
+    }
+    assert_eq!(
+        run.display_at_close.as_deref(),
+        Some("up"),
+        "the browser lost its display before bladebro closed it\n{}",
+        run.stderr
+    );
+}
+
+#[cfg(target_os = "linux")]
+struct KilledRun {
+    status: std::process::ExitStatus,
+    /// Display processes (Xvfb, window manager, browser) just before the kill.
+    display_before: usize,
+    /// Display processes still alive after it (`display_leftovers`).
+    display_after: Vec<i32>,
+    stderr: String,
+}
+
+#[cfg(target_os = "linux")]
+/// SIGKILL an in-process `probe` while the command runs: to its whole process
+/// group (`whole_group`) or to bladebro's pid alone.
+fn sigkill_mid_run(name: &str, whole_group: bool) -> KilledRun {
     let _serial = serial();
-    let (root, temp, fake, pids) = scenario_with("sigkill", endpoint_browser);
+    let (root, temp, fake, pids) = scenario_with(name, endpoint_browser);
     let errlog = root.join("stderr.log");
     let mut child = base_command(&root, &fake, &temp)
         .arg("probe")
@@ -549,12 +660,18 @@ fn sigkill_to_the_process_group_takes_the_virtual_display_with_it() {
         std::thread::sleep(Duration::from_millis(25));
     }
     let was_running = running(&root);
+    let display_before = display_processes(child.id()).len();
+    let target = if whole_group {
+        -(child.id() as i32)
+    } else {
+        child.id() as i32
+    };
     unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
+        libc::kill(target, libc::SIGKILL);
     }
     let status = child.wait().unwrap();
     let _ = leftovers(&temp, &pids);
-    let display = display_leftovers(child.id());
+    let display_after = display_leftovers(child.id());
     let stderr = std::fs::read_to_string(&errlog).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&root);
     assert!(
@@ -562,8 +679,56 @@ fn sigkill_to_the_process_group_takes_the_virtual_display_with_it() {
         "the run never reached the signal point\n{stderr}"
     );
     assert_eq!(status.signal(), Some(libc::SIGKILL), "{stderr}");
+    KilledRun {
+        status,
+        display_before,
+        display_after,
+        stderr,
+    }
+}
+
+/// SIGKILL to an in-process run's process group (`timeout -s KILL`, a
+/// harness's killpg, a cancelled CI job) leaves bladebro no chance to clean
+/// up. The virtual display must die with it: Xvfb and the window manager run
+/// in their own process group (out of reach of the group's Ctrl-C), so it is
+/// the kernel's parent-death signal that takes them down; a real Chrome then
+/// exits on losing its display. (This stand-in browser does not, and is not
+/// what is checked: it runs in its own group by design and is cleared first.)
+#[cfg(target_os = "linux")]
+#[test]
+fn sigkill_to_the_process_group_takes_the_virtual_display_with_it() {
+    let run = sigkill_mid_run("sigkill", true);
     assert!(
-        display.is_empty(),
-        "SIGKILL to bladebro's process group left display processes {display:?} running\n{stderr}"
+        run.display_after.is_empty(),
+        "SIGKILL to bladebro's process group left display processes {:?} running\n{}",
+        run.display_after,
+        run.stderr
+    );
+}
+
+/// SIGKILL to bladebro's pid alone (a harness's kill(pid), the OOM killer)
+/// reaches nothing else: the virtual display must still die with bladebro
+/// instead of running on until some later launch's orphan reaper finds it.
+#[cfg(target_os = "linux")]
+#[test]
+fn sigkill_to_bladebro_alone_takes_the_virtual_display_with_it() {
+    let run = sigkill_mid_run("sigkill-alone", false);
+    if run.display_before == 0 && !xvfb_installed() {
+        eprintln!(
+            "no virtual display here (no Xvfb); skipping ({:?})",
+            run.status
+        );
+        return;
+    }
+    assert!(
+        run.display_before > 0,
+        "no virtual display came up although Xvfb is installed\n{}",
+        run.stderr
+    );
+    assert!(
+        run.display_after.is_empty(),
+        "SIGKILL to bladebro alone left display processes {:?} running\n{}",
+        run.display_after,
+        run.stderr
     );
 }
