@@ -78,6 +78,26 @@ impl RouteEpoch {
         self.epoch.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Feed one `Page.navigatedWithinDocument` event; true when it was the
+    /// main frame's (the caller then resets its per-document logs).
+    ///
+    /// Same-process iframes report their own hash/pushState moves on this
+    /// session too. Only a main-frame route change leaves the previous
+    /// route's content mounted; arming on an iframe's (a ticker, an embedded
+    /// widget's router) made every later read pay the full budget and report
+    /// "unsettled" against a page that never moved.
+    pub(crate) fn on_navigated_within_document(
+        &self,
+        params: &serde_json::Value,
+        main_frame: &str,
+    ) -> bool {
+        let is_main = params.get("frameId").and_then(serde_json::Value::as_str) == Some(main_frame);
+        if is_main {
+            self.note_nav();
+        }
+        is_main
+    }
+
     /// True when a same-document navigation happened since the last guard pass.
     pub(crate) fn armed(&self) -> bool {
         self.epoch.load(Ordering::Relaxed) != self.settled.load(Ordering::Relaxed)
@@ -179,6 +199,21 @@ mod tests {
         assert!(e.armed(), "a same-document navigation arms the guard");
         e.note_nav();
         assert!(e.armed());
+    }
+
+    /// Same-process iframes report their own hash/pushState moves on the
+    /// page session. Only the main frame's route can leave the old content
+    /// mounted under a new url; an iframe ticker arming the guard made every
+    /// later read pay the whole budget and report "unsettled".
+    #[test]
+    fn only_main_frame_same_document_navigation_arms_the_guard() {
+        let e = RouteEpoch::new();
+        let iframe = serde_json::json!({"frameId": "CHILD", "url": "http://h/t.html#3"});
+        assert!(!e.on_navigated_within_document(&iframe, "MAIN"));
+        assert!(!e.armed(), "an iframe's pushState must not arm the guard");
+        let main = serde_json::json!({"frameId": "MAIN", "url": "http://h/#/next"});
+        assert!(e.on_navigated_within_document(&main, "MAIN"));
+        assert!(e.armed(), "the main frame's route change still arms it");
     }
 
     #[test]

@@ -180,6 +180,12 @@ impl Page {
             }
         };
         let active_locale = std::env::var("BLADE_LOCALE").ok().filter(|s| !s.is_empty());
+        // What the S6 block above put on this target (none on the real lane).
+        let emulation = if crate::realbrowser::real_lane() {
+            super::navigate::Emulation::default()
+        } else {
+            super::navigate::Emulation::session()
+        };
         wait_for_load(&cdp, Duration::from_secs(10)).await?;
 
         // D22: Worker GL spoof — inject the GL spoof into Worker contexts too.
@@ -683,15 +689,13 @@ impl Page {
                             }
                         }
                     }
-                    // A client-side route change: the url has moved but the
-                    // previous route's DOM is still mounted. Arm the guard so
-                    // the next read waits for the swap instead of answering
-                    // with the old route's content.
+                    // A main-frame client-side route change: the url has moved
+                    // but the previous route's DOM is still mounted. Arm the
+                    // guard so the next read waits for the swap instead of
+                    // answering with the old route's content (iframes' own
+                    // same-document moves are ignored there).
                     Some(Ok(ev)) if ev.method == "Page.navigatedWithinDocument" => {
-                        route_t.note_nav();
-                        if ev.params.get("frameId").and_then(Value::as_str)
-                            == Some(main_frame.as_str())
-                        {
+                        if route_t.on_navigated_within_document(&ev.params, &main_frame) {
                             if let Ok(mut log) = net_log_t.lock() {
                                 log.clear();
                             }
@@ -795,6 +799,7 @@ impl Page {
             worker_task,
             stealth_script_id,
             active_locale,
+            emulation,
             intercept,
             intercept_task: Some(intercept_task),
             downloads,

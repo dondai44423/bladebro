@@ -10,19 +10,10 @@ impl Page {
     /// navigate steps, and the CLI `nav` command.
     pub async fn navigate(&mut self, url: &str) -> Result<PageDelta> {
         self.activate().await?;
-        // S4+S5: track action timing for pacing + idle hum.
-        self.is_busy
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let result = self.navigate_inner(url).await;
-        self.is_busy
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        self.last_action_epoch
-            .store(now, std::sync::atomic::Ordering::Relaxed);
-        result
+        // S4+S5: track action timing for pacing + idle hum. The guard also
+        // clears the flag when a caller's timeout drops this future.
+        let _busy = BusyGuard::new(&self.is_busy, &self.last_action_epoch);
+        self.navigate_inner(url).await
     }
 
     async fn navigate_inner(&mut self, url: &str) -> Result<PageDelta> {
@@ -115,7 +106,7 @@ impl Page {
         };
         _t("frameNavigated");
         if matches!(nav_event, Some(result) if !matches!(result, Ok(Ok(_)))) {
-            if let Some(err) = nav_error {
+            if let Some(err) = nav_error.as_deref() {
                 let hint = if err.contains("ERR_ABORTED") {
                     " (the URL may be a file download - try act download url=...)"
                 } else {
@@ -124,6 +115,28 @@ impl Page {
                 return Err(crate::error::BladeError::Other(format!(
                     "navigation to {target} failed: {err}{hint}"
                 )));
+            }
+        }
+        // L7: an unreachable target (refused connection, DNS, TLS, unsafe
+        // port, dead proxy) is not refused - Chrome COMMITS its own error
+        // page in its place, so frameNavigated fires inside the grace above
+        // and this used to report "navigated" with "This site can't be
+        // reached" as the site's content (exit 0). A page-side navigation
+        // that superseded ours (ERR_ABORTED, then a real document) still
+        // proceeds: only Chrome's error document in the main frame fails.
+        if let Some(err) = nav_error.as_deref() {
+            let tree = self.cdp.send("Page.getFrameTree", None).await.ok();
+            let frame = tree.as_ref().and_then(|t| t.pointer("/frameTree/frame"));
+            // Name BLADE_PROXY only when it is the proxy this browser was
+            // launched with (the real lane runs the person's own Chrome).
+            let blade_proxy = !crate::realbrowser::real_lane()
+                && matches!(crate::browser::proxy::env_blade_proxy(), Ok(Some(_)));
+            if let Some(msg) = error_page_failure(&target, err, frame, blade_proxy) {
+                // Recapture so the error's page state is the tab's real
+                // state (Chrome's error page), not the page we left.
+                let _ = wait_for_load(&self.cdp, Duration::from_secs(3)).await;
+                let _ = self.recapture().await;
+                return Err(crate::error::BladeError::Other(msg));
             }
         }
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
@@ -440,70 +453,171 @@ impl Page {
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
-        if let Some(profile) = profiles.get(&domain) {
-            if let Some(ref tz) = profile.tz {
-                let _ = self
-                    .cdp
-                    .send(
-                        "Emulation.setTimezoneOverride",
-                        Some(serde_json::json!({ "timezoneId": tz })),
-                    )
-                    .await;
-                eprintln!("[bladebro] domain profile {domain}: tz={tz}");
+        // Every field resolves for EVERY domain: the profile's value, else the
+        // session baseline (BLADE_TZ / BLADE_LOCALE). Applying only what a
+        // profile set left the previous domain's tz/locale on every later
+        // site, and a profile omitting `locale` swapped the injection back
+        // while the CDP locale stayed - navigator.language and Intl then
+        // disagreed (the mismatch the coherence swap below exists to stop).
+        let want = Emulation::for_domain(profiles.get(&domain), &Emulation::session());
+        // Recorded only once CDP accepted it: a rejected override (an
+        // invalid tz name in profiles.json) is retried, never assumed.
+        if want.tz != self.emulation.tz {
+            // An empty timezoneId clears the override (the browser's own zone).
+            let tz = want.tz.as_deref().unwrap_or("");
+            match self
+                .cdp
+                .send(
+                    "Emulation.setTimezoneOverride",
+                    Some(serde_json::json!({ "timezoneId": tz })),
+                )
+                .await
+            {
+                Ok(_) => {
+                    eprintln!(
+                        "[bladebro] domain profile {domain}: tz={}",
+                        want.tz.as_deref().unwrap_or("(browser default)")
+                    );
+                    self.emulation.tz = want.tz.clone();
+                }
+                Err(e) => eprintln!("[bladebro] WARNING: {domain}: timezone override failed: {e}"),
             }
-            if let Some(ref locale) = profile.locale {
-                let _ = self
-                    .cdp
-                    .send(
-                        "Emulation.setLocaleOverride",
-                        Some(serde_json::json!({ "locale": locale })),
+        }
+        if want.locale != self.emulation.locale {
+            // Keep Accept-Language in sync — it was set once at attach;
+            // a swapped locale with a stale header is a cross-layer
+            // mismatch fingerprint. No locale: both overrides cleared.
+            let (locale_params, headers) = match want.locale.as_deref() {
+                Some(locale) => {
+                    let base = locale.split('-').next().unwrap_or(locale);
+                    (
+                        serde_json::json!({ "locale": locale }),
+                        serde_json::json!({ "Accept-Language": format!("{locale},{base};q=0.9") }),
                     )
-                    .await;
-                // Keep Accept-Language in sync — it was set once at attach;
-                // a swapped locale with a stale header is a cross-layer
-                // mismatch fingerprint.
-                let base = locale.split('-').next().unwrap_or(locale);
-                let _ = self
-                    .cdp
-                    .send(
-                        "Network.setExtraHTTPHeaders",
-                        Some(serde_json::json!({
-                            "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
-                        })),
-                    )
-                    .await;
-                eprintln!("[bladebro] domain profile {domain}: locale={locale}");
+                }
+                None => (serde_json::json!({}), serde_json::json!({})),
+            };
+            let applied = self
+                .cdp
+                .send("Emulation.setLocaleOverride", Some(locale_params))
+                .await;
+            let _ = self
+                .cdp
+                .send(
+                    "Network.setExtraHTTPHeaders",
+                    Some(serde_json::json!({ "headers": headers })),
+                )
+                .await;
+            match applied {
+                Ok(_) => {
+                    eprintln!(
+                        "[bladebro] domain profile {domain}: locale={}",
+                        want.locale.as_deref().unwrap_or("(browser default)")
+                    );
+                    self.emulation.locale = want.locale.clone();
+                }
+                Err(e) => eprintln!("[bladebro] WARNING: {domain}: locale override failed: {e}"),
             }
+        }
 
-            // S11 coherence: navigator.language comes from the INJECTED
-            // script, not the CDP override. If the injection bakes a
-            // different locale, navigator.language and Intl disagree — a
-            // fingerprint-visible mismatch. Swap the registration (remove
-            // + re-add, never stack) so both layers speak the same locale.
-            let want_locale = profile
-                .locale
-                .clone()
-                .or_else(|| std::env::var("BLADE_LOCALE").ok().filter(|s| !s.is_empty()));
-            if want_locale != self.active_locale {
-                if let Some(id) = self.stealth_script_id.take() {
-                    let _ = self
-                        .cdp
-                        .send(
-                            "Page.removeScriptToEvaluateOnNewDocument",
-                            Some(serde_json::json!({ "identifier": id })),
-                        )
-                        .await;
+        // S11 coherence: navigator.language comes from the INJECTED
+        // script, not the CDP override. If the injection bakes a
+        // different locale, navigator.language and Intl disagree — a
+        // fingerprint-visible mismatch. Swap the registration (remove
+        // + re-add, never stack) so both layers speak the same locale.
+        if want.locale != self.active_locale {
+            if let Some(id) = self.stealth_script_id.take() {
+                let _ = self
+                    .cdp
+                    .send(
+                        "Page.removeScriptToEvaluateOnNewDocument",
+                        Some(serde_json::json!({ "identifier": id })),
+                    )
+                    .await;
+            }
+            match crate::stealth::apply_stealth(&self.cdp, want.locale.as_deref()).await {
+                Ok(id) => {
+                    self.stealth_script_id = Some(id);
+                    self.active_locale = want.locale.clone();
                 }
-                match crate::stealth::apply_stealth(&self.cdp, profile.locale.as_deref()).await {
-                    Ok(id) => {
-                        self.stealth_script_id = Some(id);
-                        self.active_locale = want_locale;
-                    }
-                    Err(e) => eprintln!("[bladebro] WARNING: locale swap injection failed: {e}"),
-                }
+                Err(e) => eprintln!("[bladebro] WARNING: locale swap injection failed: {e}"),
             }
         }
     }
+}
+
+/// S11: the timezone and locale a page emulates over CDP (None = no
+/// override: the browser's own value).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Emulation {
+    tz: Option<String>,
+    locale: Option<String>,
+}
+
+impl Emulation {
+    /// The session baseline attach applies: BLADE_TZ / BLADE_LOCALE.
+    pub(crate) fn session() -> Self {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        Self {
+            tz: env("BLADE_TZ"),
+            locale: env("BLADE_LOCALE"),
+        }
+    }
+
+    /// What a navigation to a domain emulates: its profile's fields, and the
+    /// session baseline for each field the profile omits (or for a domain
+    /// without a profile) — never a value left over from the last domain.
+    fn for_domain(profile: Option<&DomainProfile>, base: &Emulation) -> Self {
+        Self {
+            tz: profile
+                .and_then(|p| p.tz.clone())
+                .or_else(|| base.tz.clone()),
+            locale: profile
+                .and_then(|p| p.locale.clone())
+                .or_else(|| base.locale.clone()),
+        }
+    }
+}
+
+/// L7: the error for a navigation whose main frame committed Chrome's own
+/// error page (`chrome-error://chromewebdata/`, `unreachableUrl` set) in
+/// place of the target, or None when a real document is showing.
+/// `blade_proxy`: the browser runs behind BLADE_PROXY (names the recovery
+/// path for a proxy/tunnel failure).
+fn error_page_failure(
+    target: &str,
+    err: &str,
+    frame: Option<&Value>,
+    blade_proxy: bool,
+) -> Option<String> {
+    let frame = frame?;
+    let unreachable = frame
+        .get("unreachableUrl")
+        .and_then(Value::as_str)
+        .is_some_and(|u| !u.is_empty());
+    let error_doc = frame
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|u| u.starts_with("chrome-error://"));
+    if !(unreachable || error_doc) {
+        return None;
+    }
+    let hint = if err.contains("PROXY") || err.contains("TUNNEL") {
+        if blade_proxy {
+            "; the proxy in BLADE_PROXY refused or is down"
+        } else {
+            "; the browser's proxy refused or is down"
+        }
+    } else if err.contains("ERR_HTTP_RESPONSE_CODE_FAILURE") {
+        // The server did answer, but with an error status and no body of
+        // its own, so Chrome rendered its "HTTP ERROR" page instead.
+        "; the server answered with an HTTP error status and an empty body"
+    } else {
+        ""
+    };
+    Some(format!(
+        "navigation to {target} failed: {err} (the tab shows Chrome's error page, not the site{hint})"
+    ))
 }
 
 /// S11: per-domain stealth settings stored in ~/.blade/profiles.json.
@@ -649,10 +763,13 @@ async fn eval_location_href(cdp: &CdpSession) -> String {
 }
 
 fn extract_domain(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
+    // Read the host the navigation will actually open: a bare host gets its
+    // scheme first, so a `://` inside the query (`?next=http://x`) is never
+    // mistaken for this URL's own scheme separator.
+    let url = with_scheme(url);
+    after_scheme_slashes(&url)
+        .unwrap_or(&url)
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or("")
         .split(':')
@@ -670,7 +787,7 @@ fn extract_domain(url: &str) -> String {
 pub(crate) fn with_scheme(url: &str) -> String {
     let u = url.trim();
     if u.is_empty()
-        || u.contains("://")
+        || after_scheme_slashes(u).is_some()
         || scheme_prefix(u).is_some_and(|s| {
             matches!(
                 s.to_ascii_lowercase().as_str(),
@@ -767,6 +884,15 @@ fn scheme_prefix(url: &str) -> Option<&str> {
     None
 }
 
+/// The rest of a URL that STARTS with `scheme://`, or None. Only a leading
+/// scheme counts: a bare host carrying a URL in its query or fragment
+/// (`127.0.0.1:8080/?next=http://x`) used to read as already-schemed, went
+/// to Chrome without one and failed as "Cannot navigate to invalid URL".
+fn after_scheme_slashes(url: &str) -> Option<&str> {
+    let scheme = scheme_prefix(url)?;
+    url[scheme.len() + 1..].strip_prefix("//")
+}
+
 /// Scheme names that look like they could be `host:port` but are schemes.
 fn is_known_scheme_name(s: &str) -> bool {
     matches!(
@@ -840,6 +966,16 @@ fn is_tracking_param(name: &str) -> bool {
     n.starts_with("utm_") || TRACKING_PARAMS.contains(&n.as_str())
 }
 
+/// One query key or value as the server decodes it (percent escapes
+/// resolved, `+` as a space). `parse` decodes whole `k=v` pairs; the dummy
+/// key keeps any `=` inside the part in the decoded value.
+fn form_decode(part: &str) -> String {
+    url::form_urlencoded::parse(format!("_={part}").as_bytes())
+        .next()
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_default()
+}
+
 /// The note for requested query parameters the final URL does not carry, or
 /// None when every meaningful parameter survived.
 fn nav_params_note(requested: &str, final_url: &str) -> Option<String> {
@@ -847,14 +983,18 @@ fn nav_params_note(requested: &str, final_url: &str) -> Option<String> {
     let fin = query_params(final_url).unwrap_or_default();
     let mut missing: Vec<String> = Vec::new();
     let mut rewritten: Vec<String> = Vec::new();
+    // Compare as the server reads them: Chrome percent-encodes what the
+    // caller typed (`café` -> `caf%C3%A9`, a space -> `%20`), so raw strings
+    // reported every non-ASCII or spaced value as "value changed".
     for (k, v) in &req {
         if is_tracking_param(k) {
             continue;
         }
-        match fin.iter().find(|(fk, _)| fk == k) {
+        let key = form_decode(k);
+        match fin.iter().find(|(fk, _)| form_decode(fk) == key) {
             None => missing.push(k.clone()),
             Some((_, fv)) => {
-                if !v.is_empty() && fv != v {
+                if !v.is_empty() && form_decode(fv) != form_decode(v) {
                     rewritten.push(k.clone());
                 }
             }
@@ -912,9 +1052,124 @@ fn normalize_url(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        already_here, extract_domain, landed, nav_params_note, normalize_url, query_params,
-        validate_nav_url,
+        already_here, error_page_failure, extract_domain, landed, nav_params_note, normalize_url,
+        query_params, validate_nav_url, DomainProfile, Emulation,
     };
+    use serde_json::json;
+
+    /// L7: an unreachable target (refused, DNS, TLS, unsafe port, dead
+    /// proxy) makes Chrome commit its own error page: errorText is set AND
+    /// frameNavigated fires. That main frame (CDP `Page.Frame`) is a failed
+    /// navigation, not "navigated → chrome-error://chromewebdata/".
+    #[test]
+    fn chrome_error_page_in_the_main_frame_fails_the_navigation() {
+        let error_page = json!({
+            "id": "MAIN",
+            "url": "chrome-error://chromewebdata/",
+            "unreachableUrl": "http://127.0.0.1:9/",
+        });
+        let msg = error_page_failure(
+            "http://127.0.0.1:9/",
+            "net::ERR_UNSAFE_PORT",
+            Some(&error_page),
+            false,
+        )
+        .expect("Chrome's error page must fail the navigation");
+        assert!(
+            msg.starts_with("navigation to http://127.0.0.1:9/ failed: net::ERR_UNSAFE_PORT"),
+            "{msg}"
+        );
+        assert!(msg.contains("Chrome's error page"), "{msg}");
+        // Either signal alone is enough.
+        let url_only = json!({"id": "MAIN", "url": "chrome-error://chromewebdata/"});
+        let msg = error_page_failure(
+            "http://site.test/",
+            "net::ERR_PROXY_CONNECTION_FAILED",
+            Some(&url_only),
+            true,
+        )
+        .expect("error document by url");
+        assert!(
+            msg.contains("BLADE_PROXY"),
+            "a proxy failure names the proxy: {msg}"
+        );
+        // Without BLADE_PROXY (the real lane, a system proxy) the hint must
+        // not send the agent to a variable that is not in play.
+        let msg = error_page_failure(
+            "http://site.test/",
+            "net::ERR_TUNNEL_CONNECTION_FAILED",
+            Some(&url_only),
+            false,
+        )
+        .expect("error document by url");
+        assert!(
+            msg.contains("the browser's proxy") && !msg.contains("BLADE_PROXY"),
+            "{msg}"
+        );
+        // An error status with an empty body also lands on Chrome's page.
+        let msg = error_page_failure(
+            "http://h/empty",
+            "net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+            Some(&url_only),
+            false,
+        )
+        .expect("error document by url");
+        assert!(msg.contains("HTTP error status"), "{msg}");
+        // A page-side navigation that superseded ours committed a REAL
+        // document: that is still a successful navigation.
+        let real = json!({"id": "MAIN", "url": "http://127.0.0.1:8080/next"});
+        assert_eq!(
+            error_page_failure(
+                "http://127.0.0.1:8080/a",
+                "net::ERR_ABORTED",
+                Some(&real),
+                false
+            ),
+            None
+        );
+        // Frame tree unavailable: no claim either way.
+        assert_eq!(
+            error_page_failure("http://h/", "net::ERR_ABORTED", None, false),
+            None
+        );
+    }
+
+    /// P7: per-domain tz/locale are reverted, not inherited. A domain without
+    /// a profile, or a profile omitting a field, runs with the session
+    /// baseline for that field — never the previous domain's value (which
+    /// leaked to every later site, and split navigator.language from Intl).
+    #[test]
+    fn domain_emulation_reverts_fields_the_profile_does_not_set() {
+        let none = Emulation::default();
+        let tokyo_de = DomainProfile {
+            tz: Some("Asia/Tokyo".into()),
+            locale: Some("de-DE".into()),
+        };
+        let full = Emulation::for_domain(Some(&tokyo_de), &none);
+        assert_eq!(full.tz.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(full.locale.as_deref(), Some("de-DE"));
+        // Next domain has no profile: back to the browser's own values.
+        assert_eq!(Emulation::for_domain(None, &none), none);
+        // Next domain sets tz only: the locale reverts with it, so the CDP
+        // locale and the injected navigator.language stay one value.
+        let tz_only = DomainProfile {
+            tz: Some("Australia/Sydney".into()),
+            locale: None,
+        };
+        let next = Emulation::for_domain(Some(&tz_only), &none);
+        assert_eq!(next.tz.as_deref(), Some("Australia/Sydney"));
+        assert_eq!(next.locale, None);
+        // The session baseline (BLADE_TZ / BLADE_LOCALE) is what "revert"
+        // means when one is set.
+        let session = Emulation {
+            tz: Some("Europe/Paris".into()),
+            locale: Some("fr-FR".into()),
+        };
+        assert_eq!(Emulation::for_domain(None, &session), session);
+        let next = Emulation::for_domain(Some(&tz_only), &session);
+        assert_eq!(next.tz.as_deref(), Some("Australia/Sydney"));
+        assert_eq!(next.locale.as_deref(), Some("fr-FR"));
+    }
 
     #[test]
     fn extract_domain_strips_scheme_port_and_www() {
@@ -958,6 +1213,24 @@ mod tests {
         .is_none());
         // No query at all → nothing to compare.
         assert!(nav_params_note("https://e.com/", "https://e.com/").is_none());
+    }
+
+    /// Chrome percent-encodes what the caller typed (`café` → `caf%C3%A9`,
+    /// a space → `%20`); that is the same value, not a site rewrite.
+    #[test]
+    fn chrome_encoding_of_a_query_value_is_not_reported_as_a_rewrite() {
+        for (requested, fin) in [
+            ("http://h/s?q=café", "http://h/s?q=caf%C3%A9"),
+            ("http://h/s?q=a b&x=1", "http://h/s?q=a%20b&x=1"),
+            ("http://h/s?q=a%20b", "http://h/s?q=a+b"),
+            ("http://h/s?q%5B%5D=1", "http://h/s?q[]=1"),
+        ] {
+            assert_eq!(nav_params_note(requested, fin), None, "{requested}");
+        }
+        // A value the site really changed is still named.
+        let note = nav_params_note("http://h/s?q=café", "http://h/s?q=cafe")
+            .expect("a changed value must be reported");
+        assert!(note.contains("value changed: q"), "{note}");
     }
 
     #[test]
@@ -1074,6 +1347,37 @@ mod tests {
         assert_eq!(with_scheme("DATA:text/html,hello"), "DATA:text/html,hello");
         assert_eq!(with_scheme("ABOUT:blank"), "ABOUT:blank");
         assert_eq!(with_scheme("example.com?x=1"), "https://example.com?x=1");
+    }
+
+    /// A `://` inside the query or path (a return-URL parameter) is not the
+    /// URL's own scheme: the bare host must still get one, or Chrome rejects
+    /// the target as "Cannot navigate to invalid URL".
+    #[test]
+    fn bare_urls_carrying_a_url_in_the_query_still_get_a_scheme() {
+        use super::with_scheme;
+        assert_eq!(
+            with_scheme("127.0.0.1:8080/?next=http://x"),
+            "http://127.0.0.1:8080/?next=http://x"
+        );
+        assert_eq!(
+            with_scheme("example.com/login?return=https://example.com/a"),
+            "https://example.com/login?return=https://example.com/a"
+        );
+        assert_eq!(
+            with_scheme("localhost/cb#u=ws://h"),
+            "http://localhost/cb#u=ws://h"
+        );
+        // A real leading scheme is still left alone.
+        assert_eq!(
+            with_scheme("https://e.com/?next=http://x"),
+            "https://e.com/?next=http://x"
+        );
+        // The domain-profile lookup reads the same input: it must name the
+        // host being opened, not the host inside the query.
+        assert_eq!(
+            extract_domain("127.0.0.1:8080/?next=http://x.example"),
+            "127.0.0.1"
+        );
     }
 
     /// R1: the scheme gate. The rejected set is exactly the class that used
