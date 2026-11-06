@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Verify owned-profile storage flush across CLI/MCP exits and forked launchers.
+"""Verify owned-profile storage flush across CLI/MCP exits, a Ctrl-C to a one-shot
+command's process group, and forked launchers.
 
 BLADEBRO selects the candidate. POLISH_OUT retains actual calls/readbacks.
 --baseline records old-binary failures. Only disposable profiles are used.
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,10 +23,28 @@ OUT = Path(os.environ.get('POLISH_OUT', 'work/persistence/receipts.json'))
 OUT.parent.mkdir(parents=True, exist_ok=True)
 VALUE = 'persistent π🦀 ' + 'value=' * 40
 checks, receipts = [], []
+WRITTEN, RELEASE = threading.Event(), threading.Event()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == '/held':
+            # Write storage, report it, then hold the document open: the
+            # command that loads this page is still running when signalled.
+            script = f"localStorage.setItem('draft',{json.dumps(VALUE)});fetch('/written')"
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            try:
+                self.wfile.write(f'<!doctype html><title>Held</title><script>{script}</script>'.encode() + b' ' * 2048)
+                self.wfile.flush()
+                RELEASE.wait(60)
+            except OSError:
+                pass
+            return
+        if self.path == '/written':
+            WRITTEN.set()
         body = b'<!doctype html><title>Persistence fixture</title><p>Owned storage</p>'
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -118,6 +138,43 @@ def mcp(home, origin, transport='ws', chrome=None):
         check(home.name + ' leaves no owned processes', not remaining)
 
 
+def interrupted(home, origin):
+    """Ctrl-C to a one-shot command's whole process group (a terminal's ^C)
+    while it runs: the owned browser still closes gracefully, so storage
+    written just before the signal survives the restart."""
+    env = environment(home)
+    WRITTEN.clear()
+    RELEASE.clear()
+    command = [BINARY, '--no-daemon', 'nav', origin + '/held']
+    process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, encoding='utf-8', start_new_session=True)
+    reached = WRITTEN.wait(60) and process.poll() is None
+    if reached:
+        os.killpg(process.pid, signal.SIGINT)
+    try:
+        stdout, stderr = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate()
+    RELEASE.set()
+    receipts.append(dict(command=command, signal='SIGINT to the process group', stdout=stdout, stderr=stderr,
+                         code=process.returncode))
+    check(home.name + ' command in flight at Ctrl-C', reached)
+    check(home.name + ' dies of the Ctrl-C after cleanup', process.returncode == -signal.SIGINT)
+    check(home.name + ' graceful close after Ctrl-C',
+          'graceful close of the owned browser was unavailable' not in stderr)
+    js = "localStorage.getItem('draft')"
+    command = [BINARY, '--no-daemon', '--json', 'act', 'eval', '--url', origin, '--js', js]
+    result = subprocess.run(command, env=env, capture_output=True, text=True, encoding='utf-8', timeout=60)
+    receipts.append(dict(command=command, stdout=result.stdout, stderr=result.stderr, code=result.returncode))
+    text = json.loads(result.stdout).get('text', '') if result.stdout.strip() else ''
+    value = next((json.loads(line[8:]) for line in text.splitlines() if line.startswith('result: ')), None)
+    check(home.name + ' storage written before Ctrl-C survives', value == VALUE)
+    remaining = owned_processes(home)
+    if remaining is not None:
+        check(home.name + ' leaves no owned processes', not remaining)
+
+
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 origin = 'http://127.0.0.1:' + str(server.server_port)
@@ -128,6 +185,7 @@ try:
         mcp(root / 'mcp-ws', origin)
         if os.name == 'posix':
             mcp(root / 'mcp-pipe', origin, 'pipe')
+            interrupted(root / 'ctrl-c-one-shot', origin)
         if sys.platform.startswith('linux'):
             chrome = os.environ.get('CHROME_PATH') or shutil.which('chromium') or shutil.which('google-chrome-stable') or shutil.which('google-chrome')
             assert chrome, 'Chrome is required for the forked-launcher fixture'
