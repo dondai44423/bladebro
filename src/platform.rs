@@ -253,6 +253,22 @@ fn plain_spelling(path: &std::path::Path) -> String {
     s.replace('\\', "/")
 }
 
+/// Resolve `.` and `..` by spelling alone, without touching the filesystem
+/// (the path need not exist, and symlinks are not followed).
+fn lexically_normalized(path: &std::path::Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 /// Validate a file write path to prevent writing to system directories.
 /// SECURITY: Blocks path traversal attacks that could overwrite critical
 /// system files (e.g., /etc/cron.d, /usr/bin, /boot) via prompt injection,
@@ -268,16 +284,7 @@ pub fn validate_write_path(path: &std::path::Path) -> Result<(), String> {
     };
 
     // Normalize the path (resolve . and .. without requiring the file to exist).
-    let mut normalized = std::path::PathBuf::new();
-    for component in canonical.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => normalized.push(other.as_os_str()),
-        }
-    }
+    let normalized = lexically_normalized(&canonical);
     // Symlink resolution: canonicalize the deepest EXISTING ancestor and
     // re-append the untouched tail. A path spelled through a symlink
     // (~/drop → /etc) must not pass on its harmless-looking spelling — the
@@ -485,6 +492,42 @@ pub fn validate_upload_path(path: &std::path::Path) -> Result<(), String> {
     validate_upload_path_at(path, &blade_dir())
 }
 
+/// The system directory an upload source lies in, if any. Both spellings
+/// must be checked, as the write guard does: what the caller wrote and what
+/// it resolves to. On NixOS most of /etc is symlinks into /nix/store, so the
+/// resolved spelling alone let `/etc/hostname` through. The platform's own
+/// spelling of each directory counts too (macOS /etc is /private/etc).
+#[cfg(unix)]
+fn upload_system_prefix(spelled: &str, resolved: &str) -> Option<&'static str> {
+    const BLOCKED: &[&str] = &[
+        "/etc",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/boot",
+        "/dev",
+        "/proc",
+        "/sys",
+        "/var/log",
+        "/var/spool",
+        "/root",
+        "/lib",
+        "/lib64",
+        "/run",
+        "/snap",
+    ];
+    BLOCKED.iter().copied().find(|prefix| {
+        let real_prefix = std::fs::canonicalize(prefix)
+            .ok()
+            .map(|p| plain_spelling(&p));
+        resolved.starts_with(prefix)
+            || spelled.starts_with(prefix)
+            || real_prefix
+                .as_deref()
+                .is_some_and(|r| resolved.starts_with(r))
+    })
+}
+
 /// [`validate_upload_path`] with the data dir injected (tests pass a
 /// scratch root instead of mutating global env).
 pub fn validate_upload_path_at(
@@ -511,38 +554,12 @@ pub fn validate_upload_path_at(
     let path_str = plain_spelling(&resolved);
 
     #[cfg(unix)]
+    if let Some(prefix) =
+        upload_system_prefix(&plain_spelling(&lexically_normalized(path)), &path_str)
     {
-        let blocked_prefixes: &[&str] = &[
-            "/etc",
-            "/usr",
-            "/bin",
-            "/sbin",
-            "/boot",
-            "/dev",
-            "/proc",
-            "/sys",
-            "/var/log",
-            "/var/spool",
-            "/root",
-            "/lib",
-            "/lib64",
-            "/run",
-            "/snap",
-        ];
-        for prefix in blocked_prefixes {
-            let resolved_prefix = std::fs::canonicalize(prefix)
-                .ok()
-                .map(|p| plain_spelling(&p));
-            if path_str.starts_with(prefix)
-                || resolved_prefix
-                    .as_deref()
-                    .is_some_and(|r| path_str.starts_with(r))
-            {
-                return Err(format!(
-                    "blocked: uploading from a system location ({prefix}) is not allowed"
-                ));
-            }
-        }
+        return Err(format!(
+            "blocked: uploading from a system location ({prefix}) is not allowed"
+        ));
     }
 
     #[cfg(windows)]
@@ -1813,6 +1830,26 @@ mod security_hardening_tests {
                 "{p} should pass"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_guard_checks_the_spelled_path_as_well_as_the_resolved_one() {
+        // NixOS: /etc/hostname is a symlink to /nix/store/…-hostname. The
+        // resolved path lies outside every blocked dir; the spelling does not.
+        assert_eq!(
+            upload_system_prefix("/etc/hostname", "/nix/store/abc-hostname"),
+            Some("/etc")
+        );
+        // A harmless spelling that resolves into a system dir stays refused.
+        assert_eq!(
+            upload_system_prefix("/home/u/notes.txt", "/etc/shadow"),
+            Some("/etc")
+        );
+        assert_eq!(
+            upload_system_prefix("/home/u/report.pdf", "/home/u/report.pdf"),
+            None
+        );
     }
 
     #[cfg(unix)]
