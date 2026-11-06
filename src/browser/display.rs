@@ -71,6 +71,12 @@ impl VirtualDisplay {
             };
             let auth_arg = auth_file.to_string_lossy().into_owned();
             let child = Command::new(xvfb_path)
+                // Stays in bladebro's process group, unlike the browser
+                // (`platform::isolate_owned_child`): SIGKILL to that group
+                // (`timeout -s KILL`, a harness's killpg, a cancelled CI job)
+                // runs no Drop, and Xvfb dying with the group is what takes
+                // Chrome down too (it exits on losing its display). In its
+                // own group Xvfb outlived such a kill, and Chrome with it.
                 .args([
                     &format!(":{display_num}"),
                     "-screen",

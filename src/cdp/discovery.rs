@@ -55,14 +55,26 @@ impl TargetInfo {
     }
 }
 
+/// HTTP client for the DevTools endpoint. Never proxied: the endpoint is
+/// reached directly, exactly like the CDP WebSocket that follows discovery
+/// (which never uses a proxy). reqwest's environment proxy matcher has no
+/// implicit loopback bypass, so an ambient `HTTP_PROXY`/`ALL_PROXY` with an
+/// empty `NO_PROXY` routed `127.0.0.1:<port>/json/version` through the proxy
+/// and every launch failed with "debug endpoint not responding" while Chrome
+/// was up and listening.
+fn devtools_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .no_proxy()
+        .build()?)
+}
+
 /// Fetch `/json/version` from a browser debug endpoint.
 ///
 /// `base` is the `host:port` (no scheme), e.g. `127.0.0.1:9222`.
 pub async fn version(base: &str) -> Result<VersionInfo> {
     let url = format!("http://{base}/json/version");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
+    let client = devtools_client()?;
     let info: VersionInfo = client.get(&url).send().await?.json().await?;
     Ok(info)
 }
@@ -70,9 +82,7 @@ pub async fn version(base: &str) -> Result<VersionInfo> {
 /// List all targets from `/json`.
 pub async fn list_targets(base: &str) -> Result<Vec<TargetInfo>> {
     let url = format!("http://{base}/json");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
+    let client = devtools_client()?;
     let targets: Vec<TargetInfo> = client.get(&url).send().await?.json().await?;
     Ok(targets)
 }
@@ -99,8 +109,6 @@ pub async fn first_page_target(base: &str) -> Result<TargetInfo> {
 /// diagnostics. Returns the parsed value so callers can pretty-print.
 pub async fn raw_targets(base: &str) -> Result<Value> {
     let url = format!("http://{base}/json");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
+    let client = devtools_client()?;
     Ok(client.get(&url).send().await?.json().await?)
 }

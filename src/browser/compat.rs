@@ -47,7 +47,7 @@ fn decide(setting: &str, affected: bool, custom_profile: bool, extra: &[String])
 }
 
 pub(crate) fn incognito_policy() -> Result<bool> {
-    let extra = extra_flags();
+    let extra = super::flags::env_chrome_flags()?;
     let affected = if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         let release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
         let model = std::fs::read_to_string("/proc/device-tree/model")
@@ -70,14 +70,8 @@ pub(crate) fn incognito_policy() -> Result<bool> {
     )
 }
 
-fn extra_flags() -> Vec<String> {
-    std::env::var("BLADE_CHROME_FLAGS")
-        .map(|s| s.split_whitespace().map(String::from).collect())
-        .unwrap_or_default()
-}
-
 pub(super) fn agent_extra_flags() -> Result<Vec<String>> {
-    let mut extra = extra_flags();
+    let mut extra = super::flags::env_chrome_flags()?;
     let incognito = incognito_policy()?;
     INCOGNITO.store(incognito, Ordering::Relaxed);
     if incognito {

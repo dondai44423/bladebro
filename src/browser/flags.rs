@@ -368,7 +368,7 @@ pub(super) fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
         args.push("--window-size=1920,1080".into());
     }
     args.extend(cfg.extra.iter().cloned());
-    args
+    merge_feature_lists(args)
 }
 
 /// Everything the real-browser lane's command line depends on. Same
@@ -437,7 +437,92 @@ pub(super) fn launch_args_real(cfg: &RealLaunchCfg<'_>) -> Vec<String> {
         args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into());
     }
     args.extend(cfg.extra.iter().cloned());
-    args
+    merge_feature_lists(args)
+}
+
+/// `BLADE_CHROME_FLAGS` as arguments (empty when unset). Both lanes read it
+/// here so they split it identically.
+pub(crate) fn env_chrome_flags() -> crate::error::Result<Vec<String>> {
+    match std::env::var("BLADE_CHROME_FLAGS") {
+        Ok(raw) => split_chrome_flags(&raw).map_err(crate::error::BladeError::Other),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+/// Split BLADE_CHROME_FLAGS shell-style: whitespace separates arguments,
+/// `'…'` and `"…"` group (quotes may start mid-word, as in
+/// `--user-agent="… (X11; …)"`). A plain whitespace split turned such a value
+/// into stray positional args that Chrome opened as URL tabs. Backslashes
+/// are literal — Windows paths are common flag values. The reason for an
+/// unterminated quote never echoes the value (it may carry a secret).
+pub(super) fn split_chrome_flags(raw: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_arg = false;
+    let mut quote: Option<char> = None;
+    for c in raw.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => current.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                in_arg = true;
+            }
+            None if c.is_whitespace() => {
+                if in_arg {
+                    args.push(std::mem::take(&mut current));
+                    in_arg = false;
+                }
+            }
+            None => {
+                current.push(c);
+                in_arg = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err(
+            "BLADE_CHROME_FLAGS has an unterminated quote (value not shown) — close it, \
+             e.g. --user-agent=\"Mozilla/5.0 (X11; Linux x86_64) ...\""
+                .into(),
+        );
+    }
+    if in_arg {
+        args.push(current);
+    }
+    Ok(args)
+}
+
+/// Chrome keeps only the LAST `--enable-features=` / `--disable-features=`
+/// on its command line, so a list appended from BLADE_CHROME_FLAGS silently
+/// replaced the built-in `--disable-features=PdfPlugin` (PDFs opened inline
+/// instead of downloading). Fold every occurrence into one comma list at
+/// the first one's position, built-ins first, duplicates dropped.
+fn merge_feature_lists(args: Vec<String>) -> Vec<String> {
+    const LISTS: [&str; 2] = ["--enable-features=", "--disable-features="];
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some((key, list)) = LISTS
+            .iter()
+            .find_map(|k| arg.strip_prefix(k).map(|list| (*k, list)))
+        else {
+            out.push(arg);
+            continue;
+        };
+        let Some(merged) = out.iter_mut().find(|a| a.starts_with(key)) else {
+            out.push(arg);
+            continue;
+        };
+        for feature in list.split(',').filter(|f| !f.is_empty()) {
+            if !merged[key.len()..].split(',').any(|f| f == feature) {
+                if merged.len() > key.len() {
+                    merged.push(',');
+                }
+                merged.push_str(feature);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -599,6 +684,77 @@ mod launch_flag_tests {
         assert!(a.iter().any(|f| f.starts_with("--user-data-dir=")));
         let h = launch_args(&cfg(GlStage::NativeGl, false, Transport::Ws));
         assert!(!h.iter().any(|f| f == "--window-size=1920,1080"));
+    }
+
+    /// A quoted value with spaces must stay ONE argument: whitespace
+    /// splitting turned `--user-agent="… (X11; …)"` into stray positional
+    /// args that Chrome opened as URL tabs.
+    #[test]
+    fn chrome_flags_split_like_a_shell() {
+        let ua = r#"--user-agent="Mozilla/5.0 (X11; Linux x86_64)" --lang=de"#;
+        assert_eq!(
+            split_chrome_flags(ua).unwrap(),
+            vec!["--user-agent=Mozilla/5.0 (X11; Linux x86_64)", "--lang=de"]
+        );
+        assert_eq!(
+            split_chrome_flags("  '--a=b c'\t--d  ").unwrap(),
+            vec!["--a=b c", "--d"]
+        );
+        assert_eq!(
+            split_chrome_flags(r#"--say='it is "quoted"'"#).unwrap(),
+            vec![r#"--say=it is "quoted""#]
+        );
+        // Backslashes stay literal: Windows paths are common values here.
+        assert_eq!(
+            split_chrome_flags(r"--disk-cache-dir=C:\Temp\cache").unwrap(),
+            vec![r"--disk-cache-dir=C:\Temp\cache"]
+        );
+        assert_eq!(split_chrome_flags(r#"--x="""#).unwrap(), vec!["--x="]);
+        assert!(split_chrome_flags(" \t ").unwrap().is_empty());
+        let err = split_chrome_flags(r#"--proxy-server="http://u:SEKRIT@h"#).unwrap_err();
+        assert!(err.contains("unterminated quote"), "{err}");
+        assert!(!err.contains("SEKRIT"), "reason echoed the value: {err}");
+    }
+
+    /// Chrome keeps only the last `--disable-features=`, so a user list
+    /// appended from BLADE_CHROME_FLAGS silently dropped the built-in
+    /// PdfPlugin entry (PDFs opened inline instead of downloading). Both
+    /// lanes must fold every list into one.
+    #[test]
+    fn user_feature_lists_merge_with_the_builtin_ones() {
+        let extra: Vec<String> = vec![
+            "--disable-features=Translate".into(),
+            "--enable-features=Foo".into(),
+            "--disable-features=Bar,PdfPlugin".into(),
+        ];
+        let agent = launch_args(&LaunchCfg {
+            extra: &extra,
+            ..cfg(GlStage::NativeGl, true, Transport::Ws)
+        });
+        let real = launch_args_real(&RealLaunchCfg {
+            headless: true,
+            no_sandbox: false,
+            ozone_x11: false,
+            port: 9222,
+            user_data_dir: Path::new("/tmp/bb-launch-args-test"),
+            profile_directory: None,
+            proxy: None,
+            extra: &extra,
+        });
+        for args in [agent, real] {
+            let lists = |key: &str| -> Vec<String> {
+                args.iter()
+                    .filter(|a| a.starts_with(key))
+                    .cloned()
+                    .collect()
+            };
+            assert_eq!(
+                lists("--disable-features"),
+                vec!["--disable-features=PdfPlugin,Translate,Bar"],
+                "{args:?}"
+            );
+            assert_eq!(lists("--enable-features"), vec!["--enable-features=Foo"]);
+        }
     }
 }
 

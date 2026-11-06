@@ -48,6 +48,12 @@ impl Browser {
                     if !auto || !startup_exit {
                         break;
                     }
+                    if platform::termination_requested() {
+                        eprintln!(
+                            "[bladebro] termination signal received — not retrying the launch"
+                        );
+                        break;
+                    }
                     if attempt == 0 {
                         eprintln!(
                             "[bladebro] sandboxed Chrome died at startup (root or restricted container?) — retrying with --no-sandbox"
@@ -93,6 +99,14 @@ impl Browser {
                     return Ok(browser);
                 }
                 None => {
+                    if i + 1 < stages.len() && platform::termination_requested() {
+                        // The command is over: hand this browser back to be
+                        // closed rather than start another for a better stage.
+                        eprintln!(
+                            "[bladebro] termination signal received — not relaunching for WebGL"
+                        );
+                        return Ok(browser);
+                    }
                     if i + 1 < stages.len() {
                         let next = stages[i + 1];
                         if next == *stage {
@@ -131,6 +145,22 @@ impl Browser {
     ) -> Result<(Self, Option<String>)> {
         let timing = std::env::var("NAV_TIMING").is_ok();
         let t0 = std::time::Instant::now();
+        // M18: Proxy support via BLADE_PROXY env var. Validated first, before
+        // a profile, display or process exists: a malformed or credentialed
+        // value fails the launch with a redacted reason instead of silently
+        // producing a broken-proxy browser. The raw value may embed
+        // credentials — only the redacted display form ever reaches stderr.
+        let proxy = match crate::browser::proxy::env_browser_proxy() {
+            Ok(p) => p,
+            Err(reason) => {
+                return Err(BladeError::Other(format!(
+                    "invalid BLADE_PROXY value: {reason} (value redacted)"
+                )));
+            }
+        };
+        if let Some(spec) = &proxy {
+            eprintln!("[bladebro] using proxy: {}", spec.display);
+        }
         let chrome_path = find_chrome()?;
         let extra = super::compat::agent_extra_flags()?;
         let profile = crate::session_profile::SessionProfile::create()?;
@@ -160,29 +190,19 @@ impl Browser {
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let headful = true; // macOS/Windows have native window servers
 
+        // From here on every failure path tears down whatever this attempt
+        // started and removes its profile (declared after the display, so it
+        // drops — and stops Chrome — before Xvfb goes away).
+        let mut guard = super::LaunchGuard::new(profile);
+
         // After both bindings: the recording must compile on every target.
         set_launched_headless(!headful);
         set_launched_no_sandbox(no_sandbox);
 
-        // M18: Proxy support via BLADE_PROXY env var. Validated here even
-        // when nothing logs: a malformed value fails the launch with a
-        // redacted reason instead of silently producing a broken-proxy
-        // browser. The raw value may embed credentials — only the redacted
-        // display form ever reaches stderr.
-        let proxy = match crate::browser::proxy::env_blade_proxy() {
-            Ok(p) => p,
-            Err(reason) => {
-                return Err(BladeError::Other(format!(
-                    "invalid BLADE_PROXY value: {reason} (value redacted)"
-                )));
-            }
-        };
-        if let Some(spec) = &proxy {
-            eprintln!("[bladebro] using proxy: {}", spec.display);
-        }
         // Power-user escape hatch: append raw Chrome flags. Useful for
         // diagnosing GL/WebGL backend issues on odd displays and for
-        // users who need a specific Chromium switch. Whitespace-split.
+        // users who need a specific Chromium switch. Shell-style split
+        // (`flags::split_chrome_flags`).
         let args = launch_args(&LaunchCfg {
             stage,
             headful,
@@ -231,8 +251,8 @@ impl Browser {
         }
 
         platform::isolate_owned_child(&mut cmd);
-        let mut child = cmd
-            .spawn()
+        let child = guard
+            .spawn(&mut cmd)
             .map_err(|e| BladeError::Other(format!("failed to launch Chrome: {e}")))?;
 
         let base = format!("127.0.0.1:{port}");
@@ -256,8 +276,6 @@ impl Browser {
                     // check is skipped.
                     if !endpoint_owned_by_pid(port, child.id()) {
                         if Instant::now() >= deadline {
-                            platform::kill_child_tree(&mut child);
-                            stop_profile_processes(&profile, false);
                             return Err(BladeError::Other(
                                 "the debug endpoint on this port is not served by the browser process — refusing it (possible local port hijack)".into(),
                             ));
@@ -281,17 +299,13 @@ impl Browser {
                             super::compat::prepare_incognito(&client).await
                         }
                         .await;
-                        if let Err(error) = prepared {
-                            platform::shutdown_child(&mut child);
-                            stop_profile_processes(&profile, false);
-                            profile.cleanup();
-                            return Err(error);
-                        }
+                        prepared?;
                     }
                     let probe = probe_gl_ws(&base).await;
                     if timing {
                         eprintln!("[launch-timing] healthcheck: {:?}", t0.elapsed());
                     }
+                    let (child, profile) = guard.finish()?;
                     return Ok((
                         Self {
                             child,
@@ -311,8 +325,8 @@ impl Browser {
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             // The launcher is gone, but a sandboxed helper
-                            // it started may not be (Flatpak portal spawns).
-                            stop_profile_processes(&profile, false);
+                            // it started may not be (Flatpak portal spawns):
+                            // the guard sweeps the profile on return.
                             return Err(BladeError::Other(format!(
                                 "Chrome exited during startup: {status}{}",
                                 chrome_stderr_tail()
@@ -326,8 +340,6 @@ impl Browser {
                         }
                     }
                     if Instant::now() >= deadline {
-                        platform::kill_child_tree(&mut child);
-                        stop_profile_processes(&profile, false);
                         return Err(BladeError::Other(format!(
                             "Chrome debug endpoint not responding after 20s{}",
                             chrome_stderr_tail()
@@ -398,9 +410,9 @@ impl Browser {
         set_launched_pipe(false);
 
         // Real-lane proxy: validated the same way as the managed lane (a
-        // malformed value fails loudly, redacted); the real lane does not
-        // log the endpoint, so nothing here can leak credentials.
-        let proxy = match crate::browser::proxy::env_blade_proxy() {
+        // malformed or credentialed value fails loudly, redacted); the real
+        // lane does not log the endpoint.
+        let proxy = match crate::browser::proxy::env_browser_proxy() {
             Ok(p) => p,
             Err(reason) => {
                 return Err(BladeError::Other(format!(
@@ -408,9 +420,7 @@ impl Browser {
                 )));
             }
         };
-        let extra: Vec<String> = std::env::var("BLADE_CHROME_FLAGS")
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default();
+        let extra = super::flags::env_chrome_flags()?;
 
         let mut last_err = None;
         // A quick clean exit means Chrome handed the command line to an
@@ -509,6 +519,10 @@ impl Browser {
                     Err(_) => {
                         match child.try_wait() {
                             Ok(Some(status)) => {
+                                // The launcher is gone, but helpers it forked
+                                // into our group can outlive it (and hold the
+                                // profile the retry is about to reuse).
+                                platform::kill_child_tree(&mut child);
                                 if spawned_at.elapsed() < Duration::from_secs(5) && status.success()
                                 {
                                     last_err = Some(BladeError::Other(
@@ -529,6 +543,7 @@ impl Browser {
                             }
                             Ok(None) => {}
                             Err(e) => {
+                                platform::kill_child_tree(&mut child);
                                 return Err(BladeError::Other(format!(
                                     "failed to poll browser status: {e}"
                                 )));
@@ -547,6 +562,10 @@ impl Browser {
             }
             // Only a genuine startup death gets the --no-sandbox retry.
             if !startup_exit {
+                break;
+            }
+            if platform::termination_requested() {
+                eprintln!("[realbrowser] termination signal received — not retrying the launch");
                 break;
             }
             if attempt == 0 {
