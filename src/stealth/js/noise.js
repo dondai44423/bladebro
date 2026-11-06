@@ -7,7 +7,11 @@
 // canvas decides first: content there proves the canvas already has a context,
 // and a transparent pixel would absorb the offset anyway (premultiplied alpha).
 // The native call runs first: receiver and tainted-canvas errors stay native,
-// and a tainted canvas never reaches (and taints) the scratch.
+// and a tainted canvas never reaches (and taints) the scratch. So the first
+// noised call on a canvas encodes twice (before and after the offset).
+// A canvas is settled (_m) once noised, or once getContext('2d') returns null:
+// its context is WebGL/bitmaprenderer, fixed for the element's lifetime, so
+// later calls skip the 1x1 probe.
 try{
 var _otd=HTMLCanvasElement.prototype.toDataURL;var _ogi=CanvasRenderingContext2D.prototype.getImageData;var _m=new WeakMap();
 var _odi=CanvasRenderingContext2D.prototype.drawImage,_ocr=CanvasRenderingContext2D.prototype.clearRect;
@@ -17,7 +21,7 @@ _defFn(HTMLCanvasElement.prototype,'toDataURL',_otd,function(th,a,og){
   var r=og.apply(th,a);
   if(!_m.has(th)){try{if(th.width>0&&th.height>0){
     _ocr.call(_nzc,0,0,1,1);_odi.call(_nzc,th,0,0,1,1,0,0,1,1);
-    if(_ogi.call(_nzc,0,0,1,1).data[3]>0){var c=th.getContext('2d');if(c){var px=_ogi.call(c,0,0,1,1);px.data[0]=(px.data[0]+cn)%256;px.data[1]=(px.data[1]+cn2)%256;c.putImageData(px,0,0);_m.set(th,true);r=og.apply(th,a);}}
+    if(_ogi.call(_nzc,0,0,1,1).data[3]>0){var c=th.getContext('2d');if(c){var px=_ogi.call(c,0,0,1,1);px.data[0]=(px.data[0]+cn)%256;px.data[1]=(px.data[1]+cn2)%256;c.putImageData(px,0,0);_m.set(th,true);r=og.apply(th,a);}else _m.set(th,true);}
   }}catch(e){}}
   return r;
 });

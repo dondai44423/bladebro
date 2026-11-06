@@ -205,10 +205,10 @@ async function noise() {
     getImageData() { return { data: Uint8ClampedArray.from(this.canvas.px) }; }
     putImageData(img) { this.canvas.px = Array.from(img.data); this.canvas.writes++; }
     clearRect() { this.canvas.px = [0, 0, 0, 0]; }
-    drawImage(src) { if (!(src instanceof HTMLCanvasElement)) throw new TypeError('source'); this.canvas.px = src.px.slice(); }
+    drawImage(src) { if (!(src instanceof HTMLCanvasElement)) throw new TypeError('source'); src.probed++; this.canvas.px = src.px.slice(); }
   }
   class HTMLCanvasElement {
-    constructor() { this.width = 300; this.height = 150; this.kind = null; this.ctx = null; this.contexts = 0; this.px = [0, 0, 0, 0]; this.writes = 0; }
+    constructor() { this.width = 300; this.height = 150; this.kind = null; this.ctx = null; this.contexts = 0; this.px = [0, 0, 0, 0]; this.writes = 0; this.probed = 0; }
     getContext(kind) {
       if (this.kind === null) { this.kind = kind; this.contexts++; this.ctx = kind === '2d' ? new CanvasRenderingContext2D(this) : { kind }; }
       return this.kind === kind ? this.ctx : null;
@@ -234,7 +234,9 @@ async function noise() {
   gl.getContext('webgl');
   gl.px = [1, 2, 3, 255];
   assert.equal(gl.toDataURL(), 'data:1,2,3,255', 'WebGL canvases are left alone');
+  assert.equal(gl.toDataURL(), 'data:1,2,3,255');
   assert.equal(gl.contexts, 1);
+  assert.equal(gl.probed, 1, 'a WebGL canvas is probed once, not on every toDataURL');
   assert.throws(() => HTMLCanvasElement.prototype.toDataURL.call({}), TypeError);
   const buf = new AudioBuffer();
   for (let i = 0; i < 5; i++) buf.getChannelData(0);
