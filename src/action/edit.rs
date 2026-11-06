@@ -67,11 +67,40 @@ pub(super) struct ClearResult {
     pub(super) was_empty: bool,
     /// Neither the addressed element nor a live editor host was reachable.
     pub(super) missing: bool,
+    /// Why nothing was attempted: the target is disabled, or another field
+    /// kept focus ("is disabled" / "did not take focus (X holds it)").
+    /// Callers prefix the ref and say what was not done.
+    pub(super) blocked: Option<String>,
 }
 
 /// Normalize text for readback comparison (mirrors the JS `_tvr`).
 pub(super) fn norm_text(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Does a host's readback show exactly the typed text? Value fields
+/// (input/textarea) read back verbatim, so they must match exactly:
+/// normalizing whitespace on both sides read "  x" typed into a field that
+/// trims as verified (A-ws). A rich editor's innerText reflows whitespace
+/// (nbsp runs, block newlines), so it compares normalized.
+pub(super) fn readback_matches(host_kind: &str, got: &str, want: &str) -> bool {
+    if matches!(host_kind, "input" | "textarea") {
+        got == want
+    } else {
+        norm_text(got) == norm_text(want)
+    }
+}
+
+/// A value field holds the typed words with different whitespace: the page
+/// trimmed or reformatted the input. Waiting, a JS rewrite or a retype
+/// cannot change that - the page does it again - and each retry repeats
+/// every keystroke and input event (autocomplete queries). The verdict
+/// reports it as "whitespace differs".
+pub(super) fn page_reformatted(host_kind: &str, got: &str, want: &str) -> bool {
+    matches!(host_kind, "input" | "textarea")
+        && got != want
+        && !norm_text(got).is_empty()
+        && norm_text(got) == norm_text(want)
 }
 
 /// Readback of the effective editing host via the "check" mode. `None`
@@ -99,8 +128,24 @@ pub(super) async fn clear_editable(
     frame: &[usize],
 ) -> Result<ClearResult> {
     // Focus first: framework editors mount and take focus here, and the
-    // trusted-key rungs act on whatever is focused.
-    let _ = find_by_sig(cdp, sig, frame, "focus", None).await;
+    // trusted-key rungs act on whatever is focused. A target that could not
+    // take focus (disabled - its own attribute or a disabled fieldset - or
+    // inert) leaves it on some other field: Ctrl+A + Backspace emptied that
+    // field (a focused email wiped by `clear` on a locked, controlled
+    // input). Nothing is written then, not even through the setter: no user
+    // could edit a disabled field either.
+    let focus = find_by_sig(cdp, sig, frame, "focus", None)
+        .await
+        .ok()
+        .filter(|f| f.ok);
+    let blocked = focus.and_then(|f| {
+        if f.disabled == Some(true) {
+            Some("is disabled".to_string())
+        } else {
+            f.away
+                .map(|other| format!("did not take focus ({other} holds it)"))
+        }
+    });
     let mut cur = check_editor(cdp, sig, frame).await;
     let Some(first) = cur.as_ref() else {
         return Ok(ClearResult {
@@ -108,6 +153,7 @@ pub(super) async fn clear_editable(
             text: String::new(),
             was_empty: false,
             missing: true,
+            blocked: None,
         });
     };
     let mut text = first.text.clone().unwrap_or_default();
@@ -117,6 +163,16 @@ pub(super) async fn clear_editable(
             text,
             was_empty: true,
             missing: false,
+            blocked: None,
+        });
+    }
+    if blocked.is_some() {
+        return Ok(ClearResult {
+            ok: false,
+            text,
+            was_empty: false,
+            missing: false,
+            blocked,
         });
     }
     let kind = first.host_kind.clone().unwrap_or_default();
@@ -136,6 +192,7 @@ pub(super) async fn clear_editable(
                 text,
                 was_empty: false,
                 missing: false,
+                blocked: None,
             });
         }
     }
@@ -155,6 +212,7 @@ pub(super) async fn clear_editable(
                     text,
                     was_empty: false,
                     missing: false,
+                    blocked: None,
                 });
             }
         }
@@ -172,6 +230,7 @@ pub(super) async fn clear_editable(
         text,
         was_empty: false,
         missing: false,
+        blocked: None,
     })
 }
 
@@ -285,14 +344,14 @@ pub(super) async fn finalize_edit(
     }
     match rep.kind {
         EditKind::Type => {
-            let want = norm_text(&rep.text);
-            rep.verified = norm_text(&final_text) == want;
+            rep.verified = readback_matches(&rep.host_kind, &final_text, &rep.text);
             if !rep.verified {
                 // Visible-but-wrong states can be corrected safely; value
                 // fields are readable by construction; blind CE readbacks
                 // stay as reported.
-                let retry_ok = !norm_text(&final_text).is_empty()
-                    || matches!(rep.host_kind.as_str(), "input" | "textarea");
+                let retry_ok = (!norm_text(&final_text).is_empty()
+                    || matches!(rep.host_kind.as_str(), "input" | "textarea"))
+                    && !page_reformatted(&rep.host_kind, &final_text, &rep.text);
                 if retry_ok {
                     let cl = clear_editable(cdp, sig, frame).await?;
                     if cl.ok {
@@ -304,12 +363,12 @@ pub(super) async fn finalize_edit(
                                 .as_ref()
                                 .and_then(|c| c.text.clone())
                                 .unwrap_or_default();
-                            if norm_text(&final_text) == want {
+                            if readback_matches(&rep.host_kind, &final_text, &rep.text) {
                                 break;
                             }
                         }
                         rep.corrected = true;
-                        rep.verified = norm_text(&final_text) == want;
+                        rep.verified = readback_matches(&rep.host_kind, &final_text, &rep.text);
                     }
                 }
             }
@@ -385,6 +444,14 @@ pub(super) fn type_verdict_text(
             s.push_str(" (settled late)");
         }
         s
+    } else if !got.is_empty() && got == want {
+        // Same words, different whitespace: the page trimmed or reformatted
+        // what was typed - not the exact value asked for.
+        format!(
+            "outcome: typed \"{}\" → value=\"{}\" (whitespace differs: the page reformatted the input)",
+            clip(text, 40),
+            clip(&rep.final_text, 40)
+        )
     } else if !got.is_empty() && got.contains(&want) {
         let why = if rep.pre_cleared {
             "content changed after typing (late restore?)"

@@ -30,6 +30,9 @@ mod input;
 mod perform;
 mod verdict;
 
+#[cfg(test)]
+mod dom_tests;
+
 pub use self::find::{
     find_by_selector, find_by_text, find_label_route, find_miss_diag, focus, inspect, locate_text,
     read_checked, read_text, LabelRoute, MissDiag, MissExample, SelectorDiag, SelectorLookup,
@@ -491,6 +494,142 @@ mod action_tests {
         assert!(msg.contains("no observable DOM change"), "{msg}");
     }
 
+    #[test]
+    fn leaf_forwarded_click_names_the_inner_control() {
+        // L3: an effect produced by a leaf-forwarded mouse click is credited
+        // to the inner control that received it, never silently to the
+        // addressed container.
+        use super::verdict::{compute_verdict, ClickEvidence};
+        let lpm = crate::page::LivePageModel::new();
+        let mut d = crate::page::PageDelta::default();
+        d.removed.push("e9".into());
+        let click = super::Action::Click {
+            ref_id: "e5".into(),
+        };
+        let verdict = |via: &'static str, leaf: Option<&'static str>| {
+            compute_verdict(
+                &click,
+                &d,
+                &lpm,
+                ClickEvidence {
+                    via: Some((via, &[via][..], "")),
+                    leaf,
+                    coord_hit: None,
+                    toggle: None,
+                    dispatched: true,
+                },
+                None,
+                None,
+            )
+        };
+        assert_eq!(
+            verdict("mouse", Some("button [Delete]")),
+            "outcome: dom-changed (+0 \u{2212}1) via mouse on inner button [Delete]"
+        );
+        // The js lane dispatches on the addressed element itself.
+        assert_eq!(
+            verdict("js", Some("button [Delete]")),
+            "outcome: dom-changed (+0 \u{2212}1) via js"
+        );
+        assert_eq!(
+            verdict("mouse", None),
+            "outcome: dom-changed (+0 \u{2212}1) via mouse"
+        );
+    }
+
+    #[test]
+    fn dialog_verdict_names_a_leaf_forwarded_control() {
+        // L3: a container click forwarded to an inner Delete that calls
+        // confirm() is the common destructive case; its dialog verdict must
+        // name the control that received the click, like the other verdicts.
+        use super::verdict::dialog_verdict;
+        assert_eq!(
+            dialog_verdict("mouse", Some("button [Delete]")),
+            "outcome: dialog opened via mouse on inner button [Delete] (handled — see ambient)"
+        );
+        assert_eq!(
+            dialog_verdict("js", Some("button [Delete]")),
+            "outcome: dialog opened via js (handled — see ambient)"
+        );
+        assert_eq!(
+            dialog_verdict("mouse", None),
+            "outcome: dialog opened via mouse (handled — see ambient)"
+        );
+    }
+
+    #[test]
+    fn scroll_verdict_reports_both_axes() {
+        // A-hscroll: a carousel / wide page that DID scroll horizontally was
+        // reported as "no movement - page already at the top".
+        use super::verdict::{scroll_verdict, ScrollReport};
+        let at_rest = ScrollReport::default();
+        let page_x = ScrollReport {
+            after_x: 500.0,
+            max_x: 3200.0,
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(500, 0, Some(&page_x)),
+            "outcome: scrolled page delta x+500 (x 0 -> 500)"
+        );
+        let carousel = ScrollReport {
+            scroller_x: "div#car".into(),
+            scroller_x_before: Some(0.0),
+            scroller_x_after: Some(500.0),
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(500, 0, Some(&carousel)),
+            "outcome: scrolled div#car delta x+500 (page unchanged at y 0)"
+        );
+        let right_edge = ScrollReport {
+            before_x: 3200.0,
+            after_x: 3200.0,
+            max_x: 3200.0,
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(500, 0, Some(&right_edge)),
+            "outcome: no movement - page already at the right edge (x 3200 of 3200)"
+        );
+        assert!(scroll_verdict(500, 0, Some(&at_rest)).contains("nothing scrolls horizontally"));
+        // The vertical wording is unchanged (qol_probe locks it).
+        let page_y = ScrollReport {
+            after_y: 300.0,
+            max_y: 2000.0,
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(0, 300, Some(&page_y)),
+            "outcome: scrolled page delta+300 (y 0 -> 300)"
+        );
+        let nested_y = ScrollReport {
+            scroller: "div#inner-scroll".into(),
+            scroller_before: Some(0.0),
+            scroller_after: Some(300.0),
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(0, 300, Some(&nested_y)),
+            "outcome: scrolled div#inner-scroll delta+300 (page unchanged at y 0)"
+        );
+        let bottom = ScrollReport {
+            before_y: 2000.0,
+            after_y: 2000.0,
+            max_y: 2000.0,
+            ..at_rest.clone()
+        };
+        assert_eq!(
+            scroll_verdict(0, 300, Some(&bottom)),
+            "outcome: no movement - page already at the bottom (y 2000 of 2000)"
+        );
+        assert_eq!(
+            scroll_verdict(0, 300, Some(&at_rest)),
+            "outcome: no movement - page already at the top"
+        );
+        assert!(scroll_verdict(0, 300, None).contains("movement not measured"));
+    }
+
     // Guards the leaf-targeting JS fragment: the box-mode resolver must stay
     // wired into the injected script, or container-matched clicks silently
     // regress to the no-effect they were built to fix.
@@ -729,6 +868,73 @@ mod action_tests {
         assert_eq!(evs[main]["type"].as_str(), Some("rawKeyDown"));
         assert!(evs[main].get("text").is_none());
         assert_eq!(evs[main]["modifiers"].as_u64(), Some(4));
+    }
+
+    #[test]
+    fn shift_chords_report_the_us_layout_glyph() {
+        // A-shift: Shift over a digit or punctuation key reports the shifted
+        // glyph (US layout, the layout the whole key map assumes) - "Shift+1"
+        // used to send key/text "1" with the Shift bit set.
+        use super::input::{combo_events, parse_key_combo};
+        for (chord, glyph, code, vk) in [
+            ("Shift+1", "!", "Digit1", 49),
+            ("Shift+2", "@", "Digit2", 50),
+            ("Shift+0", ")", "Digit0", 48),
+            ("Shift+/", "?", "Slash", 191),
+            ("Shift+;", ":", "Semicolon", 186),
+            ("Shift+'", "\"", "Quote", 222),
+            ("Shift+[", "{", "BracketLeft", 219),
+            ("Shift+`", "~", "Backquote", 192),
+            ("Shift+=", "+", "Equal", 187),
+            ("Shift+-", "_", "Minus", 189),
+            ("Shift+a", "A", "KeyA", 65),
+        ] {
+            let c = parse_key_combo(chord).unwrap().expect("combo");
+            let (evs, main) = combo_events(&c).unwrap();
+            assert_eq!(evs[main]["key"].as_str(), Some(glyph), "{chord}");
+            assert_eq!(evs[main]["text"].as_str(), Some(glyph), "{chord}");
+            assert_eq!(evs[main]["code"].as_str(), Some(code), "{chord}");
+            assert_eq!(
+                evs[main]["windowsVirtualKeyCode"].as_u64(),
+                Some(vk),
+                "{chord}"
+            );
+            assert_eq!(evs[main]["modifiers"].as_u64(), Some(8), "{chord}");
+        }
+        // A shortcut keeps the shifted key name but never types text.
+        let c = parse_key_combo("Control+Shift+1").unwrap().expect("combo");
+        let (evs, main) = combo_events(&c).unwrap();
+        assert_eq!(evs[main]["key"].as_str(), Some("!"));
+        assert!(evs[main].get("text").is_none());
+    }
+
+    #[test]
+    fn value_fields_verify_exact_whitespace() {
+        // A-ws: "  x" typed into a field that trims reads back "x"; the
+        // normalized comparison called that verified.
+        use super::edit::{readback_matches, type_verdict_text, EditKind, EditReport};
+        assert!(!readback_matches("input", "x", "  x"));
+        assert!(!readback_matches("textarea", "a b", "a  b"));
+        assert!(readback_matches("input", "  x", "  x"));
+        // Rich editors reflow whitespace in innerText: still normalized.
+        assert!(readback_matches("ce", "a b", "a\u{a0} b"));
+        let rep = EditReport {
+            kind: EditKind::Type,
+            text: "  x".into(),
+            final_text: "x".into(),
+            branch_text: "x".into(),
+            host_kind: "input".into(),
+            host_is_tgt: true,
+            tgt_missing: false,
+            pre_text_len: 0,
+            pre_cleared: true,
+            verified: false,
+            set_via_js: false,
+            corrected: true,
+        };
+        let v = type_verdict_text("e1", "  x", &rep, &crate::page::LivePageModel::new());
+        assert!(v.contains("whitespace differs"), "{v}");
+        assert!(!v.contains("late restore"), "{v}");
     }
 
     #[test]

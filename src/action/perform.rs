@@ -90,6 +90,26 @@ pub async fn perform_with_network(
     route: Option<&crate::page::RouteEpoch>,
     last_mouse: &Arc<std::sync::Mutex<Option<(f64, f64)>>>,
 ) -> Result<(PageDelta, String)> {
+    // L6: a text-input combobox (an autocomplete <input role=combobox>) has
+    // no options to pick. `select`/`fill` on it type the text through the
+    // trusted, read-back typing path instead of assigning an untrusted
+    // .value no user could produce (the verdict then says "typed").
+    let routed;
+    let action = match action {
+        Action::Select { ref_id, option }
+            if lpm.element(ref_id).is_some_and(|e| {
+                e.raw.role == "combobox" && matches!(e.raw.tag.as_str(), "input" | "textarea")
+            }) =>
+        {
+            routed = Action::Type {
+                ref_id: ref_id.clone(),
+                text: option.clone(),
+            };
+            &routed
+        }
+        _ => action,
+    };
+
     // Resolve ref → (sig, frame) for ref-targeted actions.
     let sig_frame = match action.ref_id() {
         Some(ref_id) => Some(resolve_ref(lpm, ref_id)?),
@@ -296,7 +316,15 @@ pub async fn perform_with_network(
             // that rejected a well-aimed click (issue #15). When the target
             // is NOT topmost, name what actually receives the click there
             // (occlusion diagnostic).
+            // L3: a leaf-forwarded click names the inner control it hit.
+            let leaf = found
+                .hit_tgt
+                .as_deref()
+                .filter(|_| found.leaf == Some(true));
             let mut tgt_meta = found.hit_tgt.as_deref().unwrap_or("").to_string();
+            if leaf.is_some() {
+                tgt_meta.insert_str(0, "inner ");
+            }
             if !tgt_meta.is_empty() {
                 if found.is_topmost == Some(false) {
                     match found.top_desc.as_deref() {
@@ -319,6 +347,7 @@ pub async fn perform_with_network(
                 lpm,
                 ClickEvidence {
                     via: Some((via, &tried, &tgt_meta)),
+                    leaf,
                     coord_hit: None,
                     toggle: toggle.as_ref(),
                     dispatched,
@@ -327,7 +356,7 @@ pub async fn perform_with_network(
                 None,
             );
             if dialog_fired && !delta.navigated && delta.is_empty() && !delta.content_changed {
-                verdict = format!("outcome: dialog opened via {via} (handled — see ambient)");
+                verdict = dialog_verdict(via, leaf);
             }
             return Ok((delta, verdict));
         }
@@ -414,17 +443,27 @@ pub async fn perform_with_network(
             // may move focus into it - typing then lands where a human's
             // would, and every readback below resolves the effective host.
             let focus = find_by_sig(cdp, sig, frame, "prepare", None).await?;
-            let pre = check_editor(cdp, sig, frame).await;
-            if !focus.ok
-                && pre
-                    .as_ref()
-                    .and_then(|p| p.host_kind.clone())
-                    .unwrap_or_default()
-                    .is_empty()
-            {
-                // The addressed element is gone and no live editor took over.
+            if !focus.ok {
+                // The addressed element is gone (or hidden with no editor of
+                // its own). Never fall back to whatever holds focus - that
+                // typed a password into the focused email field (L2). Heal
+                // re-resolves the ref.
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
             }
+            // Keys go wherever focus is. A target that could not take it
+            // (disabled, inert, covered) leaves focus on another field, and
+            // typing would fill THAT field - refuse before any key.
+            if focus.disabled == Some(true) {
+                return Err(BladeError::NotInteractable(format!(
+                    "{ref_id} is disabled; no keys typed"
+                )));
+            }
+            if let Some(other) = focus.away.as_deref() {
+                return Err(BladeError::NotInteractable(format!(
+                    "{ref_id} did not take focus ({other} holds it); no keys typed - the field may be inert or covered"
+                )));
+            }
+            let pre = check_editor(cdp, sig, frame).await;
             let pre_read = pre
                 .as_ref()
                 .and_then(|p| p.text.clone())
@@ -435,6 +474,11 @@ pub async fn perform_with_network(
             let mut pre_cleared = pre_read.is_empty();
             if !pre_read.is_empty() {
                 let cl = clear_editable(cdp, sig, frame).await?;
+                if let Some(why) = cl.blocked {
+                    return Err(BladeError::NotInteractable(format!(
+                        "{ref_id} {why}; no keys typed"
+                    )));
+                }
                 pre_cleared = cl.ok;
             }
             // Type: short text via per-char key events (the biometrics
@@ -443,13 +487,23 @@ pub async fn perform_with_network(
             let _ = type_text(cdp, text).await;
             // Readback with a bounded poll: framework editors (and late
             // drafts) can surface their content after the keystrokes return.
-            let want = norm_text(text);
+            // Value fields compare exactly (see `readback_matches`).
+            let kind_of = |c: &Option<FoundElement>| {
+                c.as_ref()
+                    .and_then(|c| c.host_kind.clone())
+                    .unwrap_or_default()
+            };
             let mut last = check_editor(cdp, sig, frame).await;
             let mut branch_text = last
                 .as_ref()
                 .and_then(|c| c.text.clone())
                 .unwrap_or_default();
-            if norm_text(&branch_text) != want {
+            // A page-reformatted value (see `page_reformatted`) is final:
+            // no poll, no setter rescue, no corrective retype.
+            let settled = |c: &Option<FoundElement>, got: &str| {
+                readback_matches(&kind_of(c), got, text) || page_reformatted(&kind_of(c), got, text)
+            };
+            if !settled(&last, &branch_text) {
                 for _ in 0..6u8 {
                     tokio::time::sleep(Duration::from_millis(120)).await;
                     last = check_editor(cdp, sig, frame).await;
@@ -457,7 +511,7 @@ pub async fn perform_with_network(
                         .as_ref()
                         .and_then(|c| c.text.clone())
                         .unwrap_or_default();
-                    if norm_text(&branch_text) == want {
+                    if settled(&last, &branch_text) {
                         break;
                     }
                 }
@@ -466,11 +520,8 @@ pub async fn perform_with_network(
             // did not register at all. Never for contenteditables - a DOM
             // write desyncs a framework editor's internal state.
             let mut set_via_js = false;
-            if norm_text(&branch_text) != want {
-                let kind = last
-                    .as_ref()
-                    .and_then(|c| c.host_kind.clone())
-                    .unwrap_or_default();
+            if !settled(&last, &branch_text) {
+                let kind = kind_of(&last);
                 if (kind == "input" || kind == "textarea")
                     && norm_text(&branch_text) == norm_text(&pre_read)
                 {
@@ -482,12 +533,12 @@ pub async fn perform_with_network(
                             .as_ref()
                             .and_then(|c| c.text.clone())
                             .unwrap_or_default();
-                        set_via_js = norm_text(&branch_text) == want;
+                        set_via_js = readback_matches(&kind_of(&last), &branch_text, text);
                     }
                 }
             }
             let host = last.as_ref();
-            let verified = norm_text(&branch_text) == want;
+            let verified = readback_matches(&kind_of(&last), &branch_text, text);
             edit_report = Some(EditReport {
                 kind: EditKind::Type,
                 text: text.clone(),
@@ -505,6 +556,12 @@ pub async fn perform_with_network(
         }
         Action::Clear { ref_id } => {
             let (sig, frame) = sig_frame.as_ref().unwrap();
+            // The addressed element must still exist: the readback's drift
+            // fallback (an unlabelled editor renamed by our own edit) must
+            // never let a clear empty some other field that holds focus.
+            if !find_by_sig(cdp, sig, frame, "state", None).await?.ok {
+                return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
+            }
             // Verified clear: the ladder (setter -> trusted keys -> JS path)
             // reads back at every rung; the report carries the truth into
             // the verdict - a clear that did not empty the field never
@@ -512,6 +569,18 @@ pub async fn perform_with_network(
             let cl = clear_editable(cdp, sig, frame).await?;
             if cl.missing {
                 return Err(BladeError::ElementNotFound(format!("{ref_id} ({sig})")));
+            }
+            // Same rule as type: the ladder's keys go wherever focus is, so
+            // a target that cannot take it is refused before any write.
+            if let Some(why) = cl.blocked {
+                let hint = if why.starts_with("did not take focus") {
+                    " - the field may be inert or covered"
+                } else {
+                    ""
+                };
+                return Err(BladeError::NotInteractable(format!(
+                    "{ref_id} {why}; nothing cleared{hint}"
+                )));
             }
             let cur = check_editor(cdp, sig, frame).await;
             let host = cur.as_ref();
@@ -546,12 +615,44 @@ pub async fn perform_with_network(
             let found = find_by_sig(cdp, sig, frame, "select", Some(option)).await?;
             if !found.ok {
                 let reason = found.reason.as_deref().unwrap_or("not found");
-                if reason == "option not found in select" {
+                // L6: refusals the page made plain - nothing was changed, and
+                // a heal would only repeat them.
+                match reason {
+                    "select disabled" => {
+                        return Err(BladeError::NotInteractable(format!(
+                            "{ref_id} is disabled; selection unchanged"
+                        )))
+                    }
+                    "selection rejected" => {
+                        return Err(BladeError::Other(format!(
+                            "{ref_id}: the page rejected \"{option}\" - the select still shows \"{}\"",
+                            clip(found.text.as_deref().unwrap_or(""), 40)
+                        )))
+                    }
+                    "text combobox" => {
+                        return Err(BladeError::NotInteractable(format!(
+                            "{ref_id} is a text combobox, not a <select>: type the text (act type {ref_id} \"{option}\"), then click the matching suggestion"
+                        )))
+                    }
+                    "not a native select" => {
+                        return Err(BladeError::NotInteractable(format!(
+                            "{ref_id} is a custom combobox, not a <select>; nothing was selected - click it to open the list, then click the option \"{option}\""
+                        )))
+                    }
+                    _ => {}
+                }
+                if reason == "option not found in select" || reason == "option disabled" {
                     // #21: the PICK failed, not the element. List the real
                     // live options so one retry succeeds, and don't raise
                     // ElementNotFound — the DOM-drift heal would retry the
-                    // same losing pick and drop this list on the way.
-                    let mut msg = format!("{ref_id} ({sig}) — option \"{option}\" not found");
+                    // same losing pick and drop this list on the way. A
+                    // disabled option lists the enabled ones.
+                    let what = if reason == "option disabled" {
+                        "is disabled"
+                    } else {
+                        "not found"
+                    };
+                    let mut msg = format!("{ref_id} ({sig}) — option \"{option}\" {what}");
                     let live = found.options.clone().unwrap_or_default();
                     if !live.is_empty() {
                         let hidden = found
@@ -562,7 +663,7 @@ pub async fn perform_with_network(
                         if hidden > 0 {
                             msg.push_str(&format!(" (+{hidden} more)"));
                         }
-                    } else if let Some(opts) = &el.raw.options {
+                    } else if let (Some(opts), "not found") = (&el.raw.options, what) {
                         // Fallback: the captured copy (covers frames the
                         // live read couldn't reach).
                         let (tokens, hidden) = opts.tokens(80);
@@ -677,6 +778,19 @@ pub async fn perform_with_network(
                         .to_string(),
                     scroller_before: jnum(&before_v, "elTop"),
                     scroller_after: jnum(&after_v, "elTop"),
+                    // A-hscroll: the horizontal axis, measured the same way
+                    // (absent from a probe means unmeasured, never moved).
+                    before_x: jnum(&before_v, "x").unwrap_or(0.0),
+                    after_x: jnum(&after_v, "x").unwrap_or(0.0),
+                    max_x: jnum(&after_v, "maxX").unwrap_or(0.0),
+                    scroller_x: after_v
+                        .as_ref()
+                        .and_then(|o| o.get("elx"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    scroller_x_before: jnum(&before_v, "elLeft"),
+                    scroller_x_after: jnum(&after_v, "elLeft"),
                 });
             }
         }
@@ -780,22 +894,21 @@ pub async fn perform_with_network(
             // Bezier mouse move to element center — no click.
             // The human-like path triggers CSS :hover and JS
             // mouseover/mouseenter. On dispatch failure (page
-            // navigating mid-hover), re-resolve and retry once.
-            if dispatch_mouse_move(cdp, (cx, cy), last_mouse)
-                .await
-                .is_err()
-            {
+            // navigating mid-hover), re-resolve and retry once. A retry
+            // that cannot re-locate the element is an error: no pointer
+            // reached it, so "hovered" would be a false claim.
+            if let Err(first) = dispatch_mouse_move(cdp, (cx, cy), last_mouse).await {
                 let retry = find_by_sig(cdp, sig, frame, "hover", None).await?;
-                if retry.ok {
-                    if let Some(b2) = retry.box_ {
-                        dispatch_mouse_move(
-                            cdp,
-                            (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0),
-                            last_mouse,
-                        )
-                        .await?;
+                let b2 = match (retry.ok, retry.box_) {
+                    (true, Some(b2)) => b2,
+                    _ => {
+                        return Err(BladeError::ElementNotFound(format!(
+                            "{ref_id} ({sig}) — hover failed: the mouse move did not dispatch ({first}) and the element could not be re-located"
+                        )))
                     }
-                }
+                };
+                dispatch_mouse_move(cdp, (b2[0] + b2[2] / 2.0, b2[1] + b2[3] / 2.0), last_mouse)
+                    .await?;
             }
             // Hover-driven dropdowns appear within ~150ms — the settle
             // quiet threshold (150ms) catches them. No extra sleep needed.
@@ -968,6 +1081,7 @@ pub async fn perform_with_network(
         lpm,
         ClickEvidence {
             via: None,
+            leaf: None,
             coord_hit: coord_hit.as_deref(),
             toggle: coord_toggle.as_ref(),
             // A coord click always dispatches (the click above is

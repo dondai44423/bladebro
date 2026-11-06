@@ -125,12 +125,23 @@ pub struct ScrollReport {
     pub scroller: String,
     pub scroller_before: Option<f64>,
     pub scroller_after: Option<f64>,
+    /// Horizontal axis: window scrollLeft before/after and its range, plus
+    /// the horizontal scroller under the wheel point (a carousel, a wide
+    /// table) - a vertical-only probe reported a carousel that DID scroll as
+    /// "no movement - page already at the top".
+    pub before_x: f64,
+    pub after_x: f64,
+    pub max_x: f64,
+    pub scroller_x: String,
+    pub scroller_x_before: Option<f64>,
+    pub scroller_x_after: Option<f64>,
 }
 
-/// Build the scroll-position probe: window scroller state + the deepest
-/// scrollable element under (cx, cy). One evaluate, best-effort.
+/// Build the scroll-position probe: window scroller state on both axes + the
+/// deepest vertical and horizontal scrollable elements under (cx, cy). One
+/// evaluate, best-effort.
 pub(super) fn scroll_probe_expr(cx: f64, cy: f64) -> String {
-    let js = "(()=>{var d=document;var se=d.scrollingElement||d.documentElement;var out={y:se?se.scrollTop:0,max:Math.max(0,(se?se.scrollHeight:0)-(window.innerHeight||0)),el:'',elTop:null};try{var hit=d.elementFromPoint(__X__,__Y__);var hops=0;while(hit&&hops<40){if(hit!==d.body&&hit!==d.documentElement){var cs=getComputedStyle(hit);if((cs.overflowY==='auto'||cs.overflowY==='scroll'||cs.overflowY==='overlay')&&hit.scrollHeight>hit.clientHeight+1){out.el=hit.tagName.toLowerCase()+((hit.getAttribute&&hit.getAttribute('id'))?('#'+String(hit.getAttribute('id')).slice(0,24)):'');out.elTop=hit.scrollTop;break;}}hit=hit.parentElement||(hit.getRootNode&&hit.getRootNode().host)||null;hops++;}}catch(e){}return out;})()";
+    let js = "(()=>{var d=document;var se=d.scrollingElement||d.documentElement;var out={y:se?se.scrollTop:0,max:Math.max(0,(se?se.scrollHeight:0)-(window.innerHeight||0)),el:'',elTop:null,x:se?se.scrollLeft:0,maxX:Math.max(0,(se?se.scrollWidth:0)-(window.innerWidth||0)),elx:'',elLeft:null};try{var desc=function(e){return e.tagName.toLowerCase()+((e.getAttribute&&e.getAttribute('id'))?('#'+String(e.getAttribute('id')).slice(0,24)):'');};var can=function(v){return v==='auto'||v==='scroll'||v==='overlay';};var hit=d.elementFromPoint(__X__,__Y__);var hops=0;while(hit&&hops<40&&(out.elTop===null||out.elLeft===null)){if(hit!==d.body&&hit!==d.documentElement){var cs=getComputedStyle(hit);if(out.elTop===null&&can(cs.overflowY)&&hit.scrollHeight>hit.clientHeight+1){out.el=desc(hit);out.elTop=hit.scrollTop;}if(out.elLeft===null&&can(cs.overflowX)&&hit.scrollWidth>hit.clientWidth+1){out.elx=desc(hit);out.elLeft=hit.scrollLeft;}}hit=hit.parentElement||(hit.getRootNode&&hit.getRootNode().host)||null;hops++;}}catch(e){}return out;})()";
     js.replace("__X__", &format!("{cx}"))
         .replace("__Y__", &format!("{cy}"))
 }
@@ -160,6 +171,10 @@ impl ToggleProbe {
 #[derive(Default)]
 pub struct ClickEvidence<'a> {
     pub via: Option<(&'a str, &'a [&'a str], &'a str)>,
+    /// L3: the inner control a container click was leaf-forwarded to
+    /// (`button [Delete]`), so an effect is never credited to the addressed
+    /// element when another control received the click.
+    pub leaf: Option<&'a str>,
     pub coord_hit: Option<&'a str>,
     pub toggle: Option<&'a ToggleProbe>,
     /// True when a click was actually dispatched (mouse/js/enter/space/coord).
@@ -170,6 +185,26 @@ pub struct ClickEvidence<'a> {
 /// context mid-transition): nothing was observed, so the effect is neither
 /// confirmed nor denied - never "navigated", never "no observable change".
 const UNANSWERED_EFFECT: &str = "effect unverified - the page did not answer the post-action read (busy or mid-navigation); observe before repeating";
+
+/// The lane a click went through, naming the inner control when the mouse
+/// lane was leaf-forwarded (L3). Only the mouse lane aims at the forwarded
+/// box; js/enter/space act on the addressed element itself.
+fn click_lane(via: &str, leaf: Option<&str>) -> String {
+    match leaf {
+        Some(inner) if via == "mouse" => format!("{via} on inner {inner}"),
+        _ => via.to_string(),
+    }
+}
+
+/// Verdict for a click whose only effect was a JS dialog (auto-handled).
+/// A forwarded click names its control here too: an inner Delete that asks
+/// confirm() is the common destructive case.
+pub(super) fn dialog_verdict(via: &str, leaf: Option<&str>) -> String {
+    format!(
+        "outcome: dialog opened via {} (handled — see ambient)",
+        click_lane(via, leaf)
+    )
+}
 
 /// Compute a one-line outcome verdict from the action + delta + click info.
 /// This is the M1 verdict — every act tells the agent what happened.
@@ -186,7 +221,10 @@ pub(super) fn compute_verdict(
     match action {
         Action::ClickCoord { x, y } => {
             if delta.navigated {
-                format!("outcome: navigated \u{2192} {} via coord-click({x:.0},{y:.0})", shorten_url(&delta.url))
+                format!(
+                    "outcome: navigated \u{2192} {} via coord-click({x:.0},{y:.0})",
+                    shorten_url(&delta.url)
+                )
             } else if let Some(eff) = dom_effect_summary(delta) {
                 let note = match toggle.filter(|t| t.changed()) {
                     Some(t) => format!(
@@ -228,8 +266,13 @@ pub(super) fn compute_verdict(
         }
         Action::Click { .. } => {
             let (via, tried, tgt_meta) = click_via.unwrap_or(("", &[][..], ""));
+            let via = click_lane(via, click.leaf);
             if delta.navigated {
-                format!("outcome: navigated \u{2192} {} via {}", shorten_url(&delta.url), via)
+                format!(
+                    "outcome: navigated \u{2192} {} via {}",
+                    shorten_url(&delta.url),
+                    via
+                )
             } else if let Some(eff) = dom_effect_summary(delta) {
                 let note = match toggle.filter(|t| t.changed()) {
                     Some(t) => format!(
@@ -306,7 +349,10 @@ pub(super) fn compute_verdict(
         Action::Select { option, .. } => format!("outcome: selected \"{}\"", clip(option, 40)),
         Action::Press { key } => {
             if delta.navigated {
-                format!("outcome: pressed {key} \u{2192} navigated \u{2192} {}", shorten_url(&delta.url))
+                format!(
+                    "outcome: pressed {key} \u{2192} navigated \u{2192} {}",
+                    shorten_url(&delta.url)
+                )
             } else if let Some(eff) = dom_effect_summary(delta) {
                 format!("outcome: pressed {key} \u{2192} dom-changed ({eff})")
             } else if delta.content_changed {
@@ -317,55 +363,15 @@ pub(super) fn compute_verdict(
                 format!("outcome: pressed {key}")
             }
         }
-        Action::Scroll { dx, dy } => match scroll {
-            // Report MEASURED movement. The old unconditional "scrolled
-            // (dx, dy)" claimed success when the wheel hit a boundary and
-            // nothing moved - agents read the lie as a broken tool.
-            Some(s) => {
-                let moved = s.after_y - s.before_y;
-                let el_moved = match (s.scroller_before, s.scroller_after) {
-                    (Some(a), Some(b)) => b - a,
-                    _ => 0.0,
-                };
-                if moved.abs() >= 1.0 {
-                    format!(
-                        "outcome: scrolled page delta{moved:+.0} (y {:.0} -> {:.0})",
-                        s.before_y, s.after_y
-                    )
-                } else if el_moved.abs() >= 1.0 {
-                    let who = if s.scroller.is_empty() {
-                        "nested scroller".to_string()
-                    } else {
-                        s.scroller.clone()
-                    };
-                    format!(
-                        "outcome: scrolled {who} delta{el_moved:+.0} (page unchanged at y {:.0})",
-                        s.after_y
-                    )
-                } else if s.max_y > 1.0 && (s.after_y - s.max_y).abs() < 2.0 {
-                    format!(
-                        "outcome: no movement - page already at the bottom (y {:.0} of {:.0})",
-                        s.after_y, s.max_y
-                    )
-                } else if s.after_y <= 0.5 {
-                    "outcome: no movement - page already at the top".to_string()
-                } else {
-                    format!(
-                        "outcome: no movement - wheel dispatched, nothing scrolled (y {:.0} of {:.0})",
-                        s.after_y, s.max_y
-                    )
-                }
-            }
-            // Probe failed on this burst: claim the dispatch, not movement.
-            None => format!(
-                "outcome: scroll dispatched ({dx}, {dy}) - movement not measured (probe unavailable)"
-            ),
-        },
+        Action::Scroll { dx, dy } => scroll_verdict(*dx, *dy, scroll),
         Action::Read { .. } => "outcome: read".to_string(),
         Action::Wait { condition, .. } => format!("outcome: waited ({condition})"),
         Action::Back => {
             if delta.navigated {
-                format!("outcome: navigated back \u{2192} {}", shorten_url(&delta.url))
+                format!(
+                    "outcome: navigated back \u{2192} {}",
+                    shorten_url(&delta.url)
+                )
             } else if delta.unanswered {
                 format!("outcome: back - {UNANSWERED_EFFECT}")
             } else {
@@ -374,7 +380,10 @@ pub(super) fn compute_verdict(
         }
         Action::Forward => {
             if delta.navigated {
-                format!("outcome: navigated forward \u{2192} {}", shorten_url(&delta.url))
+                format!(
+                    "outcome: navigated forward \u{2192} {}",
+                    shorten_url(&delta.url)
+                )
             } else if delta.unanswered {
                 format!("outcome: forward - {UNANSWERED_EFFECT}")
             } else {
@@ -386,7 +395,10 @@ pub(super) fn compute_verdict(
         }
         Action::Hover { ref_id } => {
             if delta.navigated {
-                format!("outcome: hovered {ref_id} \u{2192} navigated \u{2192} {}", shorten_url(&delta.url))
+                format!(
+                    "outcome: hovered {ref_id} \u{2192} navigated \u{2192} {}",
+                    shorten_url(&delta.url)
+                )
             } else if let Some(eff) = dom_effect_summary(delta) {
                 format!("outcome: hovered {ref_id} \u{2192} dom-changed ({eff})")
             } else if delta.content_changed {
@@ -398,6 +410,93 @@ pub(super) fn compute_verdict(
             }
         }
         Action::Upload { path, .. } => format!("outcome: uploaded \"{}\"", clip(path, 40)),
+    }
+}
+
+/// Scroll verdict from MEASURED movement. The old unconditional "scrolled
+/// (dx, dy)" claimed success when the wheel hit a boundary and nothing
+/// moved; agents read the lie as a broken tool. Both axes are measured:
+/// page movement first, then the nested scrollers under the wheel point,
+/// then the boundary the request ran into.
+pub(super) fn scroll_verdict(dx: i64, dy: i64, scroll: Option<&ScrollReport>) -> String {
+    // Probe failed on this burst: claim the dispatch, not movement.
+    let Some(s) = scroll else {
+        return format!(
+            "outcome: scroll dispatched ({dx}, {dy}) - movement not measured (probe unavailable)"
+        );
+    };
+    let delta = |a: Option<f64>, b: Option<f64>| match (a, b) {
+        (Some(a), Some(b)) => b - a,
+        _ => 0.0,
+    };
+    let moved = s.after_y - s.before_y;
+    let moved_x = s.after_x - s.before_x;
+    let el_moved = delta(s.scroller_before, s.scroller_after);
+    let el_moved_x = delta(s.scroller_x_before, s.scroller_x_after);
+    let name = |who: &str| {
+        if who.is_empty() {
+            "nested scroller".to_string()
+        } else {
+            who.to_string()
+        }
+    };
+    if moved.abs() >= 1.0 || moved_x.abs() >= 1.0 {
+        let mut parts = Vec::new();
+        if moved.abs() >= 1.0 {
+            parts.push(format!(
+                "delta{moved:+.0} (y {:.0} -> {:.0})",
+                s.before_y, s.after_y
+            ));
+        }
+        if moved_x.abs() >= 1.0 {
+            parts.push(format!(
+                "delta x{moved_x:+.0} (x {:.0} -> {:.0})",
+                s.before_x, s.after_x
+            ));
+        }
+        format!("outcome: scrolled page {}", parts.join(", "))
+    } else if el_moved.abs() >= 1.0 || el_moved_x.abs() >= 1.0 {
+        let mut parts = Vec::new();
+        if el_moved.abs() >= 1.0 {
+            parts.push(format!("{} delta{el_moved:+.0}", name(&s.scroller)));
+        }
+        if el_moved_x.abs() >= 1.0 {
+            parts.push(format!("{} delta x{el_moved_x:+.0}", name(&s.scroller_x)));
+        }
+        format!(
+            "outcome: scrolled {} (page unchanged at y {:.0})",
+            parts.join(", "),
+            s.after_y
+        )
+    } else if dy == 0 && dx != 0 {
+        // A horizontal-only request reports the horizontal boundary.
+        if s.max_x <= 1.0 && s.scroller_x.is_empty() {
+            "outcome: no movement - nothing scrolls horizontally here (the page fits the viewport width)".to_string()
+        } else if dx > 0 && s.max_x > 1.0 && (s.after_x - s.max_x).abs() < 2.0 {
+            format!(
+                "outcome: no movement - page already at the right edge (x {:.0} of {:.0})",
+                s.after_x, s.max_x
+            )
+        } else if dx < 0 && s.after_x <= 0.5 {
+            "outcome: no movement - page already at the left edge".to_string()
+        } else {
+            format!(
+                "outcome: no movement - wheel dispatched, nothing scrolled (x {:.0} of {:.0})",
+                s.after_x, s.max_x
+            )
+        }
+    } else if s.max_y > 1.0 && (s.after_y - s.max_y).abs() < 2.0 {
+        format!(
+            "outcome: no movement - page already at the bottom (y {:.0} of {:.0})",
+            s.after_y, s.max_y
+        )
+    } else if s.after_y <= 0.5 {
+        "outcome: no movement - page already at the top".to_string()
+    } else {
+        format!(
+            "outcome: no movement - wheel dispatched, nothing scrolled (y {:.0} of {:.0})",
+            s.after_y, s.max_y
+        )
     }
 }
 
@@ -830,12 +929,22 @@ pub async fn eval_condition(
 /// point does not land on a native control, find the nearest exposed native
 /// control inside the match and click there instead. CL3 fix: the YouTube
 /// account-menu / nav-wrapper no-effect bug (#15).
+///
+/// L3: an addressed node that is itself actionable (a native control, an
+/// inline handler, or an interactive role) is clicked where it is; only a
+/// same-named inner control may stand in for it (a wrapper around its own
+/// button - the #15 class). Redirecting a clickable thread row onto its
+/// nested Delete button fired Delete. The role alone counts: React/Vue rows
+/// carry role=button with neither tabindex nor an inline handler (listeners
+/// are attached from script, invisible here). `_lred` flags a redirect so
+/// the verdict names it.
 pub(super) const LEAF_TARGET_JS: &str = concat!(
-    "var _lClick=_lbx(n);var _lht=(n.getAttribute&&(n.getAttribute('aria-label')||n.getAttribute('title')))||'';var _lhr=(n.getAttribute&&n.getAttribute('role'))||n.tagName.toLowerCase();",
+    "var _lClick=_lbx(n);var _lht=(n.getAttribute&&(n.getAttribute('aria-label')||n.getAttribute('title')))||'';var _lhr=(n.getAttribute&&n.getAttribute('role'))||n.tagName.toLowerCase();var _lred=false;",
     "var _ltopN=doc.elementFromPoint(cx,cy);var _lNative=_lnb(_ltopN);",
+    "var _lnm=null;try{var _lr0=(n.getAttribute&&n.getAttribute('role'))||'';if(_lnb(n)||typeof n.onclick==='function'||(n.hasAttribute&&n.hasAttribute('onclick'))||(/^(button|link|menuitem|menuitemcheckbox|menuitemradio|tab|option|checkbox|radio|switch|treeitem)$/.test(_lr0))){_lnm=String(name(n,false)||'').toLowerCase();}}catch(e){}",
     "if(!_lNative){var _lbest=null,_lbd=Infinity,_lcands=[];try{_lcands=deepAll(n,'button,a[href],input:not([type=hidden]),select,textarea');}catch(e){}",
-    "for(var _lk=0;_lk<_lcands.length;_lk++){var _lc=_lcands[_lk];var _lrc=_lc.getBoundingClientRect();if(_lrc.width<2||_lrc.height<2)continue;var _lbn=n.getBoundingClientRect();if(!(_lrc.left<=_lbn.right&&_lrc.right>=_lbn.left))continue;var _lccx=_lrc.x+_lrc.width/2,_lccy=_lrc.y+_lrc.height/2;var _ltc=doc.elementFromPoint(_lccx,_lccy);if(!(_ltc===_lc||(_lc.contains&&_lc.contains(_ltc))))continue;var _ldd=Math.hypot(_lccx-cx,_lccy-cy);if(_ldd<_lbd){_lbd=_ldd;_lbest=_lc;}}",
-    "if(_lbest){_lClick=_lbx(_lbest);_lht=(_lbest.getAttribute&&(_lbest.getAttribute('aria-label')||_lbest.textContent||_lbest.getAttribute('title')))||'';_lhr=(_lbest.getAttribute&&_lbest.getAttribute('role'))||_lbest.tagName.toLowerCase();}}",
+    "for(var _lk=0;_lk<_lcands.length;_lk++){var _lc=_lcands[_lk];if(_lnm!==null){var _lcn='';try{_lcn=String(name(_lc,false)||'').toLowerCase();}catch(e){}if(_lcn!==_lnm)continue;}var _lrc=_lc.getBoundingClientRect();if(_lrc.width<2||_lrc.height<2)continue;var _lbn=n.getBoundingClientRect();if(!(_lrc.left<=_lbn.right&&_lrc.right>=_lbn.left))continue;var _lccx=_lrc.x+_lrc.width/2,_lccy=_lrc.y+_lrc.height/2;var _ltc=doc.elementFromPoint(_lccx,_lccy);if(!(_ltc===_lc||(_lc.contains&&_lc.contains(_ltc))))continue;var _ldd=Math.hypot(_lccx-cx,_lccy-cy);if(_ldd<_lbd){_lbd=_ldd;_lbest=_lc;}}",
+    "if(_lbest){_lClick=_lbx(_lbest);_lht=(_lbest.getAttribute&&(_lbest.getAttribute('aria-label')||_lbest.textContent||_lbest.getAttribute('title')))||'';_lhr=(_lbest.getAttribute&&_lbest.getAttribute('role'))||_lbest.tagName.toLowerCase();_lred=true;}}",
 );
 
 /// Build the verdict for a click where NO activation lane dispatched (every
