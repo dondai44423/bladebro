@@ -4,7 +4,8 @@
 //! The "one binary, works out of the box" promise (D2/D8): Bladebro finds
 //! Chrome itself — no manual `--remote-debugging-port` setup. On NixOS it
 //! scans the nix store via `fd`; on mainstream distros it checks PATH and
-//! common install paths; everywhere it respects `CHROME_PATH`.
+//! common install paths, then Flatpak exports (read-only-root distros such as
+//! SteamOS); everywhere it respects `CHROME_PATH`.
 //!
 //! Stealth mode: if Xvfb (virtual X display) is available, Chrome runs in
 //! headful mode on a virtual display. This eliminates most headless-detection
@@ -15,7 +16,8 @@
 //! shutdown/drop contract; `flags` builds the command line, `probe` runs the
 //! GL healthcheck, `display` owns the Xvfb + WM layer (Linux), `launch` is the
 //! launch ladder + lane dispatch, `pipe` is the pipe-transport launch, and
-//! `discover` finds Chrome/Xvfb on this system.
+//! `discover` finds Chrome/Xvfb on this system (`flatpak`: Flatpak browsers,
+//! Linux).
 
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -29,6 +31,8 @@ mod discover;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod display;
 mod flags;
+#[cfg(target_os = "linux")]
+mod flatpak;
 mod launch;
 mod pipe;
 mod probe;
@@ -106,8 +110,58 @@ impl Drop for Browser {
         // A requested Browser.close gets a flush grace before forced cleanup.
         // Unwinding/failed launches retain the emergency process-tree path.
         platform::finish_child_shutdown(&mut self.child, self.close_requested);
+        stop_profile_processes(&self.profile, self.close_requested);
         // Xvfb is dropped here too (field order: child first, then xvfb).
     }
+}
+
+/// Stop browser processes still running on this session's own profile once
+/// the launcher's process group is gone. Under Flatpak the portal spawns
+/// Chromium's zygote and utility sandboxes in its own session, so the group
+/// signal never reaches them, and where the portal does not nest them in the
+/// browser's pid namespace they outlive it (observed on SteamOS after failed
+/// launches). Only bladebro's own agent-lane session dirs qualify: a
+/// borrowed or real-lane profile may be shared with the user's own browser.
+/// After a requested close the stragglers get a flush grace first.
+pub(crate) fn stop_profile_processes(
+    profile: &crate::session_profile::SessionProfile,
+    close_requested: bool,
+) {
+    if !profile.is_owned_agent_session() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let left = || discover::processes_on_user_data_dir(profile.dir());
+        let gone_within = |wait: Duration| {
+            let deadline = Instant::now() + wait;
+            loop {
+                if left().is_empty() {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        if left().is_empty() || (close_requested && gone_within(Duration::from_secs(2))) {
+            return;
+        }
+        // Each round re-reads /proc, so only processes that still carry our
+        // profile flag are signalled.
+        for pid in left() {
+            platform::kill_process_graceful(pid);
+        }
+        if gone_within(Duration::from_secs(2)) {
+            return;
+        }
+        for pid in left() {
+            platform::kill_process_force(pid);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = close_requested;
 }
 
 impl Browser {
@@ -144,7 +198,11 @@ impl Browser {
                                 .as_u64()
                                 .and_then(|id| u32::try_from(id).ok())
                                 .is_some_and(|id| {
-                                    platform::owns_browser_process(self.child.id(), id)
+                                    platform::owns_browser_process(
+                                        self.child.id(),
+                                        id,
+                                        self.profile.dir(),
+                                    )
                                 })
                     })
                 });
@@ -172,5 +230,89 @@ impl Browser {
                     // Retain ownership metadata: a path under /tmp is not proof that
                     // an adopted user profile belongs to Bladebro.
         profile.cleanup();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod cleanup_tests {
+    use super::*;
+
+    /// A long-lived process whose own argv carries `flag`, like a sandboxed
+    /// Chromium helper. The loop keeps `sh` itself alive (a lone command could
+    /// be exec'd, dropping the flag) and leaves at most a 0.2 s sleep behind.
+    fn spawn_sleeper(flag: &str) -> Child {
+        use std::os::unix::process::CommandExt;
+        Command::new("sh")
+            .args(["-c", "while :; do sleep 0.2; done", "fixture", flag])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn fixture process")
+    }
+
+    fn exits_within(child: &mut Child, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if child.try_wait().is_ok_and(|s| s.is_some()) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// Flatpak's portal (zypak) runs Chromium's zygote and utility sandboxes in
+    /// the portal's own session, outside the launcher's process group. Where
+    /// the portal does not nest them in the browser's pid namespace they
+    /// outlive the launcher (observed on SteamOS). Tearing the Browser down
+    /// must stop every process running on its own session profile — and
+    /// nothing that merely shares a path prefix.
+    #[test]
+    fn teardown_stops_profile_processes_outside_the_launcher_group() {
+        let root = std::env::temp_dir().join(format!(
+            "blade-sweep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = root.join("sess-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut zygote = spawn_sleeper(&format!("--user-data-dir={}", dir.display()));
+        let mut neighbour = spawn_sleeper(&format!(
+            "--user-data-dir={}",
+            root.join("sess-10").display()
+        ));
+        let launcher = spawn_sleeper("launcher");
+
+        drop(Browser {
+            child: launcher,
+            xvfb: None,
+            port: 0,
+            profile: crate::session_profile::SessionProfile::owned_for_test(&dir),
+            shutdown_connection: None,
+            close_requested: false,
+        });
+
+        let zygote_stopped = exits_within(&mut zygote, Duration::from_secs(3));
+        let neighbour_alive = neighbour.try_wait().is_ok_and(|s| s.is_none());
+        // Single-process fixtures: std's kill is a no-op once reaped.
+        for fixture in [&mut zygote, &mut neighbour] {
+            let _ = fixture.kill();
+            let _ = fixture.wait();
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(
+            zygote_stopped,
+            "a browser process on our session profile must not outlive teardown"
+        );
+        assert!(
+            neighbour_alive,
+            "a process on a different profile (shared prefix) must never be signalled"
+        );
     }
 }

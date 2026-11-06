@@ -215,16 +215,26 @@ fn pick_candidate<'a>(
     cands.last().copied()
 }
 
-/// Format a completed download: real on-disk size (trust the file, not the
-/// event counter) + final path + source URL.
-fn describe_download(d: &DownloadInfo) -> String {
-    let size = std::fs::metadata(&d.path)
-        .map(|m| m.len())
-        .unwrap_or(d.received_bytes);
-    format!(
-        "download complete: {} ({} bytes)\nfrom: {}",
-        d.path, size, d.url
-    )
+/// Format a completed download from the file itself: real on-disk size +
+/// final path + source URL. Chrome's "completed" event only says the browser
+/// finished writing somewhere — a sandboxed browser that cannot reach the
+/// downloads dir (Flatpak) completes into a private tree the host never
+/// sees — so a missing file is an error, never a completion.
+fn describe_download(d: &DownloadInfo) -> std::result::Result<String, String> {
+    match std::fs::metadata(&d.path) {
+        Ok(m) if m.is_file() => Ok(format!(
+            "download complete: {} ({} bytes)\nfrom: {}",
+            d.path,
+            m.len(),
+            d.url
+        )),
+        _ => Err(format!(
+            "download not on disk: the browser reported {} complete ({} bytes), but {} does not exist — \
+             the browser saved it where bladebro cannot read it (a sandboxed browser without access \
+             to the downloads dir). For a URL that needs no login, retry with body=true.\nfrom: {}",
+            d.filename, d.received_bytes, d.path, d.url
+        )),
+    }
 }
 
 /// Wait for the correlated download to reach a terminal state (#22).
@@ -419,7 +429,8 @@ pub async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
                         })),
                     )
                     .await;
-                return waited.map(|download| describe_download(&download));
+                return waited
+                    .and_then(|download| describe_download(&download).map_err(BladeError::Other));
             }
             return Err(crate::error::BladeError::Other(format!(
                 "download failed: {err}"
@@ -438,7 +449,7 @@ pub async fn handle_download(page: &mut Page, args: &Value) -> Result<String> {
     )
     .await
     {
-        Ok(d) => Ok(describe_download(&d)),
+        Ok(d) => describe_download(&d).map_err(crate::error::BladeError::Other),
         Err(e) => Err(crate::error::BladeError::Other(e)),
     }
 }
@@ -584,6 +595,36 @@ mod download_correlation_tests {
             .expect_err("canceled download must error");
         assert!(err.contains("canceled"), "{err}");
         assert!(err.contains("two.pdf"), "{err}");
+    }
+
+    /// A "completed" event is the browser's word, not a file: a Flatpak
+    /// browser without access to the downloads dir completes into a
+    /// sandbox-private tree the host never sees. The verdict must come from
+    /// the file on disk, and a missing file must never read as complete.
+    #[test]
+    fn completed_download_missing_on_disk_is_not_reported_complete() {
+        let dir = std::env::temp_dir().join(format!("blade-dl-verdict-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut present = dl("g1", "here.txt", "completed");
+        present.path = dir.join("here.txt").display().to_string();
+        std::fs::write(&present.path, b"12345").unwrap();
+        let mut missing = dl("g2", "gone.txt", "completed");
+        missing.path = dir.join("gone.txt").display().to_string();
+
+        let found = describe_download(&present);
+        let lost = describe_download(&missing);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let found = found.expect("a file on disk is a completed download");
+        assert!(
+            found.starts_with("download complete: ") && found.contains("(5 bytes)"),
+            "size comes from the file, not the event counter: {found}"
+        );
+        let lost = lost.expect_err("a file missing on the host must not be reported complete");
+        assert!(
+            lost.starts_with("download not on disk") && lost.contains(&missing.path),
+            "{lost}"
+        );
     }
 }
 

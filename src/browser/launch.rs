@@ -204,7 +204,7 @@ impl Browser {
         let mode_str = "headful";
         eprintln!("[bladebro] launching Chrome from {chrome_path} on port {port} ({mode_str})");
 
-        let mut cmd = Command::new(&chrome_path);
+        let mut cmd = browser_command(&chrome_path, &user_data_dir);
         browser_temp_env(&mut cmd);
         // G11: bounded startup-stderr capture — a failed launch must be
         // diagnosable instead of guessed at (the runner investigation lost
@@ -257,6 +257,7 @@ impl Browser {
                     if !endpoint_owned_by_pid(port, child.id()) {
                         if Instant::now() >= deadline {
                             platform::kill_child_tree(&mut child);
+                            stop_profile_processes(&profile, false);
                             return Err(BladeError::Other(
                                 "the debug endpoint on this port is not served by the browser process — refusing it (possible local port hijack)".into(),
                             ));
@@ -282,6 +283,7 @@ impl Browser {
                         .await;
                         if let Err(error) = prepared {
                             platform::shutdown_child(&mut child);
+                            stop_profile_processes(&profile, false);
                             profile.cleanup();
                             return Err(error);
                         }
@@ -308,6 +310,9 @@ impl Browser {
                 Err(_) => {
                     match child.try_wait() {
                         Ok(Some(status)) => {
+                            // The launcher is gone, but a sandboxed helper
+                            // it started may not be (Flatpak portal spawns).
+                            stop_profile_processes(&profile, false);
                             return Err(BladeError::Other(format!(
                                 "Chrome exited during startup: {status}{}",
                                 chrome_stderr_tail()
@@ -322,6 +327,7 @@ impl Browser {
                     }
                     if Instant::now() >= deadline {
                         platform::kill_child_tree(&mut child);
+                        stop_profile_processes(&profile, false);
                         return Err(BladeError::Other(format!(
                             "Chrome debug endpoint not responding after 20s{}",
                             chrome_stderr_tail()
@@ -673,6 +679,19 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
         }
         crate::realbrowser::Mode::Auto => unreachable!("effective_mode resolves Auto"),
     }
+}
+
+/// The agent-lane browser process. A Flatpak export is started through
+/// `flatpak run` with the session profile shared into the sandbox — run
+/// as-is, Chrome would use a sandbox-private profile that vanishes on exit.
+pub(super) fn browser_command(chrome_path: &str, user_data_dir: &std::path::Path) -> Command {
+    #[cfg(target_os = "linux")]
+    if let Some(cmd) = super::flatpak::launch_command(chrome_path, user_data_dir) {
+        return cmd;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = user_data_dir;
+    Command::new(chrome_path)
 }
 
 /// S15: warn when no emoji font is installed. Kasada/Akamai render emoji on

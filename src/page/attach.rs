@@ -221,7 +221,7 @@ impl Page {
         // /tmp/bladebro-downloads leaked them across local users (and was a
         // symlink pre-placement target). The absolute path is returned to
         // the agent in the download result, so nothing depends on /tmp.
-        let download_dir = crate::platform::blade_dir().join("downloads");
+        let download_dir = crate::platform::downloads_dir();
         let _ = crate::platform::secure_create_dir_all(&download_dir);
         let _ = cdp
             .send(

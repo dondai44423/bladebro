@@ -83,6 +83,13 @@ pub fn blade_dir() -> PathBuf {
     )
 }
 
+/// Where the browser saves downloads (`Page.setDownloadBehavior`). A
+/// sandboxed launch (Flatpak) shares this exact dir into the sandbox, so
+/// both sides take it from here.
+pub fn downloads_dir() -> PathBuf {
+    blade_dir().join("downloads")
+}
+
 /// Can `$HOME/.local/state/blade` be created? True when the parent exists
 /// or `.local` does (so `state`/`blade` only need a mkdir under it).
 fn local_state_creatable(home: &std::path::Path) -> bool {
@@ -1024,20 +1031,127 @@ pub(crate) fn finish_child_shutdown(child: &mut Child, close_requested: bool) {
 
 /// Validate the browser process reported by CDP against our owned tree before
 /// closing it. A recycled/debug-port race must not close a borrowed browser.
-pub(crate) fn owns_browser_process(child: u32, browser: u32) -> bool {
+/// `user_data_dir` is the profile the owned browser was launched on.
+pub(crate) fn owns_browser_process(
+    child: u32,
+    browser: u32,
+    user_data_dir: &std::path::Path,
+) -> bool {
     #[cfg(unix)]
     {
-        child > 1
-            && child <= i32::MAX as u32
-            && browser > 1
-            && browser <= i32::MAX as u32
-            && unsafe { libc::getpgid(browser as i32) == child as i32 }
+        if !(child > 1 && child <= i32::MAX as u32 && browser > 1 && browser <= i32::MAX as u32) {
+            return false;
+        }
+        if unsafe { libc::getpgid(browser as i32) == child as i32 } {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            namespaced_pid_owned(child, browser, user_data_dir)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = user_data_dir;
+            false
+        }
     }
     #[cfg(windows)]
     {
-        let _ = child;
+        let _ = (child, user_data_dir);
         windows_job::owns_browser_process(browser)
     }
+}
+
+/// Flatpak runs the browser inside bubblewrap's own pid namespace, so CDP
+/// reports the browser's pid as seen in the sandbox (2 under Flatpak) — on
+/// the host that number is an unrelated process. Accept it only when a
+/// process we launched is namespaced and carries exactly that pid in its
+/// innermost namespace (`NSpid:` lists outermost first). "We launched" is
+/// our owned group or, because Flatpak moves bwrap into a group of its own
+/// when a wrapper script starts it, our process tree — the same subtree the
+/// launch gate requires to hold the debug endpoint. The process must also run
+/// on our `--user-data-dir`: a sandbox numbers its own processes from 1, so
+/// the bare number could name any namespaced process we started (the
+/// sandbox's init, a wrapper) rather than the browser.
+#[cfg(target_os = "linux")]
+fn namespaced_pid_owned(child: u32, ns_pid: u32, user_data_dir: &std::path::Path) -> bool {
+    let needle = format!("--user-data-dir={}", user_data_dir.display()).into_bytes();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    procs.flatten().any(|entry| {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            return false;
+        };
+        // The NSpid match is cheap and rare, so it filters before any walk.
+        pid > 1
+            && std::fs::read_to_string(format!("/proc/{pid}/status"))
+                .ok()
+                .and_then(|status| {
+                    let ids: Vec<u32> = status
+                        .lines()
+                        .find_map(|l| l.strip_prefix("NSpid:"))?
+                        .split_whitespace()
+                        .filter_map(|v| v.parse().ok())
+                        .collect();
+                    // One entry = our own namespace: the direct check covers it.
+                    (ids.len() > 1).then(|| ids[ids.len() - 1])
+                })
+                == Some(ns_pid)
+            && std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| cmdline_has_token(&cmdline, &needle))
+            && (unsafe { libc::getpgid(pid) } == child as i32
+                || pid_within_process_tree(pid as u32, child))
+    })
+}
+
+/// `needle` as a whole argument. Chromium rewrites its argv into one
+/// space-joined string (see `browser::discover::looks_like_chromium`), so a
+/// space separates arguments as well as the kernel's NUL.
+#[cfg(target_os = "linux")]
+pub(crate) fn cmdline_has_token(cmdline: &[u8], needle: &[u8]) -> bool {
+    let sep = |b: Option<&u8>| matches!(b, None | Some(0) | Some(b' '));
+    cmdline
+        .windows(needle.len())
+        .enumerate()
+        .any(|(at, window)| {
+            window == needle
+                && (at == 0 || sep(cmdline.get(at - 1)))
+                && sep(cmdline.get(at + needle.len()))
+        })
+}
+
+/// True when `pid` is `root` or a direct/indirect child of it, walking
+/// /proc's parent links. Bounded so a corrupt or racing chain cannot loop;
+/// an unreadable parent fails closed.
+#[cfg(target_os = "linux")]
+pub(crate) fn pid_within_process_tree(mut pid: u32, root: u32) -> bool {
+    // Real launch chains are short (AppRun → wrapper → browser → helper;
+    // Flatpak: export → bwrap → sandbox init → browser). A deeper chain is
+    // not evidence of ownership.
+    for _ in 0..64 {
+        if pid == root {
+            return true;
+        }
+        if pid <= 1 {
+            return false;
+        }
+        pid = proc_ppid(pid);
+    }
+    false
+}
+
+/// Parent pid of a process (0 when /proc is unreadable or unparseable).
+#[cfg(target_os = "linux")]
+fn proc_ppid(pid: u32) -> u32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    // Format: pid (comm) state ppid ... — comm can contain spaces/parens,
+    // so parse after the last ')'.
+    stat.rsplit(')')
+        .next()
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Force-kill an owned browser's whole process group without a graceful
@@ -1168,8 +1282,13 @@ mod tests {
             .process_group(0)
             .spawn()
             .unwrap();
-        assert!(owns_browser_process(child.id(), child.id()));
-        assert!(!owns_browser_process(child.id(), std::process::id()));
+        let profile = std::path::Path::new("/unused/sess-1");
+        assert!(owns_browser_process(child.id(), child.id(), profile));
+        assert!(!owns_browser_process(
+            child.id(),
+            std::process::id(),
+            profile
+        ));
         finish_child_shutdown(&mut child, true);
         let flushed = std::fs::read_to_string(&marker).ok();
         let _ = std::fs::remove_file(marker);
@@ -1177,6 +1296,159 @@ mod tests {
             flushed.as_deref(),
             Some("flushed"),
             "a requested close must finish its storage flush before the group is signalled"
+        );
+    }
+
+    /// Flatpak runs the browser inside bubblewrap's own pid namespace, so CDP's
+    /// SystemInfo.getProcessInfo reports the sandbox pid (2 under Flatpak),
+    /// which names an unrelated host process. The ownership check must map it
+    /// back to the namespaced process in the group we spawned, or graceful
+    /// Browser.close is skipped and the storage flush is lost — and only to a
+    /// process running on our own profile, not any namespaced process of ours
+    /// that happens to carry that number.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_pid_reported_from_a_sandbox_pid_namespace_is_owned() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        // `unshare --fork` mirrors bwrap's layout: launcher → namespace init
+        // (pid 1) → the "browser" (pid 2 inside the namespace), a long-lived
+        // shell whose own argv carries the profile flag.
+        let profile = std::env::temp_dir().join(format!("blade-ns-{}/sess-1", std::process::id()));
+        let flag = format!("--user-data-dir={}", profile.display());
+        let spawned = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--pid", "--fork"])
+            .args([
+                "sh",
+                "-c",
+                "sh -c 'while :; do sleep 0.2; done' browser \"$1\" & echo $!; wait",
+                "sandbox",
+                &flag,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn();
+        let Ok(mut sandbox) = spawned else {
+            eprintln!("unshare unavailable; skipping pid-namespace ownership test");
+            return;
+        };
+        let mut line = String::new();
+        let _ = BufReader::new(sandbox.stdout.take().expect("sandbox stdout")).read_line(&mut line);
+        let Ok(ns_pid) = line.trim().parse::<u32>() else {
+            // Unprivileged user namespaces are disabled here (e.g. Ubuntu's
+            // AppArmor restriction on CI runners).
+            shutdown_child(&mut sandbox);
+            eprintln!("unprivileged pid namespaces unavailable; skipping");
+            return;
+        };
+        let mut unrelated = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn unrelated process");
+
+        let owned = owns_browser_process(sandbox.id(), ns_pid, &profile);
+        let foreign = owns_browser_process(unrelated.id(), ns_pid, &profile);
+        let other_profile =
+            owns_browser_process(sandbox.id(), ns_pid, &profile.with_file_name("sess-2"));
+        shutdown_child(&mut sandbox);
+        shutdown_child(&mut unrelated);
+
+        assert!(
+            owned,
+            "the sandbox pid {ns_pid} reported by CDP belongs to the namespaced browser we spawned"
+        );
+        assert!(
+            !foreign,
+            "a namespaced pid outside the spawned process group must not count as ours"
+        );
+        assert!(
+            !other_profile,
+            "a namespaced process of ours that does not run on our profile is not the browser"
+        );
+    }
+
+    /// A forking launcher (a shell wrapper around a Flatpak export) leads our
+    /// group, but Flatpak moves bwrap into a process group of its own
+    /// (measured: wrapper pgid N, bwrap and the browser pgid N+1). The
+    /// browser is still in the process tree we spawned — the same proof the
+    /// launch gate accepts — so its sandbox pid must still count as ours.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_pid_in_a_regrouped_descendant_of_the_launcher_is_owned() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        // setsid regroups the namespace launcher while it stays the wrapper's
+        // child; both shells report a pid so the test can clean up and check.
+        let profile = std::env::temp_dir().join(format!("blade-ns-wrap-{}", std::process::id()));
+        let flag = format!("--user-data-dir={}", profile.display());
+        let script = "setsid unshare --user --map-root-user --pid --fork \
+                      sh -c 'sh -c \"while :; do sleep 0.2; done\" browser \"$1\" & echo ns $!; wait' \
+                      sandbox \"$1\" & echo host $!; wait";
+        let Ok(mut wrapper) = Command::new("sh")
+            .args(["-c", script, "wrapper", &flag])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+        else {
+            eprintln!("sh unavailable; skipping regrouped-launcher ownership test");
+            return;
+        };
+        let (mut ns_pid, mut host_pid) = (None, None);
+        let mut lines = BufReader::new(wrapper.stdout.take().expect("wrapper stdout")).lines();
+        for line in lines.by_ref().take(2).map_while(|l| l.ok()) {
+            match line.split_once(' ') {
+                Some(("ns", pid)) => ns_pid = pid.trim().parse::<u32>().ok(),
+                Some(("host", pid)) => host_pid = pid.trim().parse::<i32>().ok(),
+                _ => {}
+            }
+        }
+        let cleanup = |wrapper: &mut Child| {
+            if let Some(group) = host_pid.filter(|p| *p > 1) {
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                }
+            }
+            shutdown_child(wrapper);
+        };
+        let Some(ns_pid) = ns_pid else {
+            cleanup(&mut wrapper);
+            eprintln!("unprivileged pid namespaces or setsid unavailable; skipping");
+            return;
+        };
+
+        let mut unrelated = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn unrelated process");
+
+        let owned = owns_browser_process(wrapper.id(), ns_pid, &profile);
+        let foreign = owns_browser_process(unrelated.id(), ns_pid, &profile);
+        cleanup(&mut wrapper);
+        shutdown_child(&mut unrelated);
+
+        assert!(
+            owned,
+            "a namespaced browser regrouped below our launcher is still ours"
+        );
+        assert!(
+            !foreign,
+            "a launcher that did not start the namespaced browser must not claim it"
         );
     }
 

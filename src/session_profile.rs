@@ -369,6 +369,25 @@ impl SessionProfile {
         &self.dir
     }
 
+    /// A session dir bladebro created for its own agent-lane browser (not an
+    /// operator's BLADE_PROFILE_DIR, an adopted user profile or a real-lane
+    /// clone): only such a dir proves a process running on it is ours.
+    pub(crate) fn is_owned_agent_session(&self) -> bool {
+        self.owned && self.real_root.is_none()
+    }
+
+    /// An owned agent-lane session at `dir`, without the template copy or
+    /// reaper run that `create` performs against the process-global data dir.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn owned_for_test(dir: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            owned: true,
+            seasoned: false,
+            real_root: None,
+        }
+    }
+
     /// Called AFTER Chrome has fully exited. Copies the session
     /// profile back over the template (sole survivor only, so
     /// concurrent sessions don't clobber each other), then

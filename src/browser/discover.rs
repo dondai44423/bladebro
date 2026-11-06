@@ -70,18 +70,32 @@ pub(crate) fn find_chrome() -> Result<String> {
         }
     }
 
-    if std::path::Path::new("/nix/store").exists() {
+    let nix = std::path::Path::new("/nix/store").exists();
+    if nix {
         if let Some(path) = find_in_nix_store() {
             return Ok(path);
         }
+    }
+
+    // Flatpak exports come after every native install (SteamOS and other
+    // read-only-root distros have no other way to add a browser), but before
+    // nix-shell, which may build or download a whole Chromium.
+    #[cfg(target_os = "linux")]
+    if let Some(path) = super::flatpak::find_flatpak_browser(&|key| std::env::var(key).ok()) {
+        return Ok(path);
+    }
+
+    if nix {
         if let Some(path) = find_via_nix_shell() {
             return Ok(path);
         }
     }
 
-    Err(BladeError::Other(
-        "Chrome/Chromium not found. Set CHROME_PATH env var, add chromium to PATH, or install Chrome.".into(),
-    ))
+    Err(BladeError::Other(if cfg!(target_os = "linux") {
+        "Chrome/Chromium not found. Set CHROME_PATH env var, add chromium to PATH, or install Chrome (read-only systems such as SteamOS: `flatpak install flathub org.chromium.Chromium`).".into()
+    } else {
+        "Chrome/Chromium not found. Set CHROME_PATH env var, add chromium to PATH, or install Chrome.".into()
+    }))
 }
 
 fn common_paths() -> Vec<&'static str> {
@@ -133,7 +147,7 @@ pub(super) fn find_in_path(cmd: &str) -> Option<String> {
     None
 }
 
-fn is_executable(path: &std::path::Path) -> bool {
+pub(super) fn is_executable(path: &std::path::Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -280,41 +294,9 @@ pub(crate) fn endpoint_owned_by_pid(port: u16, pid: u32) -> bool {
             return false;
         };
         candidate != pid
-            && pid_within_process_tree(candidate, pid)
+            && platform::pid_within_process_tree(candidate, pid)
             && pid_holds_socket(candidate, ino)
     })
-}
-
-/// True when `pid` is `root` or a direct/indirect child of it, walking
-/// /proc's parent links. Bounded so a corrupt or racing chain cannot loop;
-/// an unreadable parent fails closed.
-#[cfg(target_os = "linux")]
-fn pid_within_process_tree(mut pid: u32, root: u32) -> bool {
-    // Real launch chains are short (AppRun → wrapper → browser → helper).
-    // A deeper chain is not evidence of ownership.
-    for _ in 0..64 {
-        if pid == root {
-            return true;
-        }
-        if pid <= 1 {
-            return false;
-        }
-        pid = proc_ppid(pid);
-    }
-    false
-}
-
-/// Parent pid of a process (0 when /proc is unreadable or unparseable).
-#[cfg(target_os = "linux")]
-fn proc_ppid(pid: u32) -> u32 {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-    // Format: pid (comm) state ppid ... — comm can contain spaces/parens,
-    // so parse after the last ')'.
-    stat.rsplit(')')
-        .next()
-        .and_then(|rest| rest.split_whitespace().nth(1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0)
 }
 
 /// True when ANY live process of this uid holds the loopback listener for
@@ -363,6 +345,31 @@ pub(crate) fn endpoint_owned_by_own_browser(port: u16) -> bool {
         eprintln!("[ownership] port {port} inode {ino}: no same-uid process holds the socket");
     }
     false
+}
+
+/// Live processes of this user whose command line carries exactly
+/// `--user-data-dir=<dir>` (the spelling `flags` passes). Teardown uses it to
+/// reach browser processes that left the launcher's process group — Flatpak's
+/// portal spawns Chromium's zygote and utility sandboxes in its own session.
+/// A session dir is unique to one bladebro process, so a match is ours; the
+/// token must end at a separator so `sess-1` never matches `sess-10`.
+#[cfg(target_os = "linux")]
+pub(crate) fn processes_on_user_data_dir(dir: &std::path::Path) -> Vec<u32> {
+    let needle = format!("--user-data-dir={}", dir.display()).into_bytes();
+    let uid = unsafe { libc::getuid() };
+    let me = std::process::id();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    procs
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|&pid| pid != me && process_uid(pid) == Some(uid))
+        .filter(|&pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| platform::cmdline_has_token(&cmdline, &needle))
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -502,7 +509,7 @@ mod tests {
             .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
             .find(|pid| {
                 *pid != wrapper.id()
-                    && pid_within_process_tree(*pid, wrapper.id())
+                    && crate::platform::pid_within_process_tree(*pid, wrapper.id())
                     && pid_holds_socket(*pid, inode)
             })
             .expect("forked listener pid");
