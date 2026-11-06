@@ -46,7 +46,7 @@ pub use boot::run;
 pub use boot::run_pipe;
 pub use proto::handle_tools_call;
 pub use run::handle_run;
-pub use see::handle_see;
+pub use see::{handle_see, handle_see_tool};
 pub use state::handle_state;
 pub(crate) use vision::capture_vision;
 pub use vision::handle_vision;

@@ -42,13 +42,9 @@ pub async fn handle_eval(
     //    statement executes).
     // If the page's CSP blocks eval and the code isn't a plain expression,
     // the honest EvalError is surfaced with a hint.
-    let expr_wrapper = format!("(function(){{ return ({js}); }})()");
-    let eval_wrapper = format!(
-        "(function(){{ return eval({}); }})()",
-        serde_json::to_string(js).unwrap_or_else(|_| "\"\"".into())
-    );
+    let wrappers = eval_wrappers(js);
     let expressions: Vec<String> = if ref_id.is_empty() {
-        vec![expr_wrapper.clone(), eval_wrapper.clone()]
+        wrappers.to_vec()
     } else {
         page.ensure_ref(ref_id).await?;
         let (sig, frame) = {
@@ -58,30 +54,7 @@ pub async fn handle_eval(
                 .ok_or_else(|| BladeError::StaleRef(ref_id.to_string()))?;
             (el.raw.sig.clone(), el.raw.frame.clone())
         };
-        let sig_js = serde_json::to_string(&sig)?;
-        let frame_js = serde_json::to_string(&frame)?;
-        // Find the element by its CANONICAL sig — the same role()/name()/deepAll
-        // scheme the capture script and find_by_sig use (V25c/W2). The prior
-        // inline version matched tagName ('a') against the semantic role
-        // ('link'), so eval-with-ref was broken for links and most inputs.
-        // Then invoke the user's JS with `el` in scope.
-        let template = "((sig,frame)=>{ ".to_string()
-            + &crate::page::perception::JS_PREAMBLE
-            + "let doc=document;for(const idx of frame){const ifr=[...doc.querySelectorAll('iframe')][idx];if(!ifr)return{__blade_not_found:true};try{doc=ifr.contentDocument;if(!doc)return{__blade_not_found:true};}catch(e){return{__blade_not_found:true};}}"
-            + "const all=deepAll(doc,sel);const fps=frame.join(',');const counts={};let el=null;"
-            + "for(const n of all){const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;const s=fps+'|'+r+'|'+nm+'|'+counts[key];if(s===sig){el=n;break}}"
-            + "if(!el)return{__blade_not_found:true};"
-            + "const result=((el)=>{return("
-            + "{candidate}"
-            + ");})(el);return{__blade_result:result===undefined?null:result}})("
-            + &sig_js
-            + ","
-            + &frame_js
-            + ")";
-        vec![
-            template.replace("{candidate}", &expr_wrapper),
-            template.replace("{candidate}", &eval_wrapper),
-        ]
+        ref_eval_expressions(&[&wrappers[0], &wrappers[1]], &sig, &frame)?
     };
 
     // Baseline of open page targets, captured once before evaluation, so the
@@ -187,6 +160,9 @@ pub async fn handle_eval(
                 )));
             }
             if !ref_id.is_empty() {
+                if v.get("__blade_undef").and_then(|b| b.as_bool()) == Some(true) {
+                    return format_eval_undefined(json_out);
+                }
                 if let Some(inner) = v.get("__blade_result") {
                     let inner = inner.clone();
                     return format_eval_value(&inner, json_out).await;
@@ -240,6 +216,53 @@ pub async fn handle_eval(
     }
 
     unreachable!("at least one expression candidate is always provided");
+}
+
+/// The expression wrapper and the direct-eval fallback (see handle_eval).
+fn eval_wrappers(js: &str) -> [String; 2] {
+    [
+        format!("(function(){{ return ({js}); }})()"),
+        format!(
+            "(function(){{ return eval({}); }})()",
+            serde_json::to_string(js).unwrap_or_else(|_| "\"\"".into())
+        ),
+    ]
+}
+
+/// The eval-with-ref expressions: locate the element, then run each candidate
+/// wrapper with `el` in scope.
+fn ref_eval_expressions(candidates: &[&str], sig: &str, frame: &[usize]) -> Result<Vec<String>> {
+    let sig_js = serde_json::to_string(sig)?;
+    let frame_js = serde_json::to_string(frame)?;
+    // Find the element by its CANONICAL sig — the same role()/name()/deepAll
+    // scheme the capture script and find_by_sig use (V25c/W2). The prior
+    // inline version matched tagName ('a') against the semantic role
+    // ('link'), so eval-with-ref was broken for links and most inputs.
+    // Then invoke the user's JS with `el` in scope.
+    let head = "((sig,frame)=>{ ".to_string()
+        + &crate::page::perception::JS_PREAMBLE
+        + "let doc=document;for(const idx of frame){const ifr=[...doc.querySelectorAll('iframe')][idx];if(!ifr)return{__blade_not_found:true};try{doc=ifr.contentDocument;if(!doc)return{__blade_not_found:true};}catch(e){return{__blade_not_found:true};}}"
+        + "const all=deepAll(doc,sel);const fps=frame.join(',');const counts={};let el=null;"
+        + "for(const n of all){const r=role(n);if(r==='hidden')continue;const nm=name(n,false);const key=r+'\\u0000'+nm;counts[key]=(counts[key]||0)+1;const s=fps+'|'+r+'|'+nm+'|'+counts[key];if(s===sig){el=n;break}}"
+        + "if(!el)return{__blade_not_found:true};"
+        + "const result=((el)=>{return(";
+    // Concatenate around the candidate instead of substituting a placeholder:
+    // sig is page-controlled (an accessible name), and a literal
+    // "{candidate}" in it used to be rewritten too, so the element could
+    // never be found (or the expression no longer parsed).
+    // CDP awaitPromise only awaits a TOP-LEVEL Promise: one returned inside
+    // the envelope serialized as {}. Await it here (an async function uses
+    // the intrinsic Promise, never a page-replaced window.Promise), and flag
+    // undefined, which JSON cannot carry, so it reads like the no-ref path.
+    let tail = ");})(el);return(async()=>{const r=await result;return{__blade_result:r===undefined?null:r,__blade_undef:r===undefined};})();})(".to_string()
+        + &sig_js
+        + ","
+        + &frame_js
+        + ")";
+    Ok(candidates
+        .iter()
+        .map(|candidate| format!("{head}{candidate}{tail}"))
+        .collect())
 }
 
 /// One-word shape of a returned value — used where the payload moves out of
@@ -320,6 +343,93 @@ async fn format_eval_value(value: &serde_json::Value, json_out: bool) -> Result<
         return Ok(format!("result: {compact}"));
     }
     Ok(format!("result: {compact}\nnote: {note}"))
+}
+
+#[cfg(test)]
+mod ref_eval_tests {
+    //! eval-with-ref runs inside the element-locating wrapper. These execute
+    //! the assembled expression in node against one mock button, resolving a
+    //! top-level Promise exactly as CDP `awaitPromise` does.
+
+    use super::*;
+    use std::io::Write;
+
+    /// Evaluate each expression with a button whose accessible name is
+    /// `label`; returns the JSON-serialized results (`{"thrown":msg}` for a
+    /// throw or rejection).
+    fn run_in_node(exprs: &[String], label: &str) -> Vec<serde_json::Value> {
+        let script = format!(
+            "const btn={{nodeType:1,tagName:'BUTTON',id:'',shadowRoot:null,getAttribute(a){{return a==='aria-label'?{label}:null}},closest(){{return null}}}};\
+             globalThis.document={{querySelectorAll(){{return [btn]}}}};\
+             (async()=>{{const out=[];for(const e of {exprs}){{try{{let v=(0,eval)(e);if(v instanceof Promise)v=await v;out.push(JSON.parse(JSON.stringify(v)));}}catch(err){{out.push({{thrown:String(err&&err.message||err)}});}}}}console.log(JSON.stringify(out));}})();",
+            label = serde_json::to_string(label).unwrap(),
+            exprs = serde_json::to_string(exprs).unwrap(),
+        );
+        let mut child = std::process::Command::new("node")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("node is required for injected-script tests");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    fn eval_on_button(js: &str, label: &str) -> serde_json::Value {
+        let sig = format!("|button|{label}|1");
+        let wrappers = eval_wrappers(js);
+        let exprs = ref_eval_expressions(&[&wrappers[0], &wrappers[1]], &sig, &[]).unwrap();
+        let mut out = run_in_node(&exprs, label);
+        assert_eq!(out[0], out[1], "both wrappers agree for an expression");
+        out.remove(0)
+    }
+
+    #[test]
+    fn a_sig_containing_the_placeholder_text_still_resolves() {
+        // The sig is page-controlled (an accessible name). A literal
+        // "{candidate}" in it was rewritten by the wrapper substitution, so
+        // eval-with-ref could never find that element.
+        let label = "Insert {candidate} here";
+        let out = eval_on_button("el.getAttribute('aria-label')", label);
+        assert_eq!(out["__blade_result"], label, "{out}");
+    }
+
+    #[test]
+    fn ref_eval_awaits_returned_promises_and_keeps_undefined() {
+        // awaitPromise only awaits a TOP-LEVEL Promise; wrapped in the ref
+        // envelope it serialized as {} (the same JS without ref returned the
+        // value), and undefined came back as a plain null.
+        let out = eval_on_button("Promise.resolve(el.getAttribute('aria-label'))", "Go");
+        assert_eq!(out["__blade_result"], "Go", "{out}");
+        let out = eval_on_button("new Promise(r=>setTimeout(()=>r(7),5))", "Go");
+        assert_eq!(out["__blade_result"], 7, "{out}");
+        for undefined in ["undefined", "Promise.resolve()"] {
+            let out = eval_on_button(undefined, "Go");
+            assert_eq!(out["__blade_undef"], true, "{undefined}: {out}");
+        }
+        let out = eval_on_button("null", "Go");
+        assert!(
+            out["__blade_result"].is_null() && out["__blade_undef"] != true,
+            "{out}"
+        );
+        let out = eval_on_button("Promise.reject(new Error('boom'))", "Go");
+        assert!(
+            out["thrown"].as_str().unwrap_or("").contains("boom"),
+            "{out}"
+        );
+    }
 }
 
 #[cfg(test)]

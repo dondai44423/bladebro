@@ -234,7 +234,16 @@ fn act_fields(args: &Value) -> Result<()> {
         }
         _ => {}
     }
-    if matches!(action, "type" | "clear" | "select" | "read" | "upload") {
+    if action == "upload" {
+        // The handler resolves only ref/selector to the file input; a label
+        // used to pass here and fail after url= pre-navigation/earlier steps.
+        if !["ref", "selector"].iter().any(|k| nonempty(args, k)) {
+            return Err(BladeError::Usage(
+                "upload requires ref or selector (the file input; label is not resolved for uploads)"
+                    .into(),
+            ));
+        }
+    } else if matches!(action, "type" | "clear" | "select" | "read") {
         if !["ref", "label", "selector"]
             .iter()
             .any(|k| nonempty(args, k))
@@ -341,6 +350,25 @@ pub(super) fn see(args: &Value) -> Result<()> {
         return Err(BladeError::Usage(
             "changes=true is a model delta read; omit extract/logs/artifact/scope/find".into(),
         ));
+    }
+    // handle_see answers mode/logs BEFORE extract and extract before
+    // find/scope, so these pairs silently dropped one side (format=json then
+    // came back as markdown/log text). One read per call; say which.
+    if nonempty(args, "extract") {
+        let mode = args.get("mode").and_then(Value::as_str).unwrap_or("");
+        if matches!(mode, "model" | "content" | "outline") {
+            return Err(BladeError::Usage(format!(
+                "extract= and mode={mode} are separate reads; drop mode for the extract, or split into two see calls"
+            )));
+        }
+        if let Some(key) = ["logs", "find", "scope"]
+            .into_iter()
+            .find(|k| nonempty(args, k))
+        {
+            return Err(BladeError::Usage(format!(
+                "extract= and {key}= are separate reads and one would be ignored; split into two see calls"
+            )));
+        }
     }
     if args.get("format").and_then(Value::as_str) == Some("json")
         && !nonempty(args, "extract")
@@ -528,14 +556,11 @@ fn sequence(args: &Value, key: &str, batch: bool, depth: usize, count: &mut usiz
             let action = step.get("action").and_then(Value::as_str).unwrap_or("");
             match action {
                 "if" | "while" if !batch => {
-                    super::run::condition_from_args(
-                        step,
-                        if action == "while" {
-                            "element"
-                        } else {
-                            "settle"
-                        },
-                    )?;
+                    if action == "while" {
+                        super::run::while_condition(step)?;
+                    } else {
+                        super::run::condition_from_args(step, "settle")?;
+                    }
                     if action == "while"
                         && step
                             .get("max")
@@ -685,6 +710,75 @@ mod tests {
             json!({"action":"fill","submit":true,"fields":[{"label":"Name","text":"good"}]}),
         ] {
             assert!(act(&args).is_err(), "{args}");
+        }
+    }
+
+    #[test]
+    fn while_without_an_exit_test_is_rejected_before_effects() {
+        // No condition/text/js/selector used to default to an empty element
+        // needle, which every visible element matches: the body ran `max`
+        // times with no exit test after the earlier steps had already run.
+        let effect = json!({"action":"eval","js":"window.count++"});
+        let loop_ = json!({"action":"while","steps":[{"action":"click","text":"Load more"}]});
+        let err = run(&json!({"steps":[effect, loop_]}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("step 2") && err.contains("while"), "{err}");
+        let nested = json!({"action":"if","js":"true","then":[loop_]});
+        assert!(run(&json!({"steps":[effect, nested]})).is_err());
+        for ok in [
+            json!({"action":"while","text":"Load more","steps":[]}),
+            json!({"action":"while","condition":"element","text":"Load more","steps":[]}),
+            json!({"action":"while","selector":".more","steps":[]}),
+            json!({"action":"while","js":"window.more","steps":[]}),
+            json!({"action":"while","condition":"settle","max":3,"steps":[]}),
+        ] {
+            assert!(run(&json!({"steps":[ok]})).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn upload_requires_the_addressing_its_handler_resolves() {
+        // The upload handler resolves only ref/selector. label used to pass
+        // validation and fail after url= pre-navigation and earlier steps.
+        let upload = json!({"action":"upload","label":"Resume","text":"cv.pdf"});
+        assert!(act(&upload).is_err());
+        let err = run(&json!({"steps":[{"action":"eval","js":"window.count++"}, upload]}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ref or selector"), "{err}");
+        assert!(
+            act(&json!({"action":"upload","selector":"input[type=file]","text":"cv.pdf"})).is_ok()
+        );
+        assert!(act(&json!({"action":"upload","ref":"e3","text":"cv.pdf"})).is_ok());
+    }
+
+    #[test]
+    fn extract_cannot_combine_with_a_read_that_replaces_or_drops_it() {
+        // handle_see answers mode/logs before extract, and extract before
+        // find/scope: format=json returned markdown, and find/scope vanished.
+        for args in [
+            json!({"mode":"content","extract":"auto","format":"json"}),
+            json!({"mode":"outline","extract":"links","format":"json"}),
+            json!({"mode":"model","extract":"auto"}),
+            json!({"logs":"console","extract":"auto","format":"json"}),
+            json!({"find":"Price","extract":"auto"}),
+            json!({"scope":"e5","extract":"links"}),
+        ] {
+            assert!(see(&args).is_err(), "{args}");
+        }
+        let err = act(&json!({"action":"extract","find":"Price"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("find"), "{err}");
+        for ok in [
+            json!({"extract":"auto","format":"json"}),
+            json!({"mode":"extract","extract":"auto"}),
+            json!({"mode":"content","scope":"e5"}),
+            json!({"logs":"network"}),
+            json!({"find":"Price"}),
+        ] {
+            assert!(see(&ok).is_ok(), "{ok}");
         }
     }
 

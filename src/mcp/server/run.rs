@@ -217,6 +217,20 @@ pub(super) fn condition_from_args(args: &Value, default: &str) -> Result<(String
     resolve_condition_fields(cond, text, js, default)
 }
 
+/// `while` condition: like [`condition_from_args`] with an `element` default,
+/// but that default needs a needle. An empty element match is true on any
+/// page with one visible element, so the body would run `max` times with no
+/// exit test (wait/if default to settle instead, which is finite).
+pub(super) fn while_condition(step: &Value) -> Result<(String, String)> {
+    let (condition, needle) = condition_from_args(step, "element")?;
+    if condition == "element" && needle.is_empty() {
+        return Err(BladeError::Usage(
+            "while needs an exit test: text= (loops while that element is visible), selector=, or condition=js with js= - without one it matches every page and runs max times".into(),
+        ));
+    }
+    Ok((condition, needle))
+}
+
 /// Timeout validation shared by wait/if/while (G02): integer seconds,
 /// 0-3600. A fractional/string/negative value is a loud usage error instead
 /// of a silent fallback to the default, and the cap stops a mistyped
@@ -361,7 +375,7 @@ async fn execute_step(
         }
         "while" => {
             let timeout = resolve_wait_timeout(step, 5)?;
-            let (condition, match_text) = super::run::condition_from_args(step, "element")?;
+            let (condition, match_text) = while_condition(step)?;
             let max = step.get("max").and_then(|m| m.as_u64()).unwrap_or(10) as usize;
             let body = step
                 .get("steps")

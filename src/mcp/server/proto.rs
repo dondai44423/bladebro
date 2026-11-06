@@ -8,7 +8,7 @@ use crate::error::BladeError;
 use crate::mcp::tools::tools_to_json;
 use crate::page::Page;
 
-use super::{handle_act, handle_run, handle_see, handle_state, handle_vision};
+use super::{handle_act, handle_run, handle_see_tool, handle_state, handle_vision};
 use super::{shape_result, INSTRUCTIONS, PROTOCOL_VERSION, STATELESS_VERSION, SUPPORTED_VERSIONS};
 
 pub(super) fn handle_initialize(id: Option<Value>, params: &Value) -> Value {
@@ -87,14 +87,19 @@ pub async fn handle_tools_call(
     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    // Vision tool returns an image content block, not text.
+    // Vision tool returns an image content block, not text. Its runtime
+    // errors (a CDP timeout painting marks) used to escape as JSON-RPC
+    // -32603; they get the same tool-level error result as the others.
     if name == "vision" {
-        return handle_vision(id, &args, page).await;
+        return match handle_vision(id.clone(), &args, page).await {
+            Err(e) => tool_error(id, e, page).await,
+            ok => ok,
+        };
     }
 
     let result = match name {
         "act" => handle_act(&args, page).await,
-        "see" => handle_see(&args, page).await,
+        "see" => handle_see_tool(&args, page).await,
         "state" => handle_state(&args, page).await,
         "run" => handle_run(&args, page).await,
         _ => Err(crate::error::BladeError::Other(format!(
@@ -152,77 +157,86 @@ pub async fn handle_tools_call(
                 }
             }))
         }
-        // Propagate Closed so serve() can self-heal (relaunch Chrome
-        // and retry the tool call). The agent never sees this error.
-        Err(BladeError::Closed) => Err(BladeError::Closed),
-        Err(e) => {
-            // Dead-tab errors propagate as-is so serve()'s tab-recovery
-            // branch can run. The old code converted EVERY error to an
-            // isError text response, which made that branch unreachable
-            // dead code — a closed tab errored forever instead of healing.
-            let msg = e.to_string();
-            let tab_died = msg.contains("Target closed")
-                || msg.contains("No target with given id")
-                || msg.contains("Session closed")
-                || msg.contains("Target.detachedFromTarget");
-            if tab_died {
-                return Err(e);
-            }
-            let mut text = format!("\u{2717} error: {e}");
-            // Page-state contract: every error carries enough state for
-            // the agent to recover without a separate see call. Handlers
-            // that already embedded a state section (handle_act's action
-            // path) are not doubled up.
-            if !text.contains("--- current page state ---") {
-                let view = page.view(1200);
-                if !view.trim().is_empty() {
-                    text.push_str(&format!("\n--- current page state ---\n{view}"));
-                }
-                // G09: recovery advice distinguishes "still loading" from
-                // "the action did nothing" — one bounded, safe observation.
-                if let Some(note) = page.load_state_note().await {
-                    text.push_str(&format!("\nnote: {note}"));
-                }
-            }
-            let dialogs = page.drain_dialogs();
-            if !dialogs.is_empty() {
-                text.push_str("\n\n\u{26a0} dialogs handled:\n");
-                for d in &dialogs {
-                    let action = if d.accepted { "accepted" } else { "cancelled" };
-                    let how = if d.via == "expectation" {
-                        " (via armed expectation)"
-                    } else {
-                        ""
-                    };
-                    text.push_str(&format!(
-                        "  {} \"{}\" \u{2014} {}{}\n",
-                        d.kind, d.message, action, how
-                    ));
-                    if let Some(n) = &d.note {
-                        text.push_str(&format!("    ({n})\n"));
-                    }
-                }
-            }
-            if let Some(note) = page.drain_dialog_expect_note() {
-                text.push_str(&format!("\n\u{26a0} {note}\n"));
-            }
-            let ambient = page.drain_ambient();
-            for a in &ambient {
-                if !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push_str(&format!("\u{26a0} {}\n", a));
-            }
-            Ok(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{ "type": "text", "text": text }],
-                    "isError": true,
-                }
-            }))
+        Err(e) => tool_error(id, e, page).await,
+    }
+}
+
+/// Shape a handler error as an `isError` tool result carrying page state,
+/// dialogs and ambient notices. `Closed` and dead-tab errors propagate so
+/// serve() can self-heal.
+async fn tool_error(
+    id: Option<Value>,
+    e: BladeError,
+    page: &mut Page,
+) -> std::result::Result<Value, BladeError> {
+    if matches!(e, BladeError::Closed) {
+        return Err(e);
+    }
+    // Dead-tab errors propagate as-is so serve()'s tab-recovery
+    // branch can run. The old code converted EVERY error to an
+    // isError text response, which made that branch unreachable
+    // dead code — a closed tab errored forever instead of healing.
+    let msg = e.to_string();
+    let tab_died = msg.contains("Target closed")
+        || msg.contains("No target with given id")
+        || msg.contains("Session closed")
+        || msg.contains("Target.detachedFromTarget");
+    if tab_died {
+        return Err(e);
+    }
+    let mut text = format!("\u{2717} error: {e}");
+    // Page-state contract: every error carries enough state for
+    // the agent to recover without a separate see call. Handlers
+    // that already embedded a state section (handle_act's action
+    // path) are not doubled up.
+    if !text.contains("--- current page state ---") {
+        let view = page.view(1200);
+        if !view.trim().is_empty() {
+            text.push_str(&format!("\n--- current page state ---\n{view}"));
+        }
+        // G09: recovery advice distinguishes "still loading" from
+        // "the action did nothing" — one bounded, safe observation.
+        if let Some(note) = page.load_state_note().await {
+            text.push_str(&format!("\nnote: {note}"));
         }
     }
+    let dialogs = page.drain_dialogs();
+    if !dialogs.is_empty() {
+        text.push_str("\n\n\u{26a0} dialogs handled:\n");
+        for d in &dialogs {
+            let action = if d.accepted { "accepted" } else { "cancelled" };
+            let how = if d.via == "expectation" {
+                " (via armed expectation)"
+            } else {
+                ""
+            };
+            text.push_str(&format!(
+                "  {} \"{}\" \u{2014} {}{}\n",
+                d.kind, d.message, action, how
+            ));
+            if let Some(n) = &d.note {
+                text.push_str(&format!("    ({n})\n"));
+            }
+        }
+    }
+    if let Some(note) = page.drain_dialog_expect_note() {
+        text.push_str(&format!("\n\u{26a0} {note}\n"));
+    }
+    let ambient = page.drain_ambient();
+    for a in &ambient {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!("\u{26a0} {}\n", a));
+    }
+    Ok(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{ "type": "text", "text": text }],
+            "isError": true,
+        }
+    }))
 }
 
 /// Keep format=json machine-readable even when dialogs, browser health or lane

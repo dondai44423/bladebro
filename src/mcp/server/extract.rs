@@ -219,12 +219,16 @@ pub async fn handle_template_extract(
     }
     Ok(format!("extract json ({total} items){notes}:\n{json_str}"))
 }
+/// Per-read item ceiling of the generic auto-extract script (`limit` above it
+/// is clamped), bounding one Runtime.evaluate payload.
+const AUTO_EXTRACT_MAX: usize = 500;
+
 /// V21: Auto-extract — deterministic structural list extraction.
 /// Finds the DOM container whose direct children are the most
 /// structurally-repeated (the "main list"), extracts per-item fields by
 /// content type, returns a JSON array. No template, no LLM.
 fn auto_extract_expr(limit: usize, post_marker: bool) -> String {
-    let lim = limit.min(500);
+    let lim = limit.min(AUTO_EXTRACT_MAX);
     include_str!("js/auto_extract.js")
         .replace("__LIMIT__", &lim.to_string())
         .replace(
@@ -378,10 +382,19 @@ fn auto_extract_notes(val: &serde_json::Value, limit: usize) -> String {
             }
         }
     }
-    if count > 0 && count >= limit as u64 {
-        notes.push_str(&format!(
-            "\nnote: the item cap was reached (limit={limit}) — raise limit for more items"
-        ));
+    // The script clamps limit, so compare against the cap it actually used;
+    // past the clamp, raising limit cannot return more.
+    let cap = limit.min(AUTO_EXTRACT_MAX);
+    if count > 0 && count >= cap as u64 {
+        if limit > cap {
+            notes.push_str(&format!(
+                "\nnote: the item cap was reached (limit={limit} is clamped to {cap} for extract=auto) — more items may exist; extract=json with a template is not clamped"
+            ));
+        } else {
+            notes.push_str(&format!(
+                "\nnote: the item cap was reached (limit={limit}) — raise limit for more items"
+            ));
+        }
     }
     if let Some(sp) = num("sponsored") {
         notes.push_str(&format!(
@@ -728,21 +741,7 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
             .and_then(|i| i.as_array())
             .cloned()
             .unwrap_or_default();
-        let mut new_count = 0usize;
-        for item in items {
-            // Keyless items dedupe by their JSON — the old empty-key branch
-            // re-pushed them every scroll iteration.
-            let key = item
-                .get("url")
-                .or_else(|| item.get("title"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| item.to_string());
-            if seen.insert(key) {
-                all_items.push(item);
-                new_count += 1;
-            }
-        }
+        let new_count = merge_collected(&mut all_items, &mut seen, items, max);
 
         if all_items.len() >= max {
             stop = format!("max={max} reached — raise max to collect more");
@@ -794,6 +793,66 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
         artifact_hint(&path)
     ))
 }
+/// Merge one extraction pass into the collection; returns how many items
+/// were new. Stops at `max`: one pass over a long page used to overshoot it
+/// (max=10 returned 50 rows plus "max=10 reached").
+fn merge_collected(
+    all_items: &mut Vec<Value>,
+    seen: &mut std::collections::HashSet<String>,
+    items: Vec<Value>,
+    max: usize,
+) -> usize {
+    let mut new_count = 0usize;
+    for item in items {
+        if all_items.len() >= max {
+            break;
+        }
+        // Keyless items dedupe by their JSON — the old empty-key branch
+        // re-pushed them every scroll iteration.
+        let key = item
+            .get("url")
+            .or_else(|| item.get("title"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| item.to_string());
+        if seen.insert(key) {
+            all_items.push(item);
+            new_count += 1;
+        }
+    }
+    new_count
+}
+
+#[cfg(test)]
+mod collect_tests {
+    use super::*;
+
+    #[test]
+    fn collect_never_returns_more_than_max() {
+        // One pass over a 50-row page with max=10 used to keep all 50 rows
+        // and then report "max=10 reached".
+        let rows: Vec<Value> = (0..50)
+            .map(|i| json!({"url":format!("https://e.test/{i}")}))
+            .collect();
+        let mut all = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let added = merge_collected(&mut all, &mut seen, rows.clone(), 10);
+        assert_eq!((all.len(), added), (10, 10));
+        // A later pass adds nothing once the cap is met, and repeats of
+        // earlier rows are still deduped.
+        assert_eq!(merge_collected(&mut all, &mut seen, rows, 10), 0);
+        assert_eq!(all.len(), 10);
+        let mut all = vec![json!({"url":"https://e.test/0"})];
+        let mut seen = std::collections::HashSet::from(["https://e.test/0".to_string()]);
+        let pass = vec![
+            json!({"url":"https://e.test/0"}),
+            json!({"url":"https://e.test/1"}),
+        ];
+        assert_eq!(merge_collected(&mut all, &mut seen, pass, 100), 1);
+        assert_eq!(all.len(), 2);
+    }
+}
+
 #[cfg(test)]
 mod extract_script_tests {
     //! The auto-extract script is a large injected string — a syntax error
@@ -852,6 +911,97 @@ mod extract_script_tests {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+    }
+
+    /// Run the generic auto-extract path in node over a mock list of `rows`
+    /// sponsored items whose links are Google redirect wrappers; `dup` makes
+    /// row 1 repeat row 0's destination.
+    fn auto_extract_in_node(limit: usize, rows: usize, dup: bool) -> serde_json::Value {
+        use std::io::Write;
+        let mock = format!(
+            "const ROWS={rows},DUP={dup};\
+             const style={{display:'block',visibility:'visible',opacity:'1'}};\
+             const view={{getComputedStyle(){{return style}}}};\
+             const doc={{defaultView:view}};\
+             const el=(tag,props)=>Object.assign({{nodeType:1,tagName:tag,children:[],childNodes:[],offsetParent:{{}},ownerDocument:doc,\
+               querySelector(){{return null}},querySelectorAll(){{return []}},matches(){{return false}},getAttribute(){{return null}}}},props);\
+             const rows=[];\
+             for(let i=0;i<ROWS;i++){{const n=DUP&&i===1?0:i;\
+               const a=el('A',{{href:'https://www.google.com/url?q='+encodeURIComponent('https://shop.example/item/'+n),hostname:'www.google.com',innerText:'Organic looking product number '+i,matches(){{return true}}}});\
+               const t={{nodeType:3,textContent:'Sponsored $'+(10+i)+' great value product listing text '+i}};\
+               const s=el('SPAN',{{innerText:t.textContent,childNodes:[t]}});\
+               rows.push(el('LI',{{children:[a,s],childNodes:[a,s],innerText:a.innerText+' '+s.innerText,querySelectorAll(q){{return q==='a[href]'?[a]:[]}}}}));}}\
+             const list=el('UL',{{children:rows,childNodes:rows}});\
+             globalThis.location={{hostname:'shop.test',href:'http://shop.test/list',pathname:'/list',origin:'http://shop.test',search:''}};\
+             globalThis.document={{body:{{innerText:''}},title:'List',querySelector(){{return null}},querySelectorAll(q){{return q==='*'?[list]:[]}}}};"
+        );
+        let script = format!(
+            "{mock}\nconsole.log({});",
+            super::auto_extract_expr(limit, false)
+        );
+        let mut child = std::process::Command::new("node")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("node is required for injected-script tests");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    #[test]
+    fn envelope_counters_describe_the_returned_items() {
+        // Ten sponsored, redirect-wrapped rows, row 1 duplicating row 0,
+        // limit=5. The counters used to run over all ten rows before the cap
+        // ("10 of 4 items are paid placements") and dedupe ran after the cap,
+        // so only 4 items came back and the cap note stayed silent.
+        let val = auto_extract_in_node(5, 10, true);
+        assert_eq!(val["count"], 5, "{val}");
+        assert_eq!(val["items"].as_array().map(Vec::len), Some(5), "{val}");
+        assert_eq!(val["sponsored"], 5, "{val}");
+        assert_eq!(val["redirects_unwrapped"], 5, "{val}");
+        assert_eq!(val["duplicates_removed"], 1, "{val}");
+        assert_eq!(
+            val["items"][0]["url"], "https://shop.example/item/0",
+            "{val}"
+        );
+        let notes = super::auto_extract_notes(&val, 5);
+        assert!(
+            notes.contains("5 of 5 items are paid placements"),
+            "{notes}"
+        );
+        assert!(notes.contains("item cap was reached"), "{notes}");
+        // Under the cap: no cap note, counters cover every item.
+        let val = auto_extract_in_node(50, 6, false);
+        assert_eq!(
+            (val["count"].as_u64(), val["sponsored"].as_u64()),
+            (Some(6), Some(6))
+        );
+        assert!(!super::auto_extract_notes(&val, 50).contains("item cap"));
+    }
+
+    #[test]
+    fn the_cap_note_uses_the_clamped_limit_and_says_so() {
+        // limit is clamped to 500 in the script; comparing 500 items against
+        // the requested 1000 hid the truncation.
+        let val = serde_json::json!({"count":500,"items":[]});
+        let notes = super::auto_extract_notes(&val, 1000);
+        assert!(notes.contains("item cap was reached"), "{notes}");
+        assert!(notes.contains("500"), "{notes}");
+        let val = serde_json::json!({"count":40,"items":[]});
+        assert!(!super::auto_extract_notes(&val, 1000).contains("item cap"));
     }
 
     /// G06: the template script (assembled with a real template) must parse,

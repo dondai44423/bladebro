@@ -205,8 +205,10 @@ if(score>bestScore){bestScore=score;best=c;bestSig=s;}
 if(!best){if(IS_GITHUB&&isRepoPage()){const r=extractRepo();if(Object.keys(r).length>1)return JSON.stringify({container:'github-repo',count:1,items:[r]});}return JSON.stringify({error:'no repeated list found',items:[]});}
 // Field extraction: clean, typed, deduplicated. No 'text' field.
 // P1 counters: redirect unwraps and paid placements are reported in the
-// envelope instead of silently reshaping the payload.
-let unwrapped=0,sponsored=0,unresolved=0;
+// envelope instead of silently reshaping the payload. They are counted below
+// over the items RETURNED (after dedupe and the limit), never over every
+// child: "10 of 5 items are paid placements" contradicted the payload.
+const unwrappedSet=new WeakSet();
 const items=[...best.children].filter(k=>k.nodeType===1&&sig(k)===bestSig).map(item=>{
 if(item.tagName==='SHREDDIT-AD-POST'||item.querySelector('shreddit-ad-post'))return {};
 const fullText=vtxt(item);const o={};
@@ -221,7 +223,7 @@ if(title&&/^\s*[\d.,]+\s*(units?|beds?|baths?|ba|bd|mi|miles?|sq\.?\s?ft|sqft|ac
 // A price glued into the title (listing-card text) is a field, not a name.
 if(title){const pi=title.search(PRICE);if(pi>=10)title=title.slice(0,pi).trim();}
 if(title)o.title=title.slice(0,200);
-if(link){const cu=canonicalURL(link.href);if(cu!==link.href)unwrapped++;o.url=cu;if(wrappedURL(cu)){o.url_wrapped=true;unresolved++;}}
+if(link){const cu=canonicalURL(link.href);if(cu!==link.href)unwrappedSet.add(o);o.url=cu;if(wrappedURL(cu))o.url_wrapped=true;}
 // Image.
 const img=item.querySelector('img[src]');
 if(img){o.image=img.src;if(img.alt)o.image_alt=img.alt.slice(0,100);}
@@ -242,14 +244,18 @@ if(description&&description.length>15){const dn=norm(description),tn=norm(title|
 // Site-specific fields.
 if(IS_REDDIT){var sp=item.tagName==='SHREDDIT-POST'?item:item.querySelector('shreddit-post');var sc0=item.tagName==='SHREDDIT-COMMENT'?item:item.querySelector('shreddit-comment');if(sp){var sps=sp.getAttribute('score');if(sps)o.fuzzed_score=parseInt(sps,10);var spc=sp.getAttribute('comment-count');if(spc)o.comments=parseInt(spc,10);var spa=sp.getAttribute('author');if(spa)o.author='u/'+spa;var spsub=sp.getAttribute('subreddit-prefixed-name');if(spsub)o.subreddit=spsub;var spt=sp.getAttribute('post-title');if(spt)o.title=spt.slice(0,200);var spl=sp.getAttribute('permalink');if(spl)o.url='https://www.reddit.com'+(spl.charAt(0)==='/'?spl:'/'+spl);var spts=sp.getAttribute('created-timestamp');if(spts)o.date=spts.slice(0,16).replace('T',' ');}else if(sc0){var sca=sc0.getAttribute('author');if(sca)o.author='u/'+sca;var scs=sc0.getAttribute('score');if(scs!=='')o.fuzzed_score=parseInt(scs,10);var scd=sc0.getAttribute('depth');if(scd!=='')o.depth=parseInt(scd,10);var scb=sc0.querySelector('[slot="comment"]');var sct=scb?vtxt(scb).slice(0,400):'';if(sct)o.text=sct;}else if(item.classList&&item.classList.contains('thing')){var g2=n=>item.getAttribute(n)||'';var gs2=g2('data-score');if(gs2)o.score=parseInt(gs2,10);var gc2=g2('data-comments-count');if(gc2)o.comments=parseInt(gc2,10);var ga2=g2('data-author');if(ga2)o.author='u/'+ga2;var gsb2=g2('data-subreddit');if(gsb2)o.subreddit='r/'+gsb2;var gp2=g2('data-permalink');if(gp2)o.url='https://www.reddit.com'+gp2;var gtl=item.querySelector('a.title');if(gtl)o.title=vtxt(gtl).slice(0,200);}else{var rsc=rdScore(item);if(rsc!==null)o.fuzzed_score=rsc;var rcm=rdComments(item);if(rcm!==null)o.comments=rcm;var rau=rdAuthor(item);if(rau)o.author=rau;var rsu=rdSub(item);if(rsu)o.subreddit=rsu;var rcl=item.querySelector('a[href*="/comments/"]');if(rcl){o.url=rcl.href;var rclt=vtxt(rcl);if(rclt&&rclt.length>5&&rclt.length<300)o.title=rclt.slice(0,200);}}}
 else if(IS_GITHUB){const st=ghStars(item);if(st!==null)o.stars=st;const fk=ghForks(item);if(fk!==null)o.forks=fk;const sd=ghStarsToday(item);if(sd!==null)o.stars_today=sd;const lb=ghLabels(item);if(lb.length>0)o.labels=lb;const nm=ghNumber(item);if(nm!==null)o.number=nm;const gs=ghStatus(item);if(gs)o.status=gs;}
-else{const rt=rating(item);if(rt!==null)o.rating=rt;const rv=reviews(item);if(rv!==null)o.reviews=rv;const av=avail(item);if(av)o.availability=av;const op=origPrice(item);if(op)o.original_price=op;if(isSponsored(item)){o.sponsored=true;sponsored++;}}
+else{const rt=rating(item);if(rt!==null)o.rating=rt;const rv=reviews(item);if(rv!==null)o.reviews=rv;const av=avail(item);if(av)o.availability=av;const op=origPrice(item);if(op)o.original_price=op;if(isSponsored(item))o.sponsored=true;}
 return o;
-}).filter(o=>Object.keys(o).length>0).slice(0,__LIMIT__);
-// Dedupe: the same item is common on listing pages (variant cards, an ad
-// resurfacing an organic result). Key by canonical URL, else by normalized
-// title; keyless items stay (they have nothing to collide with).
-const uniq=[];const seen=new Set();let dupes=0;
-for(const it of items){const key=it.url?it.url.split('#')[0]:(it.title?'t:'+norm(it.title):'i:'+uniq.length);if(key&&seen.has(key)){dupes++;continue;}if(key)seen.add(key);uniq.push(it);}
+}).filter(o=>Object.keys(o).length>0);
+// Dedupe, THEN apply the limit (deduping only the first `limit` rows came
+// back short of the cap while more items remained): the same item is common
+// on listing pages (variant cards, an ad resurfacing an organic result). Key
+// by canonical URL, else by normalized title; keyless items stay (they have
+// nothing to collide with).
+const uniq=[];const seen=new Set();let dupes=0,keyless=0;
+for(const it of items){const key=it.url?it.url.split('#')[0]:(it.title?'t:'+norm(it.title):'i:'+(keyless++));if(key&&seen.has(key)){dupes++;continue;}if(uniq.length>=__LIMIT__)break;if(key)seen.add(key);uniq.push(it);}
+let sponsored=0,unwrapped=0,unresolved=0;
+for(const it of uniq){if(it.sponsored)sponsored++;if(unwrappedSet.has(it))unwrapped++;if(it.url_wrapped)unresolved++;}
 const lowConf=uniq.length>0&&uniq.every(o=>!o.url)&&(uniq.reduce((a,o)=>a+(o.title||'').length,0)/uniq.length)<25;
 const out={container:best.tagName.toLowerCase(),count:uniq.length,items:uniq};
 if(sponsored>0)out.sponsored=sponsored;

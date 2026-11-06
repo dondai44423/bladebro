@@ -141,20 +141,6 @@ pub async fn dispatch(
     args: &Value,
     page: &mut Page,
 ) -> std::result::Result<ToolResult, BladeError> {
-    // For see with URL: navigate first, then read. Any non-flag token is a
-    // URL; the shared navigate adds the missing scheme.
-    if tool == "see" {
-        if let Some(url) = args.get("url").and_then(|u| u.as_str()) {
-            if !url.is_empty() && !url.starts_with("--") {
-                // Manual-control pause: a see with a url navigates first.
-                if crate::realbrowser::input_paused() {
-                    return Err(crate::realbrowser::paused_error());
-                }
-                page.navigate(url).await?;
-            }
-        }
-    }
-
     // Vision is special — an image instead of (only) text. Taken from the
     // capture directly, not re-parsed out of the MCP response: an oversized
     // screenshot is saved by the handler and comes back as a path, which
@@ -171,7 +157,9 @@ pub async fn dispatch(
 
     let result = match tool {
         "act" => server::handle_act(args, page).await,
-        "see" => server::handle_see(args, page).await,
+        // see url= navigates first (shared with MCP); the shared navigate
+        // adds a missing scheme.
+        "see" => server::handle_see_tool(args, page).await,
         "state" => server::handle_state(args, page).await,
         "run" => server::handle_run(args, page).await,
         _ => return Err(BladeError::Other(format!("unknown tool: {tool}"))),
