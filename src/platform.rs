@@ -1197,6 +1197,77 @@ pub fn isolate_owned_child(cmd: &mut std::process::Command) {
     }
 }
 
+/// Spawn a helper this process owns for its whole life (the virtual display
+/// and its window manager) in its own process group, SIGKILLed by the kernel
+/// when this process dies, whatever kills it.
+///
+/// Both halves are needed. Out of our group, the terminal's Ctrl-C to the
+/// foreground job no longer kills Xvfb while bladebro is still closing the
+/// browser (Chrome lost its display first, so the graceful close that lets it
+/// flush storage never happened). But out of our group a SIGKILL to it
+/// (`timeout -s KILL`, a harness's killpg, a cancelled CI job) no longer
+/// reaches the helper either, and nothing of ours runs to stop it:
+/// PR_SET_PDEATHSIG covers that.
+///
+/// The parent-death signal fires when the THREAD that forked the child exits,
+/// not the process: a child spawned from a tokio worker or blocking-pool
+/// thread is killed when the runtime retires that thread. Every such child is
+/// therefore spawned by one dedicated thread that is never asked to stop: it
+/// ends only with the process.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn spawn_tied_to_process(
+    mut cmd: std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc;
+    type Job = (
+        std::process::Command,
+        mpsc::SyncSender<std::io::Result<Child>>,
+    );
+    // Never dropped (a static): the spawner's receive loop never ends.
+    static SPAWNER: std::sync::Mutex<Option<mpsc::Sender<Job>>> = std::sync::Mutex::new(None);
+
+    let parent = std::process::id() as libc::pid_t;
+    cmd.process_group(0);
+    // SAFETY: prctl(2) and getppid(2) are async-signal-safe; the closure
+    // touches nothing but its copied pid.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // We died between fork and prctl: the signal is already missed
+            // and the child was reparented. Do not exec an orphan.
+            if libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+    let (reply, result) = mpsc::sync_channel(1);
+    {
+        let mut spawner = SPAWNER.lock().unwrap_or_else(|e| e.into_inner());
+        if spawner.is_none() {
+            let (jobs, queue) = mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("bladebro-spawner".into())
+                .spawn(move || {
+                    for (mut cmd, reply) in queue {
+                        let _ = reply.send(cmd.spawn());
+                    }
+                })?;
+            *spawner = Some(jobs);
+        }
+        if let Some(jobs) = spawner.as_ref() {
+            jobs.send((cmd, reply))
+                .map_err(|_| std::io::Error::other("bladebro spawner thread is gone"))?;
+        }
+    }
+    result
+        .recv()
+        .map_err(|_| std::io::Error::other("bladebro spawner thread is gone"))?
+}
+
 /// Termination signals for a process that owns its browser in-process (the
 /// one-shot CLI, `probe`/`targets`/`audit`): SIGTERM, SIGINT and SIGHUP on
 /// Unix, Ctrl+C on Windows — the set the MCP server shuts down on. Without
@@ -1478,6 +1549,36 @@ mod tests {
             flushed.as_deref(),
             Some("flushed"),
             "a requested close must finish its storage flush before the group is signalled"
+        );
+    }
+
+    /// The parent-death signal fires when the thread that forked the child
+    /// exits. A tied helper must therefore outlive the (tokio worker, blocking
+    /// pool) thread that asked for it, and must be out of our process group.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn tied_helper_outlives_the_thread_that_spawned_it_in_its_own_group() {
+        let mut child = std::thread::spawn(|| {
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("30");
+            spawn_tied_to_process(cmd).unwrap()
+        })
+        .join()
+        .unwrap();
+        // The asking thread is gone; a signal tied to it lands at once.
+        std::thread::sleep(Duration::from_millis(300));
+        let alive = child.try_wait().unwrap().is_none();
+        let pgid = unsafe { libc::getpgid(child.id() as libc::pid_t) };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            alive,
+            "the helper died with the thread that asked for it, not with the process"
+        );
+        assert_eq!(
+            pgid,
+            child.id() as libc::pid_t,
+            "helper not in its own group"
         );
     }
 

@@ -70,27 +70,28 @@ impl VirtualDisplay {
                 continue;
             };
             let auth_arg = auth_file.to_string_lossy().into_owned();
-            let child = Command::new(xvfb_path)
-                // Stays in bladebro's process group, unlike the browser
-                // (`platform::isolate_owned_child`): SIGKILL to that group
-                // (`timeout -s KILL`, a harness's killpg, a cancelled CI job)
-                // runs no Drop, and Xvfb dying with the group is what takes
-                // Chrome down too (it exits on losing its display). In its
-                // own group Xvfb outlived such a kill, and Chrome with it.
-                .args([
-                    &format!(":{display_num}"),
-                    "-screen",
-                    "0",
-                    &format!("{XVFB_SCREEN_WIDTH}x{XVFB_SCREEN_HEIGHT}x24"),
-                    "-auth",
-                    &auth_arg, // cookie-only access control (never -ac)
-                    "-nolisten",
-                    "tcp",
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            let mut child = match child {
+            let mut xvfb = Command::new(xvfb_path);
+            xvfb.args([
+                &format!(":{display_num}"),
+                "-screen",
+                "0",
+                &format!("{XVFB_SCREEN_WIDTH}x{XVFB_SCREEN_HEIGHT}x24"),
+                "-auth",
+                &auth_arg, // cookie-only access control (never -ac)
+                "-nolisten",
+                "tcp",
+            ])
+            // Out of the terminal's job: a background group reading it stops.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+            // Out of bladebro's process group, so a Ctrl-C to the foreground
+            // job leaves the display up while the browser closes and flushes
+            // (it died with bladebro's group, and Chrome lost its display
+            // mid-close). Killed by the kernel when bladebro dies, so a
+            // SIGKILL that runs no Drop still takes it down, and Chrome
+            // exits on losing its display.
+            let mut child = match crate::platform::spawn_tied_to_process(xvfb) {
                 Ok(c) => c,
                 Err(e) => {
                     release_display_claim(display_num);
@@ -195,9 +196,11 @@ fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Chi
             .env("XAUTHORITY", xauth)
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("XDG_SESSION_TYPE")
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        cmd.spawn().ok()
+        // Same lifetime as Xvfb: survives the job's Ctrl-C, dies with bladebro.
+        crate::platform::spawn_tied_to_process(cmd).ok()
     });
     // Declare the taskbar after the WM owns the root and verify the read-back.
     // xfwm4 may still re-publish the full-screen area later (measured: it does
