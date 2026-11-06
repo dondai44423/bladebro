@@ -129,6 +129,17 @@ fn checksum_required_policy() {
 }
 
 #[test]
+fn checksum_required_fails_closed_for_unparseable_tags() {
+    use bladebro::updater::download::checksum_required;
+    // A tag that is not a version (e.g. "releases" from a redirect to the
+    // release list) parsed as version [] and sorted below 3.3.0, which
+    // downgraded verification to warn-and-skip. Unknown means required.
+    for tag in ["releases", "latest", "", "v", "4.6.x"] {
+        assert!(checksum_required(tag), "{tag:?} must require a checksum");
+    }
+}
+
+#[test]
 fn checksum_parsing_accepts_only_valid_sha256() {
     use bladebro::updater::download::parse_checksum;
     let hash = "a".repeat(64);

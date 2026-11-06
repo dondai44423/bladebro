@@ -4,11 +4,21 @@ use super::version;
 use crate::error::{BladeError, Result};
 use std::path::PathBuf;
 
-/// A downloaded binary, ready to be installed.
+/// A downloaded binary, ready to be installed. It owns its temp file:
+/// dropping it removes the file, so every exit from an update — a failed
+/// verify or swap, an early `?`, a dropped future — cleans up the install
+/// dir. After a successful swap the file was renamed into place and there
+/// is nothing left to remove.
 pub struct DownloadedBinary {
     pub path: PathBuf,
     pub size: u64,
     pub asset_name: String,
+}
+
+impl Drop for DownloadedBinary {
+    fn drop(&mut self) {
+        cleanup_tmp(&self.path);
+    }
 }
 
 /// Temp file prefix for download in progress. The full name carries the
@@ -27,9 +37,13 @@ const FIRST_CHECKSUMMED_TAG: &str = "3.3.0";
 const MAX_BINARY_SIZE: u64 = 500_000_000;
 const MAX_CHECKSUM_BYTES: usize = 16 * 1024;
 
-/// Is checksum verification mandatory for this target tag?
+/// Is checksum verification mandatory for this target tag? A tag that is
+/// not a version cannot be shown to predate checksum uploads, so it is
+/// required (fail-closed) — it used to parse as version [] and sort below
+/// FIRST_CHECKSUMMED_TAG, i.e. warn-and-skip.
 pub fn checksum_required(tag: &str) -> bool {
-    super::version::compare_versions(tag, FIRST_CHECKSUMMED_TAG) != std::cmp::Ordering::Less
+    !super::version::is_version_tag(tag)
+        || super::version::compare_versions(tag, FIRST_CHECKSUMMED_TAG) != std::cmp::Ordering::Less
 }
 
 /// Parse a checksum file body: `<hash>  <filename>` or just `<hash>`.
@@ -237,24 +251,19 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
     // Unique, unpredictable temp name + O_EXCL create: a predictable
     // fixed name allowed a local attacker to pre-place a symlink at the
     // temp path and have the downloaded binary written through it.
-    let tmp = create_secure_tmp(dir)?;
+    // Owned from here on: every return below drops it and removes the
+    // temp file, a partial download included.
+    let mut dl = DownloadedBinary {
+        path: create_secure_tmp(dir)?,
+        size: 0,
+        asset_name: asset.name.clone(),
+    };
 
-    // Clean up any leftover temps from OUR previous failed attempts
-    // (same pid prefix only — never touch other processes' files).
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let prefix = format!("{TMP_PREFIX}-{}-", std::process::id());
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with(&prefix) && name.ends_with(".tmp") && e.path() != tmp {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
+    sweep_leftover_tmps(dir, &dl.path);
 
     // Pre-flight: check available disk space if we know the asset size.
     if asset.size > 0 {
         if let Err(e) = check_disk_space(dir, asset.size) {
-            let _ = std::fs::remove_file(&tmp);
             return Err(BladeError::Other(format!(
                 "insufficient disk space for download (~{} MB needed): {e}\n\
                  Free space in {} and try again.",
@@ -270,22 +279,14 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
             eprintln!("  retry {attempt}/3...");
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        match download_once(&asset.browser_download_url, &tmp, asset.size).await {
+        match download_once(&asset.browser_download_url, &dl.path, asset.size).await {
             Ok(size) => {
                 // SECURITY: Verify SHA256 before the binary is ever
                 // executed or installed. Fail-closed for releases >=
                 // FIRST_CHECKSUMMED_TAG; abort + clean up on failure.
-                if let Err(e) =
-                    verify_sha256(&tmp, &asset.browser_download_url, release.tag()).await
-                {
-                    let _ = std::fs::remove_file(&tmp);
-                    return Err(e);
-                }
-                return Ok(DownloadedBinary {
-                    path: tmp,
-                    size,
-                    asset_name: asset.name.clone(),
-                });
+                verify_sha256(&dl.path, &asset.browser_download_url, release.tag()).await?;
+                dl.size = size;
+                return Ok(dl);
             }
             Err(e) => {
                 last_err = e.to_string();
@@ -297,10 +298,51 @@ pub async fn download_binary(release: &version::Release) -> Result<DownloadedBin
             }
         }
     }
-    let _ = std::fs::remove_file(&tmp);
     Err(BladeError::Other(format!(
         "download failed after 3 attempts: {last_err}"
     )))
+}
+
+/// A download temp untouched this long belongs to no live updater: a live
+/// one writes at least every 180 s (the per-attempt download timeout) and
+/// verifies within a minute of its last write.
+const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Remove download temps left in the install dir: this process's earlier
+/// attempts, and any temp that has sat untouched for STALE_TMP_AGE — a
+/// Ctrl-C'd or crashed run's partial download. Every run picks a fresh
+/// pid + nanos name, so the old pid-only sweep never matched an earlier
+/// run's file and none was ever removed. A fresh temp from another pid is
+/// left alone: it may belong to an updater that is running right now.
+fn sweep_leftover_tmps(dir: &std::path::Path, keep: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let ours = format!("{TMP_PREFIX}-{}-", std::process::id());
+    let any = format!("{TMP_PREFIX}-");
+    let now = std::time::SystemTime::now();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with(&any) || !name.ends_with(".tmp") || e.path() == keep {
+            continue;
+        }
+        // lstat: only regular files are ours — never follow or remove
+        // a planted symlink or directory by name.
+        let Ok(meta) = std::fs::symlink_metadata(e.path()) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= STALE_TMP_AGE);
+        if name.starts_with(&ours) || stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// Create the download temp file: unique unpredictable name + O_EXCL, so a
@@ -737,7 +779,8 @@ mod tests {
             Ok(outcome) => outcome.unwrap(),
             Err(_) => task.await.unwrap(),
         };
-        std::fs::remove_file(path).unwrap();
+        // The task dropped the download, which removed the fixture.
+        let _ = std::fs::remove_file(path);
         assert!(
             outcome.is_err(),
             "a wedged version probe must fail within its own deadline"
@@ -770,6 +813,67 @@ mod tests {
             std::fs::remove_file(path).unwrap();
             assert_eq!(result.is_ok(), accepted, "{result:?}");
         }
+    }
+
+    #[test]
+    fn a_rejected_download_does_not_leave_its_temp_file() {
+        // `bladebro -u` returned early on a failed verify/swap without
+        // removing the temp file it had downloaded into the install dir.
+        let path = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        std::fs::write(&path, b"not a binary").unwrap();
+        let dl = DownloadedBinary {
+            path: path.clone(),
+            size: 12,
+            asset_name: "fixture".into(),
+        };
+        assert!(verify_binary(&dl).is_err());
+        drop(dl);
+        let left = path.exists();
+        let _ = std::fs::remove_file(&path);
+        assert!(!left, "the rejected download is still on disk");
+    }
+
+    #[test]
+    fn leftover_sweep_removes_stale_temps_from_earlier_runs_only() {
+        let dir = std::env::temp_dir().join(format!("blade-update-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let age = |p: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(hour_ago)
+                .unwrap();
+        };
+        // An earlier run's partial download (Ctrl-C, crash): another pid.
+        let stale = dir.join(format!("{TMP_PREFIX}-1-1700000000000000000-7.tmp"));
+        // A concurrent updater mid-download: another pid, recently written.
+        let fresh = dir.join(format!("{TMP_PREFIX}-2-1700000000000000001-8.tmp"));
+        let unrelated = dir.join("bladebro");
+        for p in [&stale, &fresh, &unrelated] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        age(&stale);
+        age(&unrelated);
+        // The current download is never swept, however old its mtime.
+        let current = create_secure_tmp(&dir).unwrap();
+        age(&current);
+        sweep_leftover_tmps(&dir, &current);
+        let (stale_left, fresh_left, unrelated_left, current_left) = (
+            stale.exists(),
+            fresh.exists(),
+            unrelated.exists(),
+            current.exists(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !stale_left,
+            "a stale temp from an earlier run must be swept"
+        );
+        assert!(fresh_left, "a fresh temp may belong to a running updater");
+        assert!(unrelated_left && current_left);
     }
 
     #[test]

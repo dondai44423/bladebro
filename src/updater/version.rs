@@ -53,14 +53,14 @@ pub async fn fetch_latest_tag() -> Result<String> {
     // 1. GitHub releases/latest redirect.
     let url = format!("https://github.com/{}/releases/latest", super::GITHUB_REPO);
     if let Ok(resp) = client.get(&url).send().await {
-        if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
-            if let Ok(loc_str) = loc.to_str() {
-                // URL format: https://github.com/dondai44423/bladebro/releases/tag/v3.0.12
-                if let Some(tag) = loc_str.rsplit('/').next() {
-                    let tag = tag.strip_prefix('v').unwrap_or(tag);
-                    return Ok(tag.to_string());
-                }
-            }
+        let status = resp.status();
+        if let Some(tag) = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|loc| loc.to_str().ok())
+            .and_then(|loc| tag_from_latest_redirect(status, loc))
+        {
+            return Ok(tag);
         }
         // Some CDNs/proxies eat the 301. Fall through to npm.
     }
@@ -70,7 +70,11 @@ pub async fn fetch_latest_tag() -> Result<String> {
     if let Ok(resp) = client.get(npm_url).send().await {
         if resp.status().is_success() {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(ver) = json.get("version").and_then(|v| v.as_str()) {
+                if let Some(ver) = json
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| is_version_tag(v))
+                {
                     return Ok(ver.to_string());
                 }
             }
@@ -80,6 +84,38 @@ pub async fn fetch_latest_tag() -> Result<String> {
     Err(BladeError::Other(
         "cannot reach GitHub or npm registry for version check".into(),
     ))
+}
+
+/// Extract the release tag from the `releases/latest` redirect. Only a 3xx
+/// pointing at `…/releases/tag/<version>` names a release. GitHub answers a
+/// repo with no published release with a redirect to `…/releases`; taking
+/// the last path segment of any Location turned that into the tag
+/// "releases", which parsed as no version at all, compared as older than
+/// every build ("ahead of the latest release") and made the checksum
+/// optional. Anything else falls through to the npm registry.
+pub(crate) fn tag_from_latest_redirect(
+    status: reqwest::StatusCode,
+    location: &str,
+) -> Option<String> {
+    if !status.is_redirection() {
+        return None;
+    }
+    // URL format: https://github.com/dondai44423/bladebro/releases/tag/v3.0.12
+    let path = location.split(['?', '#']).next()?;
+    let (_, tag) = path.rsplit_once("/releases/tag/")?;
+    let tag = tag.strip_prefix('v').unwrap_or(tag);
+    is_version_tag(tag).then(|| tag.to_string())
+}
+
+/// Is `v` a release version — `[v]N(.N)*` with an optional `-pre` suffix?
+/// URL segments like "releases" or "latest" and empty strings are not.
+pub(crate) fn is_version_tag(v: &str) -> bool {
+    let core = v.strip_prefix('v').unwrap_or(v);
+    let core = core.split_once('-').map_or(core, |(n, _)| n);
+    !core.is_empty()
+        && core.split('.').all(|n| {
+            !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<u64>().is_ok()
+        })
 }
 
 /// Construct a Release from a tag.
@@ -371,6 +407,70 @@ mod tests {
         assert_eq!(compare_versions("v2.0.0", "1.9.9"), Greater);
         assert_eq!(compare_versions("2.0.0-dev", "2.0.0"), Less);
         assert_eq!(compare_versions("2.0.0", "2.0.0-dev"), Greater);
+    }
+
+    #[test]
+    fn latest_redirect_yields_only_real_version_tags() {
+        use reqwest::StatusCode;
+        let repo = "https://github.com/dondai44423/bladebro";
+        let found = StatusCode::FOUND;
+        assert_eq!(
+            tag_from_latest_redirect(found, &format!("{repo}/releases/tag/v4.6.7")).as_deref(),
+            Some("4.6.7")
+        );
+        assert_eq!(
+            tag_from_latest_redirect(
+                StatusCode::MOVED_PERMANENTLY,
+                &format!("{repo}/releases/tag/v4.7.0-rc.1")
+            )
+            .as_deref(),
+            Some("4.7.0-rc.1")
+        );
+        // A repo with no published release redirects to the release list:
+        // its last segment "releases" used to come back as the tag.
+        assert_eq!(
+            tag_from_latest_redirect(found, &format!("{repo}/releases")),
+            None
+        );
+        // A renamed repo / sign-in wall is not a release pointer either.
+        assert_eq!(
+            tag_from_latest_redirect(
+                StatusCode::MOVED_PERMANENTLY,
+                "https://github.com/other/bladebro/releases/latest"
+            ),
+            None
+        );
+        assert_eq!(
+            tag_from_latest_redirect(
+                found,
+                "https://github.com/login?return_to=%2Freleases%2Ftag%2Fv9.9.9"
+            ),
+            None
+        );
+        // A Location header on a non-redirect response carries no meaning.
+        for status in [
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::NOT_FOUND,
+        ] {
+            assert_eq!(
+                tag_from_latest_redirect(status, &format!("{repo}/releases/tag/v4.6.7")),
+                None,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_tags_are_numeric() {
+        for ok in ["4.6.7", "v4.6.7", "4.7.0-rc.1", "10"] {
+            assert!(is_version_tag(ok), "{ok:?}");
+        }
+        for bad in [
+            "releases", "latest", "", "v", "4..7", "4.6.x", "+4.6.7", "4.6.7 ",
+        ] {
+            assert!(!is_version_tag(bad), "{bad:?}");
+        }
     }
 
     #[test]

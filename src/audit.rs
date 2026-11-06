@@ -1,7 +1,8 @@
 //! `bladebro audit` — runs the S13 stealth audit for the CLI.
 //!
 //! Executed by main.rs with an owned, guarded browser. The vector suite and
-//! the injection-lint fixtures live in `tests/vectors.html`; the bar is the
+//! the injection-lint fixtures live in `tests/vectors.html` (embedded in the
+//! binary, so npm and release installs can run it too); the bar is the
 //! suite's own total (111/111 on the reference machine with native behavior
 //! conformance, after the 4.6.0
 //! shell-torture + platform-truth checks and the 4.6.1 worker-renderer /
@@ -14,6 +15,14 @@ use crate::cdp;
 use crate::error::{BladeError, Result};
 use crate::page::Page;
 use crate::ui;
+use std::path::{Path, PathBuf};
+
+/// The vector suite and the fixture script it loads by relative path,
+/// compiled in: npm and release installs ship only the binary, so an audit
+/// that needed `tests/` on disk failed on every one of them with
+/// "vectors.html not found".
+const VECTORS_HTML: &str = include_str!("../tests/vectors.html");
+const NATIVE_BEHAVIOR_JS: &str = include_str!("../tests/fixtures/native_behavior.js");
 
 /// S13: `bladebro audit` — run the stealth vectors, the boot self-check (S2),
 /// and a cross-restart consistency stamp (v3.9.12); print a scorecard.
@@ -23,17 +32,15 @@ pub async fn run_audit(base: &str) -> Result<()> {
     let client = cdp::CdpClient::connect(target.ws_url()?).await?;
     let mut page = Page::attach(cdp::CdpSession::root(client), base, None).await?;
 
-    // Find vectors.html — project root or CARGO_MANIFEST_DIR.
-    let vectors_url = {
-        let candidates = [
-            std::path::PathBuf::from("tests/vectors.html"),
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors.html"),
-        ];
-        let path = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
-            BladeError::Other("vectors.html not found. Run from project root.".into())
-        })?;
-        file_url(path)
-    };
+    // Find vectors.html — project root, CARGO_MANIFEST_DIR, else the copy
+    // embedded in this binary.
+    let vectors_url = file_url(&vectors_page(
+        &[
+            PathBuf::from("tests/vectors.html"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors.html"),
+        ],
+        &crate::platform::blade_dir().join("audit"),
+    )?);
 
     if crate::realbrowser::real_lane() {
         eprintln!(
@@ -44,13 +51,15 @@ pub async fn run_audit(base: &str) -> Result<()> {
     }
     println!("[audit] running stealth vectors...");
     page.navigate(&vectors_url).await?;
-    let _ = page
+    let finished = page
         .act(Action::Wait {
             condition: "title".into(),
             text: "DONE".into(),
             timeout: std::time::Duration::from_secs(15),
         })
-        .await;
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string());
 
     // The rendered report is ONE flattened text blob (and a tight budget
     // truncated it mid-check — 2000 chars cut the tail). 16k fits the whole
@@ -81,32 +90,14 @@ pub async fn run_audit(base: &str) -> Result<()> {
     // non-zero, so CI and scripts can trust the exit code. The rendered
     // report arrives as one flattened text blob, so vector failures are
     // gated by the SCORE footer (pass == total) — the "FAIL " marker scan
-    // names them; it never gates on its own.
-    let mut failures: Vec<String> = Vec::new();
+    // names them; it never gates on its own. A suite that never finished,
+    // or a footer that is missing or unreadable, fails the gate too.
     for line in content.lines() {
         if line.contains("SCORE:") {
             println!("  {line}");
         }
     }
-    if let Some(at) = content.find("SCORE: ") {
-        let mut nums = content[at + 7..].split_whitespace();
-        if let Some((pass, total)) = nums.next().and_then(|s| s.split_once('/')) {
-            let (pass, total) = (
-                pass.parse::<u32>().unwrap_or(0),
-                total.parse::<u32>().unwrap_or(u32::MAX),
-            );
-            if pass < total {
-                failures.push(format!("vectors: {pass}/{total} passed"));
-            }
-        }
-    }
-    for seg in content.split("FAIL ").skip(1) {
-        let detail: String = seg.chars().take(140).collect();
-        let detail = detail.trim();
-        if !detail.is_empty() {
-            failures.push(format!("vector FAIL: {detail}"));
-        }
-    }
+    let mut failures = vector_failures(finished, &content);
 
     if let Some(ref result) = selfcheck {
         let v: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
@@ -223,11 +214,80 @@ return JSON.stringify(out);
     }
 }
 
+/// Resolve the vector page to load. An on-disk suite (the first existing
+/// candidate) wins, so edits to `tests/vectors.html` take effect without a
+/// rebuild. Otherwise the embedded copy and its fixture are written under
+/// `dir` (in the data dir, which the browser can already read — its profile
+/// lives there) and loaded from `file://`, as the on-disk suite is: the
+/// permissions, worker and iframe vectors are origin-sensitive, and a
+/// `data:` URL would run them in an opaque origin.
+fn vectors_page(candidates: &[PathBuf], dir: &Path) -> Result<PathBuf> {
+    if let Some(found) = candidates.iter().find(|p| p.exists()) {
+        return Ok(found.clone());
+    }
+    let page = dir.join("vectors.html");
+    let fixtures = dir.join("fixtures");
+    crate::platform::secure_create_dir_all(&fixtures)
+        .and_then(|()| {
+            crate::platform::secure_write_file(
+                &fixtures.join("native_behavior.js"),
+                NATIVE_BEHAVIOR_JS.as_bytes(),
+            )
+        })
+        .and_then(|()| crate::platform::secure_write_file(&page, VECTORS_HTML.as_bytes()))
+        .map_err(|e| {
+            BladeError::Other(format!(
+                "cannot write the built-in vector suite to {}: {e}",
+                dir.display()
+            ))
+        })?;
+    Ok(page)
+}
+
+/// Gate the vector suite's own report, failing closed. `finished` is the
+/// wait for the suite's `DONE` title. A suite that threw or hung never
+/// reaches DONE and never writes its SCORE footer; this gate used to record
+/// no failure for either (and none for a footer it could not parse), so a
+/// crashed suite printed VERDICT: PASS and exited 0 — the CI stealth gate
+/// passed without a single vector having run.
+fn vector_failures(finished: std::result::Result<(), String>, content: &str) -> Vec<String> {
+    let mut failures: Vec<String> = Vec::new();
+    if let Err(e) = finished {
+        failures.push(format!("vectors: suite did not finish ({e})"));
+    }
+    match content.find("SCORE: ") {
+        None => failures.push(
+            "vectors: no SCORE footer in the report (the suite threw, hung or was truncated)"
+                .into(),
+        ),
+        Some(at) => {
+            let token = content[at + 7..].split_whitespace().next().unwrap_or("");
+            let score = token
+                .split_once('/')
+                .and_then(|(p, t)| Some((p.parse::<u32>().ok()?, t.parse::<u32>().ok()?)));
+            match score {
+                // Zero checks run is not a pass.
+                Some((pass, total)) if total > 0 && pass == total => {}
+                Some((pass, total)) => failures.push(format!("vectors: {pass}/{total} passed")),
+                None => failures.push(format!("vectors: unparseable SCORE footer ({token:?})")),
+            }
+        }
+    }
+    for seg in content.split("FAIL ").skip(1) {
+        let detail: String = seg.chars().take(140).collect();
+        let detail = detail.trim();
+        if !detail.is_empty() {
+            failures.push(format!("vector FAIL: {detail}"));
+        }
+    }
+    failures
+}
+
 /// Build a `file://` URL from a path. Windows paths need forward slashes and
 /// a drive-rooted slash (`file:///D:/a/b.html`); a raw `file://D:\a\b.html`
 /// is not a valid URL and Chrome refuses it (caught by the first CI run on
 /// Windows). The `\\?\` prefix canonicalize() adds on Windows is stripped.
-fn file_url(path: &std::path::Path) -> String {
+fn file_url(path: &Path) -> String {
     let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     file_url_from_str(&p.display().to_string(), cfg!(windows))
 }
@@ -244,6 +304,119 @@ fn file_url_from_str(s: &str, windows: bool) -> String {
         format!("file://{t}")
     } else {
         format!("file://{s}")
+    }
+}
+
+#[cfg(test)]
+mod embedded_suite_tests {
+    use super::{vectors_page, VECTORS_HTML};
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("blade-audit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_binary_install_runs_the_embedded_suite_with_its_fixtures() {
+        // No checkout anywhere: the npm / release-asset case.
+        let dir = scratch("embedded");
+        let page = vectors_page(
+            &[dir.join("checkout/tests/vectors.html")],
+            &dir.join("audit"),
+        )
+        .expect("the embedded suite needs no files on disk");
+        assert_eq!(std::fs::read_to_string(&page).unwrap(), VECTORS_HTML);
+        // Every script the page loads by relative path must be written next
+        // to it, or the suite dies on its first reference on every install.
+        let mut scripts = 0;
+        for seg in VECTORS_HTML.split("src=\"").skip(1) {
+            let src = seg.split('"').next().unwrap_or_default();
+            scripts += 1;
+            assert!(
+                page.parent().unwrap().join(src).is_file(),
+                "{src} is loaded by tests/vectors.html but not embedded"
+            );
+        }
+        assert!(scripts > 0);
+        // A second run rewrites the files in place.
+        assert_eq!(vectors_page(&[], &dir.join("audit")).unwrap(), page);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_on_disk_suite_still_wins() {
+        let dir = scratch("ondisk");
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkout = dir.join("vectors.html");
+        std::fs::write(&checkout, "<title>edited</title>").unwrap();
+        let page = vectors_page(
+            &[dir.join("absent.html"), checkout.clone()],
+            &dir.join("audit"),
+        )
+        .unwrap();
+        assert_eq!(page, checkout);
+        assert!(
+            !dir.join("audit").exists(),
+            "nothing written when a suite is on disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod vector_gate_tests {
+    use super::vector_failures;
+
+    const TIMEOUT: &str = "wait timeout: condition 'title' not met within 15s";
+
+    #[test]
+    fn a_complete_passing_report_passes() {
+        let report = "Bladebro Stealth Vector Suite\nSCORE: 111/111 pass\nPASS webdriver: false";
+        assert_eq!(vector_failures(Ok(()), report), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_suite_that_never_finished_fails() {
+        // The suite threw or hung: the title never reached DONE and the
+        // page still shows its placeholder. This used to print VERDICT: PASS.
+        let f = vector_failures(
+            Err(TIMEOUT.into()),
+            "Bladebro Stealth Vector Suite\nRUNNING",
+        );
+        assert!(f.iter().any(|x| x.contains("did not finish")), "{f:?}");
+        assert!(f.iter().any(|x| x.contains("no SCORE")), "{f:?}");
+    }
+
+    #[test]
+    fn a_failed_wait_fails_even_when_a_score_is_present() {
+        let f = vector_failures(Err(TIMEOUT.into()), "SCORE: 111/111 pass");
+        assert!(f.iter().any(|x| x.contains("did not finish")), "{f:?}");
+    }
+
+    #[test]
+    fn a_missing_or_unparseable_score_fails() {
+        for report in [
+            "Bladebro Stealth Vector Suite\nRUNNING",
+            "SCORE: ",
+            "SCORE: pending",
+            "SCORE: 111 of 111 pass",
+            "SCORE: 111/x pass",
+            "SCORE: 0/0 pass",
+        ] {
+            let f = vector_failures(Ok(()), report);
+            assert!(!f.is_empty(), "{report:?} must fail the gate");
+        }
+    }
+
+    #[test]
+    fn failing_vectors_are_named() {
+        let f = vector_failures(Ok(()), "SCORE: 110/111 pass\nFAIL plugins: 0\nPASS x: y");
+        assert!(f.iter().any(|x| x == "vectors: 110/111 passed"), "{f:?}");
+        assert!(
+            f.iter().any(|x| x.starts_with("vector FAIL: plugins: 0")),
+            "{f:?}"
+        );
     }
 }
 
