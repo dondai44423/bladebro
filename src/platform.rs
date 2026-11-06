@@ -827,44 +827,83 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// Is this process a Chrome/Chromium process?
+/// Is this executable file name a Chromium-family browser? Case and a
+/// `.exe` suffix are ignored, and spaces read as dashes so macOS bundle names
+/// (`Google Chrome`, `Brave Browser`, `Microsoft Edge`) match the Linux
+/// package names. A `-suffix` covers channels and wrappers
+/// (`google-chrome-beta`, `vivaldi-bin`, `Google Chrome for Testing`).
+pub fn exe_name_is_chromium(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let name = lower
+        .strip_suffix(".exe")
+        .unwrap_or(&lower)
+        .replace(' ', "-");
+    [
+        "chrome",
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+        "chrome_crashpad_handler",
+        "brave",
+        "brave-browser",
+        "helium",
+        "microsoft-edge",
+        "msedge",
+        "vivaldi",
+        "opera",
+    ]
+    .iter()
+    .any(|f| name == *f || name.starts_with(&format!("{f}-")))
+}
+
+/// Is this `/proc/<pid>/cmdline` image a Chromium-family browser process?
+///
+/// Two readings of argv[0], because Chromium rewrites its own argv block
+/// into ONE space-joined string early in startup (measured live: Flatpak
+/// Chromium's browser process reads `/app/chromium/chrome --enable-…
+/// --user-data-dir=…` plus a single trailing NUL), so the NUL-separated
+/// first entry is the whole command line; the first NUL-or-space token is
+/// the executable then. The NUL entry alone still covers an install path
+/// with spaces in the kernel's normal form. A file name containing a space
+/// is never an executable here — it is the tail of a rewritten line.
+pub fn cmdline_is_chromium(cmdline: &[u8]) -> bool {
+    let first_arg = cmdline.split(|b| *b == 0).next().unwrap_or_default();
+    let first_token = cmdline
+        .split(|b| *b == 0 || *b == b' ')
+        .find(|tok| !tok.is_empty())
+        .unwrap_or_default();
+    [first_arg, first_token].iter().any(|exe| {
+        let exe = String::from_utf8_lossy(exe);
+        std::path::Path::new(exe.as_ref())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| !n.contains(' ') && exe_name_is_chromium(n))
+    })
+}
+
+/// Is this process a Chrome/Chromium-family browser process?
 pub fn process_is_chrome(pid: u32) -> bool {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         std::fs::read(format!("/proc/{pid}/cmdline"))
-            .ok()
-            .and_then(|bytes| {
-                bytes
-                    .split(|b| *b == 0)
-                    .next()
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-            })
-            .is_some_and(|exe| {
-                std::path::Path::new(&exe)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|name| {
-                        matches!(
-                            name,
-                            "chrome"
-                                | "chromium"
-                                | "chromium-browser"
-                                | "google-chrome"
-                                | "google-chrome-stable"
-                                | "chrome_crashpad_handler"
-                        )
-                    })
-            })
+            .is_ok_and(|cmdline| cmdline_is_chromium(&cmdline))
     }
     #[cfg(target_os = "macos")]
     {
+        // `comm` is the executable path; the substring test is kept so
+        // nothing recognised before is lost, the name list adds Brave/Edge/…
         std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "comm="])
             .output()
             .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .to_lowercase()
-                    .contains("chrom")
+                let comm = String::from_utf8_lossy(&o.stdout);
+                let comm = comm.trim();
+                comm.to_lowercase().contains("chrom")
+                    || std::path::Path::new(comm)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(exe_name_is_chromium)
             })
             .unwrap_or(false)
     }
@@ -1494,6 +1533,112 @@ mod security_hardening_tests {
 #[cfg(test)]
 mod persistence_reliability_tests {
     use super::*;
+
+    /// A live process whose first /proc cmdline entry is `argv0` — with
+    /// spaces, the shape Chromium leaves after rewriting its argv into one
+    /// space-joined string (measured on Flatpak Chromium's browser process).
+    /// `sh` + a blocking builtin: multi-call binaries (coreutils on NixOS)
+    /// dispatch on argv[0] and would exit at once.
+    /// spawn() returns once the child is inside execve, before the kernel
+    /// has published its new argv: /proc/<pid>/cmdline reads empty for a
+    /// moment, so wait for it.
+    #[cfg(target_os = "linux")]
+    fn process_with_argv0(argv0: &str) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        let child = std::process::Command::new("sh")
+            .arg0(argv0)
+            .args(["-c", "read -r _"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+        let cmdline = format!("/proc/{}/cmdline", child.id());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !std::fs::read(&cmdline).is_ok_and(|c| c.starts_with(argv0.as_bytes())) {
+            assert!(std::time::Instant::now() < deadline, "argv never published");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child
+    }
+
+    #[test]
+    fn chromium_family_is_recognised_in_both_cmdline_shapes() {
+        let cases: &[(&[u8], bool)] = &[
+            // Chromium's rewritten argv: one space-joined string + one NUL.
+            (
+                b"/app/chromium/chrome --enable-features=Foo --user-data-dir=/x/sess-1\0",
+                true,
+            ),
+            (b"/opt/google/chrome/chrome --type=renderer --lang=en", true),
+            // The kernel's normal NUL-separated form, incl. a spaced path.
+            (b"/usr/lib/chromium/chromium\0--user-data-dir=/x\0", true),
+            (b"/opt/My Apps/chrome\0--user-data-dir=/x\0", true),
+            (b"/opt/brave.com/brave/brave\0", true),
+            (b"/opt/microsoft/msedge/msedge\0", true),
+            (b"/opt/vivaldi/vivaldi-bin\0", true),
+            (b"/usr/bin/cat\0", false),
+            (b"/opt/chrome-tools/notchrome --user-data-dir=/x\0", false),
+            // A rewritten line whose last path component looks like a name.
+            (b"/usr/bin/foo --dir=/srv/chrome stuff\0", false),
+            (b"", false),
+        ];
+        for &(cmdline, expected) in cases {
+            assert_eq!(
+                cmdline_is_chromium(cmdline),
+                expected,
+                "{:?}",
+                String::from_utf8_lossy(cmdline)
+            );
+        }
+        for name in [
+            "Google Chrome",
+            "Brave Browser",
+            "Microsoft Edge",
+            "Chromium",
+            "Google Chrome for Testing",
+            "msedge.exe",
+        ] {
+            assert!(exe_name_is_chromium(name), "{name}");
+        }
+        assert!(!exe_name_is_chromium("Safari"));
+        assert!(!exe_name_is_chromium("chromedriver"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rewritten_and_non_google_chromium_processes_are_recognised() {
+        let cases = [
+            (
+                "/app/chromium/chrome --enable-features=Foo --user-data-dir=/x/sess-1",
+                true,
+            ),
+            ("/opt/brave.com/brave/brave", true),
+            ("/opt/microsoft/msedge/msedge --type=renderer", true),
+            ("/usr/bin/cat", false),
+            ("/opt/chrome-tools/notchrome --user-data-dir=/x", false),
+        ];
+        let mut seen = Vec::new();
+        for (argv0, expected) in cases {
+            let mut child = process_with_argv0(argv0);
+            let observed = std::fs::read(format!("/proc/{}/cmdline", child.id()));
+            seen.push((
+                argv0,
+                process_is_chrome(child.id()),
+                expected,
+                observed.map(|c| String::from_utf8_lossy(&c).into_owned()),
+            ));
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        for (argv0, got, expected, observed) in seen {
+            assert_eq!(
+                got, expected,
+                "process_is_chrome for argv0 {argv0:?} (read {observed:?})"
+            );
+        }
+    }
+
     #[test]
     fn invalid_pids_are_never_process_groups() {
         assert!(!process_alive(0));

@@ -390,40 +390,10 @@ fn process_uid(pid: u32) -> Option<u32> {
 
 #[cfg(target_os = "linux")]
 fn looks_like_chromium(pid: u32) -> bool {
-    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
-        return false;
-    };
-    // First token of the cmdline. The kernel's normal form separates argv
-    // entries with NULs, but Chromium rewrites its own argv block into one
-    // space-joined string early in startup (measured live: the browser
-    // process's /proc/<pid>/cmdline has no NUL bytes at all once rewritten),
-    // so splitting on NUL alone would yield the WHOLE command line as one
-    // token and every name check below would fail. Split on either byte.
-    let exe = cmdline
-        .split(|b| *b == 0 || *b == b' ')
-        .find(|tok| !tok.is_empty())
-        .unwrap_or_default();
-    let s = String::from_utf8_lossy(exe);
-    let name = std::path::Path::new(s.as_ref())
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    [
-        "chrome",
-        "chromium",
-        "chromium-browser",
-        "google-chrome",
-        "google-chrome-stable",
-        "brave",
-        "brave-browser",
-        "helium",
-        "microsoft-edge",
-        "msedge",
-        "vivaldi",
-        "opera",
-    ]
-    .iter()
-    .any(|f| name == *f || name.starts_with(&format!("{f}-")))
+    // Shared with the orphan reaper: both must read Chromium's rewritten
+    // (space-joined) argv the same way.
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .is_ok_and(|cmdline| crate::platform::cmdline_is_chromium(&cmdline))
 }
 
 /// Non-Linux: no /proc, so the ownership checks are skipped (verification
