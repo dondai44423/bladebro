@@ -72,6 +72,22 @@ pub fn import_template(id: &str, src: &Path) -> Result<ImportStats> {
             "profile copy produced no directory".into(),
         ));
     }
+    // A fresh import generation: sessions cloned from an EARLIER import
+    // carry the old value, and their sync-back refuses to overwrite this
+    // template with their stale copy.
+    let generation = format!(
+        "{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id()
+    );
+    platform::secure_write_file(
+        &tmp.join(crate::session_profile::IMPORT_MARKER),
+        generation.as_bytes(),
+    )
+    .map_err(|e| BladeError::Other(format!("cannot mark the imported template: {e}")))?;
 
     // Atomic-ish swap (same discipline as the agent-lane template).
     let template = root.join("template");
@@ -116,6 +132,23 @@ pub fn template_source(id: &str) -> Option<String> {
     let txt = std::fs::read_to_string(source_meta_path(id)).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     v.get("source").and_then(|s| s.as_str()).map(String::from)
+}
+
+/// True when the clone template for `id` exists AND was imported from the
+/// user-data root `root`. The template is keyed by browser id only, so a
+/// profile selected in ANOTHER root (`rb profile <abs path>`) must not reuse
+/// it. Missing provenance counts as a mismatch: nothing then proves whose
+/// profile the clone holds.
+pub fn template_matches(id: &str, root: &Path) -> bool {
+    has_template(id)
+        && template_source(id).is_some_and(|src| super::same_dir(Path::new(&src), root))
+}
+
+/// Pids of live bladebro processes running a clone session of `id`. Refreshing
+/// under one gets its stale copy synced back over the import; wiping under
+/// one deletes the profile its browser is running on.
+pub fn live_clone_sessions(id: &str) -> Vec<u32> {
+    crate::session_profile::live_session_owners(&root_for(id).join("profiles"))
 }
 
 /// Wipe a browser's template + any leftover session dirs.

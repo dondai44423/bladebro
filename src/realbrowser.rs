@@ -68,12 +68,12 @@ pub use self::profiles::{
     profile_in_use, profile_owner_pid, same_dir, ProfileInfo,
 };
 pub use self::select::{
-    effective_mode, ensure_import, resolve_selection, session_drifted, sole_root_id,
-    validate_binary_override,
+    effective_mode, ensure_current_import, ensure_import, resolve_selection, session_drifted,
+    sole_root_id, validate_binary_override,
 };
 pub use self::template::{
-    forget, has_template, human_bytes, import_template, root_for, source_meta_path, template_dir,
-    template_source, template_stats, ImportStats,
+    forget, has_template, human_bytes, import_template, live_clone_sessions, root_for,
+    source_meta_path, template_dir, template_matches, template_source, template_stats, ImportStats,
 };
 
 // ── Lane switch ─────────────────────────────────────────────────────────
@@ -459,6 +459,30 @@ mod tests {
         );
         assert!(got.exists());
         let _ = std::fs::remove_dir_all(&rel);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_paths_keep_argv0_dispatch_symlinks() {
+        // `/snap/bin/chromium` is a symlink to `/usr/bin/snap`, which picks
+        // the app from argv[0]. Resolving the link stores the dispatcher, and
+        // the launch then runs snap itself with Chrome's flags.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("blade-rb-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dispatcher = dir.join("snap");
+        std::fs::write(&dispatcher, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&dispatcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.join("chromium");
+        std::os::unix::fs::symlink(&dispatcher, &link).unwrap();
+
+        let got = validate_binary_override(&link.display().to_string()).expect("symlinked binary");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            got, link,
+            "the stored binary must keep the name argv[0] carries"
+        );
     }
 
     #[test]

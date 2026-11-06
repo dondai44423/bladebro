@@ -3,12 +3,34 @@
 
 use crate::error::Result;
 
-use super::daemon::restart_daemon_for_lane;
+use super::daemon::{restart_daemon_for_lane, stop_daemon_for_clone_change};
 
 /// One aligned `label  value` row for the `rb` blocks: labels dim, column
 /// width 9 (the longest label, `mechanism`).
 fn rb_row(label: &str, value: &str) -> String {
     crate::ui::kv(label, value, 9)
+}
+
+/// `rb refresh` / `rb forget` must not run under a live clone session (an
+/// MCP server, a second daemon): only the CLI daemon can be stopped from
+/// here, and any other session's exit copies its stale clone back over a
+/// refresh — or its browser keeps running inside a wiped root.
+fn refuse_under_live_clone_sessions(id: &str, sub: &str) -> Result<()> {
+    let pids = crate::realbrowser::live_clone_sessions(id);
+    if pids.is_empty() {
+        return Ok(());
+    }
+    let owners: Vec<String> = pids.iter().map(|p| format!("pid {p}")).collect();
+    Err(crate::error::BladeError::Other(format!(
+        "the `{id}` clone is in use by a running bladebro session ({}) — {} Close that \
+         session (its MCP client, or `bladebro stop`), then retry `bladebro rb {sub}`.",
+        owners.join(", "),
+        if sub == "forget" {
+            "wiping it would delete the profile under its open browser."
+        } else {
+            "its exit would copy the old clone back over the refresh."
+        }
+    )))
 }
 
 /// `bladebro rb ...` — switch between the default agent browser and the
@@ -133,13 +155,12 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
 
         "on" => {
             if cfg.enabled {
-                // Already on: still self-heal a missing clone (e.g. after
-                // `rb forget`) so the next launch never imports mid-run.
+                // Already on: still self-heal a missing or stale clone (after
+                // `rb forget`, or `rb profile` into another user-data root) so
+                // the next launch never imports mid-run.
                 if let Ok((spec, profile)) = rb::resolve_selection(&cfg) {
-                    if rb::effective_mode(&cfg, &profile.root) == rb::Mode::Clone
-                        && !rb::has_template(&spec.id)
-                    {
-                        rb::ensure_import(&spec, &profile)?;
+                    if rb::effective_mode(&cfg, &profile.root) == rb::Mode::Clone {
+                        rb::ensure_current_import(&spec, &profile)?;
                     }
                 }
                 if json_mode {
@@ -160,8 +181,8 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             }
             // Import now (clone lane) so problems surface HERE, not inside a
             // later agent run.
-            if mode == rb::Mode::Clone && !rb::has_template(&spec.id) {
-                rb::ensure_import(&spec, &profile)?;
+            if mode == rb::Mode::Clone {
+                rb::ensure_current_import(&spec, &profile)?;
             }
             cfg.enabled = true;
             rb::save_config(&cfg)?;
@@ -519,8 +540,10 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 );
             }
             // A live clone session syncs back over the template on exit —
-            // that would clobber the fresh import.
-            restart_daemon_for_lane().await;
+            // that would clobber the fresh import. Stop the daemon (failing
+            // if it does not stop) and refuse while any other session runs.
+            stop_daemon_for_clone_change().await?;
+            refuse_under_live_clone_sessions(&spec.id, "refresh")?;
             rb::ensure_import(&spec, &profile)?;
             if json_mode {
                 println!("{}", serde_json::json!({"ok": true, "refreshed_from": profile.path.display().to_string()}));
@@ -546,9 +569,11 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                     },
                 },
             };
-            // A live clone session recreates the template on its exit path —
-            // take the daemon down before removing the root under it.
-            restart_daemon_for_lane().await;
+            // A live clone session's browser runs inside this root — take the
+            // daemon down (failing if it does not stop) and refuse while any
+            // other session still runs one.
+            stop_daemon_for_clone_change().await?;
+            refuse_under_live_clone_sessions(&id, "forget")?;
             let removed = rb::forget(&id)?;
             if json_mode {
                 println!("{}", serde_json::json!({"ok": true, "removed": removed}));

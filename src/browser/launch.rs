@@ -630,9 +630,9 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
                     spec.name
                 )));
             }
-            if !crate::realbrowser::has_template(&spec.id) {
-                crate::realbrowser::ensure_import(&spec, &profile)?;
-            }
+            // Imports on first use AND when the selected profile lives in
+            // another user-data root than the clone was imported from.
+            crate::realbrowser::ensure_current_import(&spec, &profile)?;
             let root = crate::realbrowser::root_for(&spec.id);
             let sp = crate::session_profile::SessionProfile::create_real(&root)?;
             let browser =

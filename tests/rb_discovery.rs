@@ -213,3 +213,21 @@ fn forget_refuses_path_ids_without_deleting_outside_its_namespace() {
     assert!(!blade.join("realbrowser/helium").exists());
     assert!(victim.join("sentinel").is_file());
 }
+
+#[test]
+fn discovered_binary_keeps_its_symlink_name() {
+    // Snap installs `/snap/bin/chromium` as a symlink to `/usr/bin/snap`,
+    // which dispatches on argv[0]: storing the resolved target launches snap
+    // itself with Chrome's flags.
+    let f = Fixture::new();
+    std::fs::rename(f.0.join("bin/helium"), f.0.join("bin/snap")).unwrap();
+    std::os::unix::fs::symlink(f.0.join("bin/snap"), f.0.join("bin/helium")).unwrap();
+    let listing = f.cli(&["use"]);
+    let helium = listing["browsers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "helium")
+        .expect("Helium listed");
+    assert_eq!(helium["binary"], f.0.join("bin/helium").to_str().unwrap());
+}

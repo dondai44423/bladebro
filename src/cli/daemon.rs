@@ -29,6 +29,26 @@ pub(super) async fn restart_daemon_for_lane() {
     }
 }
 
+/// Stop the daemon before the clone template is replaced or wiped, and FAIL
+/// when it does not stop. Unlike a lane switch (which running surfaces pick
+/// up at their next action), a daemon left running here keeps its clone
+/// session: on exit it copies the stale clone back over a refresh, or keeps
+/// its browser running inside a wiped root. Unix only (daemon mode is).
+pub(super) async fn stop_daemon_for_clone_change() -> Result<()> {
+    #[cfg(unix)]
+    {
+        if daemon_running() {
+            stop_daemon().await.map_err(|e| {
+                BladeError::Other(format!(
+                    "the daemon did not stop ({e}) — its clone session would outlive this \
+                     change. Run `bladebro stop`, then retry."
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Start the CLI daemon: persistent Chrome + Unix socket server.
 /// Same lifecycle as MCP (lazy launch, self-healing, idle timeout, reaper).
 #[cfg(unix)]
