@@ -7,6 +7,31 @@ use serde_json::json;
 use crate::cdp::CdpSession;
 use crate::error::Result;
 
+/// The ladder's known-framework buttons for the reject policy. Also the
+/// replay allowlist of the stored-selector fast path under that policy.
+const REJECT_SELECTORS: &[&str] = &[
+    "#onetrust-reject-all-handler",
+    "#CybotCookiebotDialogBodyButtonDecline",
+    "#didomi-notice-disagree-button",
+    ".qc-cmp2-summary-buttons button[mode=secondary]",
+    "#truste-consent-reject",
+];
+
+/// The ladder's known-framework buttons for `BLADE_CONSENT=accept`.
+const ACCEPT_SELECTORS: &[&str] = &[
+    "#onetrust-accept-btn-handler",
+    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+    "#didomi-notice-agree-button",
+    ".qc-cmp2-summary-buttons button[mode=primary]",
+    "#truste-consent-button",
+];
+
+/// A selector list as a JS array literal. Plain strings always serialize;
+/// the fallback still parses.
+fn js_list(list: &[&str]) -> String {
+    serde_json::to_string(list).unwrap_or_else(|_| "[]".to_string())
+}
+
 /// M4: Detect and dismiss consent/cookie banners. Policy: reject (default),
 /// accept, or off (via BLADE_CONSENT env). Returns the framework name if dismissed.
 ///
@@ -31,9 +56,11 @@ pub async fn dismiss_consent(cdp: &CdpSession) -> Result<Option<String>> {
 
     let expression = "(()=>{const reject=".to_string()
         + reject_js
-        + ";const rs=['#onetrust-reject-all-handler','#CybotCookiebotDialogBodyButtonDecline','#didomi-notice-disagree-button','.qc-cmp2-summary-buttons button[mode=secondary]','#truste-consent-reject'];"
-        + "const as=['#onetrust-accept-btn-handler','#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll','#didomi-notice-agree-button','.qc-cmp2-summary-buttons button[mode=primary]','#truste-consent-button'];"
-        + "const sels=reject?rs:as;for(const sel of sels){const btn=document.querySelector(sel);if(btn&&btn.offsetWidth+btn.offsetHeight>0){btn.click();return sel;}}"
+        + ";const rs="
+        + &js_list(REJECT_SELECTORS)
+        + ";const as="
+        + &js_list(ACCEPT_SELECTORS)
+        + ";const sels=reject?rs:as;for(const sel of sels){const btn=document.querySelector(sel);if(btn&&btn.offsetWidth+btn.offsetHeight>0){btn.click();return sel;}}"
         // Generic pass — see the doc comment for why each filter exists.
         + "const dialogs=document.querySelectorAll('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');"
         + "for(const d of dialogs){"
@@ -72,9 +99,10 @@ pub async fn dismiss_consent(cdp: &CdpSession) -> Result<Option<String>> {
 /// fall back to full [`dismiss_consent`] detection if it doesn't match.
 ///
 /// This is the knowledge-base integration point: on known sites, a trusted
-/// CSS selector (confidence >= 0.7) skips the full 20-line detection JS,
-/// saving one large `Runtime.evaluate`. On unknown or changed sites, the
-/// full detection runs as usual — zero regression for cold starts.
+/// CSS selector (confidence >= 0.7) that is one of the current policy's
+/// ladder buttons skips the full 20-line detection JS, saving one large
+/// `Runtime.evaluate`. On unknown or changed sites, the full detection runs
+/// as usual — zero regression for cold starts.
 ///
 /// Returns the selector that was clicked (stored selector, new selector, or
 /// `"generic"`), or `None` if no consent dialog was found.
@@ -86,9 +114,20 @@ pub async fn dismiss_consent_with_stored(
     if policy == "off" {
         return Ok(None);
     }
+    // The store keeps ONE selector per domain, whatever policy learned it.
+    // Replay only a button from the current policy's own ladder list: an
+    // Accept selector learned under BLADE_CONSENT=accept pressed under the
+    // default reject policy would accept tracking and still be reported as
+    // "consent: rejected". The other policy's button, an unlisted entry or
+    // a tampered one goes to the full ladder, which picks by policy.
+    let replayable = if policy == "accept" {
+        ACCEPT_SELECTORS
+    } else {
+        REJECT_SELECTORS
+    };
 
     // Try the stored selector first — skip the full detection JS if it works.
-    if let Some(sel) = stored.filter(|s| !s.is_empty() && *s != "generic") {
+    if let Some(sel) = stored.filter(|s| replayable.contains(s)) {
         let sel_json = serde_json::to_string(sel).unwrap_or_default();
         // SECURITY: re-validate before clicking. The store is file-backed
         // state whose integrity rests on directory permissions — but the
@@ -99,7 +138,7 @@ pub async fn dismiss_consent_with_stored(
         // A stale or poisoned selector falls through to full detection
         // instead of clicking.
         let expr = format!(
-            "(()={{const b=document.querySelector({sel_json});if(b&&b.offsetWidth+b.offsetHeight>0){{const d=b.closest('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');if(d&&/cookie|consent|gdpr/.test((d.textContent||'').toLowerCase())){{b.click();return {sel_json};}}}}return null;}})()"
+            "(()=>{{const b=document.querySelector({sel_json});if(b&&b.offsetWidth+b.offsetHeight>0){{const d=b.closest('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');if(d&&/cookie|consent|gdpr/.test((d.textContent||'').toLowerCase())){{b.click();return {sel_json};}}}}return null;}})()"
         );
         let res = cdp
             .send(

@@ -545,7 +545,7 @@ Learns from every session, persists in `knowledge/` under your data root, surviv
 
 **Domain knowledge base** — per-site consent selectors and behavior, learned from success only:
 
-- Confidence +0.05 per success, −0.15 per failure (failures cost 3×). Auto-applied at ≥0.7, so known sites skip the full detection JS entirely.
+- Confidence +0.05 per success, −0.15 per failure (failures cost 3×). Auto-applied at ≥0.7 when the stored selector is one of the current `BLADE_CONSENT` policy's buttons, so known sites skip the full detection JS entirely.
 - Evicted below 0.3 after 30 days; bounded at 2,000 domains. Unknown sites fall back to full detection — zero regression.
 
 **Behavioral fingerprint** — biometric parameters generated once per installation and reused forever, so detectors see the same "person" every session: click precision, mouse curvature, typing cadence, inter-action gaps, overshoot and idle-hum frequency, all clamped to human ranges, written atomically.
