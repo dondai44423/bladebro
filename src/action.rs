@@ -28,6 +28,7 @@ mod edit;
 mod find;
 mod input;
 mod perform;
+mod upload;
 mod verdict;
 
 #[cfg(test)]
