@@ -90,4 +90,240 @@ async function media() {
   sync = true; assert.throws(() => md.enumerateDevices(), e => e === sentinel);
   console.log('media native rejection timing, identity, arity, dispatch, real devices and fallback checks passed');
 }
-(process.argv[2] === 'media' ? media() : permissions()).catch(error => { console.error(error); process.exitCode = 1; });
+// A mock window with just the surface the core's unguarded statements touch;
+// every other block sits in its own try and skips what the mock lacks.
+function mockWindow() {
+  const ctx = vm.createContext({});
+  const g = vm.runInContext('this', ctx);
+  Object.assign(g, {
+    window: g,
+    document: {},
+    navigator: { platform: 'Linux x86_64' },
+    MutationObserver: class { observe() {} disconnect() {} },
+    setTimeout: () => 0,
+    addEventListener() {},
+    console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
+  });
+  return { ctx, g };
+}
+// The exact assembled page script (written by the inject.rs lib test).
+async function page() {
+  const { ctx, g } = mockWindow();
+  class SharedWorker {}
+  g.SharedWorker = SharedWorker;
+  // The tail's cdc_ watcher is the last statement of the script: its
+  // observe() call proves every conditional segment before it ran through.
+  let observed = 0;
+  g.MutationObserver = class { observe() { observed++; } disconnect() {} };
+  vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), ctx);
+  assert.equal(observed, 1, 'the script ran through to the tail');
+  assert.equal(g.SharedWorker, SharedWorker, 'SharedWorker must stay the native constructor');
+  console.log('assembled page script checks passed');
+}
+function installRtc(sdp) {
+  class EventTargetImpl extends EventTarget {}
+  const native = { aic: 0 };
+  const sentinel = new TypeError('native addIceCandidate sentinel');
+  let handler = null;
+  class RTCPeerConnection extends EventTargetImpl {
+    createOffer() { return Promise.resolve({ type: 'offer', sdp }); }
+    createAnswer() { return Promise.resolve({ type: 'answer', sdp }); }
+    addIceCandidate() { native.aic++; return Promise.reject(sentinel); }
+    get onicecandidate() { return handler; }
+    set onicecandidate(v) { handler = v; }
+  }
+  const aic = RTCPeerConnection.prototype.addIceCandidate;
+  install('rtc_patch.js', { EventTarget: EventTargetImpl, RTCPeerConnection });
+  return { EventTargetImpl, RTCPeerConnection, native, sentinel, aic };
+}
+function iceEvent(candidate) { const e = new Event('icecandidate'); e.candidate = candidate; return e; }
+async function rtcListeners() {
+  const { EventTargetImpl, RTCPeerConnection } = installRtc('');
+  const pc = new RTCPeerConnection();
+  let n = 0;
+  const fn = () => { n++; };
+  pc.addEventListener('icecandidate', fn);
+  pc.addEventListener('icecandidate', fn);
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 1, 'the same listener added twice is registered once (native dedupe)');
+  pc.removeEventListener('icecandidate', fn);
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 1, 'removeEventListener(fn) removes what addEventListener(fn) registered');
+  pc.addEventListener('icecandidate', fn, true);
+  pc.addEventListener('icecandidate', fn, false);
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 3, 'capture is part of the listener key');
+  pc.removeEventListener('icecandidate', fn, { capture: true });
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 4);
+  pc.removeEventListener('icecandidate', fn);
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(n, 4);
+  const seen = [];
+  pc.addEventListener('icecandidate', e => { if (e.candidate) seen.push(e.candidate.candidate.split(' ')[4]); });
+  for (const c of ['1 1 udp 1 203.0.113.5 50000 typ srflx raddr 0.0.0.0 rport 0', '2 1 udp 1 192.168.1.5 50000 typ host',
+    '3 1 udp 1 abc.local 50000 typ host', '4 1 udp 1 198.51.100.1 3478 typ relay raddr 0.0.0.0 rport 0']) {
+    pc.dispatchEvent(iceEvent({ candidate: 'candidate:' + c }));
+  }
+  assert.deepEqual(seen, ['abc.local', '198.51.100.1'], 'srflx and raw-IP host candidates stay hidden');
+  const other = new EventTargetImpl();
+  let m = 0;
+  const g = () => { m++; };
+  other.addEventListener('icecandidate', g);
+  pc.addEventListener('icecandidate', g);
+  other.removeEventListener('icecandidate', g);
+  other.dispatchEvent(new Event('icecandidate'));
+  assert.equal(m, 0, 'a non-RTC target removes the listener it was given');
+  pc.dispatchEvent(iceEvent(null));
+  assert.equal(m, 1);
+  console.log('icecandidate listener dedupe, removal, capture keys and filtering checks passed');
+}
+async function rtcSdp() {
+  const sdp = ['v=0', 'o=- 1 2 IN IP4 127.0.0.1', 's=-', 't=0 0', 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel', 'c=IN IP4 0.0.0.0',
+    'a=candidate:1 1 udp 2122260223 192.168.1.5 50000 typ host generation 0',
+    'a=candidate:2 1 udp 2122260223 abc.local 50001 typ host generation 0',
+    'a=candidate:3 1 udp 1686052607 203.0.113.5 50000 typ srflx raddr 192.168.1.5 rport 50000 generation 0',
+    'a=candidate:4 1 udp 41885439 198.51.100.1 3478 typ relay raddr 203.0.113.5 rport 50000 generation 0',
+    'a=ice-ufrag:abcd', 'a=end-of-candidates', ''].join('\r\n');
+  const { RTCPeerConnection, native, sentinel, aic } = installRtc(sdp);
+  const pc = new RTCPeerConnection();
+  for (const desc of [await pc.createOffer(), await pc.createAnswer()]) {
+    const lines = desc.sdp.split('\r\n');
+    assert.equal(lines.pop(), '', 'SDP still ends with CRLF');
+    assert.ok(lines.every(l => l.length > 0), 'no blank SDP lines (Chrome rejects them): ' + JSON.stringify(desc.sdp));
+    assert.ok(!/typ (host|srflx)/.test(desc.sdp), 'host/srflx candidates removed');
+    assert.ok(desc.sdp.includes('typ relay') && desc.sdp.includes('a=ice-ufrag:abcd'), 'other lines kept');
+  }
+  assert.equal(RTCPeerConnection.prototype.addIceCandidate, aic, 'addIceCandidate stays native');
+  await assert.rejects(pc.addIceCandidate({ candidate: 'candidate:1 1 udp 1 192.168.1.5 5 typ host', sdpMid: '0' }), e => e === sentinel);
+  assert.equal(native.aic, 1, 'remote host candidates reach the native method');
+  console.log('SDP candidate-line removal and native addIceCandidate checks passed');
+}
+async function noise() {
+  class CanvasRenderingContext2D {
+    constructor(canvas) { this.canvas = canvas; }
+    getImageData() { return { data: Uint8ClampedArray.from(this.canvas.px) }; }
+    putImageData(img) { this.canvas.px = Array.from(img.data); this.canvas.writes++; }
+    clearRect() { this.canvas.px = [0, 0, 0, 0]; }
+    drawImage(src) { if (!(src instanceof HTMLCanvasElement)) throw new TypeError('source'); src.probed++; this.canvas.px = src.px.slice(); }
+  }
+  class HTMLCanvasElement {
+    constructor() { this.width = 300; this.height = 150; this.kind = null; this.ctx = null; this.contexts = 0; this.px = [0, 0, 0, 0]; this.writes = 0; this.probed = 0; }
+    getContext(kind) {
+      if (this.kind === null) { this.kind = kind; this.contexts++; this.ctx = kind === '2d' ? new CanvasRenderingContext2D(this) : { kind }; }
+      return this.kind === kind ? this.ctx : null;
+    }
+    toDataURL() { if (!(this instanceof HTMLCanvasElement)) throw new TypeError('Illegal invocation'); return 'data:' + this.px.join(','); }
+  }
+  const channel = new Float32Array(8);
+  class AudioBuffer { getChannelData(i) { if (i !== 0) throw new RangeError('channel index'); return channel; } }
+  const an = 3;
+  install('noise.js', { HTMLCanvasElement, CanvasRenderingContext2D, AudioBuffer, cn: 1, cn2: 1, an,
+    document: { createElement: () => new HTMLCanvasElement() } });
+  const fresh = new HTMLCanvasElement();
+  fresh.toDataURL();
+  assert.equal(fresh.contexts, 0, 'toDataURL must not create a rendering context');
+  assert.ok(fresh.getContext('webgl'), 'a later getContext(webgl) still succeeds');
+  const painted = new HTMLCanvasElement();
+  painted.getContext('2d');
+  painted.px = [10, 20, 30, 255];
+  const first = painted.toDataURL();
+  assert.equal(first, 'data:11,21,30,255', 'painted 2D canvases get the seeded offset');
+  assert.equal(painted.toDataURL(), first, 'once');
+  const gl = new HTMLCanvasElement();
+  gl.getContext('webgl');
+  gl.px = [1, 2, 3, 255];
+  assert.equal(gl.toDataURL(), 'data:1,2,3,255', 'WebGL canvases are left alone');
+  assert.equal(gl.toDataURL(), 'data:1,2,3,255');
+  assert.equal(gl.contexts, 1);
+  assert.equal(gl.probed, 1, 'a WebGL canvas is probed once, not on every toDataURL');
+  assert.throws(() => HTMLCanvasElement.prototype.toDataURL.call({}), TypeError);
+  const buf = new AudioBuffer();
+  for (let i = 0; i < 5; i++) buf.getChannelData(0);
+  assert.equal(channel[0], Math.fround(an * 1e-7), 'audio offset applied once per channel buffer, no drift');
+  assert.equal(channel[1], 0);
+  assert.throws(() => buf.getChannelData(1), RangeError);
+  console.log('canvas context-free noise and idempotent audio noise checks passed');
+}
+// The console capture in the assembled core + tail.
+async function consoleCapture() {
+  const core = fs.readFileSync(path.join(root, 'src/stealth/js/stealth_core.js'), 'utf8')
+    .replace('__SEED__', '7').replace('__PROXY_HELPERS__', () => helpers)
+    + fs.readFileSync(path.join(root, 'src/stealth/js/stealth_tail.js'), 'utf8');
+  const { ctx, g } = mockWindow();
+  // A URL with a native-style toJSON, there before the core runs (as in a page).
+  vm.runInContext('this.URL=class URL{constructor(h){this.h=h;}toJSON(){return this.h;}};', ctx);
+  vm.runInContext(core, ctx);
+  const ring = g[Symbol.for('q')];
+  const last = () => ring[ring.length - 1].m;
+  vm.runInContext('var fired=0,tj=0;console.log({get x(){fired++;return 1;}},[{get y(){fired++;return 2;}}]);console.log({toJSON:function(){tj++;return 1;}});', ctx);
+  assert.equal(g.fired, 0, 'logging must not invoke page getters');
+  assert.equal(g.tj, 0, 'logging must not invoke page toJSON');
+  vm.runInContext('console.log({a:1,get b(){return 2;}})', ctx);
+  assert.equal(last(), '{"a":1,"b":"(...)"}', 'accessors are shown, not invoked');
+  vm.runInContext('var vo=0,tju=0;URL.prototype.toJSON=function(){tju++;return "page";};var nb=new Number(3);nb.valueOf=function(){vo++;return 9;};console.log(nb,new URL("http://a/"));', ctx);
+  assert.equal(g.vo, 0, 'boxed primitives unwrap through the native valueOf');
+  assert.equal(g.tju, 0, 'URL toJSON is the native captured at injection time');
+  assert.equal(last(), '3 "http://a/"');
+  // Plain values read exactly as the JSON.stringify capture wrote them.
+  const old = c => vm.runInContext(`(function(){var a=[${c}],p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.push(typeof v==='string'?v:JSON.stringify(v));}catch(e){p.push(String(v));}}return p.join(' ').slice(0,400);})()`, ctx);
+  for (const c of ['1', "'str'", 'true', 'null', 'undefined', '-0', 'NaN', 'Infinity', '1.5e300', '10n',
+    "({a:1,b:[1,2,{c:'x\"y\\n\\u2028'}],d:null,e:true,f:-2.5})", '[1,[2,[3,[]]],{}]',
+    "({u:undefined,f:function(){},s:Symbol('s'),k:1})", "[undefined,function(){},Symbol('t'),2]", '[,1]',
+    'new Date(0)', 'new Date(NaN)', '({d:new Date(86400000)})', "'a', 1, {x:[1]}, undefined, 'b'",
+    "({'k\"ey':'v'})", '(function(){var o=Object.create(null);o.z=1;return o;})()', 'new Uint8Array([1,2])',
+    'new Error("x")', 'new Map([[1,2]])', '({a:1n})', '(function(){var o={a:1};o.self=o;return o;})()',
+    "'x'.repeat(500)", "{s:'y'.repeat(500)}", "'a'.repeat(399), 'tail'",
+    // Boxed primitives unwrap; where JSON.stringify throws (a BigInt or a cycle
+    // inside) the capture falls back to String(v), as before.
+    'new Number(3)', "new String('ab')", 'new Boolean(false)', "({n:new Number(1),s:new String('x'),b:new Boolean(true)})",
+    'Object.create(Number.prototype)', 'Object(1n)', '[1n,2n]', 'new BigInt64Array([1n,2n])',
+    '(function(){var a=[1,2];a.push(a);return a;})()', '[1n,[2,[3n,null,undefined]],{},new Number(4)]',
+    '({t:new BigUint64Array([5n])})',
+    // Keys JSON omits do not use up the work budget: thousands of methods or
+    // undefined fields before the data still log the data.
+    "(function(){var o={};for(var i=0;i<2100;i++)o['f'+i]=function(){};o.z=1;return o;})()",
+    "(function(){var o={};for(var i=0;i<2500;i++)o['u'+i]=undefined;o.z=[1,{y:2}];return o;})()",
+    "(function(){var o={};for(var i=0;i<3000;i++)o['s'+i]=Symbol();return o;})()",
+    "(function(){var o={};for(var i=0;i<3000;i++)o['k'+i]=i;return o;})()", 'Array.from({length:500},function(_,i){return i;})',
+    "(function(){return arguments;})(1,'a')", 'new (class P{constructor(){this.x=1;}m(){}})()',
+    'Object.assign(Object.create({inh:1}),{own:2})', "({toString:function(){return 'x';},a:1})",
+    'new Float64Array([0.1,-0,NaN])', 'new Array(3)', '(function(){var a=[];a[5]=1;return a;})()',
+    '({a:NaN,b:-Infinity,c:[Infinity]})', "({s:'\\ud800x'})", 'new ArrayBuffer(8)', 'new DataView(new ArrayBuffer(2))',
+    '/re/g', 'Promise.resolve(1)', "Object(Symbol('b'))", 'new Set([1])',
+    "[1n,[2,[3]],new String('ab'),true,null]", '[new Date(0),1n]', '[function f(){return 1},1n]']) {
+    vm.runInContext(`console.log(${c})`, ctx);
+    assert.equal(last(), old(c), c);
+  }
+  // Values whose String(v) fallback threw, so the old capture dropped the
+  // whole entry: they are logged now.
+  for (const [c, want] of [["[Symbol('x'),1n]", 'Symbol(x),1'],
+    ['(function(){var r=Proxy.revocable({},{});r.revoke();return r.proxy;})()', '[object Object]']]) {
+    assert.throws(() => old(c), e => e.name === 'TypeError', c);
+    const n = ring.length;
+    vm.runInContext(`console.log(${c})`, ctx);
+    assert.equal(ring.length, n + 1, c);
+    assert.equal(last(), want, c);
+  }
+  // The work budget is a backstop for output-free nesting only, and a cut by
+  // it is marked, not silent.
+  vm.runInContext('var deep=[];for(var i=0;i<2500;i++)deep=[deep];console.log([1n,deep]);', ctx);
+  assert.equal(last(), '1,\u2026', 'a work-cap cut is marked');
+  // A Proxy's traps still run (the comment says which), but never its get
+  // trap for a plain object: values come from own data descriptors.
+  vm.runInContext('var traps={};var pr=new Proxy({a:1,b:{c:[2]}},{get:function(t,k,r){traps.get=(traps.get||0)+1;return Reflect.get(t,k,r);},ownKeys:function(t){traps.ownKeys=1;return Reflect.ownKeys(t);},getOwnPropertyDescriptor:function(t,k){traps.gopd=1;return Reflect.getOwnPropertyDescriptor(t,k);},getPrototypeOf:function(t){traps.proto=1;return Reflect.getPrototypeOf(t);}});console.log(pr);', ctx);
+  assert.equal(last(), '{"a":1,"b":{"c":[2]}}');
+  assert.equal(g.traps.get, undefined, 'no get trap on a proxied plain object');
+  assert.deepEqual([g.traps.ownKeys, g.traps.gopd, g.traps.proto], [1, 1, 1], 'ownKeys, getOwnPropertyDescriptor and getPrototypeOf traps run');
+  // Bounded: a large value costs a few hundred property reads, not all of them.
+  vm.runInContext('var reads=0,big=[];for(var i=0;i<200000;i++)big.push({i:i,s:"xxxxxxxx"});var pbig=new Proxy(big,{get:function(t,k,r){reads++;return Reflect.get(t,k,r);},getOwnPropertyDescriptor:function(t,k){reads++;return Reflect.getOwnPropertyDescriptor(t,k);}});console.log(pbig);', ctx);
+  assert.equal(last(), vm.runInContext('JSON.stringify(big).slice(0,400)', ctx), 'same first 400 chars');
+  assert.ok(g.reads < 1000, `logging a 200k-element array read ${g.reads} properties`);
+  console.log('console capture: no page code, plain values unchanged, bounded work');
+}
+const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp, noise, console: consoleCapture };
+// An unknown name must fail: falling back to a default scenario let a
+// misspelled scenario in a Rust test pass without checking anything.
+const scenario = Object.hasOwn(scenarios, process.argv[2]) ? scenarios[process.argv[2]]
+  : async () => { throw new Error(`unknown scenario ${JSON.stringify(process.argv[2])}; known: ${Object.keys(scenarios).join(', ')}`); };
+scenario().catch(error => { console.error(error); process.exitCode = 1; });

@@ -148,25 +148,29 @@ impl Page {
             } else if std::env::var("BLADE_PROXY").is_ok() {
                 eprintln!("[bladebro] WARNING: BLADE_PROXY set but BLADE_TZ not set — timezone/IP mismatch will be detected");
             }
-            if let Ok(locale) = std::env::var("BLADE_LOCALE") {
-                if !locale.is_empty() {
-                    let base = locale.split('-').next().unwrap_or(&locale).to_string();
-                    let _ = cdp
-                        .send(
-                            "Emulation.setLocaleOverride",
-                            Some(serde_json::json!({ "locale": locale })),
-                        )
-                        .await;
-                    let _ = cdp
-                        .send(
-                            "Network.setExtraHTTPHeaders",
-                            Some(serde_json::json!({
-                                "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
-                            })),
-                        )
-                        .await;
-                    eprintln!("[bladebro] locale override: {locale}");
-                }
+            // The same BCP-47 normalization as the injection (`en_US` →
+            // `en-US`): Intl, navigator.language and Accept-Language must
+            // name one tag. An unusable value is reported by the injection.
+            if let Some(locale) = std::env::var("BLADE_LOCALE")
+                .ok()
+                .and_then(|l| crate::stealth::normalize_locale(&l))
+            {
+                let base = locale.split('-').next().unwrap_or(&locale).to_string();
+                let _ = cdp
+                    .send(
+                        "Emulation.setLocaleOverride",
+                        Some(serde_json::json!({ "locale": locale })),
+                    )
+                    .await;
+                let _ = cdp
+                    .send(
+                        "Network.setExtraHTTPHeaders",
+                        Some(serde_json::json!({
+                            "headers": { "Accept-Language": format!("{locale},{base};q=0.9") }
+                        })),
+                    )
+                    .await;
+                eprintln!("[bladebro] locale override: {locale}");
             }
         }
         // Inject the stealth script before any page loads. This runs at
@@ -179,7 +183,11 @@ impl Page {
                 None
             }
         };
-        let active_locale = std::env::var("BLADE_LOCALE").ok().filter(|s| !s.is_empty());
+        // Normalized like the page injection: this value is baked into the
+        // worker scripts' WorkerNavigator.language.
+        let active_locale = std::env::var("BLADE_LOCALE")
+            .ok()
+            .and_then(|l| crate::stealth::normalize_locale(&l));
         // What the S6 block above put on this target (none on the real lane).
         let emulation = if crate::realbrowser::real_lane() {
             super::navigate::Emulation::default()
