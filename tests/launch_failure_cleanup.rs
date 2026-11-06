@@ -229,7 +229,12 @@ fn launching(root: &Path) -> bool {
 }
 
 /// The launch is done and the command's own request is in flight
-/// (`endpoint_browser`).
+/// (`endpoint_browser`). Linux-only with the tests that need it: those wait
+/// for bladebro to reach a stand-in DevTools endpoint on a virtual display it
+/// started, and CI showed the endpoint poll timing out on macOS (no Xvfb; the
+/// launch path differs), so running them there would assert a scenario that
+/// does not exist on that platform.
+#[cfg(target_os = "linux")]
 fn running(root: &Path) -> bool {
     root.join("running").exists()
 }
@@ -250,6 +255,9 @@ fn started(root: &Path) -> bool {
 
 struct SignalledRun {
     status: std::process::ExitStatus,
+    /// Read by the Linux-only `signals_ignored_on_entry_stay_ignored`; every
+    /// other platform keeps the field for a uniform constructor.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     stdout: String,
     stderr: String,
     /// Browser starts over the whole run (`starts`).
@@ -432,6 +440,7 @@ fn sigint_mid_launch_of_probe_leaves_nothing_behind() {
 /// dropped, the browser bladebro launched is closed, the command reports the
 /// interruption, and only then does bladebro die of the signal, instead of
 /// dying at once with Chrome left running.
+#[cfg(target_os = "linux")]
 #[test]
 fn sigint_while_probe_runs_closes_the_browser_it_launched() {
     let run = signal_run(
@@ -488,6 +497,7 @@ fn sigint_during_the_gl_ladder_stops_relaunching() {
 /// Under `nohup` (SIGHUP ignored) or as a non-interactive shell's background
 /// job (SIGINT ignored) those signals never ended bladebro; catching them must
 /// not start to. The run finishes normally.
+#[cfg(target_os = "linux")]
 #[test]
 fn signals_ignored_on_entry_stay_ignored() {
     let run = signal_run(
@@ -518,6 +528,7 @@ fn signals_ignored_on_entry_stay_ignored() {
 /// manager stay in bladebro's process group; a real Chrome then exits on
 /// losing its display. (This stand-in browser does not, and is not what is
 /// checked: it runs in its own group by design and is cleared first.)
+#[cfg(target_os = "linux")]
 #[test]
 fn sigkill_to_the_process_group_takes_the_virtual_display_with_it() {
     let _serial = serial();
