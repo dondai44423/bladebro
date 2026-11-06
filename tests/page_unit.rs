@@ -289,72 +289,79 @@ fn navigation_mint_never_collides_with_rebound_refs() {
 // ===== D48: Structural fingerprint re-render immunity =====
 
 #[test]
-fn re_render_immunity_refs_survive_when_text_changes_but_structure_is_identical() {
+fn re_render_immunity_refs_survive_when_sig_moves_but_structure_is_identical() {
     let mut lpm = LivePageModel::new();
 
-    // First capture: a SPA button "Submit" and a counter "0 items".
-    // Both have distinct structural fingerprints (they sit in different DOM
+    // First capture: a checkout widget in frame 0 (button + card field) and
+    // a top-level link. Distinct structural fingerprints (different DOM
     // locations).
     let fp_submit: u64 = 0xdeadbeef;
-    let fp_counter: u64 = 0xfeedface;
+    let fp_card: u64 = 0xfeedface;
     let fp_link: u64 = 0xcafebabe;
 
     let d = lpm.ingest(cap(
         "https://app.test/",
         vec![
-            el_fp("button", "Submit", "button|Submit|1", fp_submit),
-            el_fp("text", "0 items", "text|0 items|1", fp_counter),
-            el_fp("link", "Help", "link|Help|1", fp_link),
+            el_fp("button", "Submit", "0|button|Submit|1", fp_submit),
+            el_fp("textbox", "Card number", "0|textbox|Card number|1", fp_card),
+            el_fp("link", "Help", "|link|Help|1", fp_link),
         ],
     ));
     assert_eq!(d.added.len(), 3);
     let submit_ref = d.added[0].ref_id.clone(); // e1
-    let counter_ref = d.added[1].ref_id.clone(); // e2
+    let card_ref = d.added[1].ref_id.clone(); // e2
     let help_ref = d.added[2].ref_id.clone(); // e3
     assert_eq!(d.rebound.len(), 0, "no rebound expected on first capture");
 
-    // Re-render: React/Vue rebuilds the component tree.
-    // Text changes: "Submit" -> "Submit (2)", "0 items" -> "1 item".
-    // Structure is IDENTICAL -> same fingerprints.
-    // The link's text/structure is unchanged -> exact sig match.
+    // Re-render: an iframe mounted ahead of the widget's frame, so the
+    // widget's sigs move 0 -> 1. Structure and names are IDENTICAL -> same
+    // fingerprints. The link is unchanged -> exact sig match.
     let d = lpm.ingest(cap(
         "https://app.test/",
         vec![
-            el_fp("button", "Submit (2)", "button|Submit (2)|1", fp_submit), // text changed, fp same
-            el_fp("text", "1 item", "text|1 item|1", fp_counter), // text changed, fp same
-            el_fp("link", "Help", "link|Help|1", fp_link),        // unchanged
+            el_fp("button", "Submit", "1|button|Submit|1", fp_submit),
+            el_fp("textbox", "Card number", "1|textbox|Card number|1", fp_card),
+            el_fp("link", "Help", "|link|Help|1", fp_link),
         ],
     ));
 
     // THE CORE ASSERTION: refs SURVIVED the re-render.
-    // Without fingerprint matching, all three would have been removed+re-added.
-    // With fingerprint matching, the first two rebound (refs kept) and the third
-    // is unchanged (exact sig match).
-    assert!(
-        !d.rebound.is_empty(),
-        "expected at least one fingerprint rebind, got: {:?}",
+    // Without fingerprint matching, the widget's two refs would have been
+    // removed+re-added; with it they rebound, and the link matched by sig.
+    assert_eq!(
+        d.rebound.len(),
+        2,
+        "both widget refs rebind: {:?}",
         d.rebound
     );
     assert!(
-        d.removed.is_empty(),
-        "no refs should have been removed during re-render: {:?}",
-        d.removed
+        d.removed.is_empty() && d.added.is_empty(),
+        "no refs should die or be minted during re-render: {d:?}"
     );
 
     // Verify the refs are still the SAME identity (e1, e2, e3 preserved).
     let live_refs: Vec<&str> = lpm.elements().iter().map(|e| e.ref_id.as_str()).collect();
-    assert!(
-        live_refs.contains(&submit_ref.as_str()),
-        "submit ref {submit_ref} should survive re-render"
-    );
-    assert!(
-        live_refs.contains(&counter_ref.as_str()),
-        "counter ref {counter_ref} should survive re-render"
-    );
-    assert!(
-        live_refs.contains(&help_ref.as_str()),
-        "help ref {help_ref} should survive"
-    );
+    for r in [&submit_ref, &card_ref, &help_ref] {
+        assert!(
+            live_refs.contains(&r.as_str()),
+            "{r} should survive re-render"
+        );
+    }
+
+    // A label change is not a re-render: the slot now holds a different
+    // element as far as the agent's ref is concerned.
+    let d = lpm.ingest(cap(
+        "https://app.test/",
+        vec![
+            el_fp("button", "Submitted", "1|button|Submitted|1", fp_submit),
+            el_fp("textbox", "Card number", "1|textbox|Card number|1", fp_card),
+            el_fp("link", "Help", "|link|Help|1", fp_link),
+        ],
+    ));
+    assert!(d.rebound.is_empty(), "{:?}", d.rebound);
+    assert_eq!(d.removed, vec![submit_ref]);
+    assert_eq!(d.added.len(), 1);
+    assert_eq!(d.added[0].raw.name, "Submitted");
 }
 
 #[test]
@@ -369,8 +376,8 @@ fn re_render_immunity_does_not_cross_match_different_elements() {
     let d = lpm.ingest(cap(
         "https://app.test/",
         vec![
-            el_fp("button", "Delete", "button|Delete|1", fp_a),
-            el_fp("button", "Delete", "button|Delete|2", fp_b),
+            el_fp("button", "Delete", "0|button|Delete|1", fp_a),
+            el_fp("button", "Delete", "0|button|Delete|2", fp_b),
         ],
     ));
     assert_eq!(d.added.len(), 2);
@@ -381,22 +388,13 @@ fn re_render_immunity_does_not_cross_match_different_elements() {
         .map(|e| (e.ref_id.clone(), e.raw.fingerprint))
         .collect();
 
-    // Re-render: text changes, structure IDENTICAL (fingerprint preserved).
+    // Re-render: the frame index moved, structure IDENTICAL (fingerprint
+    // preserved), names unchanged.
     let d = lpm.ingest(cap(
         "https://app.test/",
         vec![
-            el_fp(
-                "button",
-                "Delete (renamed)",
-                "button|Delete (renamed)|1",
-                fp_a,
-            ),
-            el_fp(
-                "button",
-                "Delete (renamed)",
-                "button|Delete (renamed)|2",
-                fp_b,
-            ),
+            el_fp("button", "Delete", "1|button|Delete|1", fp_a),
+            el_fp("button", "Delete", "1|button|Delete|2", fp_b),
         ],
     ));
 
@@ -465,6 +463,298 @@ fn re_render_no_fingerprint_falls_back_to_normal_flow() {
     assert_eq!(d.rebound.len(), 0, "zero-fp elements never rebound");
     assert_eq!(d.removed.len(), 1, "old ref should be removed");
     assert_eq!(d.removed[0], ref_save, "correct ref removed");
+}
+
+/// Regression: the structural fingerprint carries no text, so an XHR that
+/// swaps a result list's items in place (new query, same URL, same markup)
+/// left every slot with an identical fingerprint — and the old result's ref
+/// was rebound to the NEW item in its slot. An agent holding `e1` for
+/// "Result A" then clicked "Result X". A changed name is a different
+/// element: the old ref must die (and stay healable by identity) and the
+/// new item must get its own ref.
+#[test]
+fn fingerprint_rebind_never_moves_a_ref_to_a_differently_named_element() {
+    let mut lpm = LivePageModel::new();
+    // 13 stable links make this a "large" page (> 15 elements), where the
+    // delta renders as a diff and a rebind shows as just `↺ eN`.
+    let chrome = |els: &mut Vec<RawElement>| {
+        for i in 1..=13u64 {
+            els.push(el_fp(
+                "link",
+                &format!("Nav {i}"),
+                &format!("link|Nav {i}|1"),
+                0x900 + i,
+            ));
+        }
+    };
+    let mut first = vec![
+        el_fp("button", "Result A", "button|Result A|1", 0xa1),
+        el_fp("button", "Result B", "button|Result B|1", 0xa2),
+        el_fp("button", "Result C", "button|Result C|1", 0xa3),
+    ];
+    chrome(&mut first);
+    lpm.ingest(cap("https://search.test/", first));
+    let ref_a = lpm.elements()[0].ref_id.clone();
+    assert_eq!(lpm.elements()[0].raw.name, "Result A");
+
+    // New query: the same <li><button> slots now hold different results.
+    let mut second = vec![
+        el_fp("button", "Result X", "button|Result X|1", 0xa1),
+        el_fp("button", "Result Y", "button|Result Y|1", 0xa2),
+        el_fp("button", "Result Z", "button|Result Z|1", 0xa3),
+    ];
+    chrome(&mut second);
+    let d = lpm.ingest(cap("https://search.test/", second));
+
+    if let Some(e) = lpm.element(&ref_a) {
+        panic!(
+            "{ref_a} named \"Result A\" now points at {} \"{}\" (silent rebind)",
+            e.raw.role, e.raw.name
+        );
+    }
+    assert!(
+        d.rebound.is_empty(),
+        "no rebind across names: {:?}",
+        d.rebound
+    );
+    assert_eq!(d.removed.len(), 3, "old results are gone: {:?}", d.removed);
+    assert_eq!(d.added.len(), 3, "new results get fresh refs");
+    assert!(d.added.iter().all(|e| e.ref_id != ref_a));
+    // The agent-facing delta says so with the existing line formats.
+    let text = lpm.compress_delta(&d, 4000, 0);
+    assert!(text.contains(&format!("- {ref_a} (gone)")), "{text}");
+    assert!(text.contains("button \"Result X\""), "{text}");
+    assert!(!text.contains('↺'), "{text}");
+    // The dead ref still knows what it was, so a heal finds "Result A" or
+    // reports it gone — it never resolves to "Result X".
+    let (_, _, name) = lpm.graveyard_lookup(&ref_a).expect("buried");
+    assert_eq!(name, "Result A");
+}
+
+/// Regression: a fingerprint shared by several elements (identical
+/// component markup — every shadow-DOM card's button hashes the same, the
+/// ancestor chain stops at the shadow root) identifies none of them, yet the
+/// first unclaimed candidate in HashMap order won the rebind. Scrolling a
+/// list of such cards rebound an off-screen card's ref to whichever card
+/// scrolled in.
+#[test]
+fn shared_fingerprint_never_rebinds() {
+    let mut lpm = LivePageModel::new();
+    let fp = 0xc0ffee;
+    lpm.ingest(cap(
+        "https://shop.test/",
+        vec![
+            el_fp("button", "Add to cart", "button|Add to cart|1", fp),
+            el_fp("button", "Add to cart", "button|Add to cart|2", fp),
+        ],
+    ));
+    let old: Vec<String> = lpm.elements().iter().map(|e| e.ref_id.clone()).collect();
+    // Scrolled: cards 1-2 left the capture window, card 5 entered it.
+    let d = lpm.ingest(cap(
+        "https://shop.test/",
+        vec![el_fp("button", "Add to cart", "button|Add to cart|5", fp)],
+    ));
+    assert!(d.rebound.is_empty(), "ambiguous rebind: {:?}", d.rebound);
+    assert_eq!(d.added.len(), 1, "card 5 is a new element");
+    assert!(!old.contains(&d.added[0].ref_id));
+    let mut removed = d.removed.clone();
+    removed.sort();
+    assert_eq!(removed, old, "cards 1-2 left the window");
+}
+
+/// What the fingerprint rebind is FOR: the element's sig moved because its
+/// frame index shifted, while its structure and name stayed put. The ref
+/// follows it.
+#[test]
+fn fingerprint_rebind_keeps_ref_when_only_position_shifts() {
+    let mut lpm = LivePageModel::new();
+    lpm.ingest(cap(
+        "https://app.test/",
+        vec![
+            el_fp("button", "Pay", "0|button|Pay|1", 0x51),
+            el_fp("link", "Help", "|link|Help|1", 0x52),
+        ],
+    ));
+    let pay = lpm.elements()[0].ref_id.clone();
+    // An iframe was inserted ahead of the checkout frame: frame 0 → 1.
+    let d = lpm.ingest(cap(
+        "https://app.test/",
+        vec![
+            el_fp("button", "Pay", "1|button|Pay|1", 0x51),
+            el_fp("link", "Help", "|link|Help|1", 0x52),
+        ],
+    ));
+    assert!(d.removed.is_empty() && d.added.is_empty(), "{d:?}");
+    assert_eq!(d.rebound, vec![(pay.clone(), "1|button|Pay|1".to_string())]);
+    assert_eq!(
+        lpm.element(&pay).map(|e| e.raw.sig.as_str()),
+        Some("1|button|Pay|1")
+    );
+}
+
+/// The one name change that IS the same element: an editable named by its
+/// own text (an unlabeled contenteditable's accessible name is what was
+/// typed). A labeled field whose label changed is a different field.
+#[test]
+fn fingerprint_rebind_follows_an_editor_named_by_its_own_text() {
+    let mut lpm = LivePageModel::new();
+    let mut editor = el_fp("textbox", "", "|textbox||1", 0xed);
+    editor.tag = "div".into();
+    editor.element_type = None;
+    let mut first_name = el_fp("textbox", "First name", "|textbox|First name|1", 0xf1);
+    first_name.value = Some("Ada".into());
+    lpm.ingest(cap("https://form.test/", vec![editor, first_name]));
+    let ed_ref = lpm.elements()[0].ref_id.clone();
+    let fn_ref = lpm.elements()[1].ref_id.clone();
+
+    // Typed two lines into the editor. Its name is the text content
+    // (`<p>Hello<br>world</p>` → "Helloworld") and its value the innerText
+    // ("Hello world"): same text, different whitespace. Meanwhile
+    // the wizard moved on and the same input slot is now "Last name".
+    let mut typed = el_fp("textbox", "Helloworld", "|textbox|Helloworld|1", 0xed);
+    typed.tag = "div".into();
+    typed.element_type = None;
+    typed.value = Some("Hello world".into());
+    let last_name = el_fp("textbox", "Last name", "|textbox|Last name|1", 0xf1);
+    let d = lpm.ingest(cap("https://form.test/", vec![typed, last_name]));
+
+    assert_eq!(
+        lpm.element(&ed_ref).map(|e| e.raw.name.as_str()),
+        Some("Helloworld"),
+        "typing into an editor keeps its ref: {d:?}"
+    );
+    assert!(
+        lpm.element(&fn_ref).is_none(),
+        "{fn_ref} \"First name\" must not become \"Last name\""
+    );
+    assert_eq!(d.removed, vec![fn_ref]);
+}
+
+/// The other control named by its own content: an unlabeled `<select>`
+/// whose first option is blank is named by its selected option, so picking
+/// one renames it. Same control, same ref. A select whose options were
+/// replaced by an unrelated set is a different choice and gets a fresh ref.
+#[test]
+fn fingerprint_rebind_follows_a_select_named_by_its_selection() {
+    use bladebro::page::perception::SelectOptions;
+    let select = |name: &str, sel: i64, items: &[(&str, &str)], fp: u64| {
+        let mut e = el_fp("combobox", name, &format!("|combobox|{name}|1"), fp);
+        e.tag = "select".into();
+        e.element_type = Some("select-one".into());
+        e.options = Some(SelectOptions {
+            sel,
+            total: items.len(),
+            items: items
+                .iter()
+                .map(|(t, v)| (t.to_string(), v.to_string()))
+                .collect(),
+        });
+        e
+    };
+    // The capture drops options blank on both sides (label and value).
+    let countries = [("United States", "us"), ("Canada", "ca")];
+    let sizes = [("Pick a size", ""), ("Small", "s"), ("Large", "l")];
+    let mut lpm = LivePageModel::new();
+    lpm.ingest(cap(
+        "https://form.test/",
+        vec![
+            select("", 0, &countries, 0x5e1),
+            select("Pick a size", 0, &sizes, 0x5e2),
+        ],
+    ));
+    let country = lpm.elements()[0].ref_id.clone();
+    let size = lpm.elements()[1].ref_id.clone();
+
+    // Picked a country; the wizard swapped the second select's options.
+    let colours = [("Pick a colour", ""), ("Red", "r")];
+    let d = lpm.ingest(cap(
+        "https://form.test/",
+        vec![
+            select("Canada", 2, &countries, 0x5e1),
+            select("Pick a colour", 0, &colours, 0x5e2),
+        ],
+    ));
+    assert_eq!(
+        lpm.element(&country).map(|e| e.raw.name.as_str()),
+        Some("Canada"),
+        "selecting keeps the select's ref: {d:?}"
+    );
+    assert_eq!(
+        d.removed,
+        vec![size],
+        "a different option set is a new select"
+    );
+    assert_eq!(d.added.len(), 1);
+}
+
+/// Regression: a heal could leave one sig owned by two live refs. An
+/// element scrolled out of the capture window (its ref died), scrolled back
+/// (fresh ref), then the agent acted on the old ref: the heal matched the
+/// exact sig and `adopt_as` re-adopted the old ref next to the fresh one.
+/// The next ingest kept one of them in HashMap order and reported the other
+/// `- eN (gone)` while the element was still on the page (live: the click's
+/// verdict read `dom-changed (+0 −1)`).
+#[test]
+fn heal_never_leaves_two_refs_on_one_element() {
+    let mut lpm = LivePageModel::new();
+    let top = || el("button", "Top", "|button|Top|1", None, false);
+    let docs = || el("button", "Docs", "|button|Docs|1", None, false);
+    lpm.ingest(cap("https://x.test/", vec![top(), docs()]));
+    let old = lpm.elements()[1].ref_id.clone();
+    // Scrolled away: Docs left the capture window, its ref died.
+    let d = lpm.ingest(cap("https://x.test/", vec![top()]));
+    assert_eq!(d.removed, vec![old.clone()]);
+    // Scrolled back: the same element is minted a fresh ref.
+    let d = lpm.ingest(cap("https://x.test/", vec![top(), docs()]));
+    let fresh = d.added[0].ref_id.clone();
+    assert_ne!(fresh, old);
+    // The agent acts on its old ref: the heal finds the exact sig.
+    let (sig, role, name) = lpm.graveyard_lookup(&old).expect("buried");
+    lpm.adopt_as(&old, &sig, &role, &name, &[]);
+    let owners: Vec<String> = lpm
+        .elements()
+        .iter()
+        .filter(|e| e.raw.sig == sig)
+        .map(|e| e.ref_id.clone())
+        .collect();
+
+    let d = lpm.ingest(cap("https://x.test/", vec![top(), docs()]));
+    assert!(
+        d.removed.is_empty(),
+        "element is on the page but reported gone: {:?} (sig owners after heal: {owners:?})",
+        d.removed
+    );
+    assert_eq!(owners, vec![old.clone()], "one sig, one ref");
+    assert_eq!(
+        lpm.element(&old).map(|e| e.raw.name.as_str()),
+        Some("Docs"),
+        "the ref the agent acted through stays live"
+    );
+    // The retired ref still heals to the same element by its exact sig.
+    let (retired_sig, _, _) = lpm.graveyard_lookup(&fresh).expect("retired, healable");
+    assert_eq!(retired_sig, sig);
+}
+
+/// Regression: a healed ref kept its PRE-heal identity in the graveyard
+/// (ingest skips refs already recorded there), so when it died again its
+/// next heal looked for the element it named before the heal, not the one
+/// the heal note told the agent about.
+#[test]
+fn a_healed_ref_heals_to_the_element_it_named_last() {
+    let mut lpm = LivePageModel::new();
+    let first = el("link", "Docs", "|link|Docs|1", None, false);
+    lpm.ingest(cap("https://x.test/", vec![first]));
+    let r = lpm.elements()[0].ref_id.clone();
+    lpm.ingest(cap("https://x.test/", vec![]));
+    // Healed by name onto the other "Docs" link (a different sig).
+    lpm.adopt_as(&r, "|link|Docs|2", "link", "Docs", &[]);
+    let second = el("link", "Docs", "|link|Docs|2", None, false);
+    lpm.ingest(cap("https://x.test/", vec![second]));
+    assert!(lpm.element(&r).is_some());
+    // It dies again: its identity is the element it named last.
+    lpm.ingest(cap("https://x.test/", vec![]));
+    let (sig, _, _) = lpm.graveyard_lookup(&r).expect("buried");
+    assert_eq!(sig, "|link|Docs|2");
 }
 
 #[test]

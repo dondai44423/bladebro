@@ -422,15 +422,17 @@ Everything is built from scratch where it counts — the CDP transport, percepti
 
 **The #1 reliability gap in every other agent browser, solved.**
 
-When React, Vue or Angular re-renders a component, the DOM nodes are destroyed and recreated — and every other agent browser loses its refs. Bladebro re-binds them: when text changes but structure survives, the ref follows the fingerprint instead of dying.
+When React, Vue or Angular re-renders a component, the DOM nodes are destroyed and recreated — and every other agent browser loses its refs. Bladebro's refs are anchored to a signature, not a DOM node, so a re-render that keeps an element's name keeps its ref. When the signature itself shifts because the element's frame index moved (an iframe was added or removed ahead of it) but structure and name survive, the ref follows the fingerprint instead of dying.
 
 ```
-Before re-render:  e2 button "Buy Now"     sig=button|Buy Now|1     fp=0xdeadbeef
-After re-render:   e2 button "Buy Now v1"  sig=button|Buy Now v1|1  fp=0xdeadbeef  ← same fp
+Before re-render:  e2 button "Buy Now"  sig=0|button|Buy Now|1  fp=0xdeadbeef
+After re-render:   e2 button "Buy Now"  sig=1|button|Buy Now|1  fp=0xdeadbeef  ← same fp, same name
                    ↺ e2 (re-render survived)
 ```
 
 The agent sees `↺ e2 (re-render survived)` in the delta. The click works. No recapture. Playwright, Puppeteer, CDP wrappers, accessibility-tree snapshots — all lose refs here.
+
+A ref never follows the fingerprint to a differently named element. The fingerprint carries no text, so it can't tell a re-render from new content swapped into the same markup (a result list refreshed in place): when the name in a slot changes, the delta reads `- e2 (gone)` / `+ e9 button "…"` and the agent acts on the new ref. The exception is a form control named by its own content (an unlabeled editor or select), which keeps its ref while you type or pick.
 
 ## 🪙 Token efficiency
 

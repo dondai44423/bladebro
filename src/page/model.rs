@@ -38,7 +38,8 @@ pub struct PageDelta {
     pub changed: Vec<(String, StateChange)>,
     /// Refs kept via structural fingerprint rebind (D48 re-render immunity).
     /// Each `(ref_id, new_sig)` means the ref survived a re-render that
-    /// changed its sig but preserved the structural fingerprint. The agent
+    /// changed its sig but preserved the structural fingerprint and its
+    /// role+name (a renamed element is removed + added instead). The agent
     /// sees "re-render survived" instead of "ref died" — the key UX win.
     pub rebound: Vec<(String, String)>,
     /// Previous title — set when the title changed between captures.
@@ -170,6 +171,36 @@ impl LivePageModel {
         name: &str,
         frame: &[usize],
     ) -> String {
+        // One sig, one ref. The healed element may meanwhile be live under
+        // another ref (it left the capture window, e5 died, it came back as
+        // e9, then the agent acted on e5). Two live refs on one sig made the
+        // next ingest keep one of them in HashMap order and report the other
+        // `- eN (gone)` while the element was still on the page — sometimes
+        // the very ref the agent had just acted through. The ref being
+        // adopted is the one the agent is using, so it wins; the other is
+        // retired to the graveyard, where it still heals to the same element
+        // by its exact sig.
+        if self
+            .elements
+            .iter()
+            .any(|e| e.ref_id != id && e.raw.sig == sig)
+        {
+            let (retired, kept): (Vec<PageElement>, Vec<PageElement>) =
+                std::mem::take(&mut self.elements)
+                    .into_iter()
+                    .partition(|e| e.ref_id != id && e.raw.sig == sig);
+            self.elements = kept;
+            self.by_ref = self
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (e.ref_id.clone(), i))
+                .collect();
+            for e in retired {
+                self.prev_state.remove(&e.ref_id);
+                self.bury(e.ref_id, e.raw.sig, e.raw.role, e.raw.name);
+            }
+        }
         let raw = crate::page::perception::RawElement {
             tag: String::new(),
             role: role.to_string(),
@@ -215,6 +246,19 @@ impl LivePageModel {
             },
         );
         id.to_string()
+    }
+
+    /// Remember a dead ref's identity for self-healing. Latest wins: a ref
+    /// that was healed onto another element (a different sig) must heal to
+    /// THAT element when it dies again, not to the one it named before the
+    /// heal.
+    fn bury(&mut self, id: String, sig: String, role: String, name: String) {
+        self.graveyard.retain(|(g, _, _, _)| *g != id);
+        self.graveyard.push((id, sig, role, name));
+        if self.graveyard.len() > GRAVEYARD_CAP {
+            let excess = self.graveyard.len() - GRAVEYARD_CAP;
+            self.graveyard.drain(..excess);
+        }
     }
 
     /// Look up a dead ref's last-known identity: (sig, role, name).
@@ -286,16 +330,8 @@ impl LivePageModel {
         // Move dead refs' identities into the graveyard for self-healing.
         // The agent may still hold e5; when it acts on e5 we re-resolve
         // what e5 used to be (role+name) against the live page.
-        for r in &stab.removed {
-            // Skip if the same ref id is somehow already recorded.
-            if !self.graveyard.iter().any(|(id, _, _, _)| id == &r.id) {
-                self.graveyard
-                    .push((r.id.clone(), r.sig.clone(), r.role.clone(), r.name.clone()));
-            }
-        }
-        if self.graveyard.len() > GRAVEYARD_CAP {
-            let excess = self.graveyard.len() - GRAVEYARD_CAP;
-            self.graveyard.drain(..excess);
+        for r in stab.removed {
+            self.bury(r.id, r.sig, r.role, r.name);
         }
 
         let delta = PageDelta {
