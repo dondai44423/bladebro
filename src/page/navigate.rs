@@ -33,10 +33,11 @@ impl Page {
         // unchanged page as "already here". The gate answers instantly.
         validate_nav_url(url)?;
         // M16: Idempotent navigate \u{2014} if already on this URL, skip reload.
-        if !self.lpm.url().is_empty() && normalize_url(url) == normalize_url(self.lpm.url()) {
+        if already_here(&self.lpm, url) {
             let cap = capture(&self.cdp).await?;
             return Ok(self.lpm.ingest(cap));
         }
+        let from_unanswered = self.lpm.read_unanswered();
         // NOTE: no stealth re-apply here — addScriptToEvaluateOnNewDocument
         // registrations persist for the target's lifetime. Re-applying on
         // every navigation used to STACK another identical script each time
@@ -400,7 +401,7 @@ impl Page {
             }
         }
         _t("consent/block");
-        let r = self.recapture().await;
+        let r = self.recapture().await.map(|d| landed(d, from_unanswered));
         _t("recapture");
         // P1: query parameters the caller asked for that the final URL does not
         // carry. Sites silently rewrite their own URLs (Amazon drops rh=p_36,
@@ -875,6 +876,29 @@ fn nav_params_note(requested: &str, final_url: &str) -> Option<String> {
     ))
 }
 
+/// M16 shortcut gate: the model's url is the page `url` points at. Only a
+/// url the page itself answered with counts. After an unanswered read the
+/// model keeps the previous page while the tab may already be elsewhere;
+/// taking the shortcut then would skip the real navigation and report
+/// wherever the tab is as the destination.
+fn already_here(lpm: &LivePageModel, url: &str) -> bool {
+    !lpm.read_unanswered()
+        && !lpm.url().is_empty()
+        && normalize_url(url) == normalize_url(lpm.url())
+}
+
+/// The delta of a navigation that was really issued. When it started from an
+/// unanswered read, the model's url is the last ANSWERED page, not where the
+/// tab was, so landing on that same url proves nothing: the tab may have
+/// been elsewhere (a click that reached a busy page). Report the navigation
+/// that happened instead of "already here".
+fn landed(mut delta: PageDelta, from_unanswered: bool) -> PageDelta {
+    if from_unanswered && !delta.unanswered {
+        delta.navigated = true;
+    }
+    delta
+}
+
 /// Canonical comparison preserves the origin, fragment and significant path.
 /// Only URL-standard equivalences (host case, default ports, root slash) may
 /// suppress a navigation; hash routers and /x versus /x/ are different pages.
@@ -887,7 +911,10 @@ fn normalize_url(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_domain, nav_params_note, normalize_url, query_params, validate_nav_url};
+    use super::{
+        already_here, extract_domain, landed, nav_params_note, normalize_url, query_params,
+        validate_nav_url,
+    };
 
     #[test]
     fn extract_domain_strips_scheme_port_and_www() {
@@ -945,6 +972,65 @@ mod tests {
         );
         assert!(query_params("https://e.com/s").is_none());
         assert!(query_params("https://e.com/s?").is_none());
+    }
+
+    /// The idempotent-navigate shortcut trusted the model's url even after
+    /// an unanswered read, when that url is the last ANSWERED page, not
+    /// where the tab is: `navigate A` after a click that went to B (read
+    /// unanswered) skipped the navigation and reported B as A's result.
+    #[test]
+    fn idempotent_shortcut_needs_an_answered_url() {
+        use crate::page::{LivePageModel, PageCapture};
+        let page = |url: &str| PageCapture {
+            url: url.into(),
+            title: String::new(),
+            ready_state: "complete".into(),
+            muts: 0,
+            elements: Vec::new(),
+        };
+        let mut lpm = LivePageModel::new();
+        assert!(!already_here(&lpm, "https://a.test/"));
+        lpm.ingest(page("https://a.test/"));
+        assert!(already_here(&lpm, "https://a.test/"));
+        lpm.ingest(PageCapture::unanswered());
+        assert_eq!(lpm.url(), "https://a.test/");
+        assert!(
+            !already_here(&lpm, "https://a.test/"),
+            "an unanswered read must not satisfy the already-here shortcut"
+        );
+        lpm.ingest(page("https://a.test/"));
+        assert!(already_here(&lpm, "https://a.test/"));
+    }
+
+    /// With the shortcut skipped, `navigate A` from a tab whose last read
+    /// went unanswered (really on B) lands on A while the model still says
+    /// A: the delta must report the navigation, not "already here".
+    #[test]
+    fn navigation_from_an_unanswered_read_reports_the_landing() {
+        use crate::page::{LivePageModel, PageCapture};
+        let page = |url: &str| PageCapture {
+            url: url.into(),
+            title: String::new(),
+            ready_state: "complete".into(),
+            muts: 0,
+            elements: Vec::new(),
+        };
+        let mut lpm = LivePageModel::new();
+        lpm.ingest(page("https://a.test/"));
+        lpm.ingest(PageCapture::unanswered());
+        let from_unanswered = lpm.read_unanswered();
+        let d = landed(lpm.ingest(page("https://a.test/")), from_unanswered);
+        assert!(
+            d.navigated,
+            "a navigation from an unanswered read was reported as already here"
+        );
+        // An answered start keeps the plain comparison.
+        let d = landed(lpm.ingest(page("https://a.test/")), lpm.read_unanswered());
+        assert!(!d.navigated);
+        // A landing that itself went unanswered stays unverified.
+        lpm.ingest(PageCapture::unanswered());
+        let d = landed(lpm.ingest(PageCapture::unanswered()), true);
+        assert!(!d.navigated && d.unanswered);
     }
 
     #[test]

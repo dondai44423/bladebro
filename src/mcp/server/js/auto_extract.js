@@ -20,7 +20,10 @@ if(/\d+\s+(point|comment|vote|reply|reaction)/i.test(t))return true;
 return false;
 }
 function bestLink(item,title){
-const lnks=links(item).filter(a=>!isActionLink(a)&&a.offsetParent!==null);
+// SVG <a> also matches a[href], but its .href is an SVGAnimatedString and
+// its offsetParent is undefined: it passed the visibility filter and became
+// the item url "/[object SVGAnimatedString]".
+const lnks=links(item).filter(a=>typeof a.href==='string'&&!isActionLink(a)&&a.offsetParent!==null);
 if(lnks.length===0)return null;
 const ext=lnks.find(a=>a.hostname&&a.hostname!==HOST);
 if(ext)return ext;
@@ -68,7 +71,10 @@ function ghStarsToday(el){const t=txt(el);const m=t.match(/(\d[\d.,]*[KkMm]?)\s*
 function ghLabels(el){const ls=el.querySelectorAll('a[href*="label%3A"],a[data-name],.IssueLabel,.Label,.labels a');const r=[];for(const l of ls){const n=(l.getAttribute('data-name')||((l.innerText||'').split('\n')[0]||'')).trim();if(n&&n.length>1&&!r.includes(n))r.push(n);}return r;}
 function ghNumber(el){const a=el.querySelector('a[data-testid="issue-pr-title-link"],a[href*="/issues/"],a[href*="/pull/"]');if(a){const m=(a.getAttribute('href')||'').match(/\/(?:issues|pull)\/(\d+)/);if(m)return parseInt(m[1],10);}const t=txt(el);const m=t.match(/#(\d+)/);if(m)return parseInt(m[1],10);return null;}
 function ghStatus(el){const oc=el.querySelector('svg[class*="octicon-issue-open"]');if(oc)return 'open';const occ=el.querySelector('svg[class*="octicon-issue-closed"],svg[class*="octicon-skip"]');if(occ)return 'closed';const t=txt(el);const m=t.match(/Status:\s*(\w+)/i);if(m)return m[1].toLowerCase();if(el.querySelector('[data-testid="open-issue"],[class*="open-issue"],[aria-label*="open"]'))return 'open';if(el.querySelector('[data-testid="closed-issue"],[class*="closed-issue"],[aria-label*="closed"]'))return 'closed';return null;}
-function isProductPage(){const b=document.body;if(!b)return false;const t=(b.innerText||'').toLowerCase();const hp=/[$€£¥₹]\s?\d/.test(t);const cb=document.querySelector('#add-to-cart-button,#buy-now-button,[data-testid*="add-to-cart"],[data-testid*="buy-now"],button[name*="cart"],input[name*="cart"],#add-to-cart,#buy-now');const hc=/add to cart|buy now|add to basket|add to bag|in winkelwagen|au panier/i.test(t);const u=location.href.toLowerCase();const pu=PROD_URL.test(u);const h1=document.querySelector('h1');const hh=h1&&h1.innerText.trim().length>5;return hp&&hh&&(pu||cb||hc);}
+// A price + h1 under a /p/-style URL is also every newsletter post that
+// mentions "$5" (Substack serves every post at /p/<slug>): the URL never
+// makes a product page on its own; a cart/buy control or cart wording must.
+function isProductPage(){const b=document.body;if(!b)return false;const t=(b.innerText||'').toLowerCase();const hp=/[$€£¥₹]\s?\d/.test(t);const cb=document.querySelector('#add-to-cart-button,#buy-now-button,[data-testid*="add-to-cart"],[data-testid*="buy-now"],button[name*="cart"],input[name*="cart"],#add-to-cart,#buy-now');const hc=/add to cart|buy now|add to basket|add to bag|in winkelwagen|au panier/i.test(t);const h1=document.querySelector('h1');const hh=h1&&h1.innerText.trim().length>5;return hp&&hh&&(cb||hc);}
 function offerBox(){const b=document.querySelector('#add-to-cart-button,#buy-now-button,[data-testid*="add-to-cart"],[data-testid*="buy-now"],button[name*="cart"],input[name*="cart"],#add-to-cart,#buy-now');if(!b)return null;let p=b;for(let i=0;i<7&&p&&p!==document.body;i++){p=p.parentElement;if(!p)break;const t=txt(p);if(t.length<4000&&PRICE.test(t))return p;}return b.closest('form,section,main,[role="main"]');}
 function desc(el){if(!el||!el.tagName)return '';let s=el.tagName.toLowerCase();try{const id=el.getAttribute&&el.getAttribute('id');if(id&&id.length<=30)return s+'#'+id;const cl=(typeof el.className==='string'&&el.className.trim())?el.className.trim().split(/\s+/)[0]:'';if(cl&&cl.length<=24)s+='.'+cl;}catch(e){}return s;}
 function selVariant(){const out=[];try{for(const op of document.querySelectorAll('option:checked')){const t=txt(op);if(t&&t.length<=120)out.push(t);}}catch(e){}try{for(const e of document.querySelectorAll('[aria-selected="true"],[aria-checked="true"],[data-selected="true"]')){if(e.tagName==='OPTION')continue;if(e.closest('nav,[role="tablist"],header'))continue;const t=txt(e);if(t&&t.length>=2&&t.length<=120)out.push(t);}}catch(e){}return out;}

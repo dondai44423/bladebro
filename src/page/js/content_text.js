@@ -13,7 +13,9 @@ if(n.nodeType===3){const t=n.textContent;if(t){parts.push(t);cost+=t.length;}ret
 if(n.nodeType!==1)return;
 visits++;
 const tag=n.tagName;
-if(SKIP[tag])return;
+// Inline SVG children carry lowercase tagNames (svg, style, title): an
+// uppercase-only lookup leaked SVG CSS and <title> text into reads.
+if(SKIP[tag.toUpperCase()])return;
 if(n.hidden)return;
 try{const cs=getComputedStyle(n);if(cs.display==='none'||cs.visibility==='hidden')return;}catch(_e1){}
 if(isAd(n))return;

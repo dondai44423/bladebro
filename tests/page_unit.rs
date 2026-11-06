@@ -806,3 +806,210 @@ assert.equal(wrappedURL('https://www.google.com/goto?url=OPAQUE'),true);
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+/// An item whose only link is an SVG `<a>` (a chart or icon link): its
+/// `.href` is an SVGAnimatedString and its offsetParent undefined, so
+/// bestLink() picked it and extract=auto emitted the item url
+/// "/[object SVGAnimatedString]".
+#[test]
+fn extract_auto_item_link_skips_svg_anchors() {
+    let script = include_str!("../src/mcp/server/js/auto_extract.js");
+    let start = script.find("const HOST=").unwrap();
+    let end = script.find("// Redirect/tracking wrappers").unwrap();
+    let probe = r#"
+const assert=require('node:assert/strict');
+const anim=(v)=>Object.create({get baseVal(){return v;},get animVal(){return v;}});
+// SVG <a>: no innerText, no hostname, offsetParent undefined.
+const svgA={tagName:'a',href:anim('/chart/1'),matches(){return true;}};
+const htmlA={tagName:'A',href:'https://page.example/item/1',hostname:'page.example',innerText:'Item one title',offsetParent:{},matches(){return true;}};
+const item=(...as)=>({tagName:'DIV',querySelectorAll(){return as;},matches(){return false;}});
+assert.equal(bestLink(item(svgA),'Item one title'),null,'an SVG link is not an item url');
+assert.equal(bestLink(item(svgA,htmlA),'Item one title'),htmlA);
+"#;
+    let result = std::process::Command::new("node")
+        .arg("-e")
+        .arg(format!(
+            "global.location={{hostname:'page.example',href:'https://page.example/'}};\n{}\n{probe}",
+            &script[start..end]
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+/// Product-card heuristic (`see mode=content`): a currency amount anywhere +
+/// an h1 + a `/p/` URL is every Substack post that mentions "$5". The URL
+/// pattern alone must not turn an article into a product card that drops
+/// the body; a real cart/buy control still does.
+#[test]
+fn price_mention_under_a_p_slug_stays_an_article() {
+    let mock = r#"
+global.location={hostname:'writer.substack.com',href:'https://writer.substack.com/p/my-post',pathname:'/p/my-post'};
+const view={getComputedStyle(){return {display:'block',visibility:'visible',opacity:'1'}}};
+const art={nodeType:1,tagName:'ARTICLE',innerHTML:'x',innerText:'UNIQUEBODYMARKER the essay body. '.repeat(10),childNodes:[{nodeType:3,textContent:'UNIQUEBODYMARKER the essay body.'}],className:'',id:'',hidden:false,hasAttribute(){return false},getAttribute(){return null}};
+const h1={innerText:'Why I pay $5 a month for newsletters',closest(){return null}};
+global.document={body:{innerText:'Why I pay $5 a month for newsletters. It costs $5. UNIQUEBODYMARKER the essay body.',querySelectorAll(){return []}},title:'My post',defaultView:view,
+  querySelector(s){if(s==='h1')return h1;if(s==='main,[role="main"]')return art;if(s.includes('#add-to-cart-button'))return global.CART;return null},querySelectorAll(){return []}};
+art.ownerDocument=document;
+"#;
+    let script = include_str!("../src/page/js/markdown.js")
+        .replace("__SCOPE_FLAG__", "false")
+        .replace("__BUDGET__", "8000")
+        .replace("__SCOPE_MAIN__", "findMain(document)");
+    // Article: no cart control, no cart text -> the body is the payload.
+    // Product: the same page WITH an add-to-cart control -> product card.
+    let probe = format!(
+        "{mock}\nglobal.CART=null;const a={script};\nglobal.CART={{}};const p={script};\n\
+         if(!a.includes('UNIQUEBODYMARKER')||a.includes('**Price:**'))throw Error('article rendered as a product card: '+JSON.stringify(a));\n\
+         if(!p.includes('**Price:** $5'))throw Error('product page lost its card: '+JSON.stringify(p));"
+    );
+    let output = std::process::Command::new("node")
+        .arg("-e")
+        .arg(probe)
+        .output()
+        .expect("node is required for injected-script tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `extract=auto` mirrors the markdown product heuristic: the same `/p/`
+/// article must not collapse into one product item either.
+#[test]
+fn extract_auto_product_page_needs_a_cart_signal() {
+    let script = include_str!("../src/mcp/server/js/auto_extract.js");
+    let prod_url = script
+        .lines()
+        .find(|l| l.starts_with("const PROD_URL="))
+        .unwrap();
+    let is_product = script
+        .lines()
+        .find(|l| l.starts_with("function isProductPage(){"))
+        .unwrap();
+    let probe = r#"
+const assert=require('node:assert/strict');
+global.location={href:'https://writer.substack.com/p/my-post'};
+const h1={innerText:'Why I pay $5 a month for newsletters'};
+const page=(text,cart)=>{global.document={body:{innerText:text},querySelector(s){if(s==='h1')return h1;if(s.includes('#add-to-cart-button'))return cart;return null}};};
+page('Why I pay $5 a month. UNIQUEBODYMARKER the essay body.',null);
+assert.equal(!!isProductPage(),false,'article with a price mention is not a product page');
+page('Why I pay $5 a month. UNIQUEBODYMARKER the essay body.',{});
+assert.equal(!!isProductPage(),true,'a cart control still marks a product page');
+page('Widget $5. Add to cart',null);
+assert.equal(!!isProductPage(),true,'cart text still marks a product page');
+"#;
+    let result = std::process::Command::new("node")
+        .arg("-e")
+        .arg(format!("{prod_url}\n{is_product}\n{probe}"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+fn titled(url: &str, title: &str, els: Vec<RawElement>) -> bladebro::page::PageCapture {
+    let mut c = cap(url, els);
+    c.title = title.into();
+    c
+}
+
+/// Budget-truncated delta views say how many elements were cut. The count
+/// used to be derived from the printed LINE count, which includes one to
+/// three header lines (page, title, title change): off by the title lines
+/// in general, and an unsigned underflow (debug panic, release "…(huge
+/// number more)") when nothing but the headers fit — reachable with the
+/// 500-char ultra-compact act budget.
+#[test]
+fn truncated_delta_counts_the_elements_it_cut() {
+    let more = |s: &str| -> String {
+        s.lines()
+            .find(|l| l.starts_with('\u{2026}'))
+            .unwrap_or_else(|| panic!("no truncation marker in:\n{s}"))
+            .to_string()
+    };
+    let els = |n: usize| -> Vec<RawElement> {
+        (1..=n)
+            .map(|i| {
+                let nm = format!("Button number {i}");
+                el("button", &nm, &format!("|button|{nm}|1"), None, false)
+            })
+            .collect()
+    };
+    let head = |s: &str, n: usize| -> usize { s.lines().take(n).map(|l| l.len() + 1).sum() };
+
+    // Small page (full list with markers): 3 elements, a title line, room
+    // for exactly one element.
+    let mut lpm = LivePageModel::new();
+    let d = lpm.ingest(titled("https://x.test/", "Fixture title", els(3)));
+    let full = lpm.compress_delta(&d, 100_000, 0);
+    let view = lpm.compress_delta(&d, head(&full, 3) + 1, 0);
+    assert_eq!(more(&view), "\u{2026}(2 more)", "{view}");
+
+    // Title changed (three header lines) and only the headers fit: the
+    // single element is the one that was cut.
+    let mut lpm = LivePageModel::new();
+    lpm.ingest(titled("https://x.test/", "Old title", els(1)));
+    let d = lpm.ingest(titled("https://x.test/", "New title", els(1)));
+    assert!(d.title_changed);
+    let full = lpm.compress_delta(&d, 100_000, 0);
+    let view = lpm.compress_delta(&d, head(&full, 3) + 1, 0);
+    assert_eq!(more(&view), "\u{2026}(1 more)", "{view}");
+
+    // Large page (diff view): 20 added, a title line, room for two.
+    let mut lpm = LivePageModel::new();
+    let d = lpm.ingest(titled("https://x.test/", "Fixture title", els(20)));
+    let full = lpm.compress_delta(&d, 100_000, 0);
+    let view = lpm.compress_delta(&d, head(&full, 4) + 1, 0);
+    assert_eq!(more(&view), "\u{2026}(18 more)", "{view}");
+}
+
+/// A capture the page never answered (Runtime.evaluate timed out on a busy
+/// main thread, or the context was mid-transition) is not a page state.
+/// Ingesting it as one reported a navigation to "", sent every ref to the
+/// graveyard, and made the next good capture mint all-new refs for the same
+/// elements.
+#[test]
+fn unanswered_capture_is_not_a_navigation_and_keeps_refs() {
+    let page = || {
+        vec![
+            el("button", "Save", "|button|Save|1", None, false),
+            el("link", "Home", "|link|Home|1", None, false),
+        ]
+    };
+    let mut lpm = LivePageModel::new();
+    lpm.ingest(titled("https://x.test/", "Fixture", page()));
+    let refs: Vec<String> = lpm.elements().iter().map(|e| e.ref_id.clone()).collect();
+
+    // Exactly what `capture()` returns when the page does not answer.
+    let unanswered = bladebro::page::PageCapture {
+        url: String::new(),
+        title: String::new(),
+        ready_state: "loading".into(),
+        muts: 0,
+        elements: Vec::new(),
+    };
+    let d = lpm.ingest(unanswered);
+    assert!(!d.navigated, "an unanswered read is not a navigation");
+    assert!(d.removed.is_empty(), "no ref may die on an unanswered read");
+    assert_eq!(d.url, "https://x.test/");
+    assert_eq!(d.phase, "loading");
+    assert_eq!(lpm.url(), "https://x.test/");
+    assert_eq!(lpm.actionables(), 2);
+
+    // The next good capture of the same page re-binds the same refs.
+    let d = lpm.ingest(titled("https://x.test/", "Fixture", page()));
+    assert!(!d.navigated);
+    assert!(d.added.is_empty() && d.removed.is_empty(), "{d:?}");
+    let after: Vec<String> = lpm.elements().iter().map(|e| e.ref_id.clone()).collect();
+    assert_eq!(after, refs);
+    assert_eq!(lpm.phase(), "ready");
+}

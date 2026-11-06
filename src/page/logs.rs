@@ -30,8 +30,10 @@ pub struct XhrEntry {
     pub done: bool,
     /// Failure reason if the request failed.
     pub error: Option<String>,
-    /// Auth/content header subset (`authorization`, `x-csrf-token`,
-    /// `x-twitter-*`, `content-type`) — replayed verbatim by adapters.
+    /// Every request header except the transport ones the browser
+    /// regenerates itself (`cookie`, `host`, `user-agent`,
+    /// `content-length`, `accept-encoding`, `connection`, `sec-*`) —
+    /// replayed verbatim by adapters.
     pub headers: Vec<(String, String)>,
 }
 
@@ -158,7 +160,8 @@ impl Page {
         Ok(())
     }
 
-    /// Recent XHR/fetch requests (last 24, start-observed, full URLs).
+    /// Recent XHR/fetch requests (ring of 128, one entry per endpoint,
+    /// start-observed, full URLs).
     pub fn xhr_log(&self) -> Vec<XhrEntry> {
         self.xhr_log
             .lock()

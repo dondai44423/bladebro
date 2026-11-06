@@ -200,6 +200,27 @@ impl PageCapture {
             _ => "ready",
         }
     }
+
+    /// The capture returned when the page did not answer the read (the
+    /// evaluate timed out on a busy main thread, or the execution context
+    /// was mid-transition and returned nothing). It observed nothing:
+    /// [`LivePageModel::ingest`](super::LivePageModel::ingest) keeps the
+    /// previous state instead of treating it as a blank page.
+    pub fn unanswered() -> Self {
+        PageCapture {
+            url: String::new(),
+            title: String::new(),
+            ready_state: "loading".into(),
+            muts: 0,
+            elements: Vec::new(),
+        }
+    }
+
+    /// True for [`PageCapture::unanswered`]: an answered capture always
+    /// carries `location.href`, which is never empty (`about:blank` at least).
+    pub fn is_unanswered(&self) -> bool {
+        self.url.is_empty()
+    }
 }
 
 // ---- shared JS fragments (used by both capture + find-by-sig scripts) ----
@@ -320,7 +341,13 @@ pub const JS_NC_FN: &str = include_str!("js/nc_fn.js");
 static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
     "(()=>{"
         .to_string()
-        + "const d=document;if(!d||!d.body)return null;"
+        + "const d=document;if(!d)return null;"
+        // A document without a body still answered: an SVG or XML file
+        // opened directly never gets one, and an HTML page mid-parse has
+        // none yet. Report its url and readyState with no elements; `null`
+        // would read as an unanswered (busy) page and keep showing the
+        // previous page's refs.
+        + "if(!d.body)return{url:location.href,title:d.title||'',readyState:d.readyState,muts:0,elements:[]};"
         + &JS_PREAMBLE
         + "const out=[];"
         // Viewport culling (V25c): only capture elements in or near the
@@ -388,7 +415,13 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         + "value:n.isContentEditable?((n.innerText||n.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200)||null):(n.value&&n.value.length<=200?n.value:null),"
         + "disabled:!!((lp(n)||n).disabled),"
         + "checked:(r==='checkbox'||r==='radio')?!!((lp(n)||n).checked):null,"
-        + "href:(function(){var h=n.getAttribute&&n.getAttribute('href');if(h==null)return null;if(h.charAt(0)==='#')return h;return n.href||null;})(),placeholder:n.placeholder||null,"
+        // An SVG <a href> matches `a[href]`, but its `.href` is an
+        // SVGAnimatedString object, not a string: returned by value it
+        // serialized as `{}` and failed the WHOLE capture ("invalid type:
+        // map, expected a string") on any page with a linked chart or icon.
+        // Non-string `.href` resolves the attribute against the element's
+        // base URL, exactly as an HTML anchor's `.href` does.
+        + "href:(function(){var h=n.getAttribute&&n.getAttribute('href');if(h==null)return null;if(h.charAt(0)==='#')return h;if(typeof n.href==='string')return n.href||null;try{return new URL(h,n.baseURI).href;}catch(_e){return h||null;}})(),placeholder:n.placeholder||null,"
         + "options:n.tagName==='SELECT'?{sel:n.selectedIndex,total:n.options.length,items:[...n.options].slice(0,80).map(o=>[(o.label||o.text||'').trim().replace(/\\s+/g,' ').split('|').join('¦').slice(0,60),(o.value||'').split('|').join('¦').slice(0,40)]).filter(p=>p[0]||p[1])}:null,"
         + "required:!!n.required||n.getAttribute('aria-required')==='true',"
         + "haspopup:!!n.getAttribute('aria-haspopup'),"
@@ -421,7 +454,7 @@ static CAPTURE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
 pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
     // Use a shorter timeout than the default 30s — if the execution
     // context is in transition (e.g. after a form-submit navigation to a
-    // JSON response page), Runtime.evaluate can hang. Return a "loading"
+    // JSON response page), Runtime.evaluate can hang. Return an unanswered
     // capture on timeout instead of erroring after 30s.
     let res = cdp
         .send_with_timeout(
@@ -437,17 +470,14 @@ pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
 
     let res = match res {
         Ok(v) => v,
-        Err(_) => {
-            // Execution context not ready (page in transition).
-            // Return a loading capture instead of erroring.
-            return Ok(PageCapture {
-                url: String::new(),
-                title: String::new(),
-                ready_state: "loading".into(),
-                muts: 0,
-                elements: Vec::new(),
-            });
-        }
+        // A dead tab/browser is not a page state: `Closed` is the error the
+        // MCP and daemon loops self-heal on. Swallowing it reported a blank
+        // "loading" page and hid the death from the relaunch path.
+        Err(BladeError::Closed) => return Err(BladeError::Closed),
+        // Execution context not ready (page in transition) or a busy main
+        // thread: the page did not answer. Not an error for the caller, but
+        // not a page state either - the model keeps its previous read.
+        Err(_) => return Ok(PageCapture::unanswered()),
     };
 
     // Runtime.evaluate → { result: { type, value }, exceptionDetails? }
@@ -463,16 +493,10 @@ pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
 
     let value = res.get("result").and_then(|r| r.get("value"));
 
-    // The capture script returns null when the page isn't ready yet (no
-    // document.body). Return an empty loading capture instead of erroring.
+    // No value means there was no document to read (a body-less document
+    // answers with its url - see the script). Same unanswered capture.
     match value {
-        Some(serde_json::Value::Null) | None => Ok(PageCapture {
-            url: String::new(),
-            title: String::new(),
-            ready_state: "loading".into(),
-            muts: 0,
-            elements: Vec::new(),
-        }),
+        Some(serde_json::Value::Null) | None => Ok(PageCapture::unanswered()),
         Some(v) => {
             let mut parsed: PageCapture = serde_json::from_value(v.clone())?;
             // Chrome internal pages (chrome://, chrome-extension://, about:*
@@ -595,6 +619,228 @@ mod script_syntax_tests {
     #[test]
     fn capture_script_is_valid_js() {
         node_check("capture", &super::CAPTURE_SCRIPT);
+    }
+
+    /// An SVG `<a href>` matches the `a[href]` selector and role() calls it a
+    /// link, but its `.href` is an SVGAnimatedString object, not a string.
+    /// Serialized as `{}`, it failed the whole capture with "JSON error:
+    /// invalid type: map, expected a string" - nav/see/attach all errored on
+    /// any page with a linked chart. Runs the REAL capture script against a
+    /// stub DOM and parses its result exactly like `capture()` does.
+    #[test]
+    fn capture_svg_link_href_is_a_string() {
+        let src = serde_json::to_string(&*super::CAPTURE_SCRIPT).expect("serialize capture");
+        let js = format!(
+            r#"const S = {src};
+globalThis.window = globalThis;
+globalThis.innerHeight = 800;
+globalThis.location = {{ href: 'http://fixture.test/page' }};
+globalThis.getComputedStyle = () => ({{ display: 'inline', visibility: 'visible', opacity: '1' }});
+// SVGAnimatedString: values live on the prototype, so returnByValue
+// serializes it as an empty object.
+const anim = (v) => Object.create({{ get baseVal() {{ return v; }}, get animVal() {{ return v; }} }});
+const doc = {{ title: 'fixture', readyState: 'complete' }};
+const el = (tag, href, text, abs) => ({{
+  nodeType: 1, tagName: tag, ownerDocument: doc, parentElement: null, id: '',
+  baseURI: 'http://fixture.test/page', children: [],
+  childNodes: [{{ nodeType: 3, textContent: text }}],
+  attrs: {{ href }}, href: abs,
+  getAttribute(k) {{ return this.attrs[k] === undefined ? null : this.attrs[k]; }},
+  closest() {{ return null; }}, getRootNode() {{ return doc; }},
+  getBoundingClientRect() {{ return {{ x: 10, y: 20, width: 60, height: 20 }}; }},
+}});
+const svgA = el('a', '/target', 'chart link', anim('/target'));
+const htmlA = el('A', '/plain', 'plain link', 'http://fixture.test/plain');
+doc.body = {{}};
+doc.documentElement = {{}};
+doc.querySelectorAll = (s) => (s === '*' || s === 'iframe' ? [] : [svgA, htmlA]);
+globalThis.document = doc;
+console.log(JSON.stringify((0, eval)(S)));
+"#
+        );
+        let Some(out) = node_exec("capture-svg-href", &js) else {
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "capture script threw:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cap: super::PageCapture = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("capture result must parse: {e}"));
+        let hrefs: Vec<_> = cap.elements.iter().map(|e| e.href.as_deref()).collect();
+        assert_eq!(
+            hrefs,
+            [
+                Some("http://fixture.test/target"),
+                Some("http://fixture.test/plain")
+            ]
+        );
+    }
+
+    /// A document without a body (an SVG or XML file opened directly, an
+    /// HTML page mid-parse) still answered the read: it must come back with
+    /// its url, never as the unanswered capture that keeps the previous
+    /// page's refs on screen behind a "busy" note.
+    #[test]
+    fn capture_of_a_bodyless_document_is_answered() {
+        let src = serde_json::to_string(&*super::CAPTURE_SCRIPT).expect("serialize capture");
+        let js = format!(
+            r#"const S = {src};
+globalThis.window = globalThis;
+globalThis.location = {{ href: 'http://fixture.test/chart.svg' }};
+globalThis.document = {{ title: 'chart', readyState: 'complete', body: null, documentElement: {{}} }};
+console.log(JSON.stringify((0, eval)(S)));
+"#
+        );
+        let Some(out) = node_exec("capture-bodyless", &js) else {
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "capture script threw:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cap: super::PageCapture = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "a body-less document must answer with a capture, got {}: {e}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            )
+        });
+        assert_eq!(cap.url, "http://fixture.test/chart.svg");
+        assert_eq!(cap.phase(), "ready");
+        assert!(cap.elements.is_empty());
+    }
+
+    /// Inline SVG children report LOWERCASE tagNames (`svg`, `style`), so
+    /// skip lists written against uppercase HTML names never matched them:
+    /// SVG `<style>` CSS and `<title>` text leaked into `see content`,
+    /// markdown, text conditions and link names. Runs the REAL readers
+    /// against one stub DOM.
+    #[test]
+    fn svg_children_stay_out_of_text_reads() {
+        let content = super::content::content_expr(8000);
+        let markdown = super::content::markdown_expr(8000, None).expect("markdown expr builds");
+        let js = [
+            r#"
+const view = { getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }) };
+globalThis.getComputedStyle = view.getComputedStyle;
+globalThis.location = { href: 'http://fixture.test/a', hostname: 'fixture.test', pathname: '/a' };
+const doc = { defaultView: view, title: '' };
+const anim = (v) => Object.create({ get baseVal() { return v; } });
+const T = (s) => ({ nodeType: 3, textContent: s });
+const E = (tag, kids, extra) => {
+  const e = Object.assign({
+    nodeType: 1, tagName: tag, childNodes: kids, children: kids.filter(k => k.nodeType === 1),
+    hidden: false, id: '', className: '', ownerDocument: doc, shadowRoot: null, parentElement: null,
+    attrs: {}, getAttribute(k) { return this.attrs[k] === undefined ? null : this.attrs[k]; },
+    hasAttribute(k) { return k in this.attrs; }, closest() { return null; },
+  }, extra || {});
+  for (const k of e.children) k.parentElement = e;
+  return e;
+};
+// SVG-namespace elements: lowercase tagName, no `hidden`, className is an
+// SVGAnimatedString.
+const S = (tag, kids) => E(tag, kids, { hidden: undefined, className: anim(''), namespaceURI: 'http://www.w3.org/2000/svg' });
+const icon = () => S('svg', [S('style', [T('.cls-1{fill:none;stroke:red}')]), S('title', [T('SVGTITLELEAK')]), S('rect', [])]);
+// Icon link: the SVG carries only presentation CSS, so the name is the text.
+const link = E('A', [S('svg', [S('style', [T('.ic{fill:blue}')]), S('rect', [])]), T('Search')], { attrs: { href: '/search' }, href: 'http://fixture.test/search', innerText: 'Search' });
+const body = E('BODY', [E('P', [T('Body text here.')]), icon(), E('P', [link])], { innerHTML: 'x', innerText: 'Body text here. Search' });
+doc.body = body;
+doc.querySelector = () => null;
+doc.querySelectorAll = () => [];
+globalThis.document = doc;
+let fail = 0;
+const clean = (label, s) => {
+  if (!/Body text here/.test(s) || /cls-1|\.ic\{|SVGTITLELEAK/.test(s)) { fail = 1; console.log('FAIL', label, JSON.stringify(s)); }
+};
+"#,
+            "clean('content', ",
+            content.as_str(),
+            ");\nclean('markdown', ",
+            markdown.as_str(),
+            ");\n",
+            super::JS_READ_TREE,
+            "\nconst parts = []; walkReadTree(body, n => { if (n.nodeType === 3) parts.push(n.textContent); });\nclean('read-tree', parts.join(' '));\n",
+            super::JS_LABEL_CACHE,
+            super::JS_NAME_FN,
+            r#"
+const nm = name(link, false);
+if (nm !== 'Search') { fail = 1; console.log('FAIL name', JSON.stringify(nm)); }
+if (!fail) console.log('svg skip fixtures pass');
+process.exit(fail);
+"#,
+        ]
+        .concat();
+        if let Some(out) = node_exec("svg-skip-fixtures", &js) {
+            assert!(
+                out.status.success(),
+                "SVG children leaked into a text read:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// Element conditions (`wait`/`if`/`while element=`) must find a control
+    /// the capture model shows. SVG-hosted controls (an `<svg role=button>`
+    /// icon, a `<g role=button>` inside a chart) are in the model, so the read
+    /// tree has to walk into inline SVG; only SVG's unrendered text (`<style>`
+    /// CSS, `<title>`) stays out of text conditions. Runs the REAL condition
+    /// expressions against a stub DOM.
+    #[test]
+    fn conditions_walk_inline_svg_but_skip_its_style_and_title() {
+        let probe = |label: &str, expr: &str, want: bool| {
+            format!(
+                "{{const got=(0,eval)({});if(got!=={want}){{fail=1;console.log('FAIL',{},'got',got);}}}}\n",
+                serde_json::to_string(expr).expect("serialize expr"),
+                serde_json::to_string(label).expect("serialize label"),
+            )
+        };
+        let mut js = String::from(
+            r#"
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const view = { getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }) };
+globalThis.getComputedStyle = view.getComputedStyle;
+const doc = { defaultView: view };
+const T = (s) => ({ nodeType: 3, textContent: s });
+const E = (tag, kids, attrs, extra) => Object.assign({
+  nodeType: 1, tagName: tag, childNodes: kids, hidden: false, ownerDocument: doc, shadowRoot: null,
+  namespaceURI: 'http://www.w3.org/1999/xhtml',
+  getAttribute(k) { return attrs && k in attrs ? attrs[k] : null; },
+  getBoundingClientRect() { return { x: 0, y: 0, width: 40, height: 20 }; },
+}, extra || {});
+// SVG-namespace elements: lowercase tagName, no `hidden`, no `innerText`.
+const S = (tag, kids, attrs) => E(tag, kids, attrs, { hidden: undefined, namespaceURI: SVG_NS });
+// innerText leaves out SVG text, so text conditions reach the read-tree
+// fallback for it.
+doc.body = E('BODY', [
+  E('BUTTON', [T('Plain button')], {}, { innerText: 'Plain button' }),
+  S('svg', [S('style', [T('.cls-1{fill:none;stroke:red}')]), S('title', [T('SVGTITLELEAK')]), S('path', [])],
+    { role: 'button', 'aria-label': 'Close dialog' }),
+  S('svg', [S('g', [S('rect', [])], { role: 'button', 'aria-label': 'Zoom in' }), S('text', [T('Q3 revenue')])]),
+], {}, { innerText: 'Plain button' });
+globalThis.document = doc;
+let fail = 0;
+"#,
+        );
+        let element = crate::action::element_condition_expr;
+        let text = crate::action::text_condition_expr;
+        js += &probe("element Plain button", &element("Plain button"), true);
+        js += &probe("element svg[role=button]", &element("Close dialog"), true);
+        js += &probe("element g[role=button] in svg", &element("Zoom in"), true);
+        js += &probe("text svg <text> label", &text("Q3 revenue"), true);
+        js += &probe("text svg <style> css", &text("cls-1"), false);
+        js += &probe("text svg <title>", &text("SVGTITLELEAK"), false);
+        js += "if (!fail) console.log('svg condition fixtures pass');\nprocess.exit(fail);\n";
+        if let Some(out) = node_exec("svg-condition-fixtures", &js) {
+            assert!(
+                out.status.success(),
+                "a condition misread inline SVG:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 
     #[test]

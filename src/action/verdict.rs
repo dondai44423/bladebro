@@ -166,6 +166,11 @@ pub struct ClickEvidence<'a> {
     pub dispatched: bool,
 }
 
+/// Verdict tail when the post-action read went unanswered (busy main thread,
+/// context mid-transition): nothing was observed, so the effect is neither
+/// confirmed nor denied - never "navigated", never "no observable change".
+const UNANSWERED_EFFECT: &str = "effect unverified - the page did not answer the post-action read (busy or mid-navigation); observe before repeating";
+
 /// Compute a one-line outcome verdict from the action + delta + click info.
 /// This is the M1 verdict — every act tells the agent what happened.
 pub(super) fn compute_verdict(
@@ -204,6 +209,8 @@ pub(super) fn compute_verdict(
                     t.before.as_deref().unwrap_or("?"),
                     t.after.as_deref().unwrap_or("?")
                 )
+            } else if delta.unanswered {
+                format!("outcome: clicked via coord-click at {x:.0},{y:.0} - {UNANSWERED_EFFECT}")
             } else {
                 let state_note = toggle
                     .and_then(|t| t.after.as_deref())
@@ -252,6 +259,18 @@ pub(super) fn compute_verdict(
                 // box, no verified focus) - the one case that earns the word
                 // "no-effect". A retry is safe and may be the right move.
                 no_effect_verdict(tried, tgt_meta, toggle.and_then(|t| t.after.as_deref()))
+            } else if delta.unanswered {
+                // Dispatched, but the read after it saw nothing: the quiet
+                // verdict below would claim "no observable DOM change".
+                let on = if tgt_meta.is_empty() {
+                    String::new()
+                } else {
+                    format!(" on {tgt_meta}")
+                };
+                format!(
+                    "outcome: clicked via {}{on} - {UNANSWERED_EFFECT}",
+                    tried.join(", ")
+                )
             } else if tgt_meta.is_empty() {
                 clicked_quiet_verdict(tried, "", toggle.and_then(|t| t.after.as_deref()))
             } else {
@@ -292,6 +311,8 @@ pub(super) fn compute_verdict(
                 format!("outcome: pressed {key} \u{2192} dom-changed ({eff})")
             } else if delta.content_changed {
                 format!("outcome: pressed {key} \u{2192} dom-changed (content-only)")
+            } else if delta.unanswered {
+                format!("outcome: pressed {key} - {UNANSWERED_EFFECT}")
             } else {
                 format!("outcome: pressed {key}")
             }
@@ -345,6 +366,8 @@ pub(super) fn compute_verdict(
         Action::Back => {
             if delta.navigated {
                 format!("outcome: navigated back \u{2192} {}", shorten_url(&delta.url))
+            } else if delta.unanswered {
+                format!("outcome: back - {UNANSWERED_EFFECT}")
             } else {
                 "outcome: back (no navigation)".to_string()
             }
@@ -352,6 +375,8 @@ pub(super) fn compute_verdict(
         Action::Forward => {
             if delta.navigated {
                 format!("outcome: navigated forward \u{2192} {}", shorten_url(&delta.url))
+            } else if delta.unanswered {
+                format!("outcome: forward - {UNANSWERED_EFFECT}")
             } else {
                 "outcome: forward (no navigation)".to_string()
             }
@@ -366,6 +391,8 @@ pub(super) fn compute_verdict(
                 format!("outcome: hovered {ref_id} \u{2192} dom-changed ({eff})")
             } else if delta.content_changed {
                 format!("outcome: hovered {ref_id} \u{2192} dom-changed (content-only)")
+            } else if delta.unanswered {
+                format!("outcome: hovered {ref_id} - {UNANSWERED_EFFECT}")
             } else {
                 format!("outcome: hovered {ref_id}")
             }

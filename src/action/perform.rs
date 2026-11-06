@@ -956,7 +956,9 @@ pub async fn perform_with_network(
         if let Some(t) = coord_toggle.as_mut() {
             t.after = coord_toggle_probe(cdp, *x, *y).await;
         }
-        if !delta.navigated && delta.is_empty() && !delta.content_changed {
+        // An unanswered read means the page is busy: the probe would wait
+        // out its own timeout, and the unverified verdict does not use it.
+        if !delta.navigated && delta.is_empty() && !delta.content_changed && !delta.unanswered {
             coord_hit = hit_probe(cdp, *x, *y).await.unwrap_or(None);
         }
     }
