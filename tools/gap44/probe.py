@@ -487,6 +487,8 @@ finally:
             except subprocess.TimeoutExpired:
                 p.terminate()
         stderr_text = errf.read_text(errors="replace")
+        replies = [json.loads(l) for l in captured["out"].splitlines() if l.strip().startswith("{")]
+        last_reply = replies[-1] if replies else {}
         # Scan LOG files only — the fingerprint config legitimately keeps the
         # proxy value in private 0600 state (needed for the change warning);
         # the G13 contract is about launch/error/MCP LOGS.
@@ -498,14 +500,28 @@ finally:
                         home_hits.append(str(f))
                 except Exception:
                     pass
-        return captured["out"], stderr_text, home_hits
+        return captured["out"], stderr_text, home_hits, last_reply
 
-    out1, err1, hits1 = mcp_proxy_run(f"http://user:{secret}@127.0.0.1:9")
-    ok = secret not in out1 and secret not in err1 and not hits1 and "credentials redacted" in err1
-    check("G13 valid proxy: secret never logged, endpoint redacted (MCP lane)",
-          ok, short(f"hits={hits1} err_tail={err1[-200:]}"))
+    # A credentialed proxy can never work: Chrome's --proxy-server cannot
+    # authenticate, and the password would sit in Chrome's argv for any local
+    # process to read. The launch refuses it before anything is spawned, names
+    # the fix and redacts the value; the tool call is an error, not a silent
+    # failure to load pages.
+    out1, err1, hits1, reply1 = mcp_proxy_run(f"http://user:{secret}@127.0.0.1:9")
+    refused1 = bool(reply1.get("result", {}).get("isError"))
+    ok = (secret not in out1 and secret not in err1 and not hits1 and refused1
+          and "credentials are not supported" in err1 and "(value redacted)" in err1)
+    check("G13 credentialed proxy: refused before launch, secret never logged, value redacted (MCP lane)",
+          ok, short(f"hits={hits1} refused={refused1} err_tail={err1[-200:]}"))
 
-    out2, err2, hits2 = mcp_proxy_run(f"http://user:{secret}@host:notaport")
+    # The refusal is about credentials, not proxies: a plain endpoint is still
+    # handed to Chrome (here a dead loopback proxy, so only the launch matters).
+    out3, err3, hits3, reply3 = mcp_proxy_run("http://127.0.0.1:9")
+    accepted = not reply3.get("result", {}).get("isError") and "invalid BLADE_PROXY" not in err3
+    check("G13 credential-free proxy is still accepted (MCP lane)",
+          accepted, short(f"hits={hits3} err_tail={err3[-200:]}"))
+
+    out2, err2, hits2, _ = mcp_proxy_run(f"http://user:{secret}@host:notaport")
     ok = (secret not in out2 and secret not in err2 and not hits2
           and "invalid BLADE_PROXY" in (out2 + err2))
     check("G13 malformed proxy: fails redacted, names the problem",
