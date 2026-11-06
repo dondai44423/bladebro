@@ -277,13 +277,42 @@ async function consoleCapture() {
     'new Number(3)', "new String('ab')", 'new Boolean(false)', "({n:new Number(1),s:new String('x'),b:new Boolean(true)})",
     'Object.create(Number.prototype)', 'Object(1n)', '[1n,2n]', 'new BigInt64Array([1n,2n])',
     '(function(){var a=[1,2];a.push(a);return a;})()', '[1n,[2,[3n,null,undefined]],{},new Number(4)]',
-    '({t:new BigUint64Array([5n])})']) {
+    '({t:new BigUint64Array([5n])})',
+    // Keys JSON omits do not use up the work budget: thousands of methods or
+    // undefined fields before the data still log the data.
+    "(function(){var o={};for(var i=0;i<2100;i++)o['f'+i]=function(){};o.z=1;return o;})()",
+    "(function(){var o={};for(var i=0;i<2500;i++)o['u'+i]=undefined;o.z=[1,{y:2}];return o;})()",
+    "(function(){var o={};for(var i=0;i<3000;i++)o['s'+i]=Symbol();return o;})()",
+    "(function(){var o={};for(var i=0;i<3000;i++)o['k'+i]=i;return o;})()", 'Array.from({length:500},function(_,i){return i;})',
+    "(function(){return arguments;})(1,'a')", 'new (class P{constructor(){this.x=1;}m(){}})()',
+    'Object.assign(Object.create({inh:1}),{own:2})', "({toString:function(){return 'x';},a:1})",
+    'new Float64Array([0.1,-0,NaN])', 'new Array(3)', '(function(){var a=[];a[5]=1;return a;})()',
+    '({a:NaN,b:-Infinity,c:[Infinity]})', "({s:'\\ud800x'})", 'new ArrayBuffer(8)', 'new DataView(new ArrayBuffer(2))',
+    '/re/g', 'Promise.resolve(1)', "Object(Symbol('b'))", 'new Set([1])',
+    "[1n,[2,[3]],new String('ab'),true,null]", '[new Date(0),1n]', '[function f(){return 1},1n]']) {
     vm.runInContext(`console.log(${c})`, ctx);
     assert.equal(last(), old(c), c);
   }
-  // A cut by the work cap (not by the 400-char window) is marked, not silent.
-  vm.runInContext('var wc={};for(var i=0;i<2100;i++)wc["f"+i]=function(){};wc.z=1;console.log(wc);', ctx);
-  assert.equal(last(), '{\u2026', 'a work-cap cut is marked');
+  // Values whose String(v) fallback threw, so the old capture dropped the
+  // whole entry: they are logged now.
+  for (const [c, want] of [["[Symbol('x'),1n]", 'Symbol(x),1'],
+    ['(function(){var r=Proxy.revocable({},{});r.revoke();return r.proxy;})()', '[object Object]']]) {
+    assert.throws(() => old(c), e => e.name === 'TypeError', c);
+    const n = ring.length;
+    vm.runInContext(`console.log(${c})`, ctx);
+    assert.equal(ring.length, n + 1, c);
+    assert.equal(last(), want, c);
+  }
+  // The work budget is a backstop for output-free nesting only, and a cut by
+  // it is marked, not silent.
+  vm.runInContext('var deep=[];for(var i=0;i<2500;i++)deep=[deep];console.log([1n,deep]);', ctx);
+  assert.equal(last(), '1,\u2026', 'a work-cap cut is marked');
+  // A Proxy's traps still run (the comment says which), but never its get
+  // trap for a plain object: values come from own data descriptors.
+  vm.runInContext('var traps={};var pr=new Proxy({a:1,b:{c:[2]}},{get:function(t,k,r){traps.get=(traps.get||0)+1;return Reflect.get(t,k,r);},ownKeys:function(t){traps.ownKeys=1;return Reflect.ownKeys(t);},getOwnPropertyDescriptor:function(t,k){traps.gopd=1;return Reflect.getOwnPropertyDescriptor(t,k);},getPrototypeOf:function(t){traps.proto=1;return Reflect.getPrototypeOf(t);}});console.log(pr);', ctx);
+  assert.equal(last(), '{"a":1,"b":{"c":[2]}}');
+  assert.equal(g.traps.get, undefined, 'no get trap on a proxied plain object');
+  assert.deepEqual([g.traps.ownKeys, g.traps.gopd, g.traps.proto], [1, 1, 1], 'ownKeys, getOwnPropertyDescriptor and getPrototypeOf traps run');
   // Bounded: a large value costs a few hundred property reads, not all of them.
   vm.runInContext('var reads=0,big=[];for(var i=0;i<200000;i++)big.push({i:i,s:"xxxxxxxx"});var pbig=new Proxy(big,{get:function(t,k,r){reads++;return Reflect.get(t,k,r);},getOwnPropertyDescriptor:function(t,k){reads++;return Reflect.getOwnPropertyDescriptor(t,k);}});console.log(pbig);', ctx);
   assert.equal(last(), vm.runInContext('JSON.stringify(big).slice(0,400)', ctx), 'same first 400 chars');

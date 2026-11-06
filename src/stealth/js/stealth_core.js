@@ -195,17 +195,26 @@ try{
 var _uk=Symbol.for('q');
 var _uxa=[];
 // Entry serializer. Plain data (primitives, boxed primitives, arrays and
-// objects of data properties, typed arrays) reads exactly as JSON.stringify
-// wrote it, and where JSON.stringify threw (a BigInt or a cycle inside) as the
-// String(v) fallback did. But the walk runs no page code — accessors show as
-// "(...)" instead of being invoked, toJSON is honoured only for native
-// Date/URL and boxed values unwrap, all through natives captured here; DOM
-// nodes and windows read as their [object Tag] — and it stops once the
-// 400-char entry is full, or marks the cut with … when a value runs out of
-// its work budget first. JSON.stringify fired page getters/toJSON on every
-// logged argument (page-observable: the console trap the protocol layer
-// exists to avoid) and serialized the whole value before the cut (~20 ms per
-// log of a large array).
+// objects of data properties, typed arrays, Dates) reads exactly as
+// JSON.stringify wrote it, and where JSON.stringify threw (a BigInt or a cycle
+// inside) as the String(v) fallback did. JSON.stringify fired page
+// getters/toJSON on every logged argument (page-observable: the console trap
+// the protocol layer exists to avoid) and serialized the whole value before
+// the cut (~20 ms per log of a large array).
+// The walk calls no page function: accessors show as "(...)" instead of being
+// invoked, toJSON is honoured only for native Date/URL and boxed values
+// unwrap, all through natives captured here; DOM nodes and windows read as
+// their [object Tag]. A Proxy's traps still run, though:
+// ownKeys/getOwnPropertyDescriptor (Object.keys and the descriptor reads),
+// getPrototypeOf (the instanceof checks walk the chain) and get for an array
+// proxy's length.
+// Work is bounded by the 400-char entry: every counted step writes at least
+// one character. Keys JSON omits (undefined, function, symbol values) cost one
+// descriptor read each and are not counted: Object.keys has already listed
+// them all, as JSON.stringify's own scan did, so an object with thousands of
+// methods still logs its data. A 2000-step budget stays as a backstop for
+// output-free nesting in the String(v) fallback (each level also scans the
+// cycle stack); a cut by it ends with ….
 var _uj=JSON.stringify,_uks=Object.keys,_ud=Object.getOwnPropertyDescriptor,_uia=Array.isArray,_ura=Reflect.apply,_unow=Date.now,_uS=String;
 var _uhi=Function.prototype[Symbol.hasInstance],_uho=Object.prototype.hasOwnProperty,_uts=Object.prototype.toString,_ufs=Function.prototype.toString;
 var _uD=Date,_udt=Date.prototype.getTime,_udi=Date.prototype.toISOString,_uds=Date.prototype.toString;
@@ -255,10 +264,10 @@ function _uxs(v){
       put('{');
       var ks=_uks(x),first=true;
       for(i=0;i<ks.length;i++){
-        tick();d=_ud(x,ks[i]);if(!d)continue;
+        d=_ud(x,ks[i]);if(!d)continue;
         var data=_ura(_uho,d,['value']);
         if(data){var vt=typeof d.value;if(vt==='undefined'||vt==='function'||vt==='symbol')continue;}
-        put((first?'':',')+_uj(ks[i])+':');first=false;
+        tick();put((first?'':',')+_uj(ks[i])+':');first=false;
         if(data)val(d.value);else put('"(...)"');
       }
       put('}');
@@ -266,9 +275,11 @@ function _uxs(v){
     stk.length--;
     return true;
   }
-  // String(x) as Array.prototype.join builds it: null/undefined/holes read
-  // as '', a cycle as '', other objects as [object Object] without running
-  // their toString.
+  // String(x) as Array.prototype.join builds it, with natives only:
+  // null/undefined/holes read as '', a cycle as '', functions as their source,
+  // Dates as the native toString. Any other object reads as the fixed
+  // '[object Object]' (String(v) would have run its toString or a
+  // Symbol.toStringTag getter: page code), and an accessor element as (...).
   function str(x){
     var t=typeof x,b,d,i,n,arr;
     if(x===null||x===undefined)return true;
@@ -296,8 +307,11 @@ function _uxs(v){
     if(typeof v==='object'&&v!==null){var tg0=tag(v);if(tg0)return tg0;}
     return run(val);
   }catch(e){
-    // Where JSON.stringify throws (a BigInt or a cycle inside) the capture
-    // always fell back to String(v).
+    // Where JSON.stringify threw (a BigInt or a cycle inside), the capture
+    // fell back to String(v); str() rebuilds that string. If even str()
+    // throws (a revoked Proxy, or traps that throw), the entry reads the
+    // fixed '[object Object]': String(v) threw there too and the old
+    // capture dropped the whole entry.
     try{return run(str);}catch(e2){return '[object Object]';}
   }
 }
