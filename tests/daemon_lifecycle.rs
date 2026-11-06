@@ -13,10 +13,15 @@
 //! own, and an oversized request fails with a message instead of a bare
 //! "Broken pipe" error.
 //!
+//! Plus the busy daemon: a SIGTERM that lands while a request is in flight
+//! must not be lost, and `bladebro stop` must still stop a daemon that is
+//! too busy (or wedged) to answer.
+//!
 //! Subprocess-based with an isolated BLADE_HOME — no Chrome involved (the
 //! daemon binds lazily; Chrome starts on the first tool call only). Tests
 //! that send tool calls pin `BLADE_LANE=agent` and a missing `CHROME_PATH`,
-//! so a launch fails fast and the real-browser lane is never entered.
+//! so a launch fails fast and the real-browser lane is never entered; the
+//! one test that needs a launch in flight uses a stand-in browser script.
 
 #![cfg(unix)]
 
@@ -574,4 +579,121 @@ fn oversized_request_fails_with_an_actionable_message() {
     );
     assert!(alive, "the daemon must survive an oversized request");
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A stand-in browser: touches `started`, then exits during "startup"
+/// without ever opening a debug endpoint. The daemon's launch polls it,
+/// retries twice and reports a launch failure — seconds of a request in
+/// flight with no real Chrome.
+fn fake_chrome(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let started = dir.join("started");
+    let script = dir.join("fake-chrome");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\n: > '{}'\nsleep 1\nexit 1\n", started.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (script, started)
+}
+
+#[test]
+fn sigterm_during_a_request_is_not_lost() {
+    use std::io::Write;
+    let home = tmp_home("busy-signal");
+    let tools = tmp_home("busy-signal-bin");
+    let (chrome, started) = fake_chrome(&tools);
+    let mut cmd = Command::new(bin());
+    cmd.env("CHROME_PATH", &chrome)
+        .env("BLADE_LANE", "agent")
+        .env("BLADE_INCOGNITO", "0")
+        .env("BLADE_NO_WARMING", "1")
+        .env("BLADE_NO_UPDATE_CHECK", "1");
+    let mut daemon = start_daemon_with(&home, cmd);
+    let sock = home.join("cli.sock");
+    let client = std::thread::spawn(move || {
+        let mut stream = std::os::unix::net::UnixStream::connect(sock).unwrap();
+        stream
+            .write_all(b"{\"tool\":\"see\",\"args\":{\"mode\":\"content\"}}\n")
+            .unwrap();
+        let mut reply = String::new();
+        let _ = stream.read_to_string(&mut reply);
+        reply
+    });
+    // The request is now in flight: the daemon is launching its browser.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        if Instant::now() >= deadline {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+            panic!("the request never reached the browser launch");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    term(&daemon);
+    let status = wait_exit(&mut daemon, 30);
+    if status.is_none() {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+    }
+    let reply = client.join().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&tools);
+    let status =
+        status.expect("SIGTERM during a request was lost: daemon still running 30 s later");
+    assert!(status.success(), "daemon exit: {status:?}");
+    assert!(
+        reply.contains("\"ok\":false"),
+        "the in-flight request still gets its answer: {reply:?}"
+    );
+}
+
+#[test]
+fn stop_terminates_a_busy_daemon() {
+    let home = tmp_home("stop-busy");
+    let mut daemon = start_daemon(&home);
+    let sock = home.join("cli.sock");
+    // The daemon serves one connection at a time and waits up to 30 s for
+    // each request line: two silent clients keep it busy for a minute, so
+    // the stop request queues behind them and gets no answer in time.
+    let _first = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    let _second = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    let begun = Instant::now();
+    let stop = Command::new(bin())
+        .args(["--json", "stop"])
+        .env("BLADE_HOME", &home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Reap the daemon the moment it exits, as init does for a real one: a
+    // zombie child of this test would still look alive to stop's pid check.
+    let status = wait_exit(&mut daemon, 40);
+    if status.is_none() {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+    }
+    let output = stop.wait_with_output().unwrap();
+    let took = begun.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let sock_left = sock.exists();
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(
+        output.status.success(),
+        "stop on a busy daemon failed after {took:?}: {stdout}{stderr}"
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stop stdout must be one JSON object");
+    assert!(
+        value["text"].as_str().unwrap_or("").contains("terminated"),
+        "stop must say it terminated the daemon: {value}"
+    );
+    let status = status.expect("stop returned but the daemon is still running");
+    assert!(
+        status.success(),
+        "SIGTERM must still tear the daemon down gracefully: {status:?}"
+    );
+    assert!(!sock_left, "the socket must be gone after stop");
 }

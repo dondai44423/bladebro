@@ -181,30 +181,6 @@ pub(super) async fn shutdown_browser(b: crate::browser::Browser) {
     b.shutdown_gracefully().await;
 }
 
-/// Wait for a termination signal (SIGTERM/SIGINT/SIGHUP on
-/// Unix, Ctrl+C on Windows). Returns when the process should
-/// shut down gracefully. OpenCode and other harnesses kill
-/// MCP servers with SIGTERM — without this, Chrome + Xvfb
-/// are orphaned every time a session ends.
-pub(super) async fn wait_for_shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = signal(SignalKind::terminate()).ok();
-        let mut int = signal(SignalKind::interrupt()).ok();
-        let mut hup = signal(SignalKind::hangup()).ok();
-        tokio::select! {
-            _ = async { if let Some(s) = &mut term { s.recv().await } else { std::future::pending().await } } => {}
-            _ = async { if let Some(s) = &mut int { s.recv().await } else { std::future::pending().await } } => {}
-            _ = async { if let Some(s) = &mut hup { s.recv().await } else { std::future::pending().await } } => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
 /// Warm the profile on first run: navigate to a few top sites to seed
 /// cache, cookies, HSTS, and browsing history. Only runs once (when
 /// `~/.blade/.warmed` doesn't exist). Best-effort: failed navigations are

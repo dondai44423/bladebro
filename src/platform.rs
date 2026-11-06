@@ -3,12 +3,15 @@
 //! Every OS-specific operation lives here. The rest of the codebase
 //! calls these helpers — no `#[cfg]` outside this module (except for
 //! transport-level differences that can't be abstracted).
-//! `windows_job` owns kernel cleanup of the driver's browser descendants.
+//! `windows_job` owns kernel cleanup of the driver's browser descendants;
+//! `signals` owns the long-lived servers' termination-signal listeners.
 
 use std::path::PathBuf;
 use std::process::Child;
+mod signals;
 #[cfg(windows)]
 mod windows_job;
+pub(crate) use signals::ShutdownSignals;
 #[cfg(unix)]
 use std::time::Duration;
 #[cfg(windows)]

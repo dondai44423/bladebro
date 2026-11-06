@@ -10,10 +10,9 @@ use serde_json::{json, Value};
 
 use crate::error::{BladeError, Result};
 use crate::page::Page;
+use crate::platform::ShutdownSignals;
 
-use super::boot::{
-    idle_timeout_secs, launch_browser, shutdown_browser, wait_for_shutdown_signal, warm_profile,
-};
+use super::boot::{idle_timeout_secs, launch_browser, shutdown_browser, warm_profile};
 use super::proto::{handle_discover, handle_initialize, handle_tools_call, handle_tools_list};
 use super::{request_version, shape_result, SUPPORTED_VERSIONS};
 
@@ -30,13 +29,19 @@ use super::{request_version, shape_result, SUPPORTED_VERSIONS};
 /// The agent never sees "browser connection closed".
 ///
 /// Lifecycle guarantees (the reliability contract):
-/// - stdin EOF (client gone) → Chrome shut down, profile synced, exit.
-/// - SIGTERM/SIGINT/SIGHUP → same graceful teardown.
+/// - stdin EOF or a failed stdout write (client gone) → Chrome shut
+///   down, profile synced, exit.
+/// - SIGTERM/SIGINT/SIGHUP → same graceful teardown, at any moment: a
+///   tool call in flight is cancelled (see `call_tool`); a launch finishes
+///   first (cancelling it could orphan the half-started Chrome).
 /// - SIGKILL/panic → the next launch's orphan reaper kills
 ///   the leaked Chrome/Xvfb and removes the session profile.
 /// - A second bladebro NEVER touches this session's Chrome:
 ///   profiles are per-process (`~/.blade/profiles/sess-<pid>`).
 pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
+    // First, before anything can keep us busy: a signal that lands while
+    // a request is being handled must be buffered for the loop below.
+    let mut signals = ShutdownSignals::new(true);
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut input = Vec::new();
@@ -57,6 +62,11 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
     // Set when Chrome is relaunched after a crash/idle — the
     // next response tells the agent its page state was reset.
     let mut relaunch_note: Option<String> = None;
+    // Set only when the idle timer actually closed Chrome. Inferring it
+    // from "no page + idle time elapsed" also matched a client whose first
+    // call came after BLADE_IDLE_TIMEOUT, telling it Chrome "was restarted"
+    // when it had never run.
+    let mut idle_closed = false;
     // Fingerprint of the launch inputs the live browser started with; the
     // per-call drift check compares against it so `rb on|off` under a running
     // browser relaunches instead of being silently ignored.
@@ -77,7 +87,12 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
 
     loop {
         tokio::select! {
-            _ = wait_for_shutdown_signal() => {
+            // Signal first: once the host asked us to exit, never start
+            // another request (not even a launch). The rest keep their
+            // order; a tick missed during a burst of pipelined requests
+            // fires right after it (MissedTickBehavior::Delay).
+            biased;
+            _ = signals.recv() => {
                 eprintln!("[bladebro] termination signal — shutting down Chrome gracefully");
                 break;
             }
@@ -88,8 +103,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         Ok(line) => line,
                         Err(e) => {
                             let resp = json!({"jsonrpc":"2.0", "id":null, "error":{"code":-32700, "message":format!("Parse error: invalid UTF-8: {e}")}});
-                            writeln!(out, "{resp}")?;
-                            out.flush()?;
+                            if !send(&mut out, &resp) { break; }
                             continue;
                         }
                     },
@@ -114,9 +128,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                             "id": null,
                             "error": { "code": -32700, "message": format!("Parse error: {e}") }
                         });
-                        let resp_str = serde_json::to_string(&resp)?;
-                        writeln!(out, "{resp_str}")?;
-                        out.flush()?;
+                        if !send(&mut out, &resp) { break; }
                         continue;
                     }
                 };
@@ -129,9 +141,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         "id": if msg.is_object() { msg.get("id").cloned() } else { None },
                         "error": { "code": -32600, "message": "Invalid Request: expected an object with a string 'method'" }
                     });
-                    let resp_str = serde_json::to_string(&resp)?;
-                    writeln!(out, "{resp_str}")?;
-                    out.flush()?;
+                    if !send(&mut out, &resp) { break; }
                     continue;
                 }
 
@@ -155,9 +165,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                 "data": { "supportedVersions": SUPPORTED_VERSIONS },
                             }
                         });
-                        let resp_str = serde_json::to_string(&resp)?;
-                        writeln!(out, "{resp_str}")?;
-                        out.flush()?;
+                        if !send(&mut out, &resp) { break; }
                         continue;
                     }
                 };
@@ -174,8 +182,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                             }
                             let mut result = json!({"content":[{"type":"text","text":text}],"isError":true});
                             shape_result(&mut result, version);
-                            writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id,"result":result}))?;
-                            out.flush()?;
+                            if !send(&mut out, &json!({"jsonrpc":"2.0","id":id,"result":result})) { break; }
                         }
                         continue;
                     }
@@ -253,9 +260,10 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                 } else {
                                     "note: the real-browser lane is now OFF — bladebro detached from the attached browser (left running, untouched) and relaunched as the isolated agent browser. Page state reset to about:blank; navigate to continue.".into()
                                 });
-                            } else if page.is_none() && relaunch_note.is_none() && last_activity.elapsed().as_secs() > idle_secs && idle_secs > 0 {
+                            } else if idle_closed && relaunch_note.is_none() {
                                 // Post-idle relaunch: the agent's refs
                                 // are all gone. Say so explicitly.
+                                idle_closed = false;
                                 relaunch_note = Some(
                                     "note: Chrome was restarted after idle shutdown — page state reset to about:blank. Navigate to continue.".into()
                                 );
@@ -313,8 +321,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                         });
                                         // This early return bypasses the normal result shaping.
                                         shape_result(&mut result, version);
-                                        writeln!(out, "{}", json!({"jsonrpc":"2.0","id":id,"result":result}))?;
-                                        out.flush()?;
+                                        if !send(&mut out, &json!({"jsonrpc":"2.0","id":id,"result":result})) { break; }
                                     }
                                     continue;
                                 }
@@ -327,9 +334,11 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         let _hc_t = std::time::Instant::now();
                         let res = {
                             let p = page.as_mut().unwrap();
-                            futures_util::FutureExt::catch_unwind(
-                                std::panic::AssertUnwindSafe(handle_tools_call(id, &params, p)),
-                            ).await
+                            call_tool(&mut signals, handle_tools_call(id, &params, p)).await
+                        };
+                        let Some(res) = res else {
+                            cancelled_by_signal(&mut out, id_retry, is_notification, version);
+                            break;
                         };
                         if std::env::var("NAV_TIMING").is_ok() {
                             eprintln!("[nav-timing] handle_tools_call total: {:?}", _hc_t.elapsed());
@@ -376,9 +385,17 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                             );
                                             let id_retry2 = id_retry.clone();
                                             let p = page.as_mut().unwrap();
-                                            match handle_tools_call(id_retry2, &params, p).await {
-                                                Ok(v) => v,
-                                                Err(e) => {
+                                            // Same guard as the first attempt: a
+                                            // panic here used to unwind out of
+                                            // serve() and kill the whole session.
+                                            match call_tool(&mut signals, handle_tools_call(id_retry2, &params, p)).await {
+                                                None => {
+                                                    cancelled_by_signal(&mut out, id_retry, is_notification, version);
+                                                    break;
+                                                }
+                                                Some(Err(_)) => panicked(id_retry),
+                                                Some(Ok(Ok(v))) => v,
+                                                Some(Ok(Err(e))) => {
                                                     eprintln!("[bladebro] retry after reconnect failed: {e}");
                                                     json!({
                                                         "jsonrpc": "2.0",
@@ -437,9 +454,14 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                             &params["arguments"],
                                         ) => {
                                             let p = page.as_mut().unwrap();
-                                            match handle_tools_call(id_retry.clone(), &params, p).await {
-                                                Ok(v) => v,
-                                                Err(e2) => json!({
+                                            match call_tool(&mut signals, handle_tools_call(id_retry.clone(), &params, p)).await {
+                                                None => {
+                                                    cancelled_by_signal(&mut out, id_retry, is_notification, version);
+                                                    break;
+                                                }
+                                                Some(Err(_)) => panicked(id_retry),
+                                                Some(Ok(Ok(v))) => v,
+                                                Some(Ok(Err(e2))) => json!({
                                                     "jsonrpc": "2.0",
                                                     "id": id_retry,
                                                     "error": { "code": -32603, "message": e2.to_string() }
@@ -467,14 +489,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                     })
                                 }
                             }
-                            Err(_) => json!({
-                                "jsonrpc": "2.0",
-                                "id": id_retry,
-                                "error": {
-                                    "code": -32603,
-                                    "message": "internal panic in tool handler (see stderr) — session survived, retry or re-see",
-                                }
-                            }),
+                            Err(_) => panicked(id_retry),
                         };
                         // Revalidate GL liveness on a bounded cadence: a
                         // mid-session GPU crash degrades the browser to null
@@ -560,9 +575,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                     if is_notification {
                         continue;
                     }
-                    let resp_str = serde_json::to_string(&resp)?;
-                    writeln!(out, "{resp_str}")?;
-                    out.flush()?;
+                    if !send(&mut out, &resp) { break; }
                 }
             }
             _ = idle_check.tick() => {
@@ -621,6 +634,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                         shutdown_browser(b).await;
                     }
                     page = None;
+                    idle_closed = true;
                 }
             }
         }
@@ -658,4 +672,107 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
 async fn recover_dead_tab(page: &mut Page) -> Result<()> {
     let new_id = page.open_tab_target("about:blank").await?;
     page.switch_tab(&new_id).await
+}
+
+/// Write one JSON-RPC message line. `false` means the client is gone
+/// (EPIPE, closed pipe): the caller breaks to the graceful teardown, exactly
+/// like stdin EOF. Returning the error with `?` used to skip that teardown —
+/// owned Chrome dropped without its Browser.close flush, no login snapshot,
+/// no knowledge sync — whenever a client died before its response was due.
+fn send(out: &mut impl Write, msg: &Value) -> bool {
+    match writeln!(out, "{msg}").and_then(|_| out.flush()) {
+        Ok(()) => true,
+        Err(e) => {
+            // Not eprintln!: the dead client may have taken stderr with it,
+            // and a panic here would skip the teardown all the same.
+            let _ = writeln!(
+                std::io::stderr(),
+                "[bladebro] stdout write failed ({e}) — client gone, shutting down Chrome gracefully"
+            );
+            false
+        }
+    }
+}
+
+/// Answer a call cut short by a termination signal (the caller then breaks
+/// to the teardown). Its effect is unknowable: a click/submit may already
+/// have landed.
+fn cancelled_by_signal(
+    out: &mut impl Write,
+    id: Option<Value>,
+    is_notification: bool,
+    version: Option<&str>,
+) {
+    // Not eprintln!: a SIGHUP can mean the host (and its stderr) is gone.
+    let _ = writeln!(
+        std::io::stderr(),
+        "[bladebro] termination signal during a tool call — cancelled it; shutting down Chrome gracefully"
+    );
+    if is_notification {
+        return;
+    }
+    let mut result = json!({
+        "content": [{ "type": "text", "text": "\u{2717} bladebro is shutting down (termination signal): this call was cancelled mid-flight and its outcome is UNKNOWN. After the restart, inspect the destination before repeating it." }],
+        "isError": true,
+    });
+    shape_result(&mut result, version);
+    send(out, &json!({"jsonrpc":"2.0","id":id,"result":result}));
+}
+
+/// The answer to a tool handler that panicked (caught by `call_tool`).
+fn panicked(id: Option<Value>) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32603,
+            "message": "internal panic in tool handler (see stderr) — session survived, retry or re-see",
+        }
+    })
+}
+
+/// Run one tool call unless a termination signal arrives first (`None`).
+///
+/// Cancel rather than finish: a host sends SIGTERM once it has decided to
+/// end the session (MCP stdio shutdown: close stdin, wait, SIGTERM, then
+/// SIGKILL after a short grace), and stdin EOF is only noticed between
+/// calls. A long call (a navigate to a slow server, a `run` with waits)
+/// outlives that grace, so finishing it first forfeits the graceful Chrome
+/// flush the signal is meant to trigger. A panic is caught (`Some(Err)`)
+/// so one bad call never takes the whole session down.
+async fn call_tool<F>(
+    signals: &mut ShutdownSignals,
+    call: F,
+) -> Option<std::thread::Result<Result<Value>>>
+where
+    F: std::future::Future<Output = Result<Value>>,
+{
+    tokio::select! {
+        biased;
+        _ = signals.recv() => None,
+        res = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(call)) => Some(res),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every dispatch site (first attempt, crash retry, dead-tab retry) runs
+    // its handler through `call_tool`; this pins the guard they rely on.
+    #[tokio::test]
+    async fn call_tool_contains_a_panicking_handler() {
+        let mut signals = ShutdownSignals::new(false);
+        let handler = async {
+            if std::hint::black_box(true) {
+                panic!("tool handler bug");
+            }
+            Ok(Value::Null)
+        };
+        let res = call_tool(&mut signals, handler).await;
+        assert!(
+            matches!(res, Some(Err(_))),
+            "a handler panic must be caught, not unwind out of serve()"
+        );
+    }
 }

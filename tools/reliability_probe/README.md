@@ -73,7 +73,8 @@ records unsupported behavior on an older binary. Run under `capped` locally.
 `agent_contract.py` verifies actual MCP preflight rejection without an available
 browser, validation before navigation/input, complete plan validation, nested
 optional failures, failed batches, control-step URL handling, full eval/state/batch
-reads, JSON dialog/popup notices, marks isolation and schema completeness.
+reads, JSON dialog/popup notices, marks isolation, schema completeness and
+no idle-restart note on a first call made after the idle timeout.
 `BLADEBRO` chooses the binary; `POLISH_OUT` records requests, responses and timing.
 `--baseline` records failures against an older binary. Run under `capped`; all
 profiles and HTTP fixtures are disposable. Native desktop CI runs normal and
