@@ -2,8 +2,8 @@
 
 What is verified, on which platform, by which instrument. Every claim below
 points at a re-runnable instrument; everything not verified is listed as a gap.
-No perfect claims. Current release: 4.6.7 (2026-11-05). Local verification:
-2026-11-04 on Chromium 156.0.8078.79, Arch Linux x86_64.
+No perfect claims. Current release: 4.6.8 (2026-11-06). Local verification:
+2026-11-06 on Chromium 156.0.8078.79, Arch Linux x86_64.
 
 ## Platforms
 
@@ -42,6 +42,7 @@ is still needed to remove those toolchain diagnostics without suppression.
 | Chromium 156.0.8078.79 (local Arch Linux) | full local floor + persistence and agent-contract probes |
 | Google Chrome stable (CI Linux; runner Chrome on macOS/Windows) | CI tests + lifecycle x2 per OS |
 | Other Chromium forks (Helium, Brave, Edge) | discovery/wrapper mechanisms have fixtures; full engine-specific GUI runs not verified |
+| Flatpak `org.chromium.Chromium` 156 (Flathub, Flatpak 1.18.4) | discovery, sandboxed launch, host-side persistence and download verified on Linux x86_64 (author run); Steam Deck not run |
 
 ## Feature to instrument
 
@@ -65,6 +66,7 @@ is still needed to remove those toolchain diagnostics without suppression.
 | Stock-parity (page-visible differences) | `tools/diff_oracle/oracle.py` |
 | Cold start, all 5 lanes, owned-process hygiene | `tools/lane_matrix.py all 5` |
 | Real-browser lane attachment | `tools/rb_live/attach_drift.py` (run when the lane changes) |
+| Flatpak discovery, sandboxed launch, teardown | `browser::flatpak` + `platform` sandbox-pid tests; a local Flatpak run |
 | npm packaging, MCP over the package | `tools/dsh_probe/` (CI) + `scripts/publish-npm.sh` verify step |
 
 ## Not verified (gaps)
@@ -75,6 +77,7 @@ is still needed to remove those toolchain diagnostics without suppression.
 - Real-network proxies and proxy chains: G10 evidence uses a local forward
   proxy; behavior behind commercial proxies is untested.
 - Other Chromium forks: full engine-specific GUI behavior remains unverified; forked launch and cleanup fixtures use stock Chromium.
+- Flatpak browsers: discovery, sandboxed launch, persistence and teardown were verified on Flatpak 1.18.4 (Linux x86_64); a physical Steam Deck/Silverblue host and uploads into the sandbox were not run.
 - Scanned/image PDFs: out of scope by design (download hands the bytes to
   host tooling; no OCR layer in the driver).
 - Physical ARM64/Pi browser host and personal Mac/Windows GUI: native desktop
