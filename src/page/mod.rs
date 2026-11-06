@@ -381,22 +381,7 @@ impl Page {
         } else {
             intercept::InterceptState::parse_classes(spec)
         };
-        let was = self.intercept.rules();
-        self.intercept.set_rules(mask);
-        if mask != 0 && was == 0 {
-            // Enable interception: pause every request so we can decide.
-            self.cdp
-                .send(
-                    "Fetch.enable",
-                    Some(serde_json::json!({ "patterns": [{ "urlPattern": "*" }] })),
-                )
-                .await?;
-        } else if mask == 0 && was != 0 {
-            // Drain anything still paused, then stop intercepting.
-            self.intercept.drain_pending_requests(&self.cdp).await;
-            self.cdp.send("Fetch.disable", None).await?;
-        }
-        Ok(mask)
+        self.intercept.apply_rules(&self.cdp, mask).await
     }
 
     /// Persist the agent's explicit resource-block choice for the domain of

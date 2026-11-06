@@ -115,11 +115,45 @@ impl InterceptState {
         if url.is_empty() {
             return;
         }
-        let host = url_host(url);
-        let domain = registrable_domain(&host);
+        // Only http(s) pages have a site to be first-party to. `about:blank`
+        // used to become "about" (every request third-party) and a `data:`
+        // URL took the domain of whatever URL its payload happened to embed.
+        // "" = unknown origin: tracker blocking stands down (see should_block).
+        // A blob: URL carries its creator's origin (blob:https://site/<uuid>)
+        // and the page is same-origin with it, so it keeps that site.
+        let url = url.strip_prefix("blob:").unwrap_or(url);
+        let domain = if url.starts_with("http://") || url.starts_with("https://") {
+            registrable_domain(&url_host(url))
+        } else {
+            String::new()
+        };
         if let Ok(mut d) = self.page_domain.write() {
             *d = domain;
         }
+    }
+
+    /// The verdict for one paused request (true = fail it).
+    ///
+    /// The main frame's own document is the page being loaded, never a
+    /// third party to it — so it is never blocked, and it moves the
+    /// third-party baseline to the new site BEFORE that site's subresources
+    /// arrive. The baseline used to follow only the post-navigation
+    /// recapture: navigating from site A to a tracker-listed domain
+    /// (sentry.io, posthog.com, …) judged the new document against A and
+    /// failed the navigation with BlockedByClient, and the new site's own
+    /// scripts were blocked as third-party trackers. Iframe documents keep
+    /// the normal rules (ad frames are a large part of the saving).
+    ///
+    /// The baseline moved here is provisional: if that request never
+    /// commits (a download, a 204, a cancelled navigation) the old page
+    /// stays loaded but is judged against the new site until the next
+    /// recapture (Page::recapture) resets the baseline from the live URL.
+    fn verdict(&self, resource_type: &str, url: &str, frame_id: &str, main_frame: &str) -> bool {
+        if resource_type == "Document" && !main_frame.is_empty() && frame_id == main_frame {
+            self.set_page_url(url);
+            return false;
+        }
+        should_block(resource_type, url, self.rules(), &self.page_domain())
     }
 
     fn page_domain(&self) -> String {
@@ -194,9 +228,12 @@ pub fn registrable_domain(host: &str) -> String {
     last2
 }
 
-/// Third-party tracker/analytics/ad domains. Matched against the
-/// registrable domain of a THIRD-PARTY request only. Deliberately
-/// excludes bot-detection vendors (see NEVER_BLOCK).
+/// Third-party tracker/analytics/ad domains, checked for THIRD-PARTY
+/// requests only. Matched as a host suffix on a label boundary (see
+/// `tracker_host`): a registrable-domain entry covers its subdomains, a
+/// host entry (`snap.licdn.com`) covers only that host and below — never
+/// the rest of its registrable domain. Deliberately excludes
+/// bot-detection vendors (see NEVER_BLOCK).
 const TRACKER_DOMAINS: &[&str] = &[
     // Google ads/analytics (not the bot-detection side)
     "doubleclick.net",
@@ -322,6 +359,16 @@ const NEVER_BLOCK_DOMAINS: &[&str] = &[
     "geetest.com",
 ];
 
+/// `host` is a TRACKER_DOMAINS entry or a subdomain of one. Comparing
+/// the request's registrable domain instead could never match the
+/// host-level entries (`ads.twitter.com` reduces to `twitter.com`).
+fn tracker_host(host: &str) -> bool {
+    TRACKER_DOMAINS.iter().any(|t| {
+        host.strip_suffix(t)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
+    })
+}
+
 /// Decide whether a request should be blocked.
 ///
 /// `resource_type`: CDP Network.ResourceType string ("Image", "Script", ...).
@@ -361,7 +408,7 @@ pub fn should_block(resource_type: &str, url: &str, rules: u32, page_domain: &st
     // only third-party, never same-site.
     if rules & BLOCK_TRACKERS != 0 {
         let third_party = !page_domain.is_empty() && req_domain != page_domain;
-        if third_party && TRACKER_DOMAINS.contains(&req_domain.as_str()) {
+        if third_party && tracker_host(&host) {
             return true;
         }
     }
@@ -373,10 +420,14 @@ pub fn should_block(resource_type: &str, url: &str, rules: u32, page_domain: &st
 /// every `Fetch.requestPaused` immediately with a block/continue
 /// verdict. Runs for the life of the session; only receives events
 /// while Fetch is enabled (i.e. while blocking is active).
+/// `main_frame` is the page's main frame id (`Page.getFrameTree`; stable
+/// across navigations), which tells the page's own document apart from
+/// iframe documents.
 pub async fn run_interception(
     cdp: CdpSession,
     state: InterceptState,
     mut events: SessionSubscription,
+    main_frame: String,
 ) {
     loop {
         let event = match events.recv().await {
@@ -408,11 +459,10 @@ pub async fn run_interception(
             .get("resourceType")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let frame_id = params.get("frameId").and_then(|v| v.as_str()).unwrap_or("");
 
         state.add_pending(request_id);
-        let rules = state.rules();
-        let page_domain = state.page_domain();
-        let block = should_block(resource_type, url, rules, &page_domain);
+        let block = state.verdict(resource_type, url, frame_id, &main_frame);
 
         let verdict = if block {
             cdp.send(
@@ -450,6 +500,41 @@ pub async fn run_interception(
 }
 
 impl InterceptState {
+    /// Switch to the `mask` block classes, toggling the CDP Fetch domain on
+    /// the off/on edges so interception costs nothing while blocking is off.
+    ///
+    /// The mask is stored before the toggle (the first requests a fresh
+    /// Fetch.enable pauses must already see it) and rolled back if the
+    /// toggle fails. The stored mask is both what `state block get` reports
+    /// and what decides whether the next call toggles: left in place after
+    /// a failed Fetch.enable it reported blocking that was not happening,
+    /// and every later call (including navigate's stored per-domain config)
+    /// saw a non-zero mask and never retried the enable.
+    pub async fn apply_rules(&self, cdp: &CdpSession, mask: u32) -> crate::error::Result<u32> {
+        let was = self.rules();
+        self.set_rules(mask);
+        let toggled = if mask != 0 && was == 0 {
+            // Enable interception: pause every request so we can decide.
+            cdp.send(
+                "Fetch.enable",
+                Some(serde_json::json!({ "patterns": [{ "urlPattern": "*" }] })),
+            )
+            .await
+            .map(drop)
+        } else if mask == 0 && was != 0 {
+            // Drain anything still paused, then stop intercepting.
+            self.drain_pending_requests(cdp).await;
+            cdp.send("Fetch.disable", None).await.map(drop)
+        } else {
+            Ok(())
+        };
+        if let Err(e) = toggled {
+            self.set_rules(was);
+            return Err(e);
+        }
+        Ok(mask)
+    }
+
     /// Re-allow any still-paused requests (used before Fetch.disable
     /// so nothing is left hung). Best-effort.
     pub async fn drain_pending_requests(&self, cdp: &CdpSession) {
@@ -556,6 +641,47 @@ mod tests {
     }
 
     #[test]
+    fn host_level_tracker_entries_match() {
+        let r = BLOCK_TRACKERS;
+        // Entries that name a single host (not a registrable domain) must
+        // match that host and its subdomains.
+        for url in [
+            "https://snap.licdn.com/li.lms-analytics/insight.min.js",
+            "https://ads.twitter.com/uwt.js",
+            "https://analytics.twitter.com/i/adsct",
+            "https://px.ads.twitter.com/x.gif",
+            "https://connect.facebook.net/en_US/fbevents.js",
+            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+        ] {
+            assert!(should_block("Script", url, r, "example.com"), "{url}");
+        }
+        // ...without widening to the rest of their registrable domain, and
+        // only on a label boundary.
+        for url in [
+            "https://twitter.com/home",
+            "https://platform.twitter.com/widgets.js",
+            "https://static.licdn.com/aero/app.js",
+            "https://notads.twitter.com/x.js",
+        ] {
+            assert!(!should_block("Script", url, r, "example.com"), "{url}");
+        }
+        // Still third-party only: the site's own tracker host is first-party.
+        assert!(!should_block(
+            "Script",
+            "https://ads.twitter.com/uwt.js",
+            r,
+            "twitter.com"
+        ));
+        // NEVER_BLOCK keeps winning over a host entry under google.com.
+        assert!(!should_block(
+            "Script",
+            "https://analytics.google.com/g/collect",
+            r,
+            "example.com"
+        ));
+    }
+
+    #[test]
     fn never_block_bot_detectors() {
         let r = BLOCK_IMAGES | BLOCK_FONTS | BLOCK_MEDIA | BLOCK_TRACKERS;
         // DataDome third-party script: never block
@@ -622,6 +748,43 @@ mod tests {
         ));
         st.set_page_url("https://shop.test/");
         assert_eq!(st.page_domain(), "shop.test");
+    }
+
+    #[test]
+    fn opaque_page_urls_have_no_site() {
+        let s = InterceptState::default();
+        s.set_page_url("https://www.example.co.uk/a");
+        assert_eq!(s.page_domain(), "example.co.uk");
+        // about:blank used to read as the site "about" (every request then
+        // third-party); a data: URL took the host its payload mentioned.
+        for url in [
+            "about:blank",
+            "data:text/html,<script src=https://www.google-analytics.com/a.js></script>",
+            "chrome-error://chromewebdata/",
+        ] {
+            s.set_page_url(url);
+            assert_eq!(s.page_domain(), "", "{url}");
+        }
+        // A blob: page belongs to the http(s) origin that created it, as it
+        // did before the http(s) gate.
+        s.set_page_url("blob:https://www.example.co.uk/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0");
+        assert_eq!(s.page_domain(), "example.co.uk");
+    }
+
+    #[test]
+    fn main_frame_document_is_never_blocked_and_moves_the_baseline() {
+        let s = InterceptState::default();
+        s.set_rules(BLOCK_TRACKERS);
+        s.set_page_url("https://example.com/");
+        assert!(!s.verdict("Document", "https://posthog.com/", "MAIN", "MAIN"));
+        assert_eq!(s.page_domain(), "posthog.com");
+        assert!(!s.verdict("XHR", "https://us.i.posthog.com/e/", "MAIN", "MAIN"));
+        // An iframe document is still subject to tracker rules.
+        assert!(s.verdict("Document", "https://ad.doubleclick.net/f", "SUB", "MAIN"));
+        assert_eq!(s.page_domain(), "posthog.com");
+        // Unknown main frame id: no exemption, no baseline move.
+        assert!(s.verdict("Document", "https://sentry.io/", "", ""));
+        assert_eq!(s.page_domain(), "posthog.com");
     }
 
     #[test]

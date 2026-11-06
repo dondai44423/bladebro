@@ -885,18 +885,29 @@ let fail = 0;
         // Runs the REAL detector against fixture documents (stubbed DOM):
         // the reddit wall, the reddit challenge, Cloudflare, a normal page,
         // and a long prose page that MENTIONS the wall (must not classify).
+        // Turnstile: a bare widget on an empty page is a wall; the same
+        // widget in a small login/contact form, or already solved, is not.
         let src =
             serde_json::to_string(super::block::DETECT_BLOCK_SCRIPT).expect("serialize detector");
         let mut js = String::from("const S = ");
         js.push_str(&src);
         js.push_str(
             r#";
+const FIELD = "input:not([type=hidden]):not([type=submit]):not([type=button])";
+const RESP = "input[name=cf-turnstile-response]";
 const cases = [
   ["wall", {t:"", x:"You've been blocked by network security. If you think you've been blocked by mistake, file a ticket below and we'll look into it. File a ticket", s:{}}, "reddit"],
   ["wall_whoa", {t:"", x:"Whoa there, pardner! Your request has been blocked due to a network policy.", s:{}}, "reddit"],
   ["challenge", {t:"Reddit", x:"", s:{"input[name=js_challenge]":1}}, "js-challenge"],
   ["challenge_token", {t:"Reddit", x:"", s:{"input[name=jsc_token]":1}}, "js-challenge"],
   ["cloudflare", {t:"Just a moment...", x:"Verifying you are human", s:{}}, "cloudflare"],
+  ["turnstile_wall", {t:"", x:"Verify you are human by completing the action below.", s:{".cf-turnstile":1}}, "cloudflare"],
+  ["turnstile_in_form", {t:"Contact us", x:"Write to our support team about orders, returns and invoices. ".repeat(20), s:{".cf-turnstile":1}}, null],
+  ["turnstile_wall_pending", {t:"", x:"Verify you are human by completing the action below.", s:{".cf-turnstile":1, [RESP]:{value:""}}}, "cloudflare"],
+  ["turnstile_wall_solved", {t:"", x:"Verify you are human by completing the action below.", s:{".cf-turnstile":1, [RESP]:{value:"0.token"}}}, null],
+  ["turnstile_login_form", {t:"Sign in", x:"Sign in to your account Email Password Remember me Forgot your password? Sign in No account? Sign up", s:{".cf-turnstile":1, [FIELD]:1}}, null],
+  ["turnstile_contact_form", {t:"Contact", x:"Contact us Message Send", s:{".cf-turnstile":1, "textarea":1}}, null],
+  ["challenge_platform_page", {t:"", x:"Checking your browser", s:{"script[src*=challenge-platform]":1}}, "cloudflare"],
   ["normal", {t:"GitHub", x:"Lots of ordinary content", s:{}}, null],
   ["reddit_humanity", {t:"Reddit - Prove your humanity", x:"Prove your humanity We're committed to safety and security. But not for bots.", h:"www.reddit.com", s:{".g-recaptcha":1}}, "reddit-humanity"],
   ["reddit_humanity_other_host", {t:"Reddit - Prove your humanity", x:"Prove your humanity We're committed to safety and security. But not for bots.", h:"example.com", s:{".g-recaptcha":1}}, "recaptcha"],
@@ -908,7 +919,7 @@ for (const [name, c, want] of cases) {
     title: c.t,
     body: { innerText: c.x, textContent: c.x },
     querySelectorAll: () => ({ length: 10 }),
-    querySelector: (sel) => (c.s[sel] ? {} : null)
+    querySelector: (sel) => (c.s[sel] ? (typeof c.s[sel] === "object" ? c.s[sel] : {}) : null)
   };
   globalThis.location = { hostname: c.h || "example.com" };
   const got = (0, eval)(S);
