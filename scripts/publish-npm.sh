@@ -130,7 +130,7 @@ if [[ "$ALL_OK" != true ]]; then
   echo "       If \`npm stage list\` shows an entry for this version, the publish is STAGED and" >&2
   echo "       awaits approval (npm stage approve <id>; interactive 2FA required)." >&2
   echo "       If it shows nothing, a publish may still be PROCESSING on the registry —" >&2
-  echo "       re-check `npm view` for a few more minutes before retrying, and never" >&2
+  echo "       re-check \`npm view\` for a few more minutes before retrying, and never" >&2
   echo "       republish a version the registry already accepted." >&2
   exit 1
 fi
@@ -161,7 +161,7 @@ if [ "$META_OK" != true ]; then
   echo "       If \`npm stage list\` shows an entry for this version, the publish is STAGED" >&2
   echo "       and awaits approval: npm stage approve <id> (interactive 2FA required)." >&2
   echo "       If it shows nothing, the publish may still be PROCESSING (re-check" >&2
-  echo "       `npm view` before doing anything) or it failed outright — never republish" >&2
+  echo "       \`npm view\` before doing anything) or it failed outright — never republish" >&2
   echo "       a version the registry already accepted." >&2
   exit 1
 fi

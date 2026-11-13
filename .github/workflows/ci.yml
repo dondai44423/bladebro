@@ -53,8 +53,10 @@ jobs:
       - name: Install Chrome (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb
           # Use the browser installed for this fixture, not a runner's Chromium wrapper.
           echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
