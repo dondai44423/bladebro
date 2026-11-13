@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.9] - 2026-11-13
+
 ### Added
 - `act upload` verifies delivery in the page — file count, name, size and the first byte — instead of trusting `DOM.setFileInputFiles`, and reports `not delivered: …` when the page cannot use the file. Under a Flatpak browser the file is copied into a per-process staging directory shared with the sandbox; native browsers still get the original path.
 - `BLADE_NO_ACTIVATE=1` never calls `Page.bringToFront`: clicks, navigation and vision act on the page without raising the browser window.
@@ -2202,7 +2204,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.8...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.9...HEAD
+[4.6.9]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.9
 [4.6.8]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.8
 [4.6.7]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.7
 [4.6.6]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.6
