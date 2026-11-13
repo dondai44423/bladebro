@@ -12,5 +12,9 @@
   "main": "bladebro.exe",
   "files": [
     "bladebro.exe"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dondai44423/bladebro.git"
+  }
 }
