@@ -15,6 +15,12 @@ const REJECT_SELECTORS: &[&str] = &[
     "#didomi-notice-disagree-button",
     ".qc-cmp2-summary-buttons button[mode=secondary]",
     "#truste-consent-reject",
+    // Amazon EU/UK/DE… banner (the knowledge base pre-seeds it for seven
+    // TLDs). It must be on this ladder or the reject policy can never click
+    // it: the stored-selector fast path replays only ladder selectors (#82),
+    // and the cold ladder had no Amazon entry — the pre-seed never ran
+    // (issue #85 item 1).
+    "#sp-cc-rejectall-link",
 ];
 
 /// The ladder's known-framework buttons for `BLADE_CONSENT=accept`.

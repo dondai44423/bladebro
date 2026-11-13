@@ -23,6 +23,7 @@ use tokio_tungstenite::tungstenite::Message;
 const ACCEPT: &str = "#onetrust-accept-btn-handler";
 const REJECT: &str = "#onetrust-reject-all-handler";
 const DIDOMI_REJECT: &str = "#didomi-notice-disagree-button";
+const AMAZON_REJECT: &str = "#sp-cc-rejectall-link";
 
 /// One visible button per id, all inside a cookie dialog.
 const PAGE_STUB: &str = r#"
@@ -233,6 +234,20 @@ fn unlisted_stored_selector_is_not_replayed() {
     assert_all_ran(&evals);
     assert_eq!(got.as_deref(), Some(REJECT));
     assert_eq!(clicked(&evals), [REJECT]);
+}
+
+/// Issue #85 item 1: the knowledge base pre-seeds Amazon's reject link, and
+/// the fast path replays a stored selector only when the reject policy's
+/// ladder lists it. Without the ladder entry the pre-seed could never run —
+/// the cold ladder had no Amazon button either.
+#[test]
+fn amazon_reject_link_is_on_the_reject_ladder() {
+    let Some((got, evals)) = run_case(None, &[&AMAZON_REJECT[1..]], AMAZON_REJECT) else {
+        return;
+    };
+    assert_all_ran(&evals);
+    assert_eq!(clicked(&evals), [AMAZON_REJECT], "the Amazon reject link was never clicked");
+    assert_eq!(got.as_deref(), Some(AMAZON_REJECT));
 }
 
 /// The fast path itself: a learned selector for the current policy is
