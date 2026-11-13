@@ -188,28 +188,36 @@ for artifact in target/release/bladebro \
 done
 
 # Native CI is a release gate. Push the commit before making a version tag.
+# BLADE_RELEASE_SKIP_CI=1 bypasses the gate: an operator-ordered release when
+# the runner fleet is broken (it prints a loud warning and is never the
+# default). Everything else — gates twice, all five artifacts, checksums,
+# asset count, npm order, Latest last — still runs.
 git push origin main
-RUN_ID=""
-for _ in $(seq 1 12); do
-    RUN_ID=$(gh run list --workflow CI --commit "$RELEASE_SHA" --event push --json databaseId --jq '.[0].databaseId // empty')
-    [[ -n "$RUN_ID" ]] && break
-    sleep 5
-done
-# Same-version recovery can change only release notes, which push CI skips.
-# Dispatch explicitly, but never accept a run for an advanced main branch.
-if [[ -z "$RUN_ID" ]]; then
-    [[ $(gh api "repos/$RELEASE_REPO/git/ref/heads/main" --jq .object.sha) == "$RELEASE_SHA" ]] || {
-        echo "ERROR: main advanced before release CI dispatch" >&2; exit 1;
-    }
-    gh workflow run CI --ref main
+if [[ -n "${BLADE_RELEASE_SKIP_CI:-}" ]]; then
+    echo "WARNING: BLADE_RELEASE_SKIP_CI is set — the native CI gate is SKIPPED for v$VERSION." >&2
+else
+    RUN_ID=""
     for _ in $(seq 1 12); do
-        RUN_ID=$(gh run list --workflow CI --commit "$RELEASE_SHA" --event workflow_dispatch --json databaseId --jq '.[0].databaseId // empty')
+        RUN_ID=$(gh run list --workflow CI --commit "$RELEASE_SHA" --event push --json databaseId --jq '.[0].databaseId // empty')
         [[ -n "$RUN_ID" ]] && break
         sleep 5
     done
+    # Same-version recovery can change only release notes, which push CI skips.
+    # Dispatch explicitly, but never accept a run for an advanced main branch.
+    if [[ -z "$RUN_ID" ]]; then
+        [[ $(gh api "repos/$RELEASE_REPO/git/ref/heads/main" --jq .object.sha) == "$RELEASE_SHA" ]] || {
+            echo "ERROR: main advanced before release CI dispatch" >&2; exit 1;
+        }
+        gh workflow run CI --ref main
+        for _ in $(seq 1 12); do
+            RUN_ID=$(gh run list --workflow CI --commit "$RELEASE_SHA" --event workflow_dispatch --json databaseId --jq '.[0].databaseId // empty')
+            [[ -n "$RUN_ID" ]] && break
+            sleep 5
+        done
+    fi
+    [[ -n "$RUN_ID" ]] || { echo "ERROR: no native CI run for $RELEASE_SHA" >&2; exit 1; }
+    gh run watch "$RUN_ID" --exit-status
 fi
-[[ -n "$RUN_ID" ]] || { echo "ERROR: no native CI run for $RELEASE_SHA" >&2; exit 1; }
-gh run watch "$RUN_ID" --exit-status
 
 # Optional additional candidate verification: run against the exact clean
 # version/build after native CI, BEFORE any public tag or package. The hook
