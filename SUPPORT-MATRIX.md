@@ -2,8 +2,8 @@
 
 What is verified, on which platform, by which instrument. Every claim below
 points at a re-runnable instrument; everything not verified is listed as a gap.
-No perfect claims. Current release: 4.6.8 (2026-11-06). Local verification:
-2026-11-06 on Chromium 156.0.8078.79, Arch Linux x86_64.
+No perfect claims. Current release: 4.6.9 (2026-11-13). Local verification:
+2026-11-13 on Chromium 157.0.8103.38, Arch Linux x86_64.
 
 ## Platforms
 
@@ -39,7 +39,7 @@ is still needed to remove those toolchain diagnostics without suppression.
 
 | Engine | Evidence |
 |---|---|
-| Chromium 156.0.8078.79 (local Arch Linux) | full local floor + persistence and agent-contract probes |
+| Chromium 157.0.8103.38 (local Arch Linux) | full local floor + persistence and agent-contract probes |
 | Google Chrome stable (CI Linux; runner Chrome on macOS/Windows) | CI tests + lifecycle x2 per OS |
 | Other Chromium forks (Helium, Brave, Edge) | discovery/wrapper mechanisms have fixtures; full engine-specific GUI runs not verified |
 | Flatpak `org.chromium.Chromium` 156 (Flathub, Flatpak 1.18.4) | discovery, sandboxed launch, host-side persistence and download verified on Linux x86_64 (author run); Steam Deck not run |
