@@ -684,6 +684,16 @@ mod tests {
     }
 
     #[test]
+    fn gl_limits_never_exceed_the_backend() {
+        // The audit's exact-value vectors only run on the captured i915
+        // profile; everywhere else the mask reports `min(profile, backend)`
+        // (#85 item 10, the glMaxTex DIVERGENT key).
+        let profile = gpu::test_profile();
+        let script = assemble_page_script(&plan(Some(&profile), None));
+        run_scenario("gl-limits", &script);
+    }
+
+    #[test]
     fn locale_is_normalized_to_bcp47() {
         for (raw, want) in [
             ("en_US", "en-US"),

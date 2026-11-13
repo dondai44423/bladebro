@@ -604,11 +604,36 @@ pub(super) fn build_gl_spoof(p: &GpuProfile) -> String {
     let ext_patch = build_ext_patch(p.ext1_nominal, p.ext2_nominal);
     format!(
         r#"try{{
-var _fv='{vendor}',_fr='{renderer}';
-var _glLimits={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mctu},36183:{msamples}}};
+{getparam}
+{precision_patch}
+{ext_patch}
+}}catch(e){{}}"#,
+        getparam = gl_getparameter_js(p),
+        precision_patch = precision_patch,
+        ext_patch = ext_patch,
+    )
+}
+
+/// The `getParameter` mask shared by the page and worker realms: vendor and
+/// renderer, then the profile's limits, viewport and precision ranges — each
+/// capped at what the backend itself answered. Claiming more than the
+/// software backend (llvmpipe, SwiftShader) can serve is a page-visible bug:
+/// a page that sizes a texture from MAX_TEXTURE_SIZE 16384 gets
+/// INVALID_VALUE where 8192 is the real ceiling, and MAX_SAMPLES 16 asks for
+/// multisampling the backend cannot create. The differential oracle flags the
+/// same gap (`glMaxTex`) on every software host (issue #85 item 10).
+/// Coherence with the claimed GPU is kept by the profile's value whenever the
+/// backend can serve it.
+fn gl_getparameter_js(p: &GpuProfile) -> String {
+    format!(
+        r#"var _fv='{vendor}',_fr='{renderer}';
+var _glCaps={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mctu},36183:{msamples}}};
 var _glVP=new Int32Array([{vp0},{vp1}]);
 var _glPtR=new Float32Array([{psr0},{psr1}]);
 var _glLwR=new Float32Array([{lwr0},{lwr1}]);
+function _glCap(m,n){{return (typeof n==='number'&&isFinite(n)&&n>0&&n<m)?n:m;}}
+function _glPair(m,n){{if(!n||n.length!==2||!(n[0]>0)||!(n[1]>0))return m;var lo=m[0]>n[0]?m[0]:n[0];var hi=m[1]<n[1]?m[1]:n[1];return new m.constructor([lo,hi]);}}
+function _glMin2(m,n){{if(!n||n.length!==2||!(n[0]>0)||!(n[1]>0))return m;return new m.constructor([m[0]<n[0]?m[0]:n[0],m[1]<n[1]?m[1]:n[1]]);}}
 function _mkGP(proto){{
   var orig=proto.getParameter;
   _defFn(proto,'getParameter',orig,function(th,a,og){{
@@ -616,18 +641,15 @@ function _mkGP(proto){{
     var p=a[0];
     if(p===37445)return _fv;
     if(p===37446)return _fr;
-    if(p===3386)return _glVP;
-    if(p===33902)return _glPtR;
-    if(p===33901)return _glLwR;
-    if(_glLimits[p]!==undefined)return _glLimits[p];
+    if(p===3386)return _glMin2(_glVP,r);
+    if(p===33902)return _glPair(_glPtR,r);
+    if(p===33901)return _glPair(_glLwR,r);
+    if(_glCaps[p]!==undefined)return _glCap(_glCaps[p],r);
     return r;
   }});
 }}
-_mkGP(WebGLRenderingContext.prototype);
-if(typeof WebGL2RenderingContext!=='undefined'){{_mkGP(WebGL2RenderingContext.prototype);}}
-{precision_patch}
-{ext_patch}
-}}catch(e){{}}"#,
+if(typeof WebGLRenderingContext!=='undefined')_mkGP(WebGLRenderingContext.prototype);
+if(typeof WebGL2RenderingContext!=='undefined'){{_mkGP(WebGL2RenderingContext.prototype);}}"#,
         vendor = p.gl_vendor,
         renderer = p.gl_renderer,
         mts = p.max_texture_size,
@@ -641,8 +663,6 @@ if(typeof WebGL2RenderingContext!=='undefined'){{_mkGP(WebGL2RenderingContext.pr
         psr1 = p.point_size_range[1],
         lwr0 = p.line_width_range[0],
         lwr1 = p.line_width_range[1],
-        precision_patch = precision_patch,
-        ext_patch = ext_patch,
     )
 }
 
@@ -758,45 +778,13 @@ try{{
     format!(
         r#"{helpers}
 try{{
-var _fv='{vendor}',_fr='{renderer}';
-var _glLimits={{3379:{mts},34024:{mrs},34076:{mcs},35661:{mctu},36183:{msamples}}};
-var _glVP=new Int32Array([{vp0},{vp1}]);
-var _glPtR=new Float32Array([{psr0},{psr1}]);
-var _glLwR=new Float32Array([{lwr0},{lwr1}]);
-function _mkGP(proto){{
-  var orig=proto.getParameter;
-  _defFn(proto,'getParameter',orig,function(th,a,og){{
-    var r=og.apply(th,a);
-    var p=a[0];
-    if(p===37445)return _fv;
-    if(p===37446)return _fr;
-    if(p===3386)return _glVP;
-    if(p===33902)return _glPtR;
-    if(p===33901)return _glLwR;
-    if(_glLimits[p]!==undefined)return _glLimits[p];
-    return r;
-  }});
-}}
-if(typeof WebGLRenderingContext!=='undefined')_mkGP(WebGLRenderingContext.prototype);
-if(typeof WebGL2RenderingContext!=='undefined')_mkGP(WebGL2RenderingContext.prototype);
+{getparam}
 {precision_patch}
 {ext_patch}
 }}catch(e){{}}
 {locale_patch}"#,
         helpers = PROXY_HELPERS,
-        vendor = p.gl_vendor,
-        renderer = p.gl_renderer,
-        mts = p.max_texture_size,
-        mrs = p.max_renderbuffer_size,
-        mcs = p.max_cube_map_size,
-        mctu = p.max_combined_tex_units,
-        msamples = p.max_samples,
-        vp0 = p.max_viewport_dims[0],
-        vp1 = p.max_viewport_dims[1],
-        psr0 = p.point_size_range[0],
-        psr1 = p.point_size_range[1],
-        lwr0 = p.line_width_range[0],
-        lwr1 = p.line_width_range[1],
+        getparam = gl_getparameter_js(p),
         precision_patch = precision_patch,
         ext_patch = ext_patch,
         locale_patch = locale_patch,

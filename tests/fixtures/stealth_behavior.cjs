@@ -107,6 +107,45 @@ function mockWindow() {
   return { ctx, g };
 }
 // The exact assembled page script (written by the inject.rs lib test).
+async function glLimits() {
+  // The mask may claim a GPU identity, never limits the backend cannot serve:
+  // llvmpipe answers MAX_TEXTURE_SIZE 8192, 16 combined units, 8 samples.
+  // A page that sizes a texture from a claimed 16384 gets INVALID_VALUE, and
+  // the differential oracle flags the same gap (issue #85 item 10).
+  const { ctx, g } = mockWindow();
+  class WebGLRenderingContext {
+    constructor() { this.native = { 3379: 8192, 35661: 16, 3386: new Int32Array([8192, 8192]), 33902: new Float32Array([1, 1024]), 33901: new Float32Array([1, 1]) }; }
+    getParameter(p) {
+      const v = this.native[p];
+      return v === undefined ? 0 : (typeof v === 'object' ? new v.constructor(v) : v);
+    }
+  }
+  class WebGL2RenderingContext extends WebGLRenderingContext {
+    constructor() { super(); this.native[36183] = 8; }
+  }
+  g.WebGLRenderingContext = WebGLRenderingContext;
+  g.WebGL2RenderingContext = WebGL2RenderingContext;
+  vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), ctx);
+  const one = new WebGLRenderingContext();
+  assert.equal(one.getParameter(3379), 8192, 'MAX_TEXTURE_SIZE capped at the backend');
+  assert.equal(one.getParameter(35661), 16, 'combined texture units capped at the backend');
+  assert.deepEqual(Array.from(one.getParameter(3386)), [8192, 8192], 'viewport dims capped at the backend');
+  assert.deepEqual(Array.from(one.getParameter(33902)), [1, 255], 'a range inside the backend keeps the profile');
+  assert.deepEqual(Array.from(one.getParameter(33901)), [1, 1], 'a range never exceeds the backend maximum');
+  const two = new WebGL2RenderingContext();
+  assert.equal(two.getParameter(36183), 8, 'MAX_SAMPLES capped at the backend');
+  // A backend with headroom: the profile's own value wins, unchanged.
+  class Wide extends WebGLRenderingContext {}
+  Wide.prototype.getParameter = function (p) {
+    return p === 3379 ? 32768 : p === 35661 ? 64 : WebGLRenderingContext.prototype.getParameter.call(this, p);
+  };
+  g.WebGLRenderingContext = Wide;
+  vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), ctx);
+  const wide = new Wide();
+  assert.equal(wide.getParameter(3379), 16384, 'profile value kept when the backend can serve it');
+  assert.equal(wide.getParameter(35661), 64, 'profile units kept when the backend can serve them');
+  console.log('GL limits never exceed the backend');
+}
 async function page() {
   const { ctx, g } = mockWindow();
   class SharedWorker {}
@@ -321,7 +360,7 @@ async function consoleCapture() {
   assert.ok(g.reads < 1000, `logging a 200k-element array read ${g.reads} properties`);
   console.log('console capture: no page code, plain values unchanged, bounded work');
 }
-const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp, noise, console: consoleCapture };
+const scenarios = { permissions, media, page, 'rtc-listeners': rtcListeners, 'rtc-sdp': rtcSdp, noise, 'gl-limits': glLimits, console: consoleCapture };
 // An unknown name must fail: falling back to a default scenario let a
 // misspelled scenario in a Rust test pass without checking anything.
 const scenario = Object.hasOwn(scenarios, process.argv[2]) ? scenarios[process.argv[2]]
