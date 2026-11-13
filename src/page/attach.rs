@@ -218,18 +218,9 @@ impl Page {
         //   used to kill the handler, freezing every later worker.
         let worker_gl = crate::stealth::worker_gl_spoof(active_locale.as_deref());
         if worker_gl.is_some() || crate::stealth::has_full_script() {
-            // The browser-level connection the shared-worker attach needs. In
-            // pipe mode it is the launch's own connection (already browser
-            // level); the WebSocket lane talks to the page target, so a
-            // second, browser-level connection is opened for it.
-            let browser = match browser_client.clone() {
-                Some(client) => Some(client),
-                None => browser_level_client(base).await,
-            };
             worker_task = Some(
                 start_auto_attach(
                     &cdp,
-                    browser,
                     worker_gl,
                     crate::stealth::full_script(),
                     std::env::var("BLADE_DBG_WORKERS").is_ok(),
@@ -844,7 +835,6 @@ impl Page {
 /// Page and aborted on Drop.
 async fn start_auto_attach(
     cdp: &CdpSession,
-    browser: Option<CdpClient>,
     worker_script: Option<String>,
     full_script: Option<String>,
     dbg: bool,
@@ -869,63 +859,19 @@ async fn start_auto_attach(
             })),
         )
         .await;
-    // Shared workers are never reported to a PAGE-level auto-attach: measured
-    // on Chromium 157, the page read the masked renderer while its own
-    // SharedWorker read the real one, because the constructor wrapper that
-    // used to cover them broke module workers and cross-tab sharing (#85
-    // item 5). They are attached at the BROWSER level instead — filtered to
-    // shared_worker, so nothing else is paused — and patched before their
-    // first line runs. Chrome without the `filter` parameter rejects this
-    // call and nothing is paused; the gap then stays.
-    let mut shared_rx = None;
-    // Held for the task's life: dropping the last client closes the
-    // connection and the subscription would end with it.
-    let mut shared_client = None;
-    if worker_script.is_some() {
-        if let Some(client) = browser {
-            let root = CdpSession::root(client.clone());
-            let shared = root.subscribe();
-            // Last matching filter entry wins in Chrome: the catch-all is
-            // first so the shared_worker entry decides for that type.
-            let attached = root
-                .send(
-                    "Target.setAutoAttach",
-                    Some(serde_json::json!({
-                        "autoAttach": true,
-                        "flatten": true,
-                        "waitForDebuggerOnStart": true,
-                        "filter": [
-                            {"type": "", "exclude": true},
-                            {"type": "shared_worker", "exclude": false}
-                        ]
-                    })),
-                )
-                .await;
-            match attached {
-                Ok(_) => {
-                    shared_rx = Some(shared);
-                    shared_client = Some(client);
-                }
-                Err(e) => {
-                    if dbg {
-                        eprintln!("[workers] shared-worker attach unavailable: {e:?}");
-                    }
-                }
-            }
-        }
-    }
+    // Shared workers are never reported to a page-level auto-attach
+    // (Chromium 157: the page read the masked renderer while its own
+    // SharedWorker read the real one). Attaching them at the browser level
+    // was tried and reverted: under CI it delayed the first page-level
+    // commands enough that the agent-contract probe's popup/dialog steps
+    // timed out on Linux and Windows. The constructor wrapper that used to
+    // cover them broke module workers, cross-tab sharing and relative
+    // importScripts (#86), so shared workers stay native and the mask gap is
+    // documented rather than paid for with either failure mode.
     let client = cdp.client().clone();
     tokio::spawn(async move {
-        let shared_client = shared_client;
         loop {
-            let received = match shared_rx.as_mut() {
-                Some(shared) => tokio::select! {
-                    page = rx.recv() => page,
-                    shared = shared.recv() => shared,
-                },
-                None => rx.recv().await,
-            };
-            match received {
+            match rx.recv().await {
                 Ok(event) if event.method == "Target.attachedToTarget" => {
                     let target_info = event.params.get("targetInfo");
                     let target_type = target_info
@@ -958,16 +904,10 @@ async fn start_auto_attach(
                     // per-target ordering (resume → eval → resume) is
                     // preserved inside the task, and tasks are
                     // bounded by the same 3–5s/30s command timeouts.
-                    // A browser-level attach event carries no envelope
-                    // session id; its target lives on the shared-worker
-                    // connection, while a page-level attach belongs to the
-                    // page's. Addressing a child session on the wrong
-                    // connection fails with "Session with given id not
-                    // found" — and the paused target then never resumes.
-                    let client = match (&event.session_id, &shared_client) {
-                        (None, Some(browser)) => browser.clone(),
-                        _ => client.clone(),
-                    };
+                    // A browser-level attach event would carry no envelope
+                    // session id; with only page-level auto-attach every
+                    // target belongs to this page's connection.
+                    let client = client.clone();
                     let worker_script = worker_script.clone();
                     let full_script = full_script.clone();
                     tokio::spawn(async move {
@@ -999,36 +939,28 @@ async fn start_auto_attach(
                         }
                         match target_type.as_str() {
                             "worker" | "shared_worker" => {
-                                // Once per target: a browser-level attach is
-                                // delivered to every Page sharing the
-                                // connection (pipe mode), and a worker must
-                                // not be patched twice.
                                 if let Some(ref script) = worker_script {
-                                    if mark_worker_once(
-                                        worker_session.session_id().unwrap_or_default(),
-                                    ) {
-                                        // Bounded: a pathological target
-                                        // must not stall the pipeline.
-                                        let res = worker_session
-                                            .send_with_timeout(
-                                                "Runtime.evaluate",
-                                                Some(serde_json::json!({
-                                                    "expression": script,
-                                                    "returnByValue": true,
-                                                })),
-                                                std::time::Duration::from_secs(5),
-                                            )
-                                            .await;
-                                        if dbg {
-                                            eprintln!(
-                                                "[workers] eval {target_type}: {}",
-                                                if res.is_ok() {
-                                                    "ok".to_string()
-                                                } else {
-                                                    format!("ERR {:?}", res.err())
-                                                }
-                                            );
-                                        }
+                                    // Bounded: a pathological target must not
+                                    // stall the pipeline.
+                                    let res = worker_session
+                                        .send_with_timeout(
+                                            "Runtime.evaluate",
+                                            Some(serde_json::json!({
+                                                "expression": script,
+                                                "returnByValue": true,
+                                            })),
+                                            std::time::Duration::from_secs(5),
+                                        )
+                                        .await;
+                                    if dbg {
+                                        eprintln!(
+                                            "[workers] eval {target_type}: {}",
+                                            if res.is_ok() {
+                                                "ok".to_string()
+                                            } else {
+                                                format!("ERR {:?}", res.err())
+                                            }
+                                        );
                                     }
                                 }
                             }
@@ -1114,34 +1046,6 @@ async fn start_auto_attach(
             }
         }
     })
-}
-
-/// The browser-level CDP connection for a page target's `base` endpoint
-/// (WebSocket lane). `None` when the endpoint answers no browser URL — the
-/// shared-worker attach is then skipped, never faked.
-async fn browser_level_client(base: &str) -> Option<CdpClient> {
-    let version = crate::cdp::version(base).await.ok()?;
-    let ws = version.web_socket_debugger_url?;
-    CdpClient::connect(&ws).await.ok()
-}
-
-/// One patch per worker target. In pipe mode every Page shares one browser
-/// connection, so each Page's browser-level auto-attach reports the same
-/// SharedWorker — and evaluating the worker script twice would stack a
-/// second proxy layer on the first.
-fn mark_worker_once(session_id: &str) -> bool {
-    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    if seen.iter().any(|s| s == session_id) {
-        return false;
-    }
-    // Session ids are unique per attach; drop the oldest half rather than
-    // growing without bound over a long session.
-    if seen.len() >= 256 {
-        seen.drain(..128);
-    }
-    seen.push(session_id.to_string());
-    true
 }
 
 /// Per-OS fallback UA for the rare case the version endpoint carried none.
@@ -1286,7 +1190,7 @@ mod auto_attach_tests {
         // and one created paused stayed paused forever.
         let (client, mut seen, _inject) = fake_browser(vec![attached("PAGE-A", "W1")]).await;
         let page = CdpSession::child(client, "PAGE-A");
-        let task = start_auto_attach(&page, None, Some("1".into()), None, false).await;
+        let task = start_auto_attach(&page, Some("1".into()), None, false).await;
         let mut log = Vec::new();
         let resumed = saw(&mut seen, &mut log, "W1", "Runtime.runIfWaitingForDebugger").await;
         task.abort();
@@ -1300,7 +1204,7 @@ mod auto_attach_tests {
         // fallback), so each patched and resumed the other's targets too.
         let (client, mut seen, inject) = fake_browser(Vec::new()).await;
         let page = CdpSession::child(client, "PAGE-A");
-        let task = start_auto_attach(&page, None, Some("1".into()), None, false).await;
+        let task = start_auto_attach(&page, Some("1".into()), None, false).await;
         let mut log = Vec::new();
         assert!(saw(&mut seen, &mut log, "PAGE-A", "Target.setAutoAttach").await);
         inject.send(attached("PAGE-B", "W-OTHER")).unwrap();

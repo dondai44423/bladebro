@@ -114,7 +114,7 @@ async function glLimits() {
   // the differential oracle flags the same gap (issue #85 item 10).
   const { ctx, g } = mockWindow();
   class WebGLRenderingContext {
-    constructor() { this.native = { 3379: 8192, 35661: 16, 3386: new Int32Array([8192, 8192]), 33902: new Float32Array([1, 1024]), 33901: new Float32Array([1, 1]) }; }
+    constructor() { this.native = { 3379: 8192, 35661: 16, 3386: new Int32Array([8192, 8192]), 33902: new Float32Array([1, 1]), 33901: new Float32Array([1, 1]) }; }
     getParameter(p) {
       const v = this.native[p];
       return v === undefined ? 0 : (typeof v === 'object' ? new v.constructor(v) : v);
@@ -130,8 +130,10 @@ async function glLimits() {
   assert.equal(one.getParameter(3379), 8192, 'MAX_TEXTURE_SIZE capped at the backend');
   assert.equal(one.getParameter(35661), 16, 'combined texture units capped at the backend');
   assert.deepEqual(Array.from(one.getParameter(3386)), [8192, 8192], 'viewport dims capped at the backend');
-  assert.deepEqual(Array.from(one.getParameter(33902)), [1, 255], 'a range inside the backend keeps the profile');
-  assert.deepEqual(Array.from(one.getParameter(33901)), [1, 1], 'a range never exceeds the backend maximum');
+  assert.deepEqual(Array.from(one.getParameter(33902)), [1, 1], 'a range never exceeds the backend maximum');
+  // The profile's own ranges differ per platform (Intel 255, Apple 511, …):
+  // the property is that the backend's narrower maximum wins, whatever it is.
+  assert.deepEqual(Array.from(one.getParameter(33901)), [1, 1], 'a second range clamps the same way');
   const two = new WebGL2RenderingContext();
   assert.equal(two.getParameter(36183), 8, 'MAX_SAMPLES capped at the backend');
   // A backend with headroom: the profile's own value wins, unchanged.
