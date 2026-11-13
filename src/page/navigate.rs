@@ -9,7 +9,10 @@ impl Page {
     /// recaptures and returns the delta. Shared by `act navigate`, `run`
     /// navigate steps, and the CLI `nav` command.
     pub async fn navigate(&mut self, url: &str) -> Result<PageDelta> {
-        self.activate().await?;
+        // A background tab navigates fine; raising the window is what #89
+        // reports, so only a target that is not its window's active tab is
+        // activated (Page::activate_if_needed).
+        self.activate_if_needed().await?;
         // S4+S5: track action timing for pacing + idle hum. The guard also
         // clears the flag when a caller's timeout drops this future.
         let _busy = BusyGuard::new(&self.is_busy, &self.last_action_epoch);

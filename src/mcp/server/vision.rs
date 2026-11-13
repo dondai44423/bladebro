@@ -92,8 +92,10 @@ pub async fn capture_vision(
     // Chromium throttles occluded/background renderers, so the call burns
     // its full CDP timeout and vision fails (reproduced live: vision right
     // after open-tab timed out at 30s, twice, on the new tab). Activate
-    // first; best-effort (fails harmlessly when the target is mid-detach).
-    let _ = page.cdp_ref().send("Page.bringToFront", None).await;
+    // only when the target is not already its window's active tab (#89:
+    // raising the window on macOS steals focus); best-effort (fails
+    // harmlessly when the target is mid-detach).
+    let _ = page.activate_if_needed().await;
 
     if marks {
         // V14: Set-of-Marks. Paint numbered ref badges on

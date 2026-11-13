@@ -646,6 +646,7 @@ Everything optional; configuration is environment variables.
 
 | Var | Default | What it does |
 |---|---|---|
+| `BLADE_NO_ACTIVATE` | unset | `1` = never raise the browser window: clicks, navigation and vision act on the page in place (`Page.bringToFront` is skipped even for a background tab) |
 | `BLADE_PACE` | on | `off` = disable the pacing governor (human inter-action gaps) |
 | `BLADE_NO_COMPRESS` | unset | `1` = disable context pruning |
 | `BLADE_NO_WARMING` | unset | `1` = skip first-run profile warming |

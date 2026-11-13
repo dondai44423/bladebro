@@ -544,8 +544,10 @@ impl Page {
         };
         // Chrome can foreground a popup while our model still belongs to the
         // opener. Activate before input; never replay an input after timeout.
+        // Only when the target is not already its window's active tab: on
+        // macOS Page.bringToFront raises the window over every other app (#89).
         if action.injects_input() {
-            self.activate().await?;
+            self.activate_if_needed().await?;
         }
         // S5: pacing governor — realistic inter-action gaps.
         self.pace(&action).await;

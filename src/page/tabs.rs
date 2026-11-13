@@ -13,6 +13,44 @@ impl Page {
         Ok(())
     }
 
+    /// Is this target still on screen as its window's active tab? A
+    /// background tab reports `document.visibilityState == "hidden"`; one
+    /// that is merely behind another application's window still reads
+    /// "visible". An answer we cannot read counts as inactive — the caller
+    /// then activates, which is the pre-#89 behavior.
+    pub async fn is_active_tab(&self) -> bool {
+        active_from_visibility(
+            self.cdp
+                .send_with_timeout(
+                    "Runtime.evaluate",
+                    Some(serde_json::json!({
+                        "expression": "document.visibilityState",
+                        "returnByValue": true,
+                    })),
+                    Duration::from_secs(2),
+                )
+                .await
+                .ok()
+                .as_ref(),
+        )
+    }
+
+    /// Activate only when this target is not already its window's active tab.
+    /// `Page.bringToFront` activates the browser window at the OS level on
+    /// macOS — every click and navigation used to raise it above whatever the
+    /// person was working in (issue #89). It is only needed when input would
+    /// otherwise go to a background tab (a popup took the foreground, #49).
+    /// `BLADE_NO_ACTIVATE=1` never raises the window, accepting that trade.
+    pub async fn activate_if_needed(&self) -> Result<()> {
+        if std::env::var("BLADE_NO_ACTIVATE").map(|v| v == "1").unwrap_or(false) {
+            return Ok(());
+        }
+        if self.is_active_tab().await {
+            return Ok(());
+        }
+        self.activate().await
+    }
+
     /// Evaluate a JS expression in an isolated world. The isolated world has
     /// DOM access but its own JavaScript context — anti-bot scripts in the
     /// main world cannot observe our queries via patched DOM methods or
@@ -272,5 +310,47 @@ impl Page {
             )
             .await
             .is_ok()
+    }
+}
+
+/// The activation decision from a `Runtime.evaluate` reply to
+/// `document.visibilityState`: only an explicit "visible" means the target is
+/// already its window's active tab, so `Page.bringToFront` is skipped. A
+/// hidden tab, an error or an unreadable reply activates — the pre-#89
+/// behavior, because input to a background tab was the #49 bug.
+fn active_from_visibility(reply: Option<&Value>) -> bool {
+    reply
+        .and_then(|r| r.get("result"))
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        == Some("visible")
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_a_visible_page_skips_activation() {
+        for (reply, active) in [
+            (
+                Some(json!({"result": {"type": "string", "value": "visible"}})),
+                true,
+            ),
+            (
+                Some(json!({"result": {"type": "string", "value": "hidden"}})),
+                false,
+            ),
+            (Some(json!({"result": {}})), false),
+            (Some(json!({"error": {"message": "target gone"}})), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                active_from_visibility(reply.as_ref()),
+                active,
+                "{reply:?}"
+            );
+        }
     }
 }
