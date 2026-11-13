@@ -471,7 +471,7 @@ Six layers, all on by default, no config needed:
 
 | Test | Result |
 |---|---|
-| 111-check local suite + boot self-check + drift stamp (`bladebro audit`) | 111/111 pass, stamps stable |
+| Stealth vector suite + boot self-check + drift stamp (`bladebro audit`) | every vector passes at the suite's own total, stamps stable |
 | Differential oracle vs stock Chrome on the same display (`tools/diff_oracle`) | 99 probes: identical or documented mask surface in every profile state, **0 divergent** |
 | Real-browser lane vs stock Chrome (`oracle.py --lane real`) | 99 probes: **all identical, 0 expected, 0 divergent** — the lane carries no page patches |
 | CreepJS | **headless: 0%, stealth: 0%** (stock Chrome on the same lane: 0%/0%) |
@@ -670,7 +670,7 @@ Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME
 | Command | What it does |
 |---|---|
 | `bladebro -doc` / `bladebro doctor` | System check — Chrome, display, profile hygiene, logins, data root, network, version |
-| `bladebro audit` | Stealth audit — 111-check suite + boot self-check + cross-restart drift stamp, against your setup |
+| `bladebro audit` | Stealth audit — the vector suite + boot self-check + cross-restart drift stamp, against your setup |
 | `bladebro -v` | Version + update status (check only) |
 | `bladebro -u` | Self-update: check, download, SHA-256-verify, swap — non-npm installs |
 | `bladebro --rollback` | Restore the previous version (from the pre-update backup) |

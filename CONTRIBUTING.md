@@ -53,7 +53,8 @@ docs: update README comparison table
 If your change touches the stealth system, verify it doesn't regress:
 
 ```bash
-# Local vectors — must stay 111/111
+# Local vectors — no FAIL line, stamps stable (the suite prints its own
+# total; 111 on the reference machine, GPU/profile-dependent elsewhere)
 ./target/release/bladebro audit
 
 # Differential oracle — divergent must be 0 (stock vs bladebro, same display)

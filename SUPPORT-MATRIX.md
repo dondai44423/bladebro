@@ -9,7 +9,7 @@ No perfect claims. Current release: 4.6.8 (2026-11-06). Local verification:
 
 | Platform | Current audit coverage | Runtime coverage |
 |---|---|---|
-| Linux x86_64 | strict release Clippy, release tests twice, glibc 2.28 cross build, local npm installs | full local browser floor, audit 111/111 twice, both oracles, five lanes x5 |
+| Linux x86_64 | strict release Clippy, release tests twice, glibc 2.28 cross build, local npm installs | full local browser floor, audit at the suite's own total twice (111 on the reference host, 103 on the hardware-GL host), both oracles, five lanes x5 |
 | Linux ARM64 | glibc 2.28 cross build + architecture/ABI inspection | physical ARM64/Pi runtime not run |
 | macOS Intel/Apple Silicon | both cross builds + architecture inspection | native Apple Silicon CI (`macos-26`) runs the contract, persistence and audit probes; darwin-x64 is not executed natively |
 | Windows x86_64 | cross build + strict all-target cross Clippy + PE inspection | native CI, including actual Chrome and persistence/read probes |
@@ -62,7 +62,7 @@ is still needed to remove those toolchain diagnostics without suppression.
 | Geometry coherence, WebRTC under proxy | `tools/gap44/webrtc_proxy.py` |
 | Proxy credential redaction | `cargo test --profile gate` (`browser/proxy` tests) + G13 in `tools/gap44/probe.py` |
 | Updater retries, install integrity | `cargo test --profile gate` (`updater` tests) |
-| Stealth posture | `bladebro audit` (111 local vectors, cross-run stamps, nonzero on failure) |
+| Stealth posture | `bladebro audit` (the local vector suite at its own host-dependent total, cross-run stamps, nonzero on failure) |
 | Stock-parity (page-visible differences) | `tools/diff_oracle/oracle.py` |
 | Cold start, all 5 lanes, owned-process hygiene | `tools/lane_matrix.py all 5` |
 | Real-browser lane attachment | `tools/rb_live/attach_drift.py` (run when the lane changes) |
