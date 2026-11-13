@@ -231,16 +231,18 @@ fn orphan_browser_pids(dir: &Path) -> Vec<u32> {
 /// identify as a browser (so did not kill) counts: deleting a profile from
 /// under it is exactly the failure this guards. Shared with `doctor`.
 pub(crate) fn profile_in_use(dir: &Path) -> bool {
-    if read_singleton_pid(dir)
-        .is_some_and(|pid| platform::process_alive(pid) && process_uses_dir(pid, dir))
-    {
-        return true;
-    }
+    let singleton = read_singleton_pid(dir)
+        .is_some_and(|pid| platform::process_alive(pid) && process_uses_dir(pid, dir));
+    // Short-circuits: the scan only runs when the singleton does not already
+    // hold the profile.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    if !processes_naming_dir(dir).is_empty() {
-        return true;
+    {
+        singleton || !processes_naming_dir(dir).is_empty()
     }
-    false
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        singleton
+    }
 }
 
 /// Every other process whose argv names `dir` as its user-data-dir, with
