@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linux discovery prefers a native Chrome/Chromium over a snap-confined one, which cannot read the hidden data root.
 - Amazon's consent banner: `#sp-cc-rejectall-link` is on the reject ladder, so the pre-seeded selector is actually replayed (and the cold ladder can reject it too).
 - An upload source is refused when its spelling names a system directory even if it resolves outside (NixOS `/etc` symlinks into `/nix/store`).
+- `bladebro doctor` checks the window manager the virtual display needs: Xvfb without `xfwm4` runs headful with no decorations (`outerWidth == innerWidth`, `availHeight == height`) and is now reported with the install hint, instead of only the audit catching it.
 
 ### Changed
 - `bladebro audit` documentation and gates treat the suite's own, host-dependent total as the bar instead of a fixed 111.

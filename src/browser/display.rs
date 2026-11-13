@@ -164,6 +164,21 @@ impl VirtualDisplay {
     }
 }
 
+/// The window manager the virtual display starts, when it is installed. One
+/// lookup shared by the lane and by `doctor`, so the diagnostic cannot pass a
+/// machine the lane would silently degrade on: with Xvfb but no WM the screen
+/// carries no decorations (`outerWidth == innerWidth`, `availHeight ==
+/// height`) — an Xvfb signature only the audit otherwise notices.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn window_manager() -> Option<String> {
+    for path in ["/usr/bin/xfwm4", "/usr/local/bin/xfwm4"] {
+        if std::path::Path::new(path).exists() {
+            return Some(path.to_string());
+        }
+    }
+    find_in_path("xfwm4")
+}
+
 /// Start a window manager on the virtual display. An X screen with no WM has
 /// no work area at all: `screen.availHeight` equals `screen.height`,
 /// `outerWidth` equals `innerWidth` and windows carry no decorations — an
@@ -181,15 +196,7 @@ impl VirtualDisplay {
 /// Degrades silently when the tools are missing.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Child> {
-    fn find_bin(name: &str, extra: &[&str]) -> Option<String> {
-        for path in extra {
-            if std::path::Path::new(path).exists() {
-                return Some((*path).to_string());
-            }
-        }
-        find_in_path(name)
-    }
-    let wm = find_bin("xfwm4", &["/usr/bin/xfwm4", "/usr/local/bin/xfwm4"]).and_then(|path| {
+    let wm = window_manager().and_then(|path| {
         let mut cmd = Command::new(path);
         cmd.args(["--compositor=off", "--replace"])
             .env("DISPLAY", format!(":{display_num}"))

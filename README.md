@@ -670,7 +670,7 @@ Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME
 
 | Command | What it does |
 |---|---|
-| `bladebro -doc` / `bladebro doctor` | System check — Chrome, display, profile hygiene, logins, data root, network, version |
+| `bladebro -doc` / `bladebro doctor` | System check — Chrome, display and its window manager, profile hygiene, logins, data root, network, version |
 | `bladebro audit` | Stealth audit — the vector suite + boot self-check + cross-restart drift stamp, against your setup |
 | `bladebro -v` | Version + update status (check only) |
 | `bladebro -u` | Self-update: check, download, SHA-256-verify, swap — non-npm installs |

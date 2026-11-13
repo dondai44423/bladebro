@@ -30,7 +30,7 @@ mod alerts;
 mod compat;
 mod discover;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-mod display;
+pub(crate) mod display;
 mod flags;
 #[cfg(target_os = "linux")]
 mod flatpak;

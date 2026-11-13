@@ -59,6 +59,11 @@ pub async fn run() -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     checks.push(check_xvfb());
 
+    // 4b. Window manager for the virtual display (no WM = no decorations, an
+    // Xvfb signature); only meaningful where Xvfb is the lane.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    checks.push(check_window_manager());
+
     // 5. Profile directory
     checks.push(check_profile_dir());
 
@@ -364,6 +369,43 @@ fn check_xvfb() -> Check {
                     .into(),
             ),
         }
+    }
+}
+
+/// The window manager the virtual display starts. Xvfb alone is not the
+/// headful lane: with no WM the screen has no decorations at all —
+/// `outerWidth == innerWidth`, `screen.availHeight == screen.height` — which
+/// is an Xvfb signature only `bladebro audit` otherwise catches. The binary
+/// lookup is the lane's own (`browser::display::window_manager`), so doctor
+/// cannot pass a machine on which the lane would silently degrade.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn check_window_manager() -> Check {
+    wm_check(crate::browser::display::window_manager())
+}
+
+/// The report for a found (or missing) window manager. Pure, so the missing
+/// branch is tested without a machine that lacks xfwm4.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn wm_check(found: Option<String>) -> Check {
+    match found {
+        Some(path) => Check {
+            name: "Window manager (headful geometry)",
+            status: Status::Pass,
+            detail: format!("{path} (real decorations, coherent outer/inner geometry)"),
+            fix: None,
+        },
+        None => Check {
+            name: "Window manager (headful geometry)",
+            status: Status::Warn,
+            detail:
+                "xfwm4 not found — Xvfb runs headful with no decorations or frame extents \
+                     (outerWidth == innerWidth, availHeight == height); pages see an Xvfb signature"
+                    .into(),
+            fix: Some(
+                "Install xfwm4: sudo pacman -S xfwm4 (Arch) / sudo apt install xfwm4 (Debian)"
+                    .into(),
+            ),
+        },
     }
 }
 
@@ -867,6 +909,25 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".blade-owner"), owner.to_string()).unwrap();
         dir
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn a_missing_window_manager_is_reported_with_its_install_hint() {
+        let missing = wm_check(None);
+        assert!(matches!(missing.status, Status::Warn));
+        assert!(
+            missing.detail.contains("outerWidth == innerWidth"),
+            "{}",
+            missing.detail
+        );
+        assert!(missing
+            .fix
+            .unwrap_or_default()
+            .contains("sudo pacman -S xfwm4"));
+        let found = wm_check(Some("/usr/bin/xfwm4".into()));
+        assert!(matches!(found.status, Status::Pass));
+        assert!(found.detail.contains("/usr/bin/xfwm4"));
     }
 
     #[test]
