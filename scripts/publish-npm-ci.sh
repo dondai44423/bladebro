@@ -50,7 +50,7 @@ publish bladebro
 # Registry propagation: a bounded wait, not the old ten-minute window. Each
 # package must be visible at this version before the release goes Latest.
 echo "verifying the registry..."
-for _ in $(seq 1 12); do
+for _ in $(seq 1 30); do
     ok=0
     for pkg in bladebro bladebro-linux-x64 bladebro-linux-arm64 bladebro-windows-x64 bladebro-darwin-x64 bladebro-darwin-arm64; do
         if npm view "$pkg@$VERSION" version --prefer-online 2>/dev/null | grep -Fxq "$VERSION"; then
@@ -60,5 +60,5 @@ for _ in $(seq 1 12); do
     [[ "$ok" == 6 ]] && { echo "all six packages live at v$VERSION"; exit 0; }
     sleep 10
 done
-echo "ERROR: packages did not all appear within 120s — never republish; re-check, then expose Latest" >&2
+echo "ERROR: packages did not all appear within 300s — never republish; re-check, then expose Latest" >&2
 exit 1
