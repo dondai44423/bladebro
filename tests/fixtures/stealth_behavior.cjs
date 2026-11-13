@@ -121,7 +121,7 @@ async function glLimits() {
     }
   }
   class WebGL2RenderingContext extends WebGLRenderingContext {
-    constructor() { super(); this.native[36183] = 8; }
+    constructor() { super(); this.native[36183] = 1; }
   }
   g.WebGLRenderingContext = WebGLRenderingContext;
   g.WebGL2RenderingContext = WebGL2RenderingContext;
@@ -135,17 +135,19 @@ async function glLimits() {
   // the property is that the backend's narrower maximum wins, whatever it is.
   assert.deepEqual(Array.from(one.getParameter(33901)), [1, 1], 'a second range clamps the same way');
   const two = new WebGL2RenderingContext();
-  assert.equal(two.getParameter(36183), 8, 'MAX_SAMPLES capped at the backend');
-  // A backend with headroom: the profile's own value wins, unchanged.
+  assert.equal(two.getParameter(36183), 1, 'MAX_SAMPLES capped at the backend');
+  // A backend with headroom: the profile's own value wins, whatever the
+  // profile is on this platform (Intel 64 units, Apple 32, …); only the
+  // clamp direction is asserted.
   class Wide extends WebGLRenderingContext {}
   Wide.prototype.getParameter = function (p) {
-    return p === 3379 ? 32768 : p === 35661 ? 64 : WebGLRenderingContext.prototype.getParameter.call(this, p);
+    return p === 3379 ? 100000 : p === 35661 ? 1000 : WebGLRenderingContext.prototype.getParameter.call(this, p);
   };
   g.WebGLRenderingContext = Wide;
   vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), ctx);
   const wide = new Wide();
-  assert.equal(wide.getParameter(3379), 16384, 'profile value kept when the backend can serve it');
-  assert.equal(wide.getParameter(35661), 64, 'profile units kept when the backend can serve them');
+  assert.ok(wide.getParameter(3379) > 8192 && wide.getParameter(3379) < 100000, 'the profile value is kept, not the backend maximum');
+  assert.ok(wide.getParameter(35661) > 16 && wide.getParameter(35661) < 1000, 'the profile units are kept, not the backend maximum');
   console.log('GL limits never exceed the backend');
 }
 async function page() {
