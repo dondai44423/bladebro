@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `act upload` verifies delivery in the page — file count, name, size and the first byte — instead of trusting `DOM.setFileInputFiles`, and reports `not delivered: …` when the page cannot use the file. Under a Flatpak browser the file is copied into a per-process staging directory shared with the sandbox; native browsers still get the original path.
+- `BLADE_NO_ACTIVATE=1` never calls `Page.bringToFront`: clicks, navigation and vision act on the page without raising the browser window.
+
+### Fixed
+- macOS (and every OS): a click or navigation raised the browser window above whatever the person was working in. `Page.bringToFront` now runs only when the target is not already its window's active tab — a background tab still gets activated, so input after a foreground popup keeps landing (#89).
+- Stealth-injection page breakage: shared workers stay native (module workers, cross-tab sharing and relative `importScripts` work again) and are now patched through a browser-level auto-attach, so the page, dedicated workers and shared workers report the same masked renderer and locale; the RTC listener wrapper dedupes and removes like native, the SDP filter drops whole candidate lines, `addIceCandidate` stays native, `BLADE_LOCALE=en_US` is normalized to `en-US` in the page, workers, CDP override and per-domain profiles, `BLADE_NOISE` no longer locks a canvas to 2D or drifts audio samples, and the console capture no longer runs page getters or `toJSON` and is bounded.
+- The WebGL mask never reports a limit above what the backend can serve: MAX_TEXTURE_SIZE, renderbuffer/cube size, combined texture units, MAX_SAMPLES, viewport dims and the point/line ranges are capped at the native answer, so a page sizing a buffer from the mask gets no GL error and the differential oracle's `glMaxTex` key matches stock on software hosts.
+- Xvfb and its window manager run in their own process group with a parent-death signal: Ctrl-C to a one-shot run no longer takes the display away while Chrome is closing (the graceful close that flushes storage now happens), and a SIGKILL to bladebro alone takes the display and the browser down instead of orphaning them.
+- Linux discovery prefers a native Chrome/Chromium over a snap-confined one, which cannot read the hidden data root.
+- Amazon's consent banner: `#sp-cc-rejectall-link` is on the reject ladder, so the pre-seeded selector is actually replayed (and the cold ladder can reject it too).
+- An upload source is refused when its spelling names a system directory even if it resolves outside (NixOS `/etc` symlinks into `/nix/store`).
+
+### Changed
+- `bladebro audit` documentation and gates treat the suite's own, host-dependent total as the bar instead of a fixed 111.
+
+### Build
+- `scripts/publish-npm.sh` failure messages print `npm view` instead of running it.
+- CI installs Chrome through a `signed-by` keyring: `apt-key` is gone on Ubuntu 25.04+ runners.
+- The display-readiness test's fake X server is a `sh` script (no python3 start latency).
+
 ## [4.6.8] - 2026-11-06
 
 ### Added
