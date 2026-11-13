@@ -525,7 +525,21 @@ mod readiness_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("fake-xvfb");
         let pids = dir.join("pids");
-        std::fs::write(&script, format!("#!/usr/bin/env python3\nimport os,time\nwith open({:?},'a') as f:f.write(str(os.getpid())+'\\n')\ntime.sleep(60)\n", pids.to_string_lossy())).unwrap();
+        // A shell fake records its pid within a few ms. The old python3 fake
+        // could take longer than the 500ms readiness deadline to start on a
+        // loaded machine; that attempt was killed before writing its pid,
+        // and the count assert below failed (2 of 3). `exec` keeps the
+        // recorded pid the process start_with_path spawns and reaps.
+        let pids_path = pids.to_str().unwrap();
+        assert!(
+            !pids_path.contains('\''),
+            "temp path must be shell-quotable"
+        );
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho $$ >> '{pids_path}'\nexec sleep 60\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let result = VirtualDisplay::start_with_path(script.to_str().unwrap());
         let recorded = std::fs::read_to_string(&pids).unwrap();
