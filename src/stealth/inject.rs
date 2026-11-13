@@ -327,6 +327,103 @@ async fn adaptive_gl_spoof(env: &EnvProbe, cdp: &CdpSession) -> bool {
 /// Legacy alias kept for external references (doc/examples).
 pub const STEALTH_SCRIPT_TEMPLATE: &str = STEALTH_CORE;
 
+/// Normalize a locale to a BCP-47 tag before it is applied anywhere
+/// (injection, worker patches, CDP locale override, Accept-Language), or
+/// `None` when it is unusable. `_` becomes `-`: POSIX-style `en_US` is the
+/// common slip, and `navigator.language` must be BCP-47 — page code like
+/// `new Intl.NumberFormat(navigator.language)` throws RangeError on `en_US`.
+/// Shape: a 2–8 letter language subtag, then 1–8 alphanumeric subtags. The
+/// value is also interpolated into JS string literals, so this is the gate
+/// that keeps a quote or backslash from breaking out and silently killing
+/// the whole stealth injection.
+pub fn normalize_locale(raw: &str) -> Option<String> {
+    let tag = raw.replace('_', "-");
+    let mut subtags = tag.split('-');
+    let lang = subtags.next()?;
+    let lang_ok = (2..=8).contains(&lang.len()) && lang.bytes().all(|b| b.is_ascii_alphabetic());
+    let rest_ok =
+        subtags.all(|s| (1..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()));
+    (lang_ok && rest_ok).then_some(tag)
+}
+
+/// Which conditional segments `apply` decided to install. Assembly is a pure
+/// function of this plan, so the test suite builds and runs the exact page
+/// script without a browser.
+struct ScriptPlan<'a> {
+    seed: u32,
+    rtc: bool,
+    gl: Option<&'a gpu::GpuProfile>,
+    media: bool,
+    perms: bool,
+    webdriver: bool,
+    locale: Option<&'a str>,
+    noise: bool,
+}
+
+/// Assemble the page script: core, the conditional segments in their fixed
+/// order, tail, then the placeholder substitutions.
+fn assemble_page_script(plan: &ScriptPlan<'_>) -> String {
+    let mut script = String::with_capacity(
+        STEALTH_CORE.len()
+            + 2048
+            + MEDIA_PATCH.len()
+            + PERMISSIONS_PATCH.len()
+            + LOCALE_OVERRIDE.len()
+            + NOISE.len()
+            + RTC_PATCH.len()
+            + STEALTH_TAIL.len(),
+    );
+    script.push_str(STEALTH_CORE);
+    if plan.rtc {
+        script.push_str(RTC_PATCH);
+    }
+    if let Some(profile) = plan.gl {
+        script.push_str(&build_gl_spoof(profile));
+        // No SharedWorker constructor wrapper. The old blob: wrapper
+        // (<spoof> + locale patch + importScripts(url)) broke the worker
+        // itself: module workers died (importScripts throws there), every
+        // construction got its own instance (a SharedWorker is keyed by its
+        // script URL, and a blob: URL is unique per document — so the
+        // cross-tab/cross-frame hub a SharedWorker exists for never formed),
+        // and relative importScripts/fetch inside it resolved against blob:.
+        // Correctness wins: shared workers run native. Known mask gap: they
+        // report the real GL renderer and, with BLADE_LOCALE, the real
+        // WorkerNavigator.language(s), while the page and dedicated workers
+        // report the spoofed values. Page-level auto-attach never reports
+        // shared_worker targets (Chromium 156); browser-level
+        // Target.setAutoAttach with waitForDebuggerOnStart does, early enough
+        // to run worker_gl_spoof before the worker script, which would close
+        // the gap without a wrapper — an injection-architecture change.
+    }
+    if plan.media {
+        script.push_str(MEDIA_PATCH);
+    }
+    if plan.perms {
+        script.push_str(PERMISSIONS_PATCH);
+    }
+    if plan.webdriver {
+        script.push_str(WEBDRIVER_PATCH);
+    }
+    if plan.locale.is_some() {
+        script.push_str(LOCALE_OVERRIDE);
+    }
+    if plan.noise {
+        script.push_str(NOISE);
+    }
+    script.push_str(STEALTH_TAIL);
+    let script = script.replace("__SEED__", &plan.seed.to_string());
+    // Shared proxy-mask helpers (also used by the worker scripts).
+    let script = script.replace("__PROXY_HELPERS__", PROXY_HELPERS);
+    if let Some(l) = plan.locale {
+        let base = l.split('-').next().unwrap_or(l);
+        script
+            .replace("__LOCALE__", l)
+            .replace("__LOCALE_BASE__", base)
+    } else {
+        script
+    }
+}
+
 /// Apply the stealth script to a CDP client via `Page.addScriptToEvaluateOnNewDocument`.
 /// Adaptive: the launch healthcheck's GL verdict (browser.rs) drives the
 /// WebGL spoof — a real GPU is reported honestly (no mask), software GL
@@ -383,59 +480,30 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
     let noise = std::env::var("BLADE_NOISE")
         .map(|v| v == "1")
         .unwrap_or(false);
-    // BCP-47 validate: the locale is interpolated into a JS string literal —
-    // a quote or backslash would break out and silently kill the whole
-    // stealth injection. Letters, digits, '-', '_' only.
     // Explicit override (per-domain profile, S11) beats the env var.
     let raw_locale = locale_override
         .map(String::from)
-        .or_else(|| std::env::var("BLADE_LOCALE").ok());
-    let locale = raw_locale.filter(|s| !s.is_empty()).filter(|s| {
-        s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    });
-    if std::env::var("BLADE_LOCALE").is_ok() && locale.is_none() {
-        eprintln!("[stealth] WARNING: BLADE_LOCALE rejected (invalid characters) — locale override skipped");
+        .or_else(|| std::env::var("BLADE_LOCALE").ok())
+        .filter(|s| !s.is_empty());
+    let locale = raw_locale.as_deref().and_then(normalize_locale);
+    if raw_locale.is_some() && locale.is_none() {
+        eprintln!("[stealth] WARNING: locale rejected (BLADE_LOCALE / profiles.json value is not a BCP-47 tag like en-US) — locale override skipped");
     }
     if let Some(ref l) = locale {
         eprintln!("[stealth] registering locale override: {l}");
     }
 
-    let mut script = String::with_capacity(
-        STEALTH_CORE.len()
-            + 2048
-            + MEDIA_PATCH.len()
-            + PERMISSIONS_PATCH.len()
-            + LOCALE_OVERRIDE.len()
-            + NOISE.len()
-            + RTC_PATCH.len()
-            + STEALTH_TAIL.len(),
-    );
-    script.push_str(STEALTH_CORE);
     // WebRTC candidate filtering only under a proxy (see RTC_PATCH docs).
-    if std::env::var("BLADE_PROXY")
+    let rtc = std::env::var("BLADE_PROXY")
         .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        script.push_str(RTC_PATCH);
-    }
+        .unwrap_or(false);
     GL_SPOOFED.store(spoof_gl, Ordering::Relaxed);
-    if spoof_gl {
-        let profile = get_gpu_profile();
+    let gl_profile = spoof_gl.then(get_gpu_profile);
+    if let Some(ref profile) = gl_profile {
         eprintln!(
             "[stealth] registering WebGL spoof: {} (page + worker)",
             profile.gl_renderer
         );
-        script.push_str(&build_gl_spoof(&profile));
-        // SharedWorker constructor wrapper (issue #8): CDP doesn't emit
-        // attachedToTarget for shared_worker targets, so we intercept the
-        // constructor on the main page and inject GL spoof via blob URL.
-        if let Some(sw) = sharedworker_wrapper(locale.as_deref()) {
-            script.push_str(&sw);
-        }
-    }
-    if patch_media {
-        script.push_str(MEDIA_PATCH);
     }
     // Notifications relay: only the headless lane needs it. Headless-New
     // reports 'denied' for notifications on real origins — a server tell —
@@ -448,32 +516,18 @@ pub async fn apply(cdp: &CdpSession, locale_override: Option<&str>) -> Result<Sc
         Ok("real") => false,
         _ => crate::browser::launched_headless(),
     };
-    if patch_perms {
-        script.push_str(PERMISSIONS_PATCH);
-    }
-    // Pipe transport: the automation flag makes navigator.webdriver true
-    // (see WEBDRIVER_PATCH).
-    if crate::browser::launched_pipe() {
-        script.push_str(WEBDRIVER_PATCH);
-    }
-    if locale.is_some() {
-        script.push_str(LOCALE_OVERRIDE);
-    }
-    if noise {
-        script.push_str(NOISE);
-    }
-    script.push_str(STEALTH_TAIL);
-    let script = script.replace("__SEED__", &seed.to_string());
-    // Shared proxy-mask helpers (also used by the worker scripts).
-    let script = script.replace("__PROXY_HELPERS__", PROXY_HELPERS);
-    let script = if let Some(ref l) = locale {
-        let base = l.split('-').next().unwrap_or(l).to_string();
-        script
-            .replace("__LOCALE__", l)
-            .replace("__LOCALE_BASE__", &base)
-    } else {
-        script
-    };
+    let script = assemble_page_script(&ScriptPlan {
+        seed,
+        rtc,
+        gl: gl_profile.as_ref(),
+        media: patch_media,
+        perms: patch_perms,
+        // Pipe transport: the automation flag makes navigator.webdriver true
+        // (see WEBDRIVER_PATCH).
+        webdriver: crate::browser::launched_pipe(),
+        locale: locale.as_deref(),
+        noise,
+    });
 
     // Register for the OOPIF auto-attach handler (see FULL_SCRIPT).
     if let Ok(mut guard) = FULL_SCRIPT.write() {
@@ -555,66 +609,121 @@ fn worker_locale_patch(locale: Option<&str>) -> String {
     }
 }
 
-/// SharedWorker constructor wrapper for the main page injection.
-/// CDP doesn't emit Target.attachedToTarget for shared_worker targets, so we
-/// intercept the SharedWorker constructor and inject the GL spoof via a blob
-/// URL: <gl_spoof + locale patch + importScripts(absolute_url)>. The URL is
-/// resolved against the document first — relative paths cannot resolve inside
-/// a blob: worker's scope (importScripts throws), which is exactly how
-/// CreepJS's shared-worker tier was broken. A Proxy construct trap keeps the
-/// interface object native-shaped (toString, own keys, prototype forwarding)
-/// — the old plain-wrapper function was itself a differential. Any
-/// construction failure falls back to the untouched constructor. Returns
-/// None when GL spoof is not active.
-pub fn sharedworker_wrapper(locale: Option<&str>) -> Option<String> {
-    if !GL_SPOOFED.load(Ordering::Relaxed) {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_available() -> bool {
+        std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
-    let profile = get_gpu_profile();
-    let worker_code = build_worker_gl_spoof(&profile, locale);
-    // Escape for embedding in a JS string literal.
-    let escaped: String = worker_code
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    Some(format!(
-        r#"
-// SharedWorker GL spoof — CDP doesn't emit attachedToTarget for shared_worker.
-try{{
-  var _swCode='{escaped}';
-  var _OrigSW=window.SharedWorker;
-  if(_OrigSW){{
-    var _swh={{construct:function(t,a,nt){{
-      try{{
-        var url=a[0],options=a[1];
-        try{{url=new URL(url, document.baseURI).href;}}catch(e){{}}
-        var full=_swCode+'\nimportScripts('+JSON.stringify(url)+')';
-        var blob=new Blob([full],{{type:'application/javascript'}});
-        var blobUrl=URL.createObjectURL(blob);
-        var sw=Reflect.construct(t,[blobUrl,options],nt);
-        setTimeout(function(){{URL.revokeObjectURL(blobUrl);}},10000);
-        return sw;
-      }}catch(e){{
-        return Reflect.construct(t,a,nt);
-      }}
-    }}}};
-    var _SWProxy=new Proxy(_OrigSW,_swh);
-    // 4.6.0 shield: a bare callable proxy fails the cyclic-prototype torture
-    // (RangeError where a native constructor throws
-    // TypeError('Cyclic __proto__ value') at setPrototypeOf); refuse the cycle
-    // explicitly, exactly like the shared mask helpers do.
-    _swh.setPrototypeOf=function(t,p){{
-      if(p!==null&&(typeof p==='object'||typeof p==='function')){{
-        var q=p,i=0;
-        while(q&&i++<256){{if(q===_SWProxy)throw new TypeError('Cyclic __proto__ value');q=Object.getPrototypeOf(q);}}
-      }}
-      return Reflect.setPrototypeOf(t,p);
-    }};
-    Object.defineProperty(window,'SharedWorker',{{value:_SWProxy,writable:true,configurable:true,enumerable:false}});
-  }}
-}}catch(e){{}}
-"#,
-        escaped = escaped
-    ))
+
+    /// Run an assembled script through `tests/fixtures/stealth_behavior.cjs
+    /// <scenario> <file>` (the harness gives it a mock window). Skips without
+    /// node, like the other script checks in the lib tests.
+    fn run_scenario(scenario: &str, script: &str) {
+        if !node_available() {
+            eprintln!("node not available — skipping the {scenario} script check");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!(
+            "bladebro-inject-{scenario}-{}.js",
+            std::process::id()
+        ));
+        std::fs::write(&path, script).expect("write assembled script");
+        let out = std::process::Command::new("node")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/stealth_behavior.cjs"
+            ))
+            .arg(scenario)
+            .arg(&path)
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "{scenario} scenario failed:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn plan<'a>(gl: Option<&'a gpu::GpuProfile>, locale: Option<&'a str>) -> ScriptPlan<'a> {
+        ScriptPlan {
+            seed: 7,
+            rtc: true,
+            gl,
+            media: true,
+            perms: true,
+            webdriver: true,
+            locale,
+            noise: true,
+        }
+    }
+
+    // Every segment at once, GL spoof on (the software-GL / Xvfb default):
+    // the script must run top to bottom and leave SharedWorker native — a
+    // blob: wrapper broke module workers, cross-document sharing and
+    // relative URLs inside the worker.
+    #[test]
+    fn assembled_page_script_runs_and_leaves_shared_worker_native() {
+        // The production state when the plan carries a GL profile: `apply`
+        // stores the decision before assembling, and the old wrapper was gated
+        // on this flag — without it, re-adding that wrapper would pass here.
+        // Nothing else in the lib tests reads it.
+        GL_SPOOFED.store(true, Ordering::Relaxed);
+        let profile = gpu::test_profile();
+        let script = assemble_page_script(&plan(Some(&profile), Some("en-US")));
+        run_scenario("page", &script);
+    }
+
+    #[test]
+    fn locale_is_normalized_to_bcp47() {
+        for (raw, want) in [
+            ("en_US", "en-US"),
+            ("pt_BR", "pt-BR"),
+            ("en-US", "en-US"),
+            ("de", "de"),
+            ("zh-Hant-TW", "zh-Hant-TW"),
+            ("es-419", "es-419"),
+            ("zh_Hant_TW", "zh-Hant-TW"),
+        ] {
+            assert_eq!(normalize_locale(raw).as_deref(), Some(want), "{raw:?}");
+        }
+        for bad in [
+            "",
+            "en-US'",
+            "en\\US",
+            "en US",
+            "en--US",
+            "-en",
+            "en-",
+            "e",
+            "123",
+            "en-US.UTF-8",
+            "en-toolongtag",
+        ] {
+            assert_eq!(normalize_locale(bad), None, "{bad:?} must be rejected");
+        }
+    }
+
+    // `navigator.language` (page) and `WorkerNavigator.language` (workers)
+    // must be BCP-47: page code like `new Intl.NumberFormat(navigator.language)`
+    // throws RangeError on `en_US`.
+    #[test]
+    fn injected_locale_is_bcp47_in_page_and_worker_scripts() {
+        let l = normalize_locale("en_US").expect("en_US is a usable locale");
+        let page = assemble_page_script(&plan(None, Some(&l)));
+        assert!(page.contains("var _lang='en-US'"), "page language");
+        assert!(page.contains("['en-US','en']"), "page languages");
+        let worker = build_worker_gl_spoof(&gpu::test_profile(), Some(&l));
+        assert!(worker.contains("var _wl='en-US'"), "worker language");
+        assert!(worker.contains("['en-US','en']"), "worker languages");
+    }
 }

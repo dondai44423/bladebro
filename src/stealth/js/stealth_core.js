@@ -194,7 +194,128 @@ if(screen.pixelDepth!==24){_defGet(_sp2,'pixelDepth',_ogs(_sp2,'pixelDepth'),fun
 try{
 var _uk=Symbol.for('q');
 var _uxa=[];
-function _uxp(l,a){try{var p=[];for(var i=0;i<a.length;i++){var v=a[i];try{p.push(typeof v==='string'?v:JSON.stringify(v));}catch(e){p.push(String(v));}}_uxa.push({l:l,m:p.join(' ').slice(0,400),t:Date.now()});if(_uxa.length>200)_uxa.shift();}catch(e){}}
+// Entry serializer. Plain data (primitives, boxed primitives, arrays and
+// objects of data properties, typed arrays, Dates) reads exactly as
+// JSON.stringify wrote it, and where JSON.stringify threw (a BigInt or a cycle
+// inside) as the String(v) fallback did. JSON.stringify fired page
+// getters/toJSON on every logged argument (page-observable: the console trap
+// the protocol layer exists to avoid) and serialized the whole value before
+// the cut (~20 ms per log of a large array).
+// The walk calls no page function: accessors show as "(...)" instead of being
+// invoked, toJSON is honoured only for native Date/URL and boxed values
+// unwrap, all through natives captured here; DOM nodes and windows read as
+// their [object Tag]. A Proxy's traps still run, though:
+// ownKeys/getOwnPropertyDescriptor (Object.keys and the descriptor reads),
+// getPrototypeOf (the instanceof checks walk the chain) and get for an array
+// proxy's length.
+// Work is bounded by the 400-char entry: every counted step writes at least
+// one character. Keys JSON omits (undefined, function, symbol values) cost one
+// descriptor read each and are not counted: Object.keys has already listed
+// them all, as JSON.stringify's own scan did, so an object with thousands of
+// methods still logs its data. A 2000-step budget stays as a backstop for
+// output-free nesting in the String(v) fallback (each level also scans the
+// cycle stack); a cut by it ends with ….
+var _uj=JSON.stringify,_uks=Object.keys,_ud=Object.getOwnPropertyDescriptor,_uia=Array.isArray,_ura=Reflect.apply,_unow=Date.now,_uS=String;
+var _uhi=Function.prototype[Symbol.hasInstance],_uho=Object.prototype.hasOwnProperty,_uts=Object.prototype.toString,_ufs=Function.prototype.toString;
+var _uD=Date,_udt=Date.prototype.getTime,_udi=Date.prototype.toISOString,_uds=Date.prototype.toString;
+var _uUj=(typeof URL!=='undefined'&&typeof URL.prototype.toJSON==='function')?URL.prototype.toJSON:null,_uU=_uUj?URL:null;
+var _ubx=[[Number,Number.prototype.valueOf],[String,String.prototype.valueOf],[Boolean,Boolean.prototype.valueOf]];
+if(typeof BigInt!=='undefined')_ubx[3]=[BigInt,BigInt.prototype.valueOf];
+var _uN=typeof Node!=='undefined'?Node:null,_uW=typeof Window!=='undefined'?Window:null;
+var _uav=ArrayBuffer.isView,_uDV=DataView,_utl=_ud(Object.getPrototypeOf(Uint8Array.prototype),'length').get;
+var _uend={},_ucap={};
+function _uxs(v){
+  var out='',work=0,stk=[];
+  function put(s){out+=s;if(out.length>400)throw _uend;}
+  function tick(){if(++work>2000)throw _ucap;}
+  function tag(x){return (_uN&&_ura(_uhi,_uN,[x]))||(_uW&&_ura(_uhi,_uW,[x]))?_ura(_uts,x,[]):null;}
+  function tview(x){return _uav(x)&&!_ura(_uhi,_uDV,[x]);}
+  // A boxed primitive's own value (JSON unwraps Number/String/Boolean/BigInt
+  // objects), read by the native valueOf so a page valueOf never runs; _uend
+  // when x is not one.
+  function unbox(x){
+    for(var i=0;i<_ubx.length;i++)if(_ura(_uhi,_ubx[i][0],[x])){try{return _ura(_ubx[i][1],x,[]);}catch(e){return _uend;}}
+    return _uend;
+  }
+  // false = a value JSON omits (undefined, functions, symbols)
+  function val(x){
+    var t=typeof x,d,i,n;
+    if(t==='string'){put(_uj(x.length>400?x.slice(0,400):x));return true;}
+    if(t==='number'){put(_uj(x));return true;}
+    if(t==='boolean'){put(x?'true':'false');return true;}
+    if(x===null){put('null');return true;}
+    if(t==='bigint')throw new TypeError('BigInt');
+    if(t!=='object')return false;
+    if(_ura(_uhi,_uD,[x])){var tv=_ura(_udt,x,[]);put(tv===tv?_uj(_ura(_udi,x,[])):'null');return true;}
+    if(_uU&&_ura(_uhi,_uU,[x])){put(_uj(_ura(_uUj,x,[])));return true;}
+    var tg=tag(x);if(tg){put(_uj(tg));return true;}
+    var b=unbox(x);if(b!==_uend)return val(b);
+    for(i=0;i<stk.length;i++)if(stk[i]===x)throw new TypeError('cyclic');
+    stk[stk.length]=x;
+    if(_uia(x)){
+      put('[');
+      for(i=0,n=x.length;i<n;i++){tick();if(i)put(',');d=_ud(x,i);if(!d)put('null');else if(!_ura(_uho,d,['value']))put('"(...)"');else if(!val(d.value))put('null');}
+      put(']');
+    }else if(tview(x)){
+      put('{');
+      for(i=0,n=_ura(_utl,x,[]);i<n;i++){tick();put((i?',"':'"')+i+'":');val(x[i]);}
+      put('}');
+    }else{
+      put('{');
+      var ks=_uks(x),first=true;
+      for(i=0;i<ks.length;i++){
+        d=_ud(x,ks[i]);if(!d)continue;
+        var data=_ura(_uho,d,['value']);
+        if(data){var vt=typeof d.value;if(vt==='undefined'||vt==='function'||vt==='symbol')continue;}
+        tick();put((first?'':',')+_uj(ks[i])+':');first=false;
+        if(data)val(d.value);else put('"(...)"');
+      }
+      put('}');
+    }
+    stk.length--;
+    return true;
+  }
+  // String(x) as Array.prototype.join builds it, with natives only:
+  // null/undefined/holes read as '', a cycle as '', functions as their source,
+  // Dates as the native toString. Any other object reads as the fixed
+  // '[object Object]' (String(v) would have run its toString or a
+  // Symbol.toStringTag getter: page code), and an accessor element as (...).
+  function str(x){
+    var t=typeof x,b,d,i,n,arr;
+    if(x===null||x===undefined)return true;
+    if(t==='function'){put(_ura(_ufs,x,[]));return true;}
+    if(t!=='object'){put(_uS(x));return true;}
+    if(_ura(_uhi,_uD,[x])){put(_ura(_uds,x,[]));return true;}
+    b=unbox(x);if(b!==_uend){put(_uS(b));return true;}
+    arr=_uia(x);
+    if(!arr&&!tview(x)){put('[object Object]');return true;}
+    for(i=0;i<stk.length;i++)if(stk[i]===x)return true;
+    stk[stk.length]=x;
+    for(i=0,n=arr?x.length:_ura(_utl,x,[]);i<n;i++){
+      tick();if(i)put(',');
+      if(!arr)str(x[i]);else{d=_ud(x,i);if(d){if(_ura(_uho,d,['value']))str(d.value);else put('(...)');}}
+    }
+    stk.length--;
+    return true;
+  }
+  function run(f){
+    out='';work=0;stk=[];
+    try{return f(v)?out:undefined;}
+    catch(e){if(e===_uend)return out;if(e===_ucap)return out+'\u2026';throw e;}
+  }
+  try{
+    if(typeof v==='object'&&v!==null){var tg0=tag(v);if(tg0)return tg0;}
+    return run(val);
+  }catch(e){
+    // Where JSON.stringify threw (a BigInt or a cycle inside), the capture
+    // fell back to String(v); str() rebuilds that string. If even str()
+    // throws (a revoked Proxy, or traps that throw), the entry reads the
+    // fixed '[object Object]': String(v) threw there too and the old
+    // capture dropped the whole entry.
+    try{return run(str);}catch(e2){return '[object Object]';}
+  }
+}
+function _uxp(l,a){try{var m='';for(var i=0;i<a.length&&m.length<400;i++){var v=a[i],s=typeof v==='string'?v:_uxs(v);m+=(i?' ':'')+(s===undefined?'':s.length>400?s.slice(0,400):s);}_uxa.push({l:l,m:m.slice(0,400),t:_unow()});if(_uxa.length>200)_uxa.shift();}catch(e){}}
 ['log','info','warn','error','debug'].forEach(function(m){
   var _cp=Object.getPrototypeOf(console);
   var _own=Object.getOwnPropertyDescriptor(console,m);

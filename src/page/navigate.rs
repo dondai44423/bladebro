@@ -459,7 +459,16 @@ impl Page {
         // site, and a profile omitting `locale` swapped the injection back
         // while the CDP locale stayed - navigator.language and Intl then
         // disagreed (the mismatch the coherence swap below exists to stop).
-        let want = Emulation::for_domain(profiles.get(&domain), &Emulation::session());
+        let profile = profiles.get(&domain);
+        if let Some(bad) = profile
+            .and_then(|p| p.locale.as_deref())
+            .filter(|l| crate::stealth::normalize_locale(l).is_none())
+        {
+            eprintln!(
+                "[bladebro] WARNING: {domain}: profiles.json locale {bad:?} is not a BCP-47 tag like en-US — ignored"
+            );
+        }
+        let want = Emulation::for_domain(profile, &Emulation::session());
         // Recorded only once CDP accepted it: a rejected override (an
         // invalid tz name in profiles.json) is retried, never assumed.
         if want.tz != self.emulation.tz {
@@ -556,24 +565,31 @@ pub(crate) struct Emulation {
 
 impl Emulation {
     /// The session baseline attach applies: BLADE_TZ / BLADE_LOCALE.
+    /// The locale is BCP-47-normalized like the injection (`en_US` →
+    /// `en-US`), so the CDP override, Accept-Language and the injected
+    /// navigator.language name one tag, and the coherence check against
+    /// `active_locale` (normalized at attach) does not swap on every
+    /// navigation.
     pub(crate) fn session() -> Self {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         Self {
             tz: env("BLADE_TZ"),
-            locale: env("BLADE_LOCALE"),
+            locale: env("BLADE_LOCALE").and_then(|l| crate::stealth::normalize_locale(&l)),
         }
     }
 
     /// What a navigation to a domain emulates: its profile's fields, and the
     /// session baseline for each field the profile omits (or for a domain
     /// without a profile) — never a value left over from the last domain.
+    /// A profile locale that is not a usable BCP-47 tag counts as omitted.
     fn for_domain(profile: Option<&DomainProfile>, base: &Emulation) -> Self {
         Self {
             tz: profile
                 .and_then(|p| p.tz.clone())
                 .or_else(|| base.tz.clone()),
             locale: profile
-                .and_then(|p| p.locale.clone())
+                .and_then(|p| p.locale.as_deref())
+                .and_then(crate::stealth::normalize_locale)
                 .or_else(|| base.locale.clone()),
         }
     }
@@ -1169,6 +1185,38 @@ mod tests {
         let next = Emulation::for_domain(Some(&tz_only), &session);
         assert_eq!(next.tz.as_deref(), Some("Australia/Sydney"));
         assert_eq!(next.locale.as_deref(), Some("fr-FR"));
+    }
+
+    /// A profile locale is applied as a BCP-47 tag (`de_DE` → `de-DE`), the
+    /// form the injection uses — otherwise Intl throws on navigator.language
+    /// and the coherence check swaps the injection on every navigation. A
+    /// value that is not a tag counts as omitted: the session baseline.
+    #[test]
+    fn domain_emulation_normalizes_the_profile_locale() {
+        let session = Emulation {
+            tz: None,
+            locale: Some("fr-FR".into()),
+        };
+        let posix = DomainProfile {
+            tz: None,
+            locale: Some("de_DE".into()),
+        };
+        assert_eq!(
+            Emulation::for_domain(Some(&posix), &session)
+                .locale
+                .as_deref(),
+            Some("de-DE")
+        );
+        let broken = DomainProfile {
+            tz: None,
+            locale: Some("de DE'".into()),
+        };
+        assert_eq!(
+            Emulation::for_domain(Some(&broken), &session)
+                .locale
+                .as_deref(),
+            Some("fr-FR")
+        );
     }
 
     #[test]
