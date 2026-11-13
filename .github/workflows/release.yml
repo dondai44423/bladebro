@@ -62,19 +62,22 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu.2.28
+            target: x86_64-unknown-linux-gnu
+            zig_target: x86_64-unknown-linux-gnu.2.28
             asset: linux-x64
             legacy: linux-x86_64
             bin: target/x86_64-unknown-linux-gnu/release/bladebro
             zig: true
           - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu.2.28
+            target: aarch64-unknown-linux-gnu
+            zig_target: aarch64-unknown-linux-gnu.2.28
             asset: linux-arm64
             legacy: linux-aarch64
             bin: target/aarch64-unknown-linux-gnu/release/bladebro
             zig: true
           - os: ubuntu-latest
             target: x86_64-pc-windows-gnu
+            zig_target: x86_64-pc-windows-gnu
             asset: windows-x64
             legacy: windows-x86_64
             bin: target/x86_64-pc-windows-gnu/release/bladebro.exe
@@ -102,11 +105,13 @@ jobs:
         if: matrix.zig
         with:
           version: 0.17.1
+      - uses: taiki-e/install-action@cargo-zigbuild
+        if: matrix.zig
       - name: Build
         run: |
           set -euo pipefail
           if [[ "${{ matrix.zig }}" == "true" ]]; then
-            cargo zigbuild --release --target ${{ matrix.target }}
+            cargo zigbuild --release --target ${{ matrix.zig_target }}
           else
             cargo build --release --target ${{ matrix.target }}
           fi
