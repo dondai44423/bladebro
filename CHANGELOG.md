@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bladebro audit` documentation and gates treat the suite's own, host-dependent total as the bar instead of a fixed 111.
 
 ### Build
+- The release pipeline is tag-driven and runs in CI: `scripts/release-prep.sh X.Y.Z --push` writes versions, promotes this file and tags in under a second, then `release.yml` runs the gate and builds all five artifacts on native runners in parallel, publishes the 20 assets, the six npm packages (platforms before the launcher) and Latest last. `release.sh` is gone, the toolchain is pinned by `rust-toolchain.toml` so local and CI lint with the same compiler, and the browser instruments run in `probes.yml` (nightly, tag, manual) instead of inside every build.
 - `scripts/publish-npm.sh` failure messages print `npm view` instead of running it.
 - CI installs Chrome through a `signed-by` keyring: `apt-key` is gone on Ubuntu 25.04+ runners.
 - The display-readiness test's fake X server is a `sh` script (no python3 start latency).
