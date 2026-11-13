@@ -246,7 +246,11 @@ fn amazon_reject_link_is_on_the_reject_ladder() {
         return;
     };
     assert_all_ran(&evals);
-    assert_eq!(clicked(&evals), [AMAZON_REJECT], "the Amazon reject link was never clicked");
+    assert_eq!(
+        clicked(&evals),
+        [AMAZON_REJECT],
+        "the Amazon reject link was never clicked"
+    );
     assert_eq!(got.as_deref(), Some(AMAZON_REJECT));
 }
 

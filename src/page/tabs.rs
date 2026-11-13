@@ -42,7 +42,10 @@ impl Page {
     /// otherwise go to a background tab (a popup took the foreground, #49).
     /// `BLADE_NO_ACTIVATE=1` never raises the window, accepting that trade.
     pub async fn activate_if_needed(&self) -> Result<()> {
-        if std::env::var("BLADE_NO_ACTIVATE").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("BLADE_NO_ACTIVATE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         if self.is_active_tab().await {
@@ -346,11 +349,7 @@ mod activation_tests {
             (Some(json!({"error": {"message": "target gone"}})), false),
             (None, false),
         ] {
-            assert_eq!(
-                active_from_visibility(reply.as_ref()),
-                active,
-                "{reply:?}"
-            );
+            assert_eq!(active_from_visibility(reply.as_ref()), active, "{reply:?}");
         }
     }
 }

@@ -1004,7 +1004,9 @@ async fn start_auto_attach(
                                 // connection (pipe mode), and a worker must
                                 // not be patched twice.
                                 if let Some(ref script) = worker_script {
-                                    if mark_worker_once(worker_session.session_id().unwrap_or_default()) {
+                                    if mark_worker_once(
+                                        worker_session.session_id().unwrap_or_default(),
+                                    ) {
                                         // Bounded: a pathological target
                                         // must not stall the pipeline.
                                         let res = worker_session
@@ -1284,7 +1286,7 @@ mod auto_attach_tests {
         // and one created paused stayed paused forever.
         let (client, mut seen, _inject) = fake_browser(vec![attached("PAGE-A", "W1")]).await;
         let page = CdpSession::child(client, "PAGE-A");
-        let task = start_auto_attach(&page, Some("1".into()), None, false).await;
+        let task = start_auto_attach(&page, None, Some("1".into()), None, false).await;
         let mut log = Vec::new();
         let resumed = saw(&mut seen, &mut log, "W1", "Runtime.runIfWaitingForDebugger").await;
         task.abort();
@@ -1298,7 +1300,7 @@ mod auto_attach_tests {
         // fallback), so each patched and resumed the other's targets too.
         let (client, mut seen, inject) = fake_browser(Vec::new()).await;
         let page = CdpSession::child(client, "PAGE-A");
-        let task = start_auto_attach(&page, Some("1".into()), None, false).await;
+        let task = start_auto_attach(&page, None, Some("1".into()), None, false).await;
         let mut log = Vec::new();
         assert!(saw(&mut seen, &mut log, "PAGE-A", "Target.setAutoAttach").await);
         inject.send(attached("PAGE-B", "W-OTHER")).unwrap();
