@@ -48,10 +48,12 @@ pub(crate) fn find_chrome() -> Result<String> {
             "chromium-browser",
         ][..]
     };
-    for name in names {
-        if let Some(path) = find_in_path(name) {
-            return Ok(path);
-        }
+    let found: Vec<(String, String)> = names
+        .iter()
+        .filter_map(|name| find_in_path(name).map(|path| (name.to_string(), path)))
+        .collect();
+    if let Some(path) = pick_browser(found) {
+        return Ok(path);
     }
 
     let paths = common_paths();
@@ -96,6 +98,34 @@ pub(crate) fn find_chrome() -> Result<String> {
     } else {
         "Chrome/Chromium not found. Set CHROME_PATH env var, add chromium to PATH, or install Chrome.".into()
     }))
+}
+
+/// The browser to use among the PATH candidates: the first install that is
+/// not snap-confined, else the first snap one. A snap-confined Chromium
+/// (`/snap/bin/chromium`, what Ubuntu actually ships when you `apt install
+/// chromium`) cannot read a hidden data root such as the default
+/// `~/.local/state/blade` — its home interface excludes dot-directories — so
+/// it is used only when no native install exists (issue #85 item 2). Within a
+/// tier the name order is unchanged, so nobody's engine changes for a reason
+/// other than the snap. Pure, so the ordering is tested without a PATH.
+fn pick_browser(candidates: Vec<(String, String)>) -> Option<String> {
+    let mut snap = None;
+    for (_name, path) in candidates {
+        if is_snap_confined(&path) {
+            if snap.is_none() {
+                snap = Some(path);
+            }
+        } else {
+            return Some(path);
+        }
+    }
+    snap
+}
+
+/// snapd's PATH entry point is `/snap/bin`; its payload lives under
+/// `/var/lib/snapd`. Both are confined away from hidden home directories.
+fn is_snap_confined(path: &str) -> bool {
+    path.starts_with("/snap/") || path.starts_with("/var/lib/snapd/")
 }
 
 fn common_paths() -> Vec<&'static str> {
@@ -418,6 +448,37 @@ pub(crate) fn endpoint_owned_by_own_browser(_port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #85 item 2: a native Google Chrome must win over a snap-confined
+    /// Chromium, while a native Chromium still wins over Chrome and the name
+    /// order is untouched within each tier.
+    #[test]
+    fn snap_confined_chromium_yields_to_a_native_install() {
+        let c = |name: &str, path: &str| (name.to_string(), path.to_string());
+        assert_eq!(
+            pick_browser(vec![
+                c("chromium", "/snap/bin/chromium"),
+                c("google-chrome", "/usr/bin/google-chrome"),
+            ])
+            .as_deref(),
+            Some("/usr/bin/google-chrome")
+        );
+        assert_eq!(
+            pick_browser(vec![
+                c("chromium", "/usr/bin/chromium"),
+                c("google-chrome", "/usr/bin/google-chrome"),
+            ])
+            .as_deref(),
+            Some("/usr/bin/chromium"),
+            "a native chromium keeps its first place"
+        );
+        assert_eq!(
+            pick_browser(vec![c("chromium", "/snap/bin/chromium")]).as_deref(),
+            Some("/snap/bin/chromium"),
+            "a snap install is still used when it is all there is"
+        );
+        assert_eq!(pick_browser(Vec::new()), None);
+    }
 
     #[test]
     fn executable_candidates_reject_directories_and_non_executable_files() {
