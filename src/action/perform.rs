@@ -128,6 +128,9 @@ pub async fn perform_with_network(
     // G09: observable toggle state around a coordinate click (see ClickCoord).
     let mut coord_toggle: Option<ToggleProbe> = None;
 
+    // Upload: why the readback could not prove the page holds the file.
+    let mut upload_unverified: Option<String> = None;
+
     // Start listening for navigation before dispatching. Eager
     // subscribe — a lazy wait_for would miss events fired synchronously
     // during dispatch (see sub_fires).
@@ -985,6 +988,10 @@ pub async fn perform_with_network(
                     )))
                 }
             };
+            // A sandboxed (Flatpak) browser cannot open a path outside its
+            // shares; it gets a staged copy it can read.
+            let source = std::path::Path::new(path.as_str());
+            let handed = crate::browser::upload_path(source)?;
             // Set the file on the input. DOM.setFileInputFiles accepts
             // objectId directly — no need to convert to nodeId (which can
             // go stale if the DOM tree hasn't been explicitly requested).
@@ -992,10 +999,21 @@ pub async fn perform_with_network(
                 "DOM.setFileInputFiles",
                 Some(serde_json::json!({
                     "objectId": object_id,
-                    "files": [path],
+                    "files": [handed.to_string_lossy()],
                 })),
             )
             .await?;
+            // The command succeeds for any path string; only a read in the
+            // page proves the file arrived.
+            match super::upload::readback(cdp, &object_id, source).await {
+                super::upload::UploadCheck::Delivered => {}
+                super::upload::UploadCheck::Unverified(why) => upload_unverified = Some(why),
+                super::upload::UploadCheck::Undelivered(what) => {
+                    return Err(BladeError::Other(format!(
+                        "upload of {path} not delivered: {what}. A sandboxed browser (Flatpak, Snap) reads only files it was given access to."
+                    )))
+                }
+            }
         }
     }
 
@@ -1091,6 +1109,10 @@ pub async fn perform_with_network(
         edit_report.as_ref(),
         scroll_report.as_ref(),
     );
+    let verdict = match upload_unverified {
+        Some(why) => format!("{verdict} - readback unverified: {why}"),
+        None => verdict,
+    };
     Ok((delta, verdict))
 }
 
