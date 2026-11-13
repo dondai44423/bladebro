@@ -1,0 +1,113 @@
+name: Gate
+
+# The one blocking gate, callable from CI and from the tag-driven release.
+# Three jobs run in PARALLEL: the Linux lint+test suite, a compile/lint check
+# for every other published target, and a native macOS/Windows build+unit
+# check. All of it finishes in ~5–7 minutes of wall clock, and every job uses
+# the same pinned toolchain as the developer machine (rust-toolchain.toml) —
+# a drifting `stable` is how two releases failed on lints the local clippy
+# could not see.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 5
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Oracle evidence parser
+        run: python3 tools/diff_oracle/test_oracle.py
+      - name: Clippy (host + all targets)
+        run: cargo clippy --release --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --profile gate
+
+  # Compile + lint the four non-host targets on one Linux runner. `check`
+  # needs no linker, so this is the cheap net for cfg-only breakage — the
+  # class that green local clippy misses (macOS/Windows clippy caught it in
+  # CI, two releases in a row) — without waiting on a native runner.
+  cross:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-gnu
+            zig: x86_64-windows-gnu
+          - target: aarch64-apple-darwin
+            zig: aarch64-macos
+          - target: x86_64-apple-darwin
+            zig: x86_64-macos
+          - target: aarch64-unknown-linux-gnu
+            zig: aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - name: Point cc-rs at zig
+        # cc-rs appends `--target=<rust triple>` when it sees a zig compiler;
+        # zig wants its own spelling, so the wrapper strips the flag and adds
+        # the mapped triple. C build scripts (ring) run for `check` too.
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/zigcc" <<'EOF'
+          #!/usr/bin/env bash
+          triple="$1"; shift
+          args=()
+          for a in "$@"; do case "$a" in --target=*) continue;; esac; args+=("$a"); done
+          exec zig cc -target "$triple" "${args[@]}"
+          EOF
+          chmod +x "$RUNNER_TEMP/zigcc"
+          name=$(echo "${{ matrix.target }}" | tr '-' '_')
+          echo "CC_${name}=$RUNNER_TEMP/zigcc ${{ matrix.zig }}" >> "$GITHUB_ENV"
+          echo "AR_${name}=zig ar" >> "$GITHUB_ENV"
+      - name: Check the target
+        run: cargo check --locked --all-targets --target ${{ matrix.target }}
+
+  # Native compile, unit tests and a link of the shipped profile. The browser
+  # probes are NOT here: they are parallel jobs in probes.yml, so a slow or
+  # flaky browser step can never hold up a merge or a release gate.
+  native:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-${{ matrix.os }}
+      - name: Check (all targets)
+        run: cargo check --locked --all-targets
+      - name: Unit tests
+        run: cargo test --profile gate --lib
+      - name: Release link
+        run: cargo build --release

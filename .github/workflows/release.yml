@@ -1,0 +1,207 @@
+name: Release
+
+# Tag-driven. `git push origin main --tags` (or scripts/release-prep.sh) is
+# the whole local action: every artifact is built on a native runner in
+# PARALLEL, the fast gate must pass, and the public order is fixed —
+# assets first, then npm (platforms before launcher), then Latest last.
+# Nothing is built on the developer machine.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v4.6.9)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write # npm provenance
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 5
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: v
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${TAG_INPUT:-${GITHUB_REF_NAME}}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "ERROR: bad tag '$tag'" >&2; exit 1; }
+          v="${tag#v}"
+          python3 scripts/check-release-tree.py "$v"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  gate:
+    needs: plan
+    uses: ./.github/workflows/gate.yml
+
+  build:
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu.2.28
+            asset: linux-x64
+            legacy: linux-x86_64
+            bin: target/x86_64-unknown-linux-gnu/release/bladebro
+            zig: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu.2.28
+            asset: linux-arm64
+            legacy: linux-aarch64
+            bin: target/aarch64-unknown-linux-gnu/release/bladebro
+            zig: true
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            asset: windows-x64
+            legacy: windows-x86_64
+            bin: target/x86_64-pc-windows-gnu/release/bladebro.exe
+            zig: true
+          - os: macos-26
+            target: aarch64-apple-darwin
+            asset: darwin-arm64
+            legacy: macos-aarch64
+            bin: target/aarch64-apple-darwin/release/bladebro
+          - os: macos-26
+            target: x86_64-apple-darwin
+            asset: darwin-x64
+            legacy: macos-x86_64
+            bin: target/x86_64-apple-darwin/release/bladebro
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.asset }}
+      - uses: mlugg/setup-zig@v2
+        if: matrix.zig
+        with:
+          version: 0.17.1
+      - name: Build
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.zig }}" == "true" ]]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      - name: Package (binary, legacy name, checksums)
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${{ matrix.bin }}"
+          test -s "$src" || { echo "ERROR: missing $src" >&2; exit 1; }
+          ext=""
+          [[ "$src" == *.exe ]] && ext=".exe"
+          mkdir -p dist
+          cp "$src" "dist/bladebro-${{ matrix.asset }}$ext"
+          cp "$src" "dist/bladebro-${{ matrix.legacy }}$ext"
+          ( cd dist && sha256sum "bladebro-${{ matrix.asset }}$ext" > "bladebro-${{ matrix.asset }}$ext.sha256" )
+          ( cd dist && sha256sum "bladebro-${{ matrix.legacy }}$ext" > "bladebro-${{ matrix.legacy }}$ext.sha256" )
+      - uses: actions/upload-artifact@v7
+        with:
+          name: assets-${{ matrix.asset }}
+          path: dist/*
+          retention-days: 7
+
+  publish:
+    needs: [plan, gate, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify the asset set
+        run: |
+          set -euo pipefail
+          bins=$(ls dist | grep -v '\.sha256$' | wc -l)
+          sums=$(ls dist | grep -c '\.sha256$' || true)
+          [[ "$bins" == "10" && "$sums" == "10" ]] || { echo "ERROR: $bins binaries, $sums checksums (want 10/10)" >&2; ls -l dist; exit 1; }
+          ( cd dist && sha256sum -c --quiet ./*.sha256 )
+          python3 tools/reliability_probe/linux-abi.py dist/bladebro-linux-x64 dist/bladebro-linux-arm64
+      - name: Smoke the Linux artifact
+        run: |
+          set -euo pipefail
+          chmod +x dist/bladebro-linux-x64
+          ./dist/bladebro-linux-x64 --version
+      - name: Create the draft release and upload the assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --title "$TAG" --draft --generate-notes
+          gh release upload "$TAG" dist/* --clobber
+          count=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          [[ "$count" == "20" ]] || { echo "ERROR: release has $count assets, want 20" >&2; exit 1; }
+
+  # npm needs no GitHub release asset: the same binaries are re-downloaded
+  # here from the build artifacts, so the launcher and the platform packages
+  # still ship identical bytes to the release page.
+  npm:
+    needs: [plan, build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Authenticate to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
+            echo "ERROR: secrets.NPM_TOKEN is not set; npm cannot publish from CI." >&2
+            exit 1
+          fi
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
+          npm whoami
+      - name: Publish the six packages (platforms first, launcher last)
+        run: ./scripts/publish-npm-ci.sh dist
+
+  latest:
+    needs: [plan, npm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Expose the release as Latest, last
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false --latest

@@ -1,10 +1,12 @@
 name: CI
 
+# Fast, blocking feedback only. The browser instruments live in probes.yml
+# (nightly, tag, manual) and the platform builds in release.yml (tag) — this
+# file must stay under ~8 minutes of wall clock or it stops being useful.
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    # Docs-only pushes don't need CI — see status.md §0/§4 CI discipline.
     paths-ignore: &docs-ignore
       - "**.md"
       - "Assets/**"
@@ -15,280 +17,27 @@ on:
     branches: [main]
     paths-ignore: *docs-ignore
 
-# A newer push to the same PR supersedes the older run; it only wastes (scarce) native runners.
-# Never cancel main/dispatch runs: the release gate reads the exact head's result.
+# A newer push to the same PR supersedes the older run. Never cancel
+# main/dispatch runs: a release reads the exact commit's result.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  CARGO_NET_RETRY: 5
-
 jobs:
-  lint-test-build:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        # Native Mac tests run on the arm64 pool. The macos-26-intel image wedges headful Chrome's
-        # main thread in a synchronous IconServices XPC call (process samples of Chrome 157:
-        # NSMenu/ShareKit -> ISIconManager), timing out Input.* calls for minutes on fresh Chrome
-        # instances; the same suite passes every assertion on arm64. The darwin-x64 binary is still
-        # cross-built and checked by release.sh.
-        os: [ubuntu-latest, macos-26, windows-latest]
-        rust-version: ["stable"]
+  gate:
+    uses: ./.github/workflows/gate.yml
 
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust ${{ matrix.rust-version }}
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust-version }}
-          components: clippy, rustfmt
-
-      - name: Install Chrome (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo install -d -m 0755 /etc/apt/keyrings
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
-            | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
-          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb
-          # Use the browser installed for this fixture, not a runner's Chromium wrapper.
-          echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
-
-      - name: Install signed stable Chrome (macOS)
-        if: startsWith(matrix.os, 'macos-')
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Use current stock Chrome, as on Linux, instead of the image's copy.
-          dmg="$RUNNER_TEMP/googlechrome.dmg"
-          mount="$RUNNER_TEMP/chrome-installer"
-          curl --fail --location --proto '=https' --proto-redir '=https' \
-            --output "$dmg" https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg
-          mkdir -p "$mount"
-          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
-          trap 'hdiutil detach "$mount"' EXIT
-          # DMG Finder/resource-fork metadata is not valid on signed code.
-          # Copy without that metadata, then verify the actual installed bytes.
-          app="$RUNNER_TEMP/Google Chrome.app"
-          ditto --noextattr --norsrc "$mount/Google Chrome.app" "$app"
-          codesign --verify --deep --strict "$app"
-          codesign --verify -R='anchor apple generic and certificate leaf[subject.OU] = "EQHXZ8M8AV"' "$app"
-          # Only replace the disposable GitHub runner's preinstalled browser.
-          sudo rm -rf '/Applications/Google Chrome.app'
-          sudo ditto "$app" '/Applications/Google Chrome.app'
-          chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-          echo "CHROME_PATH=$chrome" >> "$GITHUB_ENV"
-          "$chrome" --version
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          key: ${{ matrix.os }}
-
-      - name: Format check
-        run: cargo fmt --check
-
-      - name: Oracle evidence parser
-        run: python tools/diff_oracle/test_oracle.py
-
-      - name: Clippy
-        run: cargo clippy --release -- -D warnings
-
-      - name: Test
-        # The gate profile: release codegen without LTO (Cargo.toml). The
-        # shipped artifact is built at --release on the next step; running the
-        # 21 test binaries through ThinLTO costs ~7 min per job for ~0.1 ms of
-        # runtime and a smaller binary.
-        run: cargo test --profile gate
-
-      - name: Build
-        run: cargo build --release
-
-      - name: Install Node for native DSH integration
-        uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-
-      - name: Verify native DSH package and browser lifecycle
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          set -e
-          # Hermetic: a cache from an earlier (even failed) attempt must never supply this tree.
-          rm -rf target/dsh-runtime
-          npm pack ./npm/bladebro --pack-destination .
-          version=$(node -p "require('./npm/bladebro/package.json').version")
-          # Test unpublished versions using this job's real native binary.
-          platform=$(node -p "(process.platform === 'win32' ? 'windows' : process.platform) + '-' + process.arch")
-          binary=$(node -p "'bladebro' + (process.platform === 'win32' ? '.exe' : '')")
-          cp "target/release/$binary" "npm/bladebro-$platform/$binary"
-          npm pack "./npm/bladebro-$platform" --pack-destination .
-          npm install --prefix target/dsh-runtime --no-audit --no-fund --ignore-scripts @deepseek-ai/dsh@0.2.0-rc.2 "./bladebro-${version}.tgz" "./bladebro-${platform}-${version}.tgz"
-          node tools/dsh_probe/package.mjs
-          node tools/dsh_probe/package.mjs
-          export DSH_RUNTIME=target/dsh-runtime
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          export BLADE_DUMP_INJECT="$RUNNER_TEMP/bladebro-inject.js"
-          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
-          mkdir -p "$BLADE_DSH_FAILURE_DIR"
-          export BLADE_DBG_WORKERS=1
-          export NAV_TIMING=1
-          node tools/dsh_probe/run.mjs
-          node tools/dsh_probe/run.mjs
-
-      - name: Diagnose macOS stock browser after failure
-        if: failure() && startsWith(matrix.os, 'macos-')
-        timeout-minutes: 2
-        run: |
-          node tools/dsh_probe/stock-browser.mjs
-          node tools/dsh_probe/stock-browser.mjs "$RUNNER_TEMP/bladebro-inject.js"
-
-      - name: Diagnose macOS without WebGL masking after failure
-        if: failure() && startsWith(matrix.os, 'macos-')
-        timeout-minutes: 5
-        shell: bash
-        env:
-          BLADE_WEBGL: real
-          DSH_RUNTIME: target/dsh-runtime
-        run: |
-          export BLADEBRO="$PWD/target/release/bladebro"
-          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
-          node tools/dsh_probe/run.mjs
-
-      - name: Diagnose macOS mask without hardware detection
-        if: failure() && startsWith(matrix.os, 'macos-')
-        timeout-minutes: 5
-        shell: bash
-        env:
-          BLADE_WEBGL: spoof
-          BLADE_GPU: apple
-          DSH_RUNTIME: target/dsh-runtime
-        run: |
-          export BLADEBRO="$PWD/target/release/bladebro"
-          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
-          node tools/dsh_probe/run.mjs
-
-      - name: Diagnose macOS native Metal backend
-        if: failure() && startsWith(matrix.os, 'macos-')
-        timeout-minutes: 5
-        shell: bash
-        env:
-          BLADE_CHROME_FLAGS: --use-angle=metal
-          DSH_RUNTIME: target/dsh-runtime
-        run: |
-          export BLADEBRO="$PWD/target/release/bladebro"
-          export BLADE_DSH_FAILURE_DIR="$RUNNER_TEMP/bladebro-dsh-failure"
-          node tools/dsh_probe/run.mjs
-
-      - name: Preserve macOS native failure evidence
-        if: failure() && startsWith(matrix.os, 'macos-')
-        uses: actions/upload-artifact@v7
-        with:
-          name: macos-native-failure
-          path: ${{ runner.temp }}/bladebro-dsh-failure
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Authenticated cross-origin downloads — native browser
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          python tools/reliability_probe/download.py
-          python tools/reliability_probe/download.py
-
-      - name: Agent UX and mutation honesty — native browser
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          BLADE_INCOGNITO=0 POLISH_OUT=work/polish-native.json python tools/reliability_probe/polish.py
-          BLADE_INCOGNITO=1 POLISH_OUT=work/polish-incognito.json python tools/reliability_probe/polish.py
-
-      - name: Live report regressions — native browser
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          BLADE_INCOGNITO=0 POLISH_OUT=work/live464-native.json python tools/reliability_probe/live464.py
-          BLADE_INCOGNITO=1 POLISH_OUT=work/live464-incognito.json python tools/reliability_probe/live464.py
-
-      - name: Root waits and toggle fill — native browser
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          BLADE_INCOGNITO=0 POLISH_OUT=work/qol465-native.json python tools/reliability_probe/qol465.py
-          BLADE_INCOGNITO=1 POLISH_OUT=work/qol465-incognito.json python tools/reliability_probe/qol465.py
-
-      - name: Agent contracts and preflight safety — native browser
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          BLADE_INCOGNITO=0 POLISH_OUT=work/agent-contract-native.json python tools/reliability_probe/agent_contract.py
-          BLADE_INCOGNITO=1 POLISH_OUT=work/agent-contract-incognito.json python tools/reliability_probe/agent_contract.py
-
-      - name: Owned storage flush — native browser
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          POLISH_OUT=work/persistence-1.json python tools/reliability_probe/persistence.py
-          POLISH_OUT=work/persistence-2.json python tools/reliability_probe/persistence.py
-
-      - name: Tiny native targets — no miss or replay
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          BLADE_INCOGNITO=0 POLISH_OUT=work/tiny-native.json python tools/reliability_probe/tiny_click.py
-          BLADE_INCOGNITO=1 POLISH_OUT=work/tiny-incognito.json python tools/reliability_probe/tiny_click.py
-
-      - name: Agent control reads and structured runs — native browser
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          export BLADEBRO=$(node -p "require('path').resolve('target/release/bladebro' + (process.platform === 'win32' ? '.exe' : ''))")
-          BLADE_INCOGNITO=0 POLISH_OUT=work/agent-ux-native.json python tools/reliability_probe/agent_ux.py
-          BLADE_INCOGNITO=1 POLISH_OUT=work/agent-ux-incognito.json python tools/reliability_probe/agent_ux.py
-
-      # 4.6.1: real runtime stealth validation on every OS — the built binary
-      # drives its own vectors page through a real browser and exits non-zero
-      # on any FAIL (the audit is a gate since 4.6.1). Kills the class of
-      # "green CI, broken lane on macOS/Windows".
-      - name: Stealth audit — real browser, all OSes
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          binary="./target/release/bladebro"
-          if [ "${RUNNER_OS}" = "Windows" ]; then binary="$binary.exe"; fi
-          export BLADE_HOME="${RUNNER_TEMP:-/tmp}/bb-audit"
-          export BLADE_NO_WARMING=1
-          "$binary" audit
-          # Default headful launches skip the notification mask. Exercise its
-          # native argument/promise contract explicitly on every desktop OS.
-          BLADE_PERMS=patch BLADE_MEDIA=patch BLADE_INCOGNITO=1 "$binary" audit
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      # Keep the supported Rust version separate from Dependabot's action ref.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.86.0"
-      - uses: actions/cache@v6
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: msrv-1.86-registry-${{ hashFiles('Cargo.lock') }}
+          key: msrv-1.86
       - name: Check advertised minimum Rust version
         run: |
           rustc --version | grep -E '^rustc 1[.]86[.]0 '
@@ -299,16 +48,16 @@ jobs:
   # bionic sysroot that ring's C needs.
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "stable"
+          toolchain: "1.100.0"
           targets: "aarch64-linux-android"
-      - uses: actions/cache@v6
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: android-aarch64-registry-${{ hashFiles('Cargo.lock') }}
+          key: android-aarch64
       - name: Point cc-rs at the NDK toolchain
         run: |
           ndk="${ANDROID_NDK_LATEST_HOME:-$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* | sort -V | tail -1)}"

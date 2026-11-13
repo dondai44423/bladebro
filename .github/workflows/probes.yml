@@ -1,0 +1,182 @@
+name: Probes
+
+# The instruments, in PARALLEL. None of this blocks a merge or a coding
+# loop: it runs nightly, on a release tag, and on demand. Each job drives a
+# real browser on its own runner, so the whole set costs ~10 minutes of wall
+# clock instead of the ~40 it took serialized.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  BLADE_NO_WARMING: "1"
+  BLADE_NO_UPDATE_CHECK: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --profile gate
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bladebro-gate
+          path: target/gate/bladebro
+          retention-days: 3
+
+  audit:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: bladebro-gate
+          path: target/gate
+      - name: Install Chrome and the virtual display
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+          echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+      - name: Stealth vectors
+        run: |
+          chmod +x target/gate/bladebro
+          BLADE_HOME=$(mktemp -d) ./target/gate/bladebro audit
+          BLADE_HOME=$(mktemp -d) BLADE_PERMS=patch BLADE_MEDIA=patch BLADE_INCOGNITO=1 ./target/gate/bladebro audit
+
+  oracle:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: bladebro-gate
+          path: target/gate
+      - name: Install Chrome and the virtual display
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+      - name: Differential oracle (divergent must be 0)
+        run: |
+          chmod +x target/gate/bladebro
+          BLADEBRO=$PWD/target/gate/bladebro python3 tools/diff_oracle/oracle.py | tee oracle.log
+          grep -q "divergent: 0" oracle.log
+
+  qol:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: bladebro-gate
+          path: target/gate
+      - name: Install Chrome and the virtual display
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+      - name: Input/action behavior suite
+        run: |
+          chmod +x target/gate/bladebro
+          BLADEBRO=$PWD/target/gate/bladebro python3 tools/qol_probe/run.py
+
+  lanes:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: bladebro-gate
+          path: target/gate
+      - name: Install Chrome and the virtual display
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+      - name: Cold start, five lanes
+        run: |
+          chmod +x target/gate/bladebro
+          BLADEBRO=$PWD/target/gate/bladebro python3 tools/lane_matrix.py all 5
+
+  gap44:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: bladebro-gate
+          path: target/gate
+      - name: Install Chrome and the virtual display
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+      - name: Acceptance probes
+        run: |
+          chmod +x target/gate/bladebro
+          export BLADEBRO=$PWD/target/gate/bladebro
+          python3 tools/gap44/probe.py 1
+          python3 tools/gap44/probe.py 2
+
+  reliability:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: bladebro-gate
+          path: target/gate
+      - name: Install Chrome and the virtual display
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+      - name: Agent contracts, persistence, downloads
+        run: |
+          chmod +x target/gate/bladebro
+          export BLADEBRO=$PWD/target/gate/bladebro
+          python3 tools/reliability_probe/agent_contract.py
+          python3 tools/reliability_probe/persistence.py
+          python3 tools/reliability_probe/download.py
+          python3 tools/reliability_probe/agent_ux.py

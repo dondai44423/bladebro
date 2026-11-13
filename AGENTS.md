@@ -25,9 +25,9 @@ cargo build --release                     # the shipped artifact (LTO) → ./tar
 ./target/release/bladebro stop            # when done — don't leave a daemon running
 ```
 
-The verification instruments (`tools/*/README.md`) read `BLADEBRO`; point them at `target/gate/bladebro` while iterating and at `target/release/bladebro` before a release.
+The verification instruments (`tools/*/README.md`) read `BLADEBRO`; point them at `target/gate/bladebro` while iterating. The full set runs in `.github/workflows/probes.yml` (nightly, tag, manual) as parallel remote jobs — run only the one that covers your change, by hand.
 
-Rust: edition 2021, MSRV 1.86. Requirements: Chrome/Chromium installed. On headless Linux bladebro manages its own Xvfb + window manager. Linux (x64 + ARM64), macOS (x64 + arm64) and Windows are all first-class — CI builds all three OSes, so don't write code that silently assumes Linux.
+Rust: edition 2021, MSRV 1.86. `rust-toolchain.toml` pins the toolchain CI uses — a drifting `stable` is how two releases failed on lints a one-version-behind local clippy could not see. Bump the pin deliberately, with the gate run on the new version. Requirements: Chrome/Chromium installed. On headless Linux bladebro manages its own Xvfb + window manager. Linux (x64 + ARM64), macOS (x64 + arm64) and Windows are all first-class — CI builds all three OSes, so don't write code that silently assumes Linux.
 
 ## Where to change what
 
@@ -65,6 +65,8 @@ Other places: `tests/` (integration tests + fixtures; unit tests live inline as 
 
 ## Verification — the instruments
 
+These run in CI as parallel jobs (`.github/workflows/probes.yml`, nightly + tag + manual), never as a serial local ritual. On your machine run only the one that covers the change you made.
+
 House rules: **reproduce before you fix** (don't "fix" what you haven't seen fail) and **verify from live readback** (a command exiting 0 is not evidence that a behavior works). These tools exist because trusting our own code is how stealth bugs ship:
 
 - `./target/release/bladebro audit` — the stealth vector suite + cross-restart stability stamps. The suite prints its own total (111 on the reference machine, GPU/profile-dependent elsewhere); the bar is no `FAIL` line and stable stamps after any stealth-adjacent change.
@@ -94,7 +96,19 @@ Match the surrounding code. Specific to this repo:
 - Branch, commit, open a PR, fill in `.github/PULL_REQUEST_TEMPLATE.md`. Keep PRs scoped — a stealth fix and a refactor are two PRs.
 - CI (fmt + clippy + test + build on ubuntu, macos, windows) runs on PRs — all three must pass. Docs-only changes skip CI by design.
 - AI-generated PRs are welcome, but **review your own diff first** — you are responsible for what you submit.
-- Version bumps, publishing, tags and `CHANGELOG.md` curation are maintainer territory. Describe your change in the PR description; don't touch release machinery.
+- Version bumps, publishing, `CHANGELOG.md` curation and tags are maintainer territory (`scripts/release-prep.sh` + the tag-triggered release workflow). Describe your change in the PR description; don't touch release machinery.
+
+## Shipping — tag-driven, all remote
+
+```bash
+./scripts/release-prep.sh X.Y.Z --push   # versions + CHANGELOG + commit + tag: <1 s, builds nothing
+gh run watch --workflow Release          # the only thing to wait on; nothing builds here
+```
+
+`.github/workflows/release.yml` then runs, in parallel where it can: `plan` (tag ↔ Cargo/npm/CHANGELOG consistency) → `gate` (the same lint+test matrix as CI) ∥ `build` ×5 on native runners (linux x64/arm64 + windows via zigbuild on ubuntu, darwin arm64/x64 on macos-26) → `publish` (checksums, LINUX ABI check, smoke run, draft release, exactly 20 assets) → `npm` (platforms first, launcher last, provenance, ≤2 min registry wait) → `latest`. Budget ~15 minutes end to end.
+
+- Never build a release artifact locally, never bump a version by hand, never re-tag — a failed release is re-run with `workflow_dispatch` on the same tag.
+- Never republish an npm version: `publish-npm-ci.sh` fails closed if the registry already has it.
 
 ## Boundaries
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ── publish-npm.sh: Build binary, publish platform + main packages ─────
 # Run from project root:  ./scripts/publish-npm.sh
-#   --no-build   skip building; copy the binaries release.sh just built
+#   --no-build   skip building; use the binaries already under target/
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -9,7 +9,7 @@ SELF="$SCRIPT_DIR/$(basename "$0")"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
-# ── resource cap: same policy as release.sh (skip when already capped) ─
+# ── resource cap: keep the machine usable while a local build runs ────
 if [[ -z "${BLADE_RELEASE_CAPPED:-}" ]]; then
     export BLADE_RELEASE_CAPPED=1
     cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
@@ -54,7 +54,7 @@ open(p, 'a').write('\n')
 done
 
 # ── binaries: build (unless --no-build), then copy into the packages ──
-# release.sh calls this script with --no-build right after it built all
+# The tag-driven release workflow calls publish-npm-ci.sh instead; this
 # five binaries itself, so the duplicate second build pass is gone.
 SKIP_BUILD=0
 if [[ "${1:-}" == "--no-build" ]]; then SKIP_BUILD=1; fi

@@ -1,0 +1,6 @@
+# One toolchain for CI and every machine: a drifting `stable` is how two
+# releases failed on lints the local clippy (one version behind) could not
+# see. Bump this deliberately, with the gate run on the new version.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
