@@ -14,7 +14,7 @@
 ## Checklist
 
 - [ ] `cargo clippy --release -- -D warnings` passes
-- [ ] `cargo test --release` passes
+- [ ] `cargo test --profile gate` passes
 - [ ] `cargo build --release` produces a clean binary
 - [ ] Commit message follows conventional commits (`feat:` / `fix:` / `stealth:` / `docs:`)
 - [ ] No new tools added (surface stays at 5: act/see/state/run/vision)

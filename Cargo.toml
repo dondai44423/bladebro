@@ -53,11 +53,18 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
-# Local iteration only (never used by CI or release builds): release codegen
-# without LTO, parallel codegen units + incremental for fast rebuilds.
-# Use: capped cargo test --profile quick ...
-[profile.quick]
+# The gate profile: what `cargo test`, CI and release.sh compile the suite
+# with. Release codegen (opt-level 3, no debug info, stripped) without LTO.
+# Thin LTO + codegen-units=1 is worth it only for the shipped artifact
+# (measured 2026-11-13, i5-1145G7: 8.2 MB vs 11.9 MB binary, 4.8 vs 4.9 ms
+# startup) and it makes every one of the 21 test binaries re-run the LTO
+# pass — edit → all test binaries: 420 s at release vs 27 s here. The shipped
+# artifacts still build with `cargo build --release`.
+[profile.gate]
 inherits = "release"
 lto = false
 codegen-units = 16
 incremental = true
+# Keep symbols in test binaries: a failing gate should name its frames, and
+# skipping the strip step is also marginally faster than doing it.
+strip = "none"

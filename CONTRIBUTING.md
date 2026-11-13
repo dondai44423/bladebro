@@ -10,10 +10,10 @@ Working with a coding agent? Point it at [AGENTS.md](AGENTS.md) — the agent-fa
 # Lint — zero warnings allowed
 cargo clippy --release -- -D warnings
 
-# Tests — all must pass
-cargo test --release
+# Tests — all must pass (gate profile: release codegen without LTO)
+cargo test --profile gate
 
-# Build — must produce a clean binary
+# Build — must produce a clean binary (the shipped artifact profile)
 cargo build --release
 ```
 

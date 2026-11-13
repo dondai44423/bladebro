@@ -696,7 +696,7 @@ Bladebro is free and open source. Sponsoring keeps development independent.
 
 ## 🤝 Contributing
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Before submitting: `cargo clippy --release -- -D warnings` and `cargo test --release`.
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Before submitting: `cargo clippy --release -- -D warnings` and `cargo test --profile gate`.
 
 Using a coding agent? Point it at [AGENTS.md](AGENTS.md) — repo mechanics, house rules and verification instruments in one file.
 

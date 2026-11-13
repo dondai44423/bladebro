@@ -48,7 +48,7 @@ is still needed to remove those toolchain diagnostics without suppression.
 
 | Area | Instrument |
 |---|---|
-| Agent schemas, preflight, nested plans, JSON notices | `tools/reliability_probe/agent_contract.py` + `cargo test --release` |
+| Agent schemas, preflight, nested plans, JSON notices | `tools/reliability_probe/agent_contract.py` + `cargo test --profile gate` |
 | Live control reads, option labels, structured run statuses/artifacts | `tools/reliability_probe/agent_ux.py` |
 | Owned storage flush, EOF and forked-launcher restart | `tools/reliability_probe/persistence.py` + `browser-setup.py` |
 | Trusted input (isTrusted, paused wrapper) | `tools/qol_probe/run.py` + `tools/gap44/probe.py` |
@@ -56,12 +56,12 @@ is still needed to remove those toolchain diagnostics without suppression.
 | Wait/readiness contract | `tools/qol_probe/run.py` + G02 in `tools/gap44/probe.py` |
 | Dialog expectations | G03 in `tools/gap44/probe.py` |
 | Content reads, outline, template extraction | `tools/qol_probe/run.py` + G06 in `tools/gap44/probe.py` |
-| Product/offer extraction | `cargo test --release` (`mcp/server/extract` tests) |
+| Product/offer extraction | `cargo test --profile gate` (`mcp/server/extract` tests) |
 | Document/PDF paths | G08 in `tools/gap44/probe.py` |
-| Outcome wording, state readbacks | `cargo test --release` (verdict tests) + G01 in `tools/gap44/probe.py` |
+| Outcome wording, state readbacks | `cargo test --profile gate` (verdict tests) + G01 in `tools/gap44/probe.py` |
 | Geometry coherence, WebRTC under proxy | `tools/gap44/webrtc_proxy.py` |
-| Proxy credential redaction | `cargo test --release` (`browser/proxy` tests) + G13 in `tools/gap44/probe.py` |
-| Updater retries, install integrity | `cargo test --release` (`updater` tests) |
+| Proxy credential redaction | `cargo test --profile gate` (`browser/proxy` tests) + G13 in `tools/gap44/probe.py` |
+| Updater retries, install integrity | `cargo test --profile gate` (`updater` tests) |
 | Stealth posture | `bladebro audit` (111 local vectors, cross-run stamps, nonzero on failure) |
 | Stock-parity (page-visible differences) | `tools/diff_oracle/oracle.py` |
 | Cold start, all 5 lanes, owned-process hygiene | `tools/lane_matrix.py all 5` |
@@ -86,7 +86,7 @@ is still needed to remove those toolchain diagnostics without suppression.
 ## Re-run
 
 ```bash
-cargo fmt --check && cargo clippy --release -- -D warnings && cargo test --release
+cargo fmt --check && cargo clippy --release -- -D warnings && cargo test --profile gate
 ./target/release/bladebro audit
 python3 tools/reliability_probe/agent_contract.py
 python3 tools/reliability_probe/persistence.py

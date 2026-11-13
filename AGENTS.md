@@ -12,16 +12,20 @@ Two properties shape every change:
 ## Commands
 
 ```bash
-cargo build --release                     # → ./target/release/bladebro
+cargo check                               # type-check loop (~3 s)
+cargo build --profile gate                # fast runnable binary → ./target/gate/bladebro
 cargo fmt --check                         # formatting (CI-enforced)
 cargo clippy --release -- -D warnings     # zero warnings, always
-cargo test --release                      # all tests must pass
+cargo test --profile gate                 # all tests must pass (~90 s edit→green)
+cargo build --release                     # the shipped artifact (LTO) → ./target/release/bladebro
 
 ./target/release/bladebro doctor          # environment check
 ./target/release/bladebro nav example.com # auto-starts its daemon + browser
 ./target/release/bladebro see content
 ./target/release/bladebro stop            # when done — don't leave a daemon running
 ```
+
+The verification instruments (`tools/*/README.md`) read `BLADEBRO`; point them at `target/gate/bladebro` while iterating and at `target/release/bladebro` before a release.
 
 Rust: edition 2021, MSRV 1.86. Requirements: Chrome/Chromium installed. On headless Linux bladebro manages its own Xvfb + window manager. Linux (x64 + ARM64), macOS (x64 + arm64) and Windows are all first-class — CI builds all three OSes, so don't write code that silently assumes Linux.
 
@@ -56,7 +60,7 @@ Other places: `tests/` (integration tests + fixtures; unit tests live inline as 
 5. **Adapters are pure optimization.** The `extract=auto` site paths make existing commands smarter on their site — zero new tools, zero new params, live-tested on the real site.
 6. **Honest verdicts.** Never claim success — a value written, a field cleared, a click's effect — without a readback that proves it. When proof is impossible, the verdict says so ("readback unverified"). Errors carry current page state so an agent can recover without an extra call.
 7. **Stealth means Proxies over native originals.** Every installed function/getter is a `Proxy` whose apply trap delegates to the original first (native receiver/arg validation preserved). Never patch `Function.prototype.toString` — that was tried once and it leaked the real source of every patched function. Never add automation flags (`--enable-automation`, `--disable-blink-features=AutomationControlled`, …): they are exactly what detectors read, and Chrome answers them with a visible infobar.
-8. **Zero warnings + green tests.** `cargo clippy --release -- -D warnings` clean and `cargo test --release` passing before you commit. A bugfix PR needs a regression test that would have caught the bug.
+8. **Zero warnings + green tests.** `cargo clippy --release -- -D warnings` clean and `cargo test --profile gate` passing before you commit. A bugfix PR needs a regression test that would have caught the bug.
 9. **Don't break other platforms.** All five build targets ship; platform differences belong behind `src/platform.rs` where possible. A CI failure on macos or windows is a real failure, not noise.
 
 ## Verification — the instruments

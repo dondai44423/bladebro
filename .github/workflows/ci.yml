@@ -101,7 +101,11 @@ jobs:
         run: cargo clippy --release -- -D warnings
 
       - name: Test
-        run: cargo test --release
+        # The gate profile: release codegen without LTO (Cargo.toml). The
+        # shipped artifact is built at --release on the next step; running the
+        # 21 test binaries through ThinLTO costs ~7 min per job for ~0.1 ms of
+        # runtime and a smaller binary.
+        run: cargo test --profile gate
 
       - name: Build
         run: cargo build --release

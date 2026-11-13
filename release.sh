@@ -162,8 +162,8 @@ SYNC
 cargo fmt --check
 cargo clippy --release -- -D warnings
 # Each test process owns fresh fixtures and data roots; cache files stay intact.
-cargo test --release
-cargo test --release
+cargo test --profile gate
+cargo test --profile gate
 
 # Commit first, build artifacts from this exact clean commit. A failed build
 # leaves a local commit, never a public tag or partial release.
