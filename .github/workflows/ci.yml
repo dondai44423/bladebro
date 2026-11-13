@@ -39,6 +39,11 @@ jobs:
         with:
           key: msrv-1.86
       - name: Check advertised minimum Rust version
+        # rust-toolchain.toml pins 1.100.0 for the workspace; this job must
+        # override it explicitly or rustup follows the file and the grep below
+        # fails on the pinned version instead of exercising the MSRV.
+        env:
+          RUSTUP_TOOLCHAIN: "1.86.0"
         run: |
           rustc --version | grep -E '^rustc 1[.]86[.]0 '
           cargo check --locked --all-targets
