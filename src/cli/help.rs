@@ -558,11 +558,11 @@ FLAGS
   --content           include text in model mode
   --budget <N>        max response chars (default 8000)
   --limit <N>         max extract items (default 50; Reddit comments: all ≤1000)
-  --logs console|network
+  --logs console|network|xhr
   --artifact <path>   paged read (--offset/--limit count chars; --items counts JSON rows)
   --preview           extract auto: container/schema without rows
   --changes           model delta since last capture; --format json for structured fields
-  --clear             read then clear --logs console|network
+  --clear             read then clear --logs console|network|xhr
   --sort <sort>       Reddit post auto-extract: confidence|top|new|controversial|old|qa
   --format text|json  json: pure JSON out for extract/artifact/eval reads
   --url <url>         navigate first (or pass the URL positionally)

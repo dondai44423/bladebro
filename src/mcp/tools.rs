@@ -151,7 +151,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "see",
-            description: "Read: model gives refs, content rendered markdown, outline headings. extract=auto detects list/search/product/site fields; preview=true samples schema without rows. Reddit comments disclose complete/partial, API denial and fuzzed_score; sort overrides page sort. Opaque redirects are flagged. find searches text; scope narrows reads. Logs: console=current document, network=current navigation; clear=true reads then clears.\nformat=json: payload, {data,note} for caveats/events, or artifact envelope. Default artifact pages are character chunks: concatenate data strings before parsing payload. items=true pages JSON array rows independently. next_offset=0 starts paging; null ends. changes=true gives model delta since last capture (JSON supported). Large reads offload; inspect partial/limit notes.",
+            description: "Read: model gives refs, content rendered markdown, outline headings. extract=auto detects list/search/product/site fields; preview=true samples schema without rows. Reddit comments disclose complete/partial, API denial and fuzzed_score; sort overrides page sort. Opaque redirects are flagged. find searches text; scope narrows reads. Logs: console=doc, network=nav, xhr=API endpoints; clear=true reads then clears.\nformat=json: payload, {data,note} for caveats/events, or artifact envelope. Default artifact pages are character chunks: concatenate data strings before parsing payload. items=true pages JSON array rows independently. next_offset=0 starts paging; null ends. changes=true gives model delta since last capture (JSON supported). Large reads offload; inspect partial/limit notes.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -171,7 +171,7 @@ pub fn all_tools() -> Vec<ToolDef> {
                     "sort": {"type":"string","enum":["confidence","top","new","controversial","old","qa"],"description":"Reddit post auto-extract sort; overrides page sort."},
                     "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}. @attr reads the container attribute. Text reads are RENDERED - a hidden element is omitted (the item lists it in _omitted); read one explicitly with {\"sel\":\"css\",\"raw\":true}. Lookups span light DOM, open shadow roots and same-origin frames; skipped frames are reported."},
                     "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set). Artifact: chars (default 20000), or rows with items=true (default 50)."},
-                    "logs": {"type":"string","enum":["console","network"],"description":"Console: current document. Network: current navigation."},
+                    "logs": {"type":"string","enum":["console","network","xhr"],"description":"Console: doc. Network: nav. XHR: deduplicated API/fetch URLs."},
                     "clear": {"type":"boolean","description":"Read then clear selected log."},
                     "preview": {"type":"boolean","description":"extract=auto: sampled container and fields, without rows."},
                     "changes": {"type":"boolean","description":"Model delta since last capture; format=json for structured output."},

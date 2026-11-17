@@ -141,6 +141,12 @@ impl Page {
             .unwrap_or_default()
     }
 
+    pub fn clear_xhr_log(&self) {
+        if let Ok(mut log) = self.xhr_log.lock() {
+            log.clear();
+        }
+    }
+
     /// V8: snapshot of the network request log (last 50).
     pub fn network_log(&self) -> Vec<NetEntry> {
         self.net_log
