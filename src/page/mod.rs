@@ -25,7 +25,7 @@ mod gl;
 mod route;
 
 pub use self::logs::{NetEntry, XhrEntry};
-pub(crate) use self::navigate::with_scheme;
+pub(crate) use self::navigate::{validate_nav_url, with_scheme};
 pub use self::route::{RouteEpoch, RouteSettle, ROUTE_BUDGET};
 
 use std::time::Duration;
