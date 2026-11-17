@@ -429,6 +429,12 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
 pub async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
     match kind {
         "console" => {
+            if crate::realbrowser::real_lane() {
+                return Ok(
+                    "console: unavailable on the real-browser lane (page injection is off)"
+                        .to_string(),
+                );
+            }
             let entries = page.console_log().await?;
             let arr = entries.as_array().cloned().unwrap_or_default();
             if arr.is_empty() {

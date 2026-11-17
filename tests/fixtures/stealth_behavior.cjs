@@ -114,10 +114,13 @@ async function glLimits() {
   // the differential oracle flags the same gap (issue #85 item 10).
   const { ctx, g } = mockWindow();
   class WebGLRenderingContext {
-    constructor() { this.native = { 3379: 8192, 35661: 16, 3386: new Int32Array([8192, 8192]), 33902: new Float32Array([1, 1]), 33901: new Float32Array([1, 1]) }; }
+    constructor() { this.native = { 3379: 8192, 35661: 16, 3386: new Int32Array([8192, 8192]), 33902: new Float32Array([1, 1]), 33901: new Float32Array([1, 1]), 36183: null, 37445: null, 37446: null }; }
     getParameter(p) {
-      const v = this.native[p];
-      return v === undefined ? 0 : (typeof v === 'object' ? new v.constructor(v) : v);
+      if (p in this.native) {
+        const v = this.native[p];
+        return v && typeof v === 'object' ? new v.constructor(v) : v;
+      }
+      return 0;
     }
   }
   class WebGL2RenderingContext extends WebGLRenderingContext {
@@ -131,6 +134,18 @@ async function glLimits() {
   assert.equal(one.getParameter(35661), 16, 'combined texture units capped at the backend');
   assert.deepEqual(Array.from(one.getParameter(3386)), [8192, 8192], 'viewport dims capped at the backend');
   assert.deepEqual(Array.from(one.getParameter(33902)), [1, 1], 'a range never exceeds the backend maximum');
+  assert.equal(one.getParameter(36183), null, 'WebGL2-only MAX_SAMPLES stays null on WebGL1');
+  assert.equal(one.getParameter(37445), null, 'UNMASKED_VENDOR_WEBGL stays null before WEBGL_debug_renderer_info');
+  assert.equal(one.getParameter(37446), null, 'UNMASKED_RENDERER_WEBGL stays null before WEBGL_debug_renderer_info');
+  one.native[37445] = 'Google Inc. (Mesa)';
+  one.native[37446] = 'ANGLE (Mesa, llvmpipe, OpenGL 4.5)';
+  assert.notEqual(one.getParameter(37445), null, 'enabled extension returns spoofed vendor');
+  assert.ok(!String(one.getParameter(37446)).includes('llvmpipe'), 'enabled extension masks software renderer');
+  // Lost context: native returns null for every enum; mask must pass null through.
+  one.native[3379] = null;
+  one.native[3386] = null;
+  assert.equal(one.getParameter(3379), null, 'lost-context scalar stays null');
+  assert.equal(one.getParameter(3386), null, 'lost-context viewport stays null');
   // The profile's own ranges differ per platform (Intel 255, Apple 511, …):
   // the property is that the backend's narrower maximum wins, whatever it is.
   assert.deepEqual(Array.from(one.getParameter(33901)), [1, 1], 'a second range clamps the same way');
@@ -290,14 +305,23 @@ async function noise() {
 }
 // The console capture in the assembled core + tail.
 async function consoleCapture() {
+  const secret = 'b0123456789abcdef0123456789abcdef';
   const core = fs.readFileSync(path.join(root, 'src/stealth/js/stealth_core.js'), 'utf8')
-    .replace('__SEED__', '7').replace('__PROXY_HELPERS__', () => helpers)
+    .replace('__SEED__', '7').replace('__CONSOLE_KEY__', secret).replace('__PROXY_HELPERS__', () => helpers)
     + fs.readFileSync(path.join(root, 'src/stealth/js/stealth_tail.js'), 'utf8');
   const { ctx, g } = mockWindow();
   // A URL with a native-style toJSON, there before the core runs (as in a page).
   vm.runInContext('this.URL=class URL{constructor(h){this.h=h;}toJSON(){return this.h;}};', ctx);
   vm.runInContext(core, ctx);
-  const ring = g[Symbol.for('q')];
+  assert.deepEqual(Object.getOwnPropertySymbols(g), [], 'console capture must install zero symbol properties on window');
+  assert.equal(Symbol.for('q') in g, false, 'legacy Symbol.for("q") marker must be absent');
+  const ring = vm.runInContext(`console.debug.call('${secret}', 0)`, ctx);
+  assert.ok(Array.isArray(ring), 'secret receiver returns the private ring');
+  // Ordinary console.debug calls (including custom non-secret receivers) log normally and never return the ring.
+  assert.equal(vm.runInContext(`console.debug.call('wrong-key', 'probe')`, ctx), undefined);
+  assert.equal(ring.length, 1);
+  vm.runInContext(`console.debug.call('${secret}', 1)`, ctx);
+  assert.equal(ring.length, 0, 'secret clear empties the ring in place');
   const last = () => ring[ring.length - 1].m;
   vm.runInContext('var fired=0,tj=0;console.log({get x(){fired++;return 1;}},[{get y(){fired++;return 2;}}]);console.log({toJSON:function(){tj++;return 1;}});', ctx);
   assert.equal(g.fired, 0, 'logging must not invoke page getters');
