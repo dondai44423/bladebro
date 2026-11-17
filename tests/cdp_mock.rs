@@ -791,3 +791,45 @@ async fn a_field_that_trims_its_value_is_typed_once() {
     assert!(verdict.contains("whitespace differs"), "{verdict}");
     server.abort();
 }
+
+#[tokio::test]
+async fn child_wait_for_returns_closed_immediately_when_target_detaches() {
+    use futures_util::SinkExt;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        ws.send(Message::Text(
+            serde_json::json!({
+                "method": "Target.detachedFromTarget",
+                "params": {"sessionId": "sess-dead", "targetId": "tab-1"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        // Keep transport open so only target-detach can end the child wait.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    });
+
+    let client = CdpClient::connect(&format!("ws://{addr}")).await.unwrap();
+    let child = CdpSession::child(client, "sess-dead");
+    let wait = child.wait_for("Page.loadEventFired", std::time::Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    let res = wait.await;
+    assert!(
+        matches!(res, Err(bladebro::error::BladeError::Closed)),
+        "expected Closed on detached child session, got {res:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "detached child wait_for must not wait out deadline"
+    );
+    let _ = server.await;
+}
