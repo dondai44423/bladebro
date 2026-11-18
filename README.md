@@ -1,332 +1,43 @@
-<div align="center">
-
-<img src="Assets/logo.png" alt="Bladebro" width="120">
-
-**Give your AI agent a browser. Few tools. Full control. Real stealth. Zero runtime deps.**
-
-Re-render-immune refs · batch actions · auto-extract · self-improving · 6-layer stealth · drive your own browser
-
-One MCP server · one CLI · one persistent page model · no Node.js · one binary · Linux · macOS · Windows
-
-[![npm version](https://img.shields.io/npm/v/bladebro?style=flat-square)](https://www.npmjs.com/package/bladebro) [![npm downloads](https://img.shields.io/npm/dm/bladebro?style=flat-square)](https://www.npmjs.com/package/bladebro) [![license](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE) [![platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue?style=flat-square)](#-install) [![GitHub stars](https://img.shields.io/github/stars/dondai44423/bladebro?style=flat-square)](https://github.com/dondai44423/bladebro/stargazers)
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
-
-```bash
-npm install -g bladebro && bladebro mcp
-```
-
-[Demo](#-demo) · [Install](#-install) · [The 5 tools](#-the-5-tools) · [Usage](#-usage) · [Your browser](#-real-browser-mode) · [Stealth Bench V1](#-stealth-bench-v1) · [Stealth](#-stealth) · [Adapters](#-site-adapters) · [Comparison](#-comparison) · [Gotchas & limits](#-gotchas--limits)
-
-</div>
-
----
-
-**Bladebro is an agentic browser driver** — it gives an AI agent full control of a real browser through **5 tools**, not thirty. Built in Rust on a self-built CDP transport: one static binary, no Node.js, no Playwright, no runtime. It holds a persistent **Live Page Model** across tool calls, so every action returns **what changed** — never the whole page again.
-
-> **⭐ New — drive *your* browser.** `bladebro rb on` switches every surface to your own Chromium-family browser — your profile, your logins, your display — with the page-injection layer **off entirely**: a real environment has no manufactured tells to catch. Everything driver-side stays on. **[Real-browser mode →](#-real-browser-mode)**
-
-## 🎬 Demo
-
-**Bladebro doing real work on two bot-protected sites — Reddit and X.com — in under two minutes.** Real navigation, real actions, real content back: comment trees, threads and timelines as clean structured output.
-
-<https://github.com/user-attachments/assets/f67d80cc-a0ae-447a-8848-e35fce67f378>
-
-## 🏆 Stealth Bench V1
-
-Run against [browser-use's Stealth Bench V1](https://github.com/browser-use/benchmark): **80 real production sites** protected by 11 anti-bot vendors. Bladebro cleared **68 (85%)** — above every provider on the published leaderboard (browser-use-cloud: 81%).
-
-- **Out of the box** — one IP, no proxy, no captcha solver, no fingerprint rotation, no cloud. Stock Chromium with Bladebro's stealth layer on by default.
-- **Honest run** — real navigation of the real 80 sites; an open-model agent acted as the browsing agent because there was no paid cloud access, and the deviations are disclosed in full. The defensive layer being measured is Bladebro's own.
-- **Where it stands** — perfect on Cloudflare (22/22) and reCaptcha (6/6); cleared the two sites browser-use-cloud did not (Shape, Temu); one named gap: Akamai (3/6).
-
-**[Full report and methodology →](STEALTH_BENCH.md)** · **[Per-site results (CSV)](stealth-bench-sites.csv)**
-
-## ✨ What makes it different
-
-| What | Why it matters |
-|---|---|
-| **Re-render immunity** | Refs survive React/Vue/Angular DOM replacement via structural fingerprints — no other agent browser does this. |
-| **Delta-first results** | Every action returns what changed: 60–570 tokens per action, not full-page snapshot dumps. |
-| **5 tools, not 30** | Five compact definitions; shared step fields avoid repeated schemas. |
-| **Batch + branching** | `act batch` runs multi-step workflows in ONE call; `run` adds `if`/`while` logic. |
-| **Auto-extract + adapters** | Template-free list extraction, site-aware: Reddit comment trees, X.com threads, GitHub repos, product pages. |
-| **Infinite-scroll collect** | `act collect` scrolls, dedupes and returns a whole feed as one artifact, in one call. |
-| **6-layer stealth** | Protocol, environment, behavior, coherence, residue, seasoning — on by default, verified against real detectors. |
-| **Real-browser lane** | `bladebro rb on` drives your real Chrome-family browser — your profile, your display — with zero page patches and every driver feature on. |
-| **Self-improving** | Learns consent selectors, block choices and settle timing per domain; one behavioral fingerprint forever. |
-| **Self-healing** | Dead refs re-resolve, dead tabs reopen, crashed Chrome relaunches — transparently. |
-
-## 🚀 Install
-
-### npm (recommended)
-
-```bash
-npm install -g bladebro
-bladebro mcp
-```
-
-Requires Chrome/Chromium; prebuilt Linux binaries require glibc 2.28 or newer. No Rust or compilation. npm resolves the prebuilt binary for your platform — zero postinstall scripts. Update later with `npm update -g bladebro`.
-
-| Platform | Package | Size | Status |
-|---|---|---|---|
-| Linux x86_64 | `bladebro-linux-x64` | 7.4 MB | Live-verified |
-| Linux ARM64 | `bladebro-linux-arm64` | 6.5 MB | Not live-verified |
-| Windows x86_64 | `bladebro-windows-x64` | 6.9 MB | CI-verified |
-| macOS Intel | `bladebro-darwin-x64` | 6.9 MB | CI-verified |
-| macOS Apple Silicon | `bladebro-darwin-arm64` | 6.4 MB | CI-verified |
-
-<sub>Every release builds and passes CI on Ubuntu, macOS and Windows. Linux ARM64 and macOS binaries are cross-compiled from Linux with cargo-zigbuild.</sub>
-
-A Linux `ENOENT` launch error can mean the executable's loader is missing even when the file exists. The prebuilt binaries require glibc >=2.28; use a source build on Alpine/musl rather than reinstalling the same prebuild. A missing optional platform package is a separate error: reinstall with optional dependencies enabled.
-
-### Pi coding agent
-
-```bash
-pi install npm:bladebro
-```
-
-Registers 5 native tools (`browser.act`, `browser.see`, `browser.state`, `browser.run`, `browser.vision`) from the binary's own `tools/list` — tool definitions auto-adapt to any change, with zero extension maintenance.
-
-### DeepSeek Harness (DSH)
-
-Add Bladebro as a native plugin in the Web UI's **Plugins** page, or run:
-
-```bash
-dsh plugin --profile web add bladebro
-```
-
-pnpm 11 defaults to a [one-day release-age delay](https://pnpm.io/blog/releases/11.0),
-so an unversioned install immediately after a release can select an older package.
-To select an exact release, append its version, for example `dsh plugin --profile web add bladebro@4.6.7`
-(or enter `bladebro@4.6.7` in Plugins). If your package manager explicitly enforces
-a stricter release-age policy, wait for its configured delay. Keep that policy intact.
-
-Restart the profile and start a new chat. Desktop users can install `bladebro`
-from the same **Plugins** page. For terminal setup, enable Desktop's **Manage dsh
-Command**, fully quit the app, then use its bundled command:
-
-```bash
-dsh plugin --profile desktop add bladebro
-```
-
-Use Desktop's command for its profile; the npm DSH CLI cannot manage that
-app-owned profile. Open Desktop again after installation.
-
-DSH discovers the five tools as `mcp__bladebro__act`, `see`, `state`, `run` and
-`vision` (each with the same prefix). Schemas and descriptions come from the
-binary; DSH handles permissions, image attachments, reconnection and cleanup
-through its native MCP bridge. DSH may also expose its own generic MCP resource
-helpers and choose PTC presentation. No API key, separate MCP configuration, global
-Bladebro install or extra plugin package is needed. Chrome/Chromium must be
-installed on the machine running the DSH host. A remotely hosted Web UI controls
-that host's browser, rather than the device viewing the UI.
-
-Disable/re-enable the **Bladebro** bundle in Plugins, or remove it with
-`dsh plugin --profile web remove bladebro` (use `desktop` with Desktop's command).
-Restart the profile and begin a new chat after package changes. Other tools and
-settings remain intact. Do not also configure a second MCP server named
-`bladebro`; DSH refuses the duplicate namespace.
-
-Updates use DSH's package manager: `dsh plugin --profile web update bladebro`,
-or **Update** in Plugins. The plugin and native binary travel in the same
-package, so ordinary Bladebro releases update both. Existing global/Pi installs
-are separate. No background downloader or installation scripts run.
-
-Advanced configuration belongs in the profile's `cordis.patch.yml`:
-
-```yaml
-- id: bladebro
-  config:
-    # Optional absolute source-build/portable executable; package binary is default.
-    binaryPath: /absolute/path/to/bladebro
-    env:
-      CHROME_PATH: /absolute/path/to/chrome
-      BLADE_HOME: /absolute/path/to/private/browser-data
-    toolCallTimeoutMs: 180000
-```
-
-Windows YAML paths can use forward slashes, such as `C:/Tools/bladebro.exe`.
-The optional `cwd` and `reconnect` settings use DSH's native MCP configuration.
-The default per-call budget is 180 seconds; raise it for longer `run` sequences.
-Cancellation stops waiting, but an already-dispatched browser mutation may
-finish: observe its destination before trying it again.
-
-The npm CLI keeps its Node.js >=14 requirement; the DSH plugin uses the host's
-Node.js requirement. Prebuilt binaries cover Linux x64/ARM64 (glibc >=2.28),
-macOS Intel/Apple Silicon and Windows x64. Other targets need a source build and
-`binaryPath`. See the official [DSH plugin commands](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/reference/README.md#plugin-management)
-and [Desktop command runtime](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/desktop/README.md#bundled-command-runtime).
-
-### Hermes Agent
-
-```bash
-npm install -g bladebro
-bladebro hermes on
-```
-
-Requires a current Hermes CLI with `config get --json --raw`, `config unset`
-and `mcp test`; update Hermes if those commands are unavailable.
-
-Start a **new Hermes chat** (restart a running gateway or desktop client).
-This connects the standard MCP server and removes Hermes' built-in browser
-toolset, including `browser_exec`, from the agent's tools. Web search and
-extraction keep their existing settings. Chrome/Chromium must be installed;
-`bladebro doctor` checks browser prerequisites.
-
-```bash
-bladebro hermes status          # inspect the setup
-bladebro hermes off             # restore the previous browser settings
-bladebro hermes on --profile work  # target a named Hermes profile
-```
-
-Use the same profile for `off`; `HERMES_HOME` is also respected. If Hermes isn't
-on PATH, add `--hermes /path/to/hermes` (its CLI executable on Windows).
-Setup uses Hermes' public `config` and `mcp test` commands, saves private
-recovery state beside `config.yaml`, and reads settings back after writing.
-Interrupted switches can resume with `on` or restore with `off`. A changed
-MCP entry is refused during recovery rather than overwritten. Existing server environment settings are retained; explicit `BLADE_HOME` and
-`CHROME_PATH` from setup are forwarded because Hermes filters inherited variables.
-Other settings and pre-existing browser suppression survive restore. Avoid concurrent manual
-configuration edits while switching.
-
-There is no separate plugin or copied tool schema: normal Bladebro updates
-update the Hermes browser too. Hermes may expose MCP tools through its built-in
-Tool Search; all five remain discoverable there. `browser.backend: off` selects
-Hermes' alternative native browser stack; it does **not** disable browser tools.
-See [Hermes browser documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser/)
-and [MCP documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/).
-
-### From source
-
-Requires Chromium or Chrome (auto-detected) and Rust 1.86+. Linux servers need Xvfb for headful.
-
-```bash
-git clone https://github.com/dondai44423/bladebro.git
-cd bladebro
-cargo build --release
-./target/release/bladebro mcp
-```
-
-Source builds self-update too: `bladebro -u` swaps in the official released binary for your platform (it doesn't rebuild — for that: `git pull && cargo build --release`).
-
-## 🎯 The 5 tools
-
-The tables use compact MCP parameter notation. CLI calls use named flags, for example `bladebro act click --text "Sign in"` or `bladebro act eval --url https://example.com --js document.title`.
-
-### `act` — do, then observe
-
-Input actions return an **outcome verdict + page delta**; explicit reads/eval return their data. Clicks choose a role-aware activation lane and dispatch once; a quiet DOM never triggers another click. After a disconnect, mutating actions report an unknown outcome so the agent can inspect the destination before repeating them; clicking by text skips the read step (`act click text="Sign in"`), and ambiguous text returns matches with refs + `nth` values. Verdicts report observable evidence only: a state-only change is labeled `state-only, no nodes added/removed` (never a phantom `(+0 −0)`), an occluded click names what actually receives it, and a coordinate click that hits nothing names the topmost element at that point.
-
-| Action | Example | What it does |
-|---|---|---|
-| `click` | `act click e5` / `act click text="Sign in"` / `act click selector="#menu li"` | Mouse, JS, Enter escalation; `selector=` reaches controls inside open shadow roots — a bad selector errors as invalid, an out-of-range `nth` errors with the real match count |
-| `type` | `act type label="Search" text="hello"` | Cadenced typing into textboxes |
-| `fill` | `act fill fields=[...] submit="Go"` | Multi-field forms in ONE call, auto-detects field type |
-| `batch` | `act batch steps=[...]` | Multi-step workflows in ONE call |
-| `navigate` | `act navigate url="https://example.com"` | Idempotent; returns the page model |
-| `collect` | `act collect max=50 timeout=30` | Auto-extract + scroll + dedupe an infinite feed |
-| `wait` | `act wait condition=url text="dashboard"` | Visible element/CSS/text, title, URL, JS, DOM quiet, or tracked network quiet |
-| `eval` | `act eval js="document.title"` | Console-style JS; `el` in scope when a ref is given |
-| `scroll` | `act scroll dy=800` | Smooth, eased wheel events |
-| `hover` | `act hover text="Products"` | Reveals dropdowns in the delta |
-| `press` | `act press key=Enter` / `key=Control+a` | Real key event; full chords (`Control+a`, `Meta+Enter`, `Shift+Tab`) |
-| `select` | `act select e4 option="Nepal"` | Native dropdown by option text or value, read back; a text combobox is typed into |
-| `read` | `act read e5` | Live text/control value, toggle state and select choices; `--format json` for structured data |
-| `upload` | `act upload e7 text="/tmp/file.txt"` | File input |
-| `clear` | `act clear e3` | Empty an input or rich editor |
-| `download` | `act download url=... timeout=10` | Fetch + Blob download, returns the path |
-| `pdf` | `act pdf` | Export the page as a PDF artifact |
-| `back` / `forward` / `reload` | `act back` | History + reload |
-
-- **Self-healing refs** — within a page, dead refs re-resolve by identity after re-renders. Refresh refs after navigation or a tab switch; IDs from the previous page are not a cross-page address.
-- **Batch** — one call fills, submits, clicks and reads; it continues through navigation and stops on the first runtime error with step number + page state. Explicit `see`, `extract`, `read`, `eval` and state reads retain their data even with `slim:true`. Use `run` for branches or a batch inside a larger plan; batches cannot nest batches.
-- **`selector=` everywhere** — click, hover, type, press, wait, select, clear, read, upload, eval, `fill` fields, and `batch`/`run` steps all accept a CSS selector (light DOM + open shadow roots); `nth=` picks among matches.
-- **`url=` on input/read actions** — navigate first, then act: `act fill url="https://..." fields=[...]` reaches a page and fills it in one call. Download URLs identify the file; state URLs identify tab destinations or cookie scope.
-- **`slim=true`** — successful actions return verdicts only, including navigate/fill. On batch/run it inherits through steps and branches, preserving reads and failure recovery; a run step can set `slim:false` to opt back in.
-
-- **Inspect controls without eval** — MCP `act {action:"read",label:"Country",format:"json"}` returns the live value and select choices with labels, values, selection and disabled state. Textareas use the current value; checkboxes/radios include checked state, checkboxes also include indeterminate, and ARIA toggle states retain values such as `mixed`. Select choices are capped at 80 with `options_total` and `options_truncated:true` when clipped; multiple selects include all selected `values`. Large read results offload complete JSON to an artifact. `see scope=...` remains a text-subtree read.
-- **Machine-readable plans** — MCP `run {format:"json",steps:[...]}` returns `{status:"completed"|"stopped",results:[{step,status,output,error?}],stopped_at?,error?,page?,note?}`. Top-level step IDs are 1-based; statuses are `ok`, `optional_failed` or `failed`. Nested observations remain text inside `output`; `ok` means the top-level step finished, including any locally optional failures. The outer format does not change step formats: request JSON on individual reads explicitly. Oversized runs offload the complete result using the usual artifact paging envelope. Default run output stays text.
-
-- **Unambiguous targeting:** equally ranked text/label matches refuse with candidate refs/context. Choose `ref`, a unique selector, or `nth` (1-based). Targeted `press` focuses and checks its target before keys; an omitted target uses current focus.
-- **Popups:** `_blank` clicks report the new tab ID once and restore the opener. Use `state switch-tab` to act in the popup. Input reactivates the addressed tab; no mutation is retried after a timeout.
-- **Waits:** `act wait selector=".ready"` waits for visible CSS across open shadows/same-origin frames. `condition=element text="Ready"` also finds ordinary visible elements. `condition=network` requires 300ms with no tracked requests (long-lived streams excluded), and times out honestly. A false `if`/`while` may exit before its maximum budget.
-- **Pagination:** `act paginate next="text=Next" max=5 extract="auto"` reads the current page, clicks once per advance and stops at missing Next, repeated data or the cap. The result retains each page and discloses partial completion. `next` also accepts a CSS selector, `label=...` or `ref=...`; `max` is 1–100 pages.
-- **HTTP body save:** `act download url="https://example.com" body=true` saves an HTTP response (up to 32MiB/30s), reports status/final URL/path, and uses no browser cookies or JavaScript. It honors HTTP(S) `BLADE_PROXY`; other configured proxy types refuse before sending. The ordinary download path remains the browser-context attachment path.
-
-### `see` — observe
-
-| Call | What you get |
-|---|---|
-| `see` | Full model — interactive elements with refs (nav/footer auto-folded) |
-| `see mode=content` | Page text as clean markdown — for reading |
-| `see mode=outline` | Heading hierarchy only (~50–200 bytes) |
-| `see find="price"` | Search by text (light DOM + open shadow roots) → refs + scores; a miss names hidden matches with reasons |
-| `see filter="button,link"` | Zoom by role/name/landmark |
-| `see extract="auto"` | Template-free list extraction, site-aware (below) |
-| `see extract="json" template={...}` | Custom CSS-template extraction |
-| `see extract="links"` / `"forms"` | All links / all form fields |
-| `see scope=e5` | One element's subtree text; with `mode=content`: that subtree as markdown (budget honored) |
-| `see logs="console"` / `"network"` | Current-navigation JS errors / requests, failures first; `clear:true` reads then clears |
-| `see extract="auto" preview=true` | Container and sampled field names without rows |
-| `see changes=true format="json"` | Structured model delta since the last capture, with stable refs |
-
-- **Truncation is deterministic:** output ends with `…(N more: X link, Y button)` — roles sorted by count desc, then alphabetically; the full set stays available via `see filter=`.
-- **Artifact JSON paging:** `next_offset:0` in an offload envelope means start at offset zero. Default pages are valid JSON envelopes whose `data` is a character fragment: concatenate the strings, then parse the payload. `see artifact="<path>" items=true offset=0 limit=50` instead returns independently usable rows from a JSON array or `items`/`data` array; offsets count rows, `next_offset:null` means done. Item pages are capped at 500 rows/200KB; oversized individual rows require character paging.
-- **JSON notices stay JSON:** dialog, popup and browser health notices use `{data,note}` when a JSON result needs a caveat; artifact envelopes keep their paging fields and add `note`. Parse the complete text block, then inspect the envelope.
-- **Big data goes to files.** Large payloads (threshold depends on read type) are written to `artifacts/` and returned as a path + preview; read any artifact back in pages with `see artifact="<path>"` (+`offset`/`limit`) — no filesystem access needed.
-- **Site-aware:** on Reddit post pages and X.com status pages, `extract=auto` attempts the full comment tree / thread in ONE call; `complete`/`partial` and fallback notes disclose API blocks or missing replies; Hacker News rows carry points, author, age and comment count.
-
-### `state` — cookies, storage, tabs, sessions
-
-| op | What it does |
-|---|---|
-| `tabs` / `open-tab` / `switch-tab` / `close-tab` | Tab management (auto-focus on open) |
-| `cookies` / `set-cookie` / `del-cookie` | Cookies |
-| `save name=login` / `load name=login` | Save cookies + storage; navigate to the saved origin before loading, then reload |
-| `ls` / `ss` / `set-ls` / `set-ss` / `rm-ls` / `rm-ss` | localStorage / sessionStorage |
-| `block classes="images,fonts,trackers"` | Block inert assets — never first-party scripts; `block` without arguments reports measured blocked-request count since attach. Byte/time savings are unmeasured. |
-| `compress on/off/status` | Context pruning toggle |
-
-Cookie and storage reads preserve complete values. Large reads return a JSON artifact path for `see artifact="..." format="json" items=true`; values are not silently shortened. Setters require an explicit value; `value:""` sets an empty value. Normal owned-browser exits flush ordinary profile storage before cleanup; force-kills cannot guarantee the latest writes. Incognito storage remains ephemeral; use named sessions when restoration is needed.
-
-### `run` — batch + branch + JS
-
-```json
-{"steps":[
-  {"action":"type","label":"Email","text":"user@mail.com"},
-  {"action":"type","label":"Password","text":"secret"},
-  {"action":"click","text":"Sign in"},
-  {"action":"wait","condition":"element","text":"Dashboard","timeout":10}
-]}
-```
-
-Plans are validated before their first effect, including later steps and unchosen branches. Fix malformed arguments rather than marking them optional. Plans allow up to 1,000 static steps and 32 nesting levels; `while max` is 0–100 (default 10). Every `while` needs an exit test (`text`, `selector` or `js`) and a `steps` array. `url` on `if`, `while` or `wait` navigates once before evaluating that step. Runtime failure does not undo completed effects; inspect the failed destination before repeating input. A failed batch stops its enclosing run.
-
-Use instead of `act batch` when you need branching (`if`/`else`), loops (`while`), or state ops that change tabs. `see` steps read inline — nav + loop + read across pages in ONE call. Steps take `optional: true` (a runtime failure is reported and execution continues locally, including inside branches and loops), and `wait` accepts an `else: [...]` fallback branch when its condition times out.
-
-### `vision` — screenshot (last resort)
-
-Screenshot as PNG; `marks=true` overlays numbered ref badges. MCP returns it as an image; the CLI writes a file and reports `image_path`. The structural model is almost always better: cheaper, more reliable, and it hands you refs to act on.
-
-## 🔌 Usage
-
 <p align="center">
-  <img src="Assets/png/in-action.png" alt="Bladebro in action — one call extracts a full thread; ref badges mark clickable elements" width="100%">
+  <img src="Assets/readme/masthead.webp" width="100%" alt="Bladebro in cream letterpress beside a katana, a Chromium window, and a black and red city at night">
 </p>
 
-Same 5 tools, same handlers, same stealth — two surfaces. Use MCP for agents; use the CLI for scripts, shells and CI. One codebase, so every fix lands on both.
+<h1 align="center"><img src="Assets/readme/monogram.webp" width="54" height="54" alt=""> Bladebro</h1>
 
-| | MCP server | CLI |
-|---|---|---|
-| **Best for** | AI agents (Claude, Cursor, pi, Cline) | Shell scripts, CI/CD, quick one-offs |
-| **Works over** | stdio JSON-RPC | `bladebro <command>`, daemon-backed |
-| **Discovery** | `tools/list` | `bladebro help --json` |
-| **Session** | one Chrome per agent session | persistent daemon, or `--no-daemon` per command |
+<p align="center"><strong>Drive a real browser from your agent or terminal.</strong><br>
+Click, fill forms, read pages, and keep a browser session across calls. Five MCP tools in one Rust binary.</p>
 
-### MCP server
+<p align="center">
+  <a href="https://www.npmjs.com/package/bladebro"><img src="https://img.shields.io/npm/v/bladebro?style=flat-square&amp;labelColor=151518&amp;color=d52932" alt="npm release"></a>
+  <a href="https://github.com/dondai44423/bladebro/stargazers"><img src="https://img.shields.io/github/stars/dondai44423/bladebro?style=flat-square&amp;labelColor=151518&amp;color=d52932" alt="GitHub stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-d52932?style=flat-square&amp;labelColor=151518" alt="Apache 2.0 license"></a>
+</p>
 
-Add to your client's config:
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#the-five-tools">Tools</a> ·
+  <a href="#browser-modes">Browser modes</a> ·
+  <a href="#how-it-works">Architecture</a> ·
+  <a href="#docs">Docs</a> ·
+  <strong><a href="#sponsors">Sponsor</a></strong>
+</p>
+
+## Quickstart
+
+Install Chrome or Chromium on the machine running Bladebro. Then open and read a page from the terminal.
+
+```sh
+npm install -g bladebro
+bladebro nav https://example.com
+bladebro see content
+bladebro stop
+```
+
+The first browser command starts a local daemon. Later calls use the same tabs and page state until you stop it. Run `bladebro doctor` if Chrome or its display cannot start. Linux, macOS, and Windows are available as [prebuilt binaries](docs/setup.md#prebuilt-binaries).
+
+### Connect an agent
+
+Add this stdio server to your MCP client. Restart the client or start a new session after saving.
 
 ```json
 {
@@ -339,368 +50,104 @@ Add to your client's config:
 }
 ```
 
-Speaks MCP **2024-11-05 through 2026-07-28** — the legacy `initialize` handshake and the stateless per-request dialect (`server/discover`). Works with every MCP client, old and new.
+The schema comes from the binary. In the shell, `bladebro help --json` includes the same tool definitions plus CLI usage and exit codes. [Pi, DeepSeek Harness, and Hermes setup](docs/setup.md#agent-integrations).
 
-### CLI
+### From source
 
-`bladebro help --json` is the single self-teaching manual: the same tool schemas as MCP, plus per-command usage, universal flags, payload conventions and exit codes — in ONE call.
+For a source or portable install, see [the build instructions](docs/setup.md#from-source) or [download a prebuilt binary](docs/setup.md#prebuilt-binaries).
 
-```bash
-bladebro help --json | jq '.tools[].name'   # ["act","see","state","run","vision"]
-bladebro help act --json | jq .detail.actions
-```
-
-**Daemon mode** — the first command auto-starts a daemon; Chrome stays alive across calls:
-
-```bash
-bladebro nav https://news.ycombinator.com
-bladebro see content
-bladebro act click e5
-bladebro stop                              # clean shutdown
-```
-
-```bash
-bladebro see content https://example.com --no-daemon   # one-shot: launch Chrome per command
-```
-
-The daemon runs every command with its own lane and browser settings (`CHROME_PATH`, `BLADE_PROXY`, `BLADE_LOCALE`, … as set when it started). A command that resolves another lane (`BLADE_LANE`) or sets one of those variables to a different value is refused before anything runs — `bladebro stop` restarts the daemon with the command's settings, `--no-daemon` runs just that command on its own.
-
-**Universal flags**
-
-| Flag | What it does |
-|---|---|
-| `--json` | One JSON object on stdout: `{ok, is_error, text}` (+ `image_path` for vision) |
-| `--no-daemon` | Launch Chrome per command instead of using the daemon |
-| `--host` / `--port` | Drive an already-running Chrome on this debug port |
-| `--marks` | Vision: overlay numbered ref badges |
-
-**Exit codes are the contract:** `0` success · `1` command failed (the text carries page state for recovery) · `2` usage error (the message says how to fix it).
-
-Big payloads come from a file or stdin — no shell-quoting games: `bladebro run @steps.json`, `cat steps.json | bladebro run -`, `bladebro act eval @script.js`.
-
-<details>
-<summary><b>More CLI examples</b></summary>
-
-```bash
-# Forms — one call
-bladebro act fill '[{"label":"Email","text":"a@b.com"},{"label":"Password","text":"secret"}]' --submit e20
-
-# Batch steps from a file
-bladebro run @steps.json
-bladebro act batch @steps.json
-
-# Read + extract
-bladebro see model --json | jq .text
-bladebro see extract auto --json
-
-# State
-bladebro state cookies
-bladebro state open-tab https://example.com
-
-# Drive your own browser
-bladebro rb on && bladebro nav https://news.ycombinator.com
-
-# Screenshot with ref badges
-bladebro vision --marks --json | jq -r .image_path
-```
-
-</details>
-
-## 🧠 How it works
+## The five tools
 
 <p align="center">
-  <img src="Assets/png/architecture.png" alt="Bladebro architecture — your agent speaks MCP, Bladebro speaks CDP, driving Chromium" width="100%">
+  <img src="Assets/readme/tools.webp" width="100%" alt="Five noir icons for act, see, state, run, and vision">
 </p>
 
-The core is the **Live Page Model** — a persistent, compressed, ref-stable model of the page held across every tool call. Three pillars:
+| Tool | Use it to |
+|---|---|
+| [`act`](docs/tools.md#act) | Navigate, click, type, fill, scroll, read a control, or handle files. Input returns a verdict and page changes. |
+| [`see`](docs/tools.md#see) | Inspect interactive elements, read Markdown or headings, find text, or extract structured records. |
+| [`state`](docs/tools.md#state) | Manage tabs, cookies, storage, saved sessions, and resource blocking. |
+| [`run`](docs/tools.md#run) | Execute a plan with reads, actions, branches, and bounded loops in one call. |
+| [`vision`](docs/tools.md#vision) | Capture a PNG, optionally marked with element references. |
 
-- **Semantic refs** (`e1`, `e2`, …) — anchors assigned by signature (`framePath|role|name|rank`), not position. They survive scrolls, insertions and re-renders.
-- **Structural fingerprints** — an FNV-1a hash of the ancestor chain, tag, children and identity attributes: the mechanism behind re-render immunity.
-- **Deltas only** — every action returns what changed, so the agent never re-reads what it already knows.
+A typical loop is `see` → `act` → inspect the result. Use a reference like `e5`, a selector, a label, or visible text. If several controls match equally well, Bladebro returns the candidates so the caller can choose. Use the page model for ordinary reading and `vision` when layout matters.
 
-Everything is built from scratch where it counts — the CDP transport, perception, stealth injection, biometrics, session management. Chromium is the only borrowed part.
-
-## 🧬 Re-render immunity
-
-**The #1 reliability gap in every other agent browser, solved.**
-
-When React, Vue or Angular re-renders a component, the DOM nodes are destroyed and recreated — and every other agent browser loses its refs. Bladebro's refs are anchored to a signature, not a DOM node, so a re-render that keeps an element's name keeps its ref. When the signature itself shifts because the element's frame index moved (an iframe was added or removed ahead of it) but structure and name survive, the ref follows the fingerprint instead of dying.
-
-```
-Before re-render:  e2 button "Buy Now"  sig=0|button|Buy Now|1  fp=0xdeadbeef
-After re-render:   e2 button "Buy Now"  sig=1|button|Buy Now|1  fp=0xdeadbeef  ← same fp, same name
-                   ↺ e2 (re-render survived)
-```
-
-The agent sees `↺ e2 (re-render survived)` in the delta. The click works. No recapture. Playwright, Puppeteer, CDP wrappers, accessibility-tree snapshots — all lose refs here.
-
-A ref never follows the fingerprint to a differently named element. The fingerprint carries no text, so it can't tell a re-render from new content swapped into the same markup (a result list refreshed in place): when the name in a slot changes, the delta reads `- e2 (gone)` / `+ e9 button "…"` and the agent acts on the new ref. The exception is a form control named by its own content (an unlabeled editor or select), which keeps its ref while you type or pick.
-
-## 🪙 Token efficiency
-
-**5× more token-efficient than every competitor.**
-
-- **Delta results** — 60–570 tokens per action; snapshot-based tools spend ~1,400–2,000+.
-- **Tool defs** — five compact definitions with a serialized-size regression guard. The agent plans; it doesn't juggle APIs.
-- **Context pruning** — `act` responses compress after turn 3 on the same page: full (8K) → reduced (3K) → verdict-only (500 chars). ~54% fewer tokens over a session, zero capability loss.
-
-```bash
-bladebro state compress off     # on / off / status — or BLADE_NO_COMPRESS=1
+```sh
+bladebro nav https://example.com
+bladebro see model
+bladebro see outline
+bladebro see extract links --json
+bladebro vision --marks
+bladebro stop
 ```
 
-The counter resets on navigation, any `see`, or any error. `see`, `state`, `run` and `vision` are never compressed.
+[Action examples, plans, and result formats](docs/tools.md)
 
-## 🥷 Stealth
+## Browser modes
 
 <p align="center">
-  <img src="Assets/png/stealth-layers.png" alt="6-layer stealth — nothing to detect" width="100%">
+  <img src="Assets/readme/browser-modes.webp" width="100%" alt="An isolated browser window on the left and a desktop browser with personal tabs on the right">
 </p>
 
-Six layers, all on by default, no config needed:
-
-| Layer | What it does |
+| Mode | Profile and ownership |
 |---|---|
-| **Protocol** | No `Runtime.enable` (defuses the DataDome console trap); CDP over WebSocket by default (native `webdriver=false`) with a zero-port pipe opt-in; isolated world for DOM reads. |
-| **Environment** | UA + Client Hints override (no HeadlessChrome); a window manager on the virtual display (xfwm4) gives real frame extents (`outerWidth > innerWidth`), coherent outer/inner geometry and the display's truthful work area (`availHeight` is the native value — a panel-less desktop reads `availHeight == height`, exactly like the machine's own session; no geometry getter is patched); the lane renders on the real GPU — `--use-angle=gl-egl` headful or headless on Linux, native Metal/D3D11 paths on macOS/Windows — and reports the machine's own WebGL strings in the platform's own ANGLE shape; the adaptive mask only exists for genuinely software hosts; media inventory fallback and headless notification status — `permissions.query` and `getUserMedia` stay native, including argument conversion and rejection timing; installed overrides use Proxies over native originals with native receiver validation, own keys `{length,name}`, no `prototype`, stringifies as native in **every** realm, and refuses the cyclic-prototype torture exactly like a native function (`TypeError: Cyclic __proto__ value` — creepjs's prototype lie engine reads 0). Nothing is fabricated: pages see the platform's real API surface and the display's real geometry. |
-| **Behavior** | Bezier mouse paths with overshoot + correction, `movementX/Y` deltas, micro-tremors, non-zero key-press duration, log-normal typing, idle hum, smooth scroll. |
-| **Coherence** | Per-domain timezone/locale memory, geo-consistent identity, WebRTC fail-closed, stable canvas/audio (noise off by default). |
-| **Residue** | `cdc_` removal, `MutationObserver` for late artifacts, and — deliberately — **no `Function.prototype.toString` patch**: masks are native-shaped by construction, so there is nothing to leak across realms. |
-| **Seasoning** | Persistent profile (cookies, history, HSTS) + a login snapshot that survives clean shutdown, SIGKILL and power loss. |
+| **Agent browser** · default | Bladebro launches and owns Chromium with a dedicated profile. This suits a separate browsing workspace. |
+| **Your browser** · `bladebro rb on` | Use an installed Chromium-family browser and selected profile. Auto mode attaches to an available debug endpoint or imports a copy. The driver keeps its page model and actions while page injection is off. |
 
-**Verified against real detection sites:**
+Start with the agent browser for a clean workspace. Use real-browser mode when a task depends on your browser setup or authenticated state. Actions in a signed-in profile can affect your account.
 
-| Test | Result |
+`bladebro rb status` shows which browser and profile are selected. `bladebro rb pause` hands input back to you, and `bladebro rb off` switches back to the agent browser. [Profiles, attachment, and ownership](docs/browser-modes.md).
+
+## How it works
+
+**Agent or CLI → Bladebro → Chromium DevTools Protocol → live browser.**
+
+- **A model that stays with the page.** Bladebro builds a structural view from the live DOM. References can survive re-renders when the element still matches. Get fresh references after navigation or a tab switch.
+- **Small responses during interaction.** Actions normally return a verdict and the delta. Use `see content` for Markdown, `see outline` for headings, or `see extract` for records. Large reads expose a file and paging information.
+- **Action outcomes carry evidence.** A click or submit dispatches once. After a disconnect, an unknown mutation outcome asks you to inspect the destination before retrying.
+- **One local driver.** MCP and CLI share the same handlers. Chromium supplies the live browser, and the Rust binary handles transport, input, perception, and session state.
+
+[Architecture and source map](docs/architecture.md) · [Platform and browser verification](SUPPORT-MATRIX.md) · [Recorded benchmark and methodology](STEALTH_BENCH.md)
+
+## Docs
+
+| Guide | Go here for |
 |---|---|
-| Stealth vector suite + boot self-check + drift stamp (`bladebro audit`) | every vector passes at the suite's own total, stamps stable |
-| Differential oracle vs stock Chrome on the same display (`tools/diff_oracle`) | 99 probes: identical or documented mask surface in every profile state, **0 divergent** |
-| Real-browser lane vs stock Chrome (`oracle.py --lane real`) | 99 probes: **all identical, 0 expected, 0 divergent** — the lane carries no page patches |
-| CreepJS | **headless: 0%, stealth: 0%** (stock Chrome on the same lane: 0%/0%) |
-| bot.sannysoft.com | All pass |
-| incolumitas.com | No bot detection; its legacy `WEBDRIVER` cell reads the same as stock Chrome |
-| deviceandbrowserinfo.com | “You are human!” — `isBot: false` |
-| PerimeterX/HUMAN (Zillow, Fiverr) | Full page load, no block |
+| [Setup](docs/setup.md) | Prebuilts, source builds, MCP, Pi, DeepSeek Harness, Hermes, and updates |
+| [Tools](docs/tools.md) | Syntax, addressing, tab and file operations, plans, and JSON output |
+| [Browser modes](docs/browser-modes.md) | Separate profiles, cloning, attaching, and using your own browser |
+| [Configuration](docs/configuration.md) | Browser discovery, storage, proxy setup, Linux displays, and troubleshooting |
+| [Architecture](docs/architecture.md) | Live Page Model, stable refs, recovery, and source layout |
+| [Support matrix](SUPPORT-MATRIX.md) | What was tested and on which systems |
+| [Changelog](CHANGELOG.md) | Released behavior and fixes |
 
-Run `bladebro audit` to verify your own setup; run `python3 tools/diff_oracle/oracle.py` before any release.
+### Limits
 
-## 🌐 Real-browser mode
+Bladebro drives Chromium-family browsers. Cross-origin iframe content, extensions, and session video recording are outside the supported tool surface. Use `vision` for screenshots. Interactive challenges can stop a task with a `blocked:` verdict. The platform packages cover five targets, with differing levels of live verification. [Support matrix](SUPPORT-MATRIX.md).
 
-> **The strongest fingerprint is a real one.** No manufactured coherence to maintain — this lane simply *is* your browser, on your machine, with your history.
+<a name="-sponsors"></a>
 
-The stealth layers above manufacture coherence inside an isolated browser. The
-real-browser lane deletes the problem instead: it drives **your own**
-Chromium-family browser — your profile data, your display — and switches the
-page-injection layer **off entirely**. Truth has no tells to catch, so on this
-lane the amount of page patching is zero. Everything driver-side still runs:
-perception, Live Page Model, refs, adapters, token efficiency, resource
-blocking, biometrics + idle hum.
+## Sponsors
 
-```bash
-bladebro rb on        # switch every surface (CLI, daemon, MCP) to your browser
-bladebro rb status    # what is configured / live (--json for agents)
-bladebro rb pause     # manual control: input, navigation, history, downloads, collecting and tab ops refuse until `rb resume`
-bladebro rb off       # back to the isolated agent browser
-```
+<p align="center"><img src="Assets/readme/monogram.webp" width="144" alt="Bladebro's angular B monogram with a browser toolbar and a katana blade"></p>
 
-| Mechanism | How it works | When it fits |
-|---|---|---|
-| `clone` (default) | Imports your profile once into a blade-owned copy (browser may stay open; the source is never written to); runs your real binary on the copy, which ages through use | Everyday use; works on branded Google Chrome |
-| `profile` | Launches your binary on your live profile | Purists — close the browser first; Google Chrome 136+ refuses CDP on the default profile dir |
-| `attach` | Drives a browser that already exposes a debug endpoint (`--remote-debugging-port=0`, or Chrome 144+ `chrome://inspect#remote-debugging`) | Zero disruption; never owned, never shut down. Caveat (measured, Chrome 151): an *ephemeral* `--remote-debugging-port=0` arm — and the approval flow — makes Chrome itself report `navigator.webdriver=true`; a fixed port reports `false` |
+Sponsorship funds maintenance and releases for Bladebro.
 
-Supported browsers: Chromium, Google Chrome, Brave, **Helium**, Edge, Vivaldi,
-and Opera. `bladebro rb use` lists detected installs; `bladebro rb use helium`
-selects Helium on Linux, macOS, or Windows. On Linux, Helium wrappers on PATH
-and `HELIUM_CONFIG_HOME` are recognized. For an AppImage or portable install,
-launch Helium once to create its profile, select it, then set
-`bladebro rb use --binary /absolute/path/to/helium.AppImage` (or executable).
+| Tier | Monthly price | What you get |
+|---|---:|---|
+| **Silver** | **$25/month** | A text link to your site in this section. |
+| **Gold** | **$79/month** | A large linked banner with priority placement above Silver links. Bladebro may consider a native integration if the product fits and we agree on the scope. |
 
-`rb mode auto` (default) attaches when a live endpoint exists, else clones.
-Browser override: `rb use <id>` · custom binary (nix/flatpak wrapper):
-`rb use --binary <path|auto>` · profile pick: `rb profile <key>` (validated;
-an absolute profile path also works) · re-import: `rb refresh` · wipe the
-imported copy: `rb forget` · `rb visible on|off` (real window vs
-`--headless=new`) · `rb idle-hum on|off` · `rb idle-shutdown on|off` (may the
-idle timeout close the real browser — default off). Switching restarts the
-daemon, and a live MCP/daemon browser is detected as stale at its next use
-and relaunched automatically; an attach session **detaches** instead — your
-browser is left running, untouched. No host restart anywhere.
+### How to sponsor
 
-> ⚠️ The agent browses **as you**: anything it does is attributable to your
-> identity. `rb on` prints exactly what it will use and how to revert.
+Email **bhandaribishesh879@gmail.com** with your site or product URL, tier, and preferred term. For Gold, include a banner if you have one and describe any integration you'd like to discuss. I'll confirm placement and share PayPal payment details. [Email about sponsorship](mailto:bhandaribishesh879@gmail.com).
 
-## 🧩 Site adapters
+### Prepay to lock your rate
 
-Built-in, automatic, zero config — and zero cost to the tool definitions. Adapters are runtime heuristics: they add no tools and no parameters, and their extra fields appear only on pages that have them.
+Prepay any number of months at the current rate. That rate stays fixed for the term you paid for. Six months costs **$150** for Silver or **$474** for Gold. One-time support is welcome through Ko-fi.
 
-- **Reddit** — `see extract=auto` on a post attempts the full comment tree in ONE call (API denial returns a clearly partial DOM fallback): every reply (collapsed included), thread-ordered with depth, author/date, `fuzzed_score` (Reddit's displayed values, labeled as such), full text, an `op` flag on the submitter's comments, and honest `count`/`total`/`complete` fields. `sort=confidence|top|new|controversial|old|qa` overrides the active/URL sort for a Reddit post. Safe transient GET failures have two bounded retries; policy denials and rate limits stop without switching hosts. On feeds: typed posts (title, `fuzzed_score`, comments, author, subreddit, date, domain). `see mode=content` gives clean title/meta/body markdown.
-- **X.com (Twitter)** — `see extract=auto` on a status page returns the FULL conversation in ONE call: the focal post plus every reply and nested reply, thread-ordered with depth, author/date/counts, media and an `op` flag (sections X collapses behind "Show replies" or "Show more replies" are not expanded yet — `complete:false` and the note say so) — read from the page's own API traffic (query ids captured live, self-healing across deploys). Profile/search/home return timelines the same way; search falls back to bounded in-page collection when X gates its API. The composer works through the normal tools: `act click` Reply → `act type` → `act click` Post.
-- **GitHub** — repo pages: description, stars, forks, language, topics; issue/PR lists: number, title, status, labels, author per row.
-- **Product pages** — price (with strikethrough original), rating, availability, key features — on any shop, not a fixed list of stores.
+[![Support Bladebro on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
-Adapters self-improve through the domain knowledge base (below): consent selectors, block history, settle timing and resource-blocking choices are learned per domain and reused on later visits. No plugin API — site-specific behavior belongs in the heuristics, not in config.
+---
 
-## 🌱 Self-improvement
-
-Learns from every session, persists in `knowledge/` under your data root, survives restarts.
-
-**Domain knowledge base** — per-site consent selectors and behavior, learned from success only:
-
-- Confidence +0.05 per success, −0.15 per failure (failures cost 3×). Auto-applied at ≥0.7 when the stored selector is one of the current `BLADE_CONSENT` policy's buttons, so known sites skip the full detection JS entirely.
-- Evicted below 0.3 after 30 days; bounded at 2,000 domains. Unknown sites fall back to full detection — zero regression.
-
-**Behavioral fingerprint** — biometric parameters generated once per installation and reused forever, so detectors see the same "person" every session: click precision, mouse curvature, typing cadence, inter-action gaps, overshoot and idle-hum frequency, all clamped to human ranges, written atomically.
-
-## 📊 Comparison
-
-| | Bladebro | agent-browser | Playwright MCP | Chrome DevTools MCP |
-|---|---|---|---|---|
-| Tool defs | **5 compact definitions** | 0 (CLI) | ~13,700 tokens | ~8,000 tokens |
-| Per-click result | **60–570 tokens** (delta) | ~1,400 (snapshot) | 2,000+ | 2,000+ |
-| Stealth | **6 layers + biometrics** | None | None | None |
-| Drive your own browser | **Yes (`rb on`)** | No | No | No |
-| Re-render immunity | **Yes** | No | No | No |
-| Self-improvement | **Yes** | No | No | No |
-| Auto-extraction | **Template-free, site-aware** | No | No | No |
-| Batch actions | **Yes** (`act batch` / `run`) | No | No | No |
-| Infinite-scroll collect | **Yes** | No | No | No |
-| Runtime | **None (static binary)** | Node.js daemon | Node.js | Node.js |
-| Page model | **Persistent, ref-stable, diff-first** | A11y snapshot | None | None |
-| Binary size | **7.4 MB** | ~50 MB (node + deps) | ~50 MB | ~50 MB |
-| Platforms | **Linux, macOS, Windows** | Linux, macOS, Windows | Linux, macOS, Windows | Linux, macOS, Windows |
-
-### Head-to-head: Bladebro vs agent-browser
-
-agent-browser v0.33.2 at its best (headed, system Chromium, persistent profile, custom UA) vs Bladebro defaults, same machine:
-
-| Task | agent-browser | Bladebro |
-|---|---|---|
-| Wikipedia (navigate + read) | 153K chars, 3 calls | **82K chars, 2 calls (−47%)** |
-| Hacker News (elements) | 14K chars, 2 calls | **5.5K chars, 1 call (−61%)** |
-| Reddit (search) | 5.7K chars, 2 calls, no URLs | 4.5K chars, 2 calls, URLs + content |
-| Zillow (PerimeterX) | **Blocked** (Press & Hold) | **Full access** (992 listings) |
-| HN structured extraction | No feature | **30 items as JSON, 1 call** |
-
-<details>
-<summary><b>Stealth benchmark: Bladebro vs Camoufox</b></summary>
-
-A pure stealth comparison — Camoufox is a patched Firefox for scraping, not an agent tool. Both headed, same machine, same network, no proxy, 8 detection sites.
-
-| Detection site | Camoufox | Bladebro |
-|---|---|---|
-| Sannysoft | 1 fail (Chrome obj — expected for Firefox) | All pass |
-| CreepJS | Fingerprint computed | headless: 6%, stealth: 20% |
-| BotD / FingerprintJS | Pass | Pass |
-| Pixelscan | Pass (masking detected) | Pass (masking detected) |
-| Zillow / Reddit / Fiverr | Pass | Pass |
-
-CreepJS values in this block are from that earlier round — the current suite reads headless 0% / stealth 0% (stealth table above).
-
-Near equal on stealth; both flagged for masking on Pixelscan (expected for any anti-detect tool). The difference is delivery: Bladebro ships this out of the box in one binary — Camoufox needs Python, a venv and a Playwright script to drive it.
-
-</details>
-
-## 🚧 Gotchas & limits
-
-Honest boundaries: what surprises people, and what Bladebro deliberately does not do.
-
-| Situation | What happens — and why |
-|---|---|
-| **CAPTCHA / Turnstile challenges** | Not solved as a general capability, deliberately — you get a `blocked:` verdict with a remediation ladder; hand off to a solver if needed. One narrow exception: a site adapter may pass a challenge that is trivial for a human (reddit's one-time "prove your humanity" checkbox gets one humanized click); image grids stay unsolved and are reported honestly. |
-| **Datacenter / VPS IPs** | Flagged regardless of fingerprint. Use `BLADE_PROXY` with a residential proxy — with a proxy set, WebRTC ICE candidates are filtered (no srflx / raw-IP host candidates reach the page) so the real IP cannot leak around it. |
-| **Cross-origin iframe content** | Invisible (`SecurityError`). Deliberate: access would need `Runtime.enable`, which defuses the protocol stealth layer. |
-| **Browser extensions** | Not supported — CDP cannot load them, and they would break the stealth profile. |
-| **Session video recording** | Not supported. Use `vision` screenshots. |
-| **Firefox / Gecko** | Not supported — the driver speaks CDP, which is Chromium-only. |
-| **macOS binaries** | Cross-compiled from Linux via cargo-zigbuild; CI builds and tests macOS natively on every release, and since 4.6.1 the CI stealth audit drives the native CI build through a real browser on macOS (and Windows) — runtime-verified in CI, not yet on local hardware. File an issue if something breaks. |
-| **Linux ARM64** | Cross-compiled; not live-verified on ARM hardware yet. Community reports welcome. |
-| **`BLADE_NOISE=1`** | Canvas/audio noise can *hurt* — FingerprintJS ML reads it as tampering. Off by default; enable only if you know why. |
-
-## 🔧 Configuration
-
-Everything optional; configuration is environment variables.
-
-**Data & profile**
-
-| Var | Default | What it does |
-|---|---|---|
-| `BLADE_HOME` | auto | Data root override (highest priority): knowledge, logins, artifacts, fingerprint |
-| `XDG_STATE_HOME` | XDG spec | Data root becomes `$XDG_STATE_HOME/blade` when set |
-| `BLADE_PROFILE_DIR` | `<data root>/profile` | Persistent browser profile location — point it at a directory only you can write (it holds the live cookie jar) |
-| `BLADE_FRESH` | unset | `1` = ephemeral profile (no persistence) |
-| `CHROME_PATH` | auto-detected | Chrome/Chromium binary |
-
-**Identity & stealth**
-
-| Var | Default | What it does |
-|---|---|---|
-| `BLADE_LOCALE` | `en-US` | BCP-47 locale (`en-GB`, `ne-NP`, …) |
-| `BLADE_TZ` | IP geo | Timezone (`Europe/London`, `Asia/Kathmandu`, …) |
-| `BLADE_GPU` | `auto` | `intel` / `amd` / `nvidia` / `mali` / `adreno` / `auto` (lspci detection) |
-| `BLADE_WEBGL` | `auto` | `spoof` / `real` / `auto` |
-| `BLADE_MEDIA` | `auto` | `patch` / `real` / `auto` |
-| `BLADE_NOISE` | unset | `1` = canvas/audio fingerprint noise (see gotchas) |
-| `BLADE_PROXY` | none | Proxy URL — also enables WebRTC ICE filtering + the non-proxied-UDP launch policy, so the real IP stays out of ICE candidates. No embedded `user:pass@`: Chrome cannot authenticate with them, so the launch refuses them — use an IP-allowlisted endpoint or a local forwarding proxy that adds the credentials |
-| `BLADE_CONSENT` | `reject` | Consent banners: `accept` / `reject` / `off` |
-
-**Behavior & ops**
-
-| Var | Default | What it does |
-|---|---|---|
-| `BLADE_NO_ACTIVATE` | unset | `1` = never raise the browser window: clicks, navigation and vision act on the page in place (`Page.bringToFront` is skipped even for a background tab) |
-| `BLADE_PACE` | on | `off` = disable the pacing governor (human inter-action gaps) |
-| `BLADE_NO_COMPRESS` | unset | `1` = disable context pruning |
-| `BLADE_NO_WARMING` | unset | `1` = skip first-run profile warming |
-| `BLADE_NO_UPDATE_CHECK` | unset | `1` = skip update checks |
-| `BLADE_CMD_TIMEOUT` | `300` | How long the CLI waits for a daemon response, seconds |
-| `BLADE_IDLE_TIMEOUT` | `600` | Daemon idle time before Chrome shuts down, seconds |
-| `BLADE_TRANSPORT` | ws | MCP transport: WebSocket by default (native `webdriver=false`); `pipe` opts into the zero-port pipe (its automation flag is masked) |
-| `BLADE_CHROME_FLAGS` | none | Extra Chrome launch flags, split shell-style (`--user-agent="… (X11; …)"` stays one flag; backslashes are literal). `--enable-features`/`--disable-features` lists merge with the built-in ones |
-| `BLADE_INCOGNITO` | `auto` | Agent lane only: `1` uses incognito compatibility, `0` disables automatic compatibility; restart the client/daemon after changing |
-| `BLADE_LANE` | auto | `real` forces the real-browser lane for this process (same as `rb on`) |
-| `BLADE_RB_DEBUG` | — | `1` surfaces the browser's own stderr on real-lane launches |
-| `BLADE_PLAIN` | — | `1` renders CLI output plain — no ANSI even on a terminal (same: `NO_COLOR`; override: `CLICOLOR_FORCE=1`) |
-
-Data root resolution (Unix): `BLADE_HOME` → `$XDG_STATE_HOME/blade` → `$HOME/.local/state/blade` → `$HOME/.blade` (legacy). Existing installs keep their tree — nothing is ever split across two directories. Windows: `%USERPROFILE%\.blade` (plus `BLADE_HOME`). `bladebro doctor` prints the resolved data root and exits nonzero when a required check fails. An explicit `CHROME_PATH` must point to an executable file; invalid overrides report an error instead of silently launching another browser.
-
-**Raspberry Pi OS trixie (arm64):** issue [#45](https://github.com/dondai44423/bladebro/issues/45) reports Chromium's regular-profile network service hanging even on loopback. On a detected Raspberry Pi running Debian/Raspbian trixie, the agent lane automatically uses one managed incognito context. Other hosts keep their persistent profile, and an explicit `BLADE_PROFILE_DIR` keeps its chosen mode. Set `BLADE_INCOGNITO=1` to request this compatibility path elsewhere, or `0` to disable automatic selection. The real-browser and external-attach lanes keep their existing behavior. Incognito cookies still persist through Bladebro's login snapshot; named `state save`/`load` sessions restore cookies and storage. History, cache and automatic localStorage persistence are unavailable in this mode; launch diagnostics and `doctor` disclose that tradeoff. The reporter verified the Pi workaround; the release regression suite exercises the context, tabs, HTTP navigation and persistence contracts on Linux x64.
-
-**Flatpak browsers (SteamOS, Bazzite, Fedora Silverblue):** when no native Chrome/Chromium is found, discovery uses an installed Flatpak export — `org.chromium.Chromium`, then `com.google.Chrome`, `com.brave.Browser`, `com.microsoft.Edge`, `com.vivaldi.Vivaldi`, `io.github.ungoogled_software.ungoogled_chromium` — from the user installation (`FLATPAK_USER_DIR`, else `~/.local/share/flatpak`) before the system one (`/var/lib/flatpak`). Install one with `flatpak install flathub org.chromium.Chromium`. The agent lane starts an export (found or given as `CHROME_PATH`) with `flatpak run`, sharing the session profile, the downloads dir and a per-process upload staging dir (`<data root>/uploads/<pid>`) into the sandbox, so cookies, storage and downloads reach the host; it needs the desktop session's D-Bus and Flatpak portal. The sandbox reads nothing else (at most your home dir, per the app's manifest), so `act upload` copies the file into the staging dir and hands Chrome the copy; copies are removed when the browser closes. A wrapper script around an export runs without these shares. The real-browser lane is unchanged.
-
-## 🔄 Maintenance
-
-| Command | What it does |
-|---|---|
-| `bladebro -doc` / `bladebro doctor` | System check — Chrome, display and its window manager, profile hygiene, logins, data root, network, version |
-| `bladebro audit` | Stealth audit — the vector suite + boot self-check + cross-restart drift stamp, against your setup |
-| `bladebro -v` | Version + update status (check only) |
-| `bladebro -u` | Self-update: check, download, SHA-256-verify, swap — non-npm installs |
-| `bladebro --rollback` | Restore the previous version (from the pre-update backup) |
-| `npm update -g bladebro` | Update an npm install |
-
-**One updater per install — use the one that matches how you installed.** npm-managed (`npm install -g bladebro`) → `npm update -g bladebro`, which keeps the shim, the platform package and npm's bookkeeping in sync. Everything else — a downloaded binary, a manual copy, a `cargo build` — → `bladebro -u`: it downloads the official released binary for your platform, SHA-256-verifies it against the published checksum, confirms it starts, backs up the old one and swaps it in; `bladebro --rollback` undoes it. (`-u` never rebuilds from source — for that: `git pull && cargo build --release`.)
-
-`bladebro -u` knows which install it's on: under npm it refuses to touch npm's files and points you to npm (`--force` overrides — at the cost of npm's metadata going stale); on a build that's ahead of the latest release it won't downgrade without `--force`. `BLADE_NO_UPDATE_CHECK=1` skips update checks entirely.
-
-## 💖 Sponsors
-
-Bladebro is free and open source. Sponsoring keeps development independent.
-
-| Tier | Price | What you get |
-|---|---|---|
-| 🥉 Bronze | $15/mo | Name + link |
-| 🥈 Silver | $40/mo | Small logo + link |
-| 🥇 Gold | $60/mo | Large logo/banner + link, pinned at top |
-
-**How to sponsor.** GitHub Sponsors is enabled and featured on this repo — but my region isn't supported for payouts yet, so the reliable route is email: **[bhandaribishesh879@gmail.com](mailto:bhandaribishesh879@gmail.com)**. Write me, I'll share my PayPal, and we go through the steps. One-time sponsorships are welcome at any amount — [Ko-fi](https://ko-fi.com/G5Y624N5RE) covers quick one-offs too.
-
-**Prepay to lock your rate.** You can pay for any number of months in one go at today's price, and that rate is fixed for the whole term — e.g. 6 months of Gold at today's $60/mo = $360, and a later increase (even to $150) doesn't touch it. Price changes only ever apply to sponsorships started after them.
-
-## 🤝 Contributing
-
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Before submitting: `cargo clippy --release -- -D warnings` and `cargo test --profile gate`.
-
-Using a coding agent? Point it at [AGENTS.md](AGENTS.md) — repo mechanics, house rules and verification instruments in one file.
-
-## 📄 License
-
-Apache-2.0 — see [LICENSE](LICENSE).
+[Star Bladebro](https://github.com/dondai44423/bladebro) · [Report an issue](https://github.com/dondai44423/bladebro/issues) · [Contribute](CONTRIBUTING.md) · [Security](SECURITY.md) · [Apache 2.0](LICENSE)
