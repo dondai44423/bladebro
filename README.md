@@ -2,7 +2,7 @@
   <img src="Assets/readme/masthead.webp" width="100%" alt="Bladebro in cream letterpress beside a katana, a Chromium window, and a black and red city at night">
 </p>
 
-<h1 align="center"><img src="Assets/readme/monogram.webp" width="36" height="36" align="middle" alt="B">ladebro</h1>
+<h1 align="center"><img src="Assets/readme/monogram.webp" width="30" height="30" alt="B">ladebro</h1>
 
 <p align="center"><strong>Drive a real browser from your agent or terminal.</strong><br>
 Click, fill forms, read pages, and keep a browser session across calls. Five MCP tools in one Rust binary.</p>
