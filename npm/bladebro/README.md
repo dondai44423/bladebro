@@ -1,88 +1,17 @@
 # Bladebro
 
-Stealthy and efficient agentic browser driver for AI agents. Few tools, full control, real stealth, max token efficiency.
+Drive a real Chromium-family browser from your AI agent or terminal. Five MCP tools (`act`, `see`, `state`, `run`, `vision`) in one Rust binary — persistent Live Page Model, delta-first token efficiency, and real stealth.
+
+Full documentation: **[github.com/dondai44423/bladebro](https://github.com/dondai44423/bladebro)**
 
 ## Install
 
 ```bash
 npm install -g bladebro
+bladebro doctor
 ```
 
-Or use without installing:
-
-```bash
-npx bladebro mcp
-```
-
-### DeepSeek Harness (DSH)
-
-Add Bladebro as a native plugin in the Web UI's **Plugins** page, or run:
-
-```bash
-dsh plugin --profile web add bladebro
-```
-
-Restart the profile and start a new chat. Desktop users can install `bladebro`
-from the same **Plugins** page. For terminal setup, enable Desktop's **Manage dsh
-Command**, fully quit the app, then use its bundled command:
-
-```bash
-dsh plugin --profile desktop add bladebro
-```
-
-Use Desktop's command for its profile; the npm DSH CLI cannot manage that
-app-owned profile. Open Desktop again after installation.
-
-DSH discovers the five tools as `mcp__bladebro__act`, `see`, `state`, `run` and
-`vision` (each with the same prefix). Schemas and descriptions come from the
-binary; DSH handles permissions, image attachments, reconnection and cleanup
-through its native MCP bridge. DSH may also expose its own generic MCP resource
-helpers and choose PTC presentation. No API key, separate MCP configuration, global
-Bladebro install or extra plugin package is needed. Chrome/Chromium must be
-installed on the machine running the DSH host. A remotely hosted Web UI controls
-that host's browser, rather than the device viewing the UI.
-
-Disable/re-enable the **Bladebro** bundle in Plugins, or remove it with
-`dsh plugin --profile web remove bladebro` (use `desktop` with Desktop's command).
-Restart the profile and begin a new chat after package changes. Other tools and
-settings remain intact. Do not also configure a second MCP server named
-`bladebro`; DSH refuses the duplicate namespace.
-
-Updates use DSH's package manager: `dsh plugin --profile web update bladebro`,
-or **Update** in Plugins. The plugin and native binary travel in the same
-package, so ordinary Bladebro releases update both. Existing global/Pi installs
-are separate. No background downloader or installation scripts run.
-
-Advanced configuration belongs in the profile's `cordis.patch.yml`:
-
-```yaml
-- id: bladebro
-  config:
-    # Optional absolute source-build/portable executable; package binary is default.
-    binaryPath: /absolute/path/to/bladebro
-    env:
-      CHROME_PATH: /absolute/path/to/chrome
-      BLADE_HOME: /absolute/path/to/private/browser-data
-    toolCallTimeoutMs: 180000
-```
-
-Windows YAML paths can use forward slashes, such as `C:/Tools/bladebro.exe`.
-The optional `cwd` and `reconnect` settings use DSH's native MCP configuration.
-The default per-call budget is 180 seconds; raise it for longer `run` sequences.
-Cancellation stops waiting, but an already-dispatched browser mutation may
-finish: observe its destination before trying it again.
-
-The npm CLI keeps its Node.js >=14 requirement; the DSH plugin uses the host's
-Node.js requirement. Prebuilt binaries cover Linux x64/ARM64 (glibc >=2.28),
-macOS Intel/Apple Silicon and Windows x64. Other targets need a source build and
-`binaryPath`. See the official [DSH plugin commands](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/reference/README.md#plugin-management)
-and [Desktop command runtime](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/desktop/README.md#bundled-command-runtime).
-
-## MCP and CLI
-
-### Option 1: MCP Server
-
-For AI agents that speak MCP (Model Context Protocol). Point your agent at it:
+## MCP Server
 
 ```json
 {
@@ -95,45 +24,33 @@ For AI agents that speak MCP (Model Context Protocol). Point your agent at it:
 }
 ```
 
-Five tools: `act`, `see`, `state`, `run`, `vision`. Full docs at [github.com/dondai44423/bladebro](https://github.com/dondai44423/bladebro).
+Or without a global install: `"command": "npx"`, `"args": ["-y", "bladebro", "mcp"]`.
 
-### Option 2: CLI
+## CLI
 
-For AI agents that run shell commands. One persistent Chrome instance across all commands (auto-daemon):
+The first command auto-starts a local daemon and reuses the same browser across calls:
 
 ```bash
-bladebro nav https://example.com     # auto-starts daemon + Chrome
-bladebro see content                 # uses same Chrome
-bladebro act click e5                # uses same Chrome
-bladebro stop                        # cleans up
+bladebro nav https://example.com
+bladebro see content
+bladebro act click e5
+bladebro stop
 
-# JSON output for agents:
-bladebro nav https://example.com --json
-bladebro see content --json
-
-# Agent discovery (returns tool schemas + CLI mapping):
-bladebro help --json
+bladebro see content --json    # single-object JSON output
+bladebro help --json           # full tool schemas + CLI usage
 ```
 
-## Requirements
+## Agent Integrations
 
-- Node.js >= 14
-- Chrome/Chromium installed (Bladebro finds it automatically)
-- Linux prebuilt binaries: glibc >= 2.28
+- **Pi**: `pi install npm:bladebro` (registers five native `browser.*` tools).
+- **Hermes**: `bladebro hermes on` (registers MCP and suppresses only Hermes' built-in browser toolset; `status` / `off` to inspect or restore).
+- **DeepSeek Harness (DSH)**: install via the Web/Desktop **Plugins** page or `dsh plugin --profile web add bladebro` (for Desktop CLI, enable **Manage dsh Command**, quit Desktop, and use its bundled `dsh plugin --profile desktop add bladebro`). Tools appear under `mcp__bladebro__*`. Optional `cordis.patch.yml` overrides (`binaryPath`, `env.CHROME_PATH`, `env.BLADE_HOME`, `toolCallTimeoutMs`: default `180000`) are documented in the [Setup guide](https://github.com/dondai44423/bladebro/blob/main/docs/setup.md#deepseek-harness).
 
-A Linux `ENOENT` launch error can mean the executable's loader is missing even when the file exists. The prebuilt binaries require glibc >=2.28; use a source build on Alpine/musl rather than reinstalling the same prebuild. A missing optional platform package is a separate error: reinstall with optional dependencies enabled.
+## Requirements & Platforms
 
-## Platforms
-
-Prebuilt binaries available for:
-
-- Linux x86_64 (`linux-x64`)
-- Linux ARM64 (`linux-arm64`)
-- macOS Apple Silicon (`darwin-arm64`)
-- macOS Intel (`darwin-x64`)
-- Windows x86_64 (`windows-x64`)
-
-Other platforms: [build from source](https://github.com/dondai44423/bladebro#from-source).
+- Node.js ≥ 14 (for the npm launcher; standalone binary has zero Node dependency)
+- Chrome, Chromium, Brave, Helium, Edge, Vivaldi, or Opera installed on the host
+- Prebuilt binaries via `optionalDependencies` (zero install scripts): `linux-x64` and `linux-arm64` (glibc ≥ 2.28; build from source on Alpine/musl), `darwin-arm64`, `darwin-x64`, `windows-x64`
 
 ## License
 

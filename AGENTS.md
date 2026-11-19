@@ -1,127 +1,81 @@
 # AGENTS.md
 
-**Before you change anything: read [`CONTRIBUTING.md`](CONTRIBUTING.md).** It is one page and it is the binding contract — what PRs are accepted, what gets rejected, and what "verified" means here. This file adds the repo mechanics an agent needs on top of it. If the two ever disagree, CONTRIBUTING.md wins.
+Canonical engineering guide for coding agents in this repository. Read [CONTRIBUTING.md](CONTRIBUTING.md) alongside this file; if they ever conflict, `CONTRIBUTING.md` wins.
 
-Bladebro is an agentic browser driver for AI: an MCP server (`bladebro mcp`, stdio JSON-RPC) and a CLI (`bladebro nav`, `see`, `act`, …) driving a real Chrome/Chromium over the DevTools Protocol. The shipped artifact is a single Rust binary — no Node.js runtime, no Playwright/Puppeteer, no LLM in the driver. The CDP transport, perception layer, stealth injection, biometrics and session management are built from scratch in this repo.
+Bladebro is a single Rust binary (`bladebro`) providing an MCP stdio server (`bladebro mcp`) and CLI (`bladebro nav`, `see`, `act`, …) that drive stock Chrome/Chromium over the Chrome DevTools Protocol (CDP). No Node.js runtime in the driver, no Playwright/Puppeteer, no internal LLM.
 
-Two properties shape every change:
+- **Perception as a side-effect of acting**: a persistent Live Page Model reads the live DOM (including open shadow roots and visible same-origin frames) and returns outcome verdicts + compact deltas instead of full-page snapshots.
+- **Stable, self-healing refs (`e1`, `e2`, …)**: keyed by `framePath|role|name|rank` plus an FNV-1a structural fingerprint so refs survive React/Vue/Angular re-renders and retired refs heal through the ref graveyard.
+- **Two lanes**: the default `agent` lane launches an owned Chromium + seasoned profile with full stealth; the real-browser lane (`bladebro rb on`) drives a user's installed Chromium-family browser (`auto`/`clone`/`profile`/`attach`) with page injection completely disabled.
 
-- **The users are LLMs.** Tool outputs, verdicts and error strings get read by an agent mid-task and billed per token. Dense, honest, minimal — a new verbose field is a tax on every user.
-- **Stealth is measured, not vibed.** Every page-visible difference from stock Chrome must be an intentional, documented mask. The instruments below are how that is proven, and they are the bar for merging.
+## Hard Invariants
 
-## Commands
+Violating any rule below is an automatic rejection:
 
-```bash
-cargo check                               # type-check loop (~3 s)
-cargo build --profile gate                # fast runnable binary → ./target/gate/bladebro
-cargo fmt --check                         # formatting (CI-enforced)
-cargo clippy --release -- -D warnings     # zero warnings, always
-cargo test --profile gate                 # all tests must pass (~90 s edit→green)
-cargo build --release                     # the shipped artifact (LTO) → ./target/release/bladebro
+1. **Five tools forever (`act`, `see`, `state`, `run`, `vision`).** New capabilities ship as parameters or behaviors on those five; MCP and CLI share one handler surface.
+2. **Deterministic driver only.** Zero LLM/model calls inside Bladebro.
+3. **No general CAPTCHA solver.** Detect walls, return an honest `blocked:` verdict, and run the remediation ladder. Sole exception: a site-gated adapter clicking a human-trivial single checkbox (e.g., Reddit's humanity check) via normal humanized input; image/grid challenges are never solved.
+4. **Stock Chromium engine.** Never fork Chromium.
+5. **Native-Proxy stealth (`agent` lane) and zero-patch `real` lane.** Every injected function/getter wraps the native original in a `Proxy` that delegates first (preserving WebIDL conversions, receiver errors, microtask rejection order, `{length, name}` own keys, and the cycle-exact `setPrototypeOf` shield guarded by `shell-torture` in `tests/vectors.html`). Never patch `Function.prototype.toString`. Install a mask only when the native value is an automation tell. Real-browser mode (`rb`) runs with page injection off.
+6. **Zero automation flags on the default lane.** Default CDP transport is WebSocket (`navigator.webdriver == false` natively); never add `--enable-automation` or `--disable-blink-features=AutomationControlled`. `BLADE_TRANSPORT=pipe` (Unix zero-port pipe) stays opt-in and carries its own mask. Headless Linux runs headful on Xvfb + `xfwm4` with `--use-angle=gl-egl`; WebGL masking is for software-GL hosts only and caps limits at the real backend.
+7. **Readback-verified verdicts & single-dispatch mutations.** Never report a write, clear, toggle, upload, or select as succeeded without live readback (or say `readback unverified`). Accepted clicks/submits dispatch once even if the DOM stays quiet; an unknown mutation outcome after disconnect requires destination inspection before retrying, while only safe reads retry. Action errors include current page state.
+8. **Disclosed read bounds.** Every clipped, paginated, capped, or offloaded read states its exact bound; templates and adapters distinguish missing from empty and mark partial results (`complete: false`).
+9. **Process & profile discipline.** Validate owned profile permissions/symlinks before launch; flush storage via `Browser::shutdown_gracefully()` on stop/EOF/signal/idle before process-group (or Windows job) cleanup; never close an externally attached browser. All tests and probes must isolate data in scratch `BLADE_HOME` directories — never touch a real user profile.
+10. **Cross-platform parity.** Linux (`x64`, `arm64`), macOS (`x64`, `arm64`), and Windows (`x64`) are all required targets; isolate OS specifics in `src/platform.rs` / `src/platform/`.
+11. **Zero doc sprawl or append-only history.** Never create new `.md` files, subfolder READMEs, plan/audit notes, or scratch dumps in the repo (all probes live in [tools/README.md](tools/README.md); scratch outputs go in `/tmp`). Do not read `CHANGELOG.md` for codebase context and do not edit it in PRs. Update existing docs by replacing stale lines in place — never append dated logs or "previously did X" stories.
 
-./target/release/bladebro doctor          # environment check
-./target/release/bladebro nav example.com # auto-starts its daemon + browser
-./target/release/bladebro see content
-./target/release/bladebro stop            # when done — don't leave a daemon running
-```
+## Source Map
 
-The verification instruments (`tools/*/README.md`) read `BLADEBRO`; point them at `target/gate/bladebro` while iterating. The full set runs in `.github/workflows/probes.yml` (nightly, tag, manual) as parallel remote jobs — run only the one that covers your change, by hand.
+Big modules follow **thin parent + focused children**: `src/foo.rs` holds the public surface, re-exports, and a `Module map:` header; implementation lives in `src/foo/`. Page-injected JS lives in `src/**/js/*.js` via `include_str!` (never inline JS payloads in Rust strings).
 
-Rust: edition 2021, MSRV 1.86. `rust-toolchain.toml` pins the toolchain CI uses — a drifting `stable` is how two releases failed on lints a one-version-behind local clippy could not see. Bump the pin deliberately, with the gate run on the new version. Requirements: Chrome/Chromium installed. On headless Linux bladebro manages its own Xvfb + window manager. Linux (x64 + ARM64), macOS (x64 + arm64) and Windows are all first-class — CI builds all three OSes, so don't write code that silently assumes Linux.
-
-## Where to change what
-
-| To touch… | Start in |
+| Area | Path |
 |---|---|
-| click/type/fill/select/press, find-by-sig, action conditions | `src/action.rs` + `src/action/` (perform, find, input, verdict, edit) |
-| capture, markdown, settle, block detection | `src/page/perception.rs` + `src/page/perception/` (wait, consent, block, content), `src/page/mod.rs` (JS in `src/page/js/`) |
-| refs, Live Page Model, deltas | `src/page/refs.rs`, `src/page/model.rs` |
-| navigation, tabs, attach, heal, page logs, client-side route guard | `src/page/` (navigate, tabs, attach, heal, logs, route) |
-| stealth injection (every page-side override) | `src/stealth/inject.rs` + `src/stealth/inject/` (gpu), `src/stealth/js/` |
-| mouse/typing biometrics, idle hum | `src/stealth/biometrics.rs`, `src/stealth/hum.rs` |
-| Chrome discovery, launch flags, CDP transports, Xvfb | `src/browser.rs` + `src/browser/`, `src/platform.rs` |
-| MCP tool schemas and dispatch | `src/mcp/tools.rs`, `src/mcp/server.rs` + `src/mcp/server/` (boot, serve, proto + tool handlers) |
-| CLI commands, daemon, help text | `src/cli.rs` + `src/cli/` (args/ per-command parsers, daemon, help, rb) |
-| sessions/profiles, seasoning, orphan reaper | `src/session_profile.rs` + `src/session_profile/` (reap, copy) |
-| cookies/storage/tabs, session save-load | `src/state.rs` |
-| site adapters (`extract=auto` fast paths) | `src/reddit.rs` + `src/reddit/`, `src/x.rs` + `src/x/` |
-| real-browser lane (`rb`) | `src/realbrowser.rs` + `src/realbrowser/` |
-| self-update, rollback, doctor | `src/updater/` |
-| human CLI output/styling | `src/ui.rs` |
+| MCP tool schemas, JSON-RPC loop, handlers | `src/mcp/tools.rs`, `src/mcp/server.rs`, `src/mcp/server/` |
+| CLI arg parsers, daemon, `rb`, `hermes`, help | `src/cli.rs`, `src/cli/` (`args/`, `daemon.rs`, `rb.rs`, `hermes.rs`, `help.rs`) |
+| Live Page Model, refs, perception, capture, logs | `src/page/` (`mod.rs`, `model.rs`, `refs.rs`, `perception.rs`, `perception/`, `js/`) |
+| Actions, addressing, biometric input, verdicts | `src/action.rs`, `src/action/` (`perform.rs`, `find.rs`, `input.rs`, `edit.rs`, `upload.rs`, `verdict.rs`, `js/`) |
+| Stealth injection, GPU profile, biometrics, hum | `src/stealth/` (`inject.rs`, `inject/gpu.rs`, `biometrics.rs`, `hum.rs`, `js/`) |
+| Browser discovery, flags, Xvfb+WM, Flatpak, proxy | `src/browser.rs`, `src/browser/` |
+| CDP WebSocket/pipe client, sessions, discovery | `src/cdp/` |
+| Real-browser lane (`rb`: select, clone, attach) | `src/realbrowser.rs`, `src/realbrowser/` |
+| Owned profiles, seasoning, orphan reaper | `src/session_profile.rs`, `src/session_profile/` |
+| Cookies, web storage, tabs, named sessions | `src/state.rs`, `src/logins.rs`, `src/knowledge.rs`, `src/fingerprint.rs` |
+| Site `extract=auto` adapters | `src/reddit.rs` + `src/reddit/`, `src/x.rs` + `src/x/` |
+| Self-updater, rollback, `doctor`, audit runner | `src/updater/`, `src/audit.rs` |
+| OS process/signal/job abstractions, artifacts, UI | `src/platform.rs` + `src/platform/`, `src/artifacts.rs`, `src/ui.rs`, `src/error.rs` |
+| Integration tests & fixtures / live probes | `tests/`, `tools/` (see [tools/README.md](tools/README.md)) |
 
-Other places: `tests/` (integration tests + fixtures; unit tests live inline as `#[cfg(test)]`), `tools/` (the verification instruments — each folder has its own README), `npm/` (6 packages: a thin launcher plus per-platform binaries), `README.md` (user-facing source of truth for behavior), `CHANGELOG.md` (release history, curated by the maintainer).
+## Build, Test & Targeted Verification
 
-## Non-negotiables (PRs violating these are rejected)
-
-1. **Five tools. Forever.** `act`, `see`, `state`, `run`, `vision`. New capabilities are parameters or behaviors of those five — never a sixth tool. The tool definitions (five compact definitions) are the entire interface budget of every agent using bladebro.
-2. **No LLM inside the driver.** Deterministic machinery only. The agent is the intelligence; bladebro never calls a model.
-3. **No CAPTCHA solving as a capability — with one narrow, adapter-only exception.** The standing rule: detect, report an honest `blocked:` verdict, apply the remediation ladder; nothing is ever fake-solved. The exception: a site adapter may pass a challenge that is trivial for a human — a single check-the-box click through the normal humanized input path, as the reddit adapter does for reddit's one-time "prove your humanity" gate. Conditions that keep it honest: adapter-specific and site-gated (never a universal solver), and if the challenge escalates beyond the simple check (an image grid), that is reported honestly and never solved.
-4. **No Chromium fork.** The engine is stock system Chrome/Chromium. Everything else is built here.
-5. **Adapters are pure optimization.** The `extract=auto` site paths make existing commands smarter on their site — zero new tools, zero new params, live-tested on the real site.
-6. **Honest verdicts.** Never claim success — a value written, a field cleared, a click's effect — without a readback that proves it. When proof is impossible, the verdict says so ("readback unverified"). Errors carry current page state so an agent can recover without an extra call.
-7. **Stealth means Proxies over native originals.** Every installed function/getter is a `Proxy` whose apply trap delegates to the original first (native receiver/arg validation preserved). Never patch `Function.prototype.toString` — that was tried once and it leaked the real source of every patched function. Never add automation flags (`--enable-automation`, `--disable-blink-features=AutomationControlled`, …): they are exactly what detectors read, and Chrome answers them with a visible infobar.
-8. **Zero warnings + green tests.** `cargo clippy --release -- -D warnings` clean and `cargo test --profile gate` passing before you commit. A bugfix PR needs a regression test that would have caught the bug.
-9. **Don't break other platforms.** All five build targets ship; platform differences belong behind `src/platform.rs` where possible. A CI failure on macos or windows is a real failure, not noise.
-
-## Verification — the instruments
-
-These run in CI as parallel jobs (`.github/workflows/probes.yml`, nightly + tag + manual), never as a serial local ritual. On your machine run only the one that covers the change you made.
-
-House rules: **reproduce before you fix** (don't "fix" what you haven't seen fail) and **verify from live readback** (a command exiting 0 is not evidence that a behavior works). These tools exist because trusting our own code is how stealth bugs ship:
-
-- `./target/release/bladebro audit` — the stealth vector suite + cross-restart stability stamps. The suite prints its own total (111 on the reference machine, GPU/profile-dependent elsewhere); the bar is no `FAIL` line and stable stamps after any stealth-adjacent change.
-- `python3 tools/diff_oracle/oracle.py` — stock Chrome vs bladebro, same display, identical probe battery; every difference classified EXPECTED (a documented mask, with its reason) or DIVERGENT. **`divergent: 0` is required — a DIVERGENT line is a STOP, not a note.** `--lane real` checks the real-browser lane (bar: 0 expected, 0 divergent).
-- `python3 tools/qol_probe/run.py` — the input/action behavior suite against local fixtures (`editor.html`, `shadow.html`, `extract.html`, `universal.html`, `router.html`); 122 checks. Runs on a local HTTP fixture server with its own `BLADE_HOME`. The fastest way to validate click/type/fill/select changes, and the right place to add a repro when you fix an input bug.
-- `python3 tools/lane_matrix.py all 5` — cold-start matrix across all five lanes (daemon / one-shot / MCP / MCP-pipe / real), 5 rounds each.
-- `python3 tools/rb_live/attach_drift.py` — real-lane attach drift check; run after touching `src/realbrowser.rs`.
-
-Stealth-touching PRs additionally need the live sites — bot.sannysoft.com (all pass), incolumitas.com (no bot detection), abrahamjuliot.github.io/creepjs (headless 0% / stealth 0%) — with before/after numbers in the PR description.
-
-## Code conventions
-
-Match the surrounding code. Specific to this repo:
-
-- **Comments explain why**, not what — constraints, detection classes, behaviors that break if the line changes.
-- **Error strings are product surface.** Agents read them: be specific, actionable, name the recovery path. Include page state in action errors.
-- **No `unwrap`/`expect` in non-test code** outside provably-guarded cases; failures bubble with context (`anyhow`/`thiserror`).
-- **Injected JS must stay dependency-free and syntactically valid.** The test suite runs `node --check` on assembled scripts because one parse error silently disables *every* patch. Debug with `BLADE_DUMP_INJECT=/tmp/inj.js` + `node --check /tmp/inj.js`.
-- **`src/cli/help.rs` help blocks are raw strings** (`r#"…"#`). A `"#` sequence inside one (a CSS `"#id"` example, say) terminates the string early and the compiler error appears dozens of lines away. Don't put it there.
-- **stdout is a machine contract.** `--json` prints a single JSON object; MCP stdout is pure JSON-RPC. Logs go to stderr. Human styling (`src/ui.rs`) is TTY-gated — piped output must stay plain.
-- **Keep outputs lean.** Delta-first responses, big payloads offloaded to artifact files. Don't add a field an agent doesn't need.
-- **Thin cores + focused children.** Big modules split as `foo.rs` (public surface + a `Module map:` header, re-exports) plus a `foo/` folder — `cli/`, `cli/args/`, `mcp/server/`, `action/`, `page/`, `page/perception/`, `session_profile/`, `stealth/inject/`, `browser/`, `realbrowser/`, `reddit/`, `x/`. When moving code, keep public paths stable via re-exports. Embedded JS lives in `src/**/js/*.js` (`include_str!`) — edit the `.js`, never paste a payload back into a Rust string.
-
-## Git / PR workflow
-
-- Conventional Commits: `feat:`, `fix:`, `stealth:`, `perf:`, `docs:`, `chore:` — e.g. `fix: handle redirect drift in network tracker`.
-- Branch, commit, open a PR, fill in `.github/PULL_REQUEST_TEMPLATE.md`. Keep PRs scoped — a stealth fix and a refactor are two PRs.
-- CI (fmt + clippy + test + build on ubuntu, macos, windows) runs on PRs — all three must pass. Docs-only changes skip CI by design.
-- AI-generated PRs are welcome, but **review your own diff first** — you are responsible for what you submit.
-- Version bumps, publishing, `CHANGELOG.md` curation and tags are maintainer territory (`scripts/release-prep.sh` + the tag-triggered release workflow). Describe your change in the PR description; don't touch release machinery.
-
-## Shipping — tag-driven, all remote
+Toolchain is pinned in `rust-toolchain.toml` (`1.100.0`, matching CI; crate MSRV is `1.86`). Bump the pin only deliberately with the full gate green.
 
 ```bash
-./scripts/release-prep.sh X.Y.Z --push   # versions + CHANGELOG + commit + tag: <1 s, builds nothing
-gh run watch --workflow Release          # the only thing to wait on; nothing builds here
+cargo check                                               # fast type-check (~3s)
+cargo fmt --check                                         # formatting check
+cargo clippy --release --all-targets -- -D warnings       # zero warnings across all targets
+cargo test --profile gate                                 # unit + integration suite (release codegen, no LTO)
+cargo build --profile gate                                # fast binary for probes → ./target/gate/bladebro
+cargo build --release                                     # shipped LTO binary → ./target/release/bladebro
 ```
 
-`.github/workflows/release.yml` then runs, in parallel where it can: `plan` (tag ↔ Cargo/npm/CHANGELOG consistency) → `gate` (the same lint+test matrix as CI) ∥ `build` ×5 on native runners (linux x64/arm64 + windows via zigbuild on ubuntu, darwin arm64/x64 on macos-26) → `publish` (checksums, LINUX ABI check, smoke run, draft release, exactly 20 assets) → `npm` (platforms first, launcher last, provenance, ≤2 min registry wait) → `latest`. Budget ~15 minutes end to end.
+Run **only** the live instrument in [tools/README.md](tools/README.md) that covers what you changed (reproduce before fixing; verify from live readback, never exit code alone). The full probe matrix runs remotely in parallel via `.github/workflows/probes.yml`.
 
-- Never build a release artifact locally, never bump a version by hand, never re-tag — a failed release is re-run with `workflow_dispatch` on the same tag.
-- Never republish an npm version: `publish-npm-ci.sh` fails closed if the registry already has it.
+| Touched area | Run locally (with `BLADEBRO=$PWD/target/gate/bladebro`) |
+|---|---|
+| Stealth / browser flags / injection | `BLADE_HOME=$(mktemp -d) $BLADEBRO audit` (0 `FAIL`, stable stamps) + `python3 tools/diff_oracle/oracle.py` (`divergent: 0`) + live check on sannysoft / incolumitas / creepjs |
+| Click / type / fill / select / reads / shadow DOM | `python3 tools/qol_probe/run.py` (122 assertions) |
+| Addressing, waits, dialogs, PDFs, proxy redaction | `python3 tools/gap44/probe.py 1 && python3 tools/gap44/probe.py 2` |
+| MCP schemas, preflight, `run`, control inspection | `python3 tools/reliability_probe/agent_contract.py` + `agent_ux.py` |
+| Shutdown storage flush, downloads, launch/lanes | `python3 tools/reliability_probe/persistence.py` / `download.py` / `python3 tools/lane_matrix.py all 5` |
+| Real-browser lane (`src/realbrowser*`) | `python3 tools/diff_oracle/oracle.py --lane real` (`0 expected, 0 divergent`) + `python3 tools/rb_live/attach_drift.py` |
 
-## Boundaries
+## Conventions & Sharp Edges
 
-- ✅ **Always:** run clippy + tests; add the regression test; use a scratch data dir for manual experiments (`BLADE_HOME=$(mktemp -d) ./target/release/bladebro …`) so a real browser profile is never touched; state exactly how you verified (commands + output) in the PR.
-- ⚠️ **Ask first** (open an issue or draft PR): adding a dependency (binary size + supply chain — it ships ~7 MB and we like it); changing MCP tool schemas (every word is billed to every user's context); changing capture/perception output formats (agents parse them); touching the stealth injection *architecture*; anything in `npm/`.
-- 🚫 **Never:** a 6th tool; an LLM call in the driver; CAPTCHA solving beyond the adapter-only human-trivial exception (non-negotiable #3); a Chromium fork; a `Function.prototype.toString` patch; launch flags that mark the browser as automated; committing secrets, tokens or real browsing-profile data; committing build artifacts; npm install scripts (the packages ship zero — keep it that way); version bumps or publishing.
-
-## Gotchas worth knowing (each one cost real debugging time)
-
-- **Owned browser shutdown must flush before process-tree cleanup.** Await `Browser::shutdown_gracefully()` on normal exit, EOF, signal and idle paths. Killing the whole process group first kills Chrome's storage services before localStorage reaches disk. Keep emergency tree cleanup bounded; never close an externally attached browser. `tools/reliability_probe/persistence.py` locks direct/forked CLI and MCP restart behavior.
-- **A running daemon/MCP keeps the old binary inode.** After rebuilding, `bladebro stop` (or restart the MCP server) before testing — otherwise you're still testing the old build.
-- **The MCP lane defaults to the WebSocket transport** (native `navigator.webdriver == false`). `BLADE_TRANSPORT=pipe` is the opt-in zero-port pipe: Chrome then reports `webdriver == true` and needs a mask — keep it opt-in, never a default.
-- **The stealth baseline is Chrome-version-sensitive.** The current audited numbers were measured against Chromium 157 at v4.6.9. Re-measure on a different Chrome before calling something a regression.
-- **Don't point anything at a real browser profile.** Tests and the gate tools isolate themselves with scratch `BLADE_HOME`s — keep that property in anything you add.
-
-Before you say "done": clippy clean → tests pass → the instruments for your change ran green → the PR description says what changed, how it was verified, and before/after numbers for stealth or performance work. That is the definition of done here.
+- **Token-lean outputs**: every tool schema word, verdict, and error string is paid per token by calling LLMs. Keep outputs compact, actionable, and delta-first.
+- **`stdout` is a machine contract**: `--json` emits one JSON object; `bladebro mcp` emits pure JSON-RPC; logs go to `stderr`; ANSI styling in `src/ui.rs` stays TTY-gated.
+- **Injected JS syntax**: assembled scripts are checked with `node --check` in tests because one JS syntax error silently disables all page patches. Inspect assembled output via `BLADE_DUMP_INJECT=/tmp/inj.js` + `node --check /tmp/inj.js`.
+- **Raw strings in `src/cli/help.rs`**: help text uses `r#"…"#` — never put `"#` (e.g. `"#id"`) inside a help block.
+- **No `unwrap`/`expect` in non-test code** unless locally invariant-guarded; propagate context via `anyhow`/`thiserror`.
+- **Restart daemons after rebuilds**: a live daemon or `mcp` process holds the old binary inode — run `bladebro stop` before manual CLI testing.
+- **Ask before**: adding Cargo dependencies (binary stays ~7–8 MB), changing MCP tool schemas or perception output formats, altering stealth injection architecture, or editing `npm/`.
+- **PRs & maintainer-only boundaries**: use Conventional Commits (`feat:`, `fix:`, `stealth:`, `perf:`, `docs:`, `chore:`), keep PRs scoped to one concern, and fill out `.github/PULL_REQUEST_TEMPLATE.md` with verification commands and before/after numbers. Never bump versions, edit `CHANGELOG.md`, create tags, or touch `scripts/` release tooling — releases are maintainer-only.

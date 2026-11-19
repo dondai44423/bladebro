@@ -1,89 +1,31 @@
 # Contributing to Bladebro
 
-Thanks for your interest in improving Bladebro. This is a small, focused project — keep PRs scoped.
+Keep pull requests small and single-purpose. Coding agents should also read [AGENTS.md](AGENTS.md) and [tools/README.md](tools/README.md).
 
-Working with a coding agent? Point it at [AGENTS.md](AGENTS.md) — the agent-facing repo guide (commands, house rules, verification instruments).
-
-## Before you submit
+## Required Gate Before Opening a PR
 
 ```bash
-# Lint — zero warnings allowed
-cargo clippy --release -- -D warnings
-
-# Tests — all must pass (gate profile: release codegen without LTO)
+cargo fmt --check
+cargo clippy --release --all-targets -- -D warnings
 cargo test --profile gate
-
-# Build — must produce a clean binary (the shipped artifact profile)
-cargo build --release
 ```
 
-If any of these fail, fix them before opening a PR.
+Every bug fix requires a regression test in `src/` (`#[cfg(test)]`) or `tests/` (or the matching live probe in `tools/`). Use a disposable `BLADE_HOME` when running manual checks — never point development runs at a personal browser profile.
 
-## What we accept PRs for
+## Scope Rules
 
-- Bug fixes (with a test that would have caught the bug)
-- Stealth improvements (verified against `bladebro audit` + real detection sites)
-- New actions on `act` (that fit the "few tools, full control" philosophy)
-- Adapter fixes (the `extract=auto` site-aware paths — with a live repro on the real site)
-- New adapters (pure optimization only — zero new tools, zero new params; must be live-tested, token-efficient and actually good — reviewed closely)
-- Performance improvements (with benchmarks)
-- Cross-platform support (macOS, Windows — Linux is the live-tested platform today; macOS/Windows are CI-verified)
-- AI generated PR are fine but make sure to review it first.
+**Accepted:**
+- Bug fixes with regression coverage and readback-verified verdicts.
+- Stealth fixes proven with `bladebro audit` (zero `FAIL`), `python3 tools/diff_oracle/oracle.py` (`divergent: 0`), and before/after results on `bot.sannysoft.com`, `incolumitas.com`, and `abrahamjuliot.github.io/creepjs`.
+- Composable improvements to the existing 5 tools (`act`, `see`, `state`, `run`, `vision`), token-lean `extract=auto` site adapters (zero new tools or parameters, live-tested), performance wins with benchmarks, and Linux/macOS/Windows portability fixes.
 
-## What we don't accept
+**Rejected:**
+- A 6th MCP tool (without an extraordinary, non-marginal capability).
+- Any LLM/model call inside the driver.
+- General CAPTCHA solving (detect and return `blocked:` with the remediation ladder; only site-gated, human-trivial single-checkbox adapters such as Reddit's humanity check are allowed).
+- Chromium forks, `Function.prototype.toString` patches, or Chrome automation launch flags (`--enable-automation`, `--disable-blink-features=AutomationControlled`, …).
+- Manual version bumps, `CHANGELOG.md` release tags, or local release artifacts (handled by the maintainer tag pipeline).
 
-- More tools — the surface is 5. New capabilities go as params/behaviors of existing tools; a sixth tool only lands if it is massively net-positive, never marginal.
-- An LLM inside the driver. Deterministic machinery only.
-- CAPTCHA solving as a general capability. Detect + honest `blocked:` verdict + remediation ladder. One exception, kept deliberately narrow: a site adapter may pass a challenge that is trivial for a human — a single checkbox click, like reddit's humanity gate; image grids are never solved.
-- Chromium source forks. Stock Chrome stays the engine.
+## Commits & License
 
-## Commit style
-
-[Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-feat: add hover action for dropdown menus
-fix: handle redirect drift in network tracker
-stealth: mask navigator.languages via injection
-docs: update README comparison table
-```
-
-## Stealth changes
-
-If your change touches the stealth system, verify it doesn't regress:
-
-```bash
-# Local vectors — no FAIL line, stamps stable (the suite prints its own
-# total; 111 on the reference machine, GPU/profile-dependent elsewhere)
-./target/release/bladebro audit
-
-# Differential oracle — divergent must be 0 (stock vs bladebro, same display)
-python3 tools/diff_oracle/oracle.py
-
-# CreepJS lie-engine port (tools/diff_oracle/lieport.js) — eval it in the
-# page; flags + the toString-leak list must stay clean (189 properties)
-
-# Per-lane smoke (daemon / one-shot / MCP / MCP-pipe / real), 5 cold starts each
-python3 tools/lane_matrix.py all 5
-
-# Real-browser lane: 0 expected, 0 divergent — page-visibly identical to stock
-python3 tools/diff_oracle/oracle.py --lane real
-
-# Real-lane cold starts (clone mechanism, isolated home)
-python3 tools/lane_matrix.py real 5
-
-# Real detection sites
-# bot.sannysoft.com — all checks must pass
-# incolumitas.com — no bot detection
-# abrahamjuliot.github.io/creepjs — headless 0%, stealth 0%
-```
-
-Include the before/after scores in your PR description.
-
-## Testing
-
-Write tests that would have caught the bug you're fixing. Tests live in `tests/`. Unit tests (`#[cfg(test)]`) for logic, integration tests for CDP behavior.
-
-## License
-
-By contributing, you agree your changes are licensed under the project's Apache-2.0 license.
+Use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `stealth:`, `perf:`, `docs:`, `chore:`). Contributions are licensed under [Apache-2.0](LICENSE).

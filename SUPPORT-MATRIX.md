@@ -1,98 +1,51 @@
-# Support matrix
+# Support Matrix
 
-What is verified, on which platform, by which instrument. Every claim below
-points at a re-runnable instrument; everything not verified is listed as a gap.
-No perfect claims. Current release: 4.6.9 (2026-11-13). Local verification:
-2026-11-13 on Chromium 157.0.8103.38, Arch Linux x86_64.
+Current verification coverage by platform, browser engine, and runnable instrument. Current release: `4.6.9` (verified locally on Arch Linux x86_64 with Chromium `157.0.8103.38` and pinned `rustc 1.100.0`).
 
 ## Platforms
 
-| Platform | Current audit coverage | Runtime coverage |
+| Platform | Blocking CI (`ci.yml` / `gate.yml`) | Release & Runtime Coverage |
 |---|---|---|
-| Linux x86_64 | strict release Clippy, release tests twice, glibc 2.28 cross build, local npm installs | full local browser floor, audit at the suite's own total twice (111 on the reference host, 103 on the hardware-GL host), both oracles, five lanes x5 |
-| Linux ARM64 | glibc 2.28 cross build + architecture/ABI inspection | physical ARM64/Pi runtime not run |
-| macOS Intel/Apple Silicon | both cross builds + architecture inspection | native Apple Silicon CI (`macos-26`) runs the contract, persistence and audit probes; darwin-x64 is not executed natively |
-| Windows x86_64 | cross build + strict all-target cross Clippy + PE inspection | native CI, including actual Chrome and persistence/read probes |
-| Android | source-only CI check, no published binary | no Android browser runtime claim |
+| Linux x86_64 | `fmt`, `clippy --release --all-targets -D warnings`, `cargo test --profile gate`, MSRV `1.86.0` check | glibc `2.28` `zigbuild` + ABI check + binary smoke in `release.yml`; parallel Chrome suite in `probes.yml`; full local probe floor + `diff_oracle` on both lanes |
+| Linux ARM64 | Cross `cargo check --all-targets` (`zig cc`) | glibc `2.28` `zigbuild` + ABI check in `release.yml`; physical ARM64/Raspberry Pi browser runtime not run |
+| macOS Apple Silicon (`darwin-arm64`) | Native `cargo check --all-targets`, unit tests (`--lib`), `cargo build --release` on `macos-26` | Native `macos-26` release binary in `release.yml` |
+| macOS Intel (`darwin-x64`) | Cross `cargo check --all-targets` | Built on `macos-26` (`--target x86_64-apple-darwin`) in `release.yml`; not executed natively (`macos-26-intel` wedges headful Chrome in `ISIconManager` XPC) |
+| Windows x86_64 | Cross `cargo check --all-targets` + native check, unit tests (`--lib`), and `cargo build --release` on `windows-latest` | `zigbuild` PE binary in `release.yml` |
+| Android (`aarch64-linux-android`) | Source compile check (`ci.yml` NDK job) | Source-level `cfg` guard only; no binary published and no runtime claim |
 
-Rust 1.86.0 passes `cargo check --locked --all-targets` on Linux. Native CI
-(`.github/workflows/ci.yml`) builds/tests Linux, macOS and Windows and drives
-Chrome with package, download, action, agent-contract, persistence and audit
-probes. Release gates require green CI and reached assertions for the exact
-release commit; local cross builds do not substitute for those runs.
+## Browser Engines
 
-The native Mac job runs on the standard arm64 `macos-26` pool. The
-`macos-26-intel` image was tried and abandoned: headful Chrome's main thread
-wedges in a synchronous IconServices XPC call (process samples: NSMenu/ShareKit
-to `ISIconManager`), so `Input.*` calls time out for minutes on fresh browser
-instances, while the identical suite passes every assertion on arm64. The
-darwin-x64 binary is still cross-built and architecture-checked by the release
-script but is not executed natively in CI. Available labels are documented by
-[GitHub](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job).
-
-The local cross links retain the existing Zig deprecated linker-optimization
-and macOS SDK-discovery diagnostics. Artifacts linked and passed architecture
-checks; source Clippy is warning-clean. A supported local SDK/toolchain setup
-is still needed to remove those toolchain diagnostics without suppression.
-
-## Engines
-
-| Engine | Evidence |
+| Engine | Verified scope |
 |---|---|
-| Chromium 157.0.8103.38 (local Arch Linux) | full local floor + persistence and agent-contract probes |
-| Google Chrome stable (CI Linux; runner Chrome on macOS/Windows) | CI tests + lifecycle x2 per OS |
-| Other Chromium forks (Helium, Brave, Edge) | discovery/wrapper mechanisms have fixtures; full engine-specific GUI runs not verified |
-| Flatpak `org.chromium.Chromium` 156 (Flathub, Flatpak 1.18.4) | discovery, sandboxed launch, host-side persistence and download verified on Linux x86_64 (author run); Steam Deck not run |
+| Chromium `157` (Arch Linux x86_64) | Full local verification floor (`audit`, `diff_oracle` agent + real lanes, `qol_probe`, `lane_matrix`, `gap44`, `reliability_probe`) |
+| Google Chrome Stable (Ubuntu CI) | Parallel `probes.yml` browser jobs (`audit`, `qol`, `lanes`, `gap44`, `reliability`) |
+| Flatpak `org.chromium.Chromium` (`1.18.4` x86_64) | Discovery, sandboxed launch, host persistence, upload staging, download, and teardown verified on Linux x86_64 |
+| Chromium forks (Brave, Helium, Edge, Vivaldi, Opera) | Discovery, wrapper/AppImage PID ownership, and clone unit/integration fixtures (`tools/rb_live/helium.py` available for manual Helium runs) |
 
-## Feature to instrument
+## Feature-to-Instrument Map
+
+See [tools/README.md](tools/README.md) for exact invocations and pass criteria.
 
 | Area | Instrument |
 |---|---|
-| Agent schemas, preflight, nested plans, JSON notices | `tools/reliability_probe/agent_contract.py` + `cargo test --profile gate` |
-| Live control reads, option labels, structured run statuses/artifacts | `tools/reliability_probe/agent_ux.py` |
-| Owned storage flush, EOF and forked-launcher restart | `tools/reliability_probe/persistence.py` + `browser-setup.py` |
-| Trusted input (isTrusted, paused wrapper) | `tools/qol_probe/run.py` + `tools/gap44/probe.py` |
-| Addressing (selector/text/nth/scope, options, labels) | `tools/qol_probe/run.py` + G01 in `tools/gap44/probe.py` |
-| Wait/readiness contract | `tools/qol_probe/run.py` + G02 in `tools/gap44/probe.py` |
-| Dialog expectations | G03 in `tools/gap44/probe.py` |
-| Content reads, outline, template extraction | `tools/qol_probe/run.py` + G06 in `tools/gap44/probe.py` |
-| Product/offer extraction | `cargo test --profile gate` (`mcp/server/extract` tests) |
-| Document/PDF paths | G08 in `tools/gap44/probe.py` |
-| Outcome wording, state readbacks | `cargo test --profile gate` (verdict tests) + G01 in `tools/gap44/probe.py` |
-| Geometry coherence, WebRTC under proxy | `tools/gap44/webrtc_proxy.py` |
-| Proxy credential redaction | `cargo test --profile gate` (`browser/proxy` tests) + G13 in `tools/gap44/probe.py` |
-| Updater retries, install integrity | `cargo test --profile gate` (`updater` tests) |
-| Stealth posture | `bladebro audit` (the local vector suite at its own host-dependent total, cross-run stamps, nonzero on failure) |
-| Stock-parity (page-visible differences) | `tools/diff_oracle/oracle.py` |
-| Cold start, all 5 lanes, owned-process hygiene | `tools/lane_matrix.py all 5` |
-| Real-browser lane attachment | `tools/rb_live/attach_drift.py` (run when the lane changes) |
-| Flatpak discovery, sandboxed launch, teardown | `browser::flatpak` + `platform` sandbox-pid tests; a local Flatpak run |
-| npm packaging, MCP over the package | `tools/dsh_probe/` (CI) + `scripts/publish-npm.sh` verify step |
+| Tool schemas, preflight validation, `run` plans, JSON notices | `tools/reliability_probe/agent_contract.py` + `cargo test --profile gate` |
+| Live control inspection (`act read`), option labels, `run format=json` | `tools/reliability_probe/agent_ux.py` |
+| Graceful shutdown storage flush, EOF, forked-launcher teardown | `tools/reliability_probe/persistence.py` + `tools/reliability_probe/browser-setup.py` |
+| Trusted input, framework editors, shadow DOM, `rb pause`, scoped reads | `tools/qol_probe/run.py` |
+| Addressing, readiness waits, dialogs, templates, PDFs, proxy redaction | `tools/gap44/probe.py` + `cargo test --profile gate` |
+| Cross-origin and `body: true` downloads | `tools/reliability_probe/download.py` |
+| Geometry coherence & fail-closed WebRTC under proxy | `tools/gap44/webrtc_proxy.py` |
+| Stealth vectors & cross-restart stamp stability | `bladebro audit` |
+| Stock-Chrome page parity (`agent` and `real` lanes) | `tools/diff_oracle/oracle.py` (`--lane real` for zero-mask parity) |
+| Cold-start stability across all 5 lanes | `tools/lane_matrix.py all 5` |
+| Real-browser attach → agent-lane switch | `tools/rb_live/attach_drift.py` |
+| Linux glibc ≤ `2.28` symbol gate | `tools/reliability_probe/linux-abi.py` |
+| npm / Cordis / Pi / Hermes host bridges | `tools/dsh_probe/`, `tools/reliability_probe/pi-stdio.mjs`, `tests/hermes_cli.rs`, `tools/hermes_probe/` |
 
-## Not verified (gaps)
+## Unverified Gaps
 
-- Stealth floor on macOS/Windows: the CI audit step (since 4.6.1) runs the
-  full vector suite through a real browser on each — but the larger local
-  floor (QoL, reliability, lanes, oracle) still runs on Linux only.
-- Real-network proxies and proxy chains: G10 evidence uses a local forward
-  proxy; behavior behind commercial proxies is untested.
-- Other Chromium forks: full engine-specific GUI behavior remains unverified; forked launch and cleanup fixtures use stock Chromium.
-- Flatpak browsers: discovery, sandboxed launch, persistence and teardown were verified on Flatpak 1.18.4 (Linux x86_64); a physical Steam Deck/Silverblue host and uploads into the sandbox were not run.
-- Scanned/image PDFs: out of scope by design (download hands the bytes to
-  host tooling; no OCR layer in the driver).
-- Physical ARM64/Pi browser host and personal Mac/Windows GUI: native desktop
-  CI and the cross artifacts are the recorded coverage.
-
-## Re-run
-
-```bash
-cargo fmt --check && cargo clippy --release -- -D warnings && cargo test --profile gate
-./target/release/bladebro audit
-python3 tools/reliability_probe/agent_contract.py
-python3 tools/reliability_probe/persistence.py
-python3 tools/qol_probe/run.py
-python3 tools/diff_oracle/oracle.py
-python3 tools/lane_matrix.py all 5
-python3 tools/gap44/probe.py 1 && python3 tools/gap44/probe.py 2
-python3 tools/gap44/webrtc_proxy.py
-```
+- **Remote `oracle` job in `probes.yml`**: currently fails on GitHub's Ubuntu runner before comparison starts (`stock Chrome debug endpoint did not come up`); verified locally on Linux x86_64.
+- **macOS & Windows live browser probes**: `gate.yml` runs native compile, unit tests, and release linking on `macos-26` and `windows-latest`; the live browser probe suite (`probes.yml`) runs on Linux only.
+- **Physical ARM64 / Raspberry Pi & SteamOS/Silverblue hosts**: covered by cross-builds, ABI checks, host-selector unit tests, and x86_64 Flatpak runs, not physical device runs.
+- **Commercial upstream proxies & non-stock fork GUIs**: proxy tests use local forward proxies; non-Chromium forks outside manual Helium runs are covered by discovery/ownership fixtures rather than full GUI suites.
+- **`SharedWorker` stealth scope & scanned PDFs**: `SharedWorker` globals remain native by design to avoid breaking module/shared workers; scanned image PDFs have no in-driver OCR (`act download` hands raw bytes to the caller).
