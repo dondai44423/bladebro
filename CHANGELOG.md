@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.10] - 2026-11-19
+
 ### Added
 - `see logs=xhr` reports the deduplicated XHR/fetch API ring: method, status (or `PENDING`/the error), the full URL with its query and GraphQL variables intact, and the request's header *names* only — failures first, `format=json` for rows, `clear=true` to reset, and an artifact offload past 30 endpoints. Header values (`Authorization`, CSRF tokens) never leave the page.
 
@@ -2223,7 +2225,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.9...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.10...HEAD
+[4.6.10]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.10
 [4.6.9]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.9
 [4.6.8]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.8
 [4.6.7]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.7
