@@ -76,6 +76,14 @@ impl VirtualDisplay {
                 "-screen",
                 "0",
                 &format!("{XVFB_SCREEN_WIDTH}x{XVFB_SCREEN_HEIGHT}x24"),
+                // Xvfb compiles VFB_DEFAULT_DPI = 100, which under an X11
+                // window manager (xfwm4/GTK) causes Chromium Ozone-X11 to
+                // derive devicePixelRatio = 1.046875 (67/64) and shrink CSS
+                // screen.width to 1835 while --window-size=1920,1080 opens a
+                // 1912px inner viewport (tripping inner-within-screen). Pin
+                // standard desktop 96 DPI so CSS pixels match display pixels.
+                "-dpi",
+                "96",
                 "-auth",
                 &auth_arg, // cookie-only access control (never -ac)
                 "-nolisten",
@@ -619,5 +627,37 @@ mod readiness_tests {
         assert_eq!(socket_peer_pid(&client), Some(std::process::id()));
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn xvfb_command_pins_96_dpi_and_cookie_auth() {
+        let dir = std::env::temp_dir().join(format!("blade-xvfb-argv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-xvfb");
+        let argv = dir.join("argv");
+        let argv_path = argv.to_str().unwrap();
+        assert!(!argv_path.contains('\''));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv_path}'\nexit 1\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = VirtualDisplay::start_with_path(script.to_str().unwrap());
+        let recorded: Vec<String> = std::fs::read_to_string(&argv)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            recorded.windows(2).any(|w| w == ["-dpi", "96"]),
+            "Xvfb must pin 96 DPI for 1:1 CSS screen geometry, got {recorded:?}"
+        );
+        assert!(
+            !recorded.iter().any(|a| a == "-ac"),
+            "Xvfb must never disable Xauthority access control"
+        );
     }
 }
