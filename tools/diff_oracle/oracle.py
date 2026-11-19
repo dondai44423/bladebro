@@ -39,6 +39,8 @@ EXPECTED = [
     (r"^glMaxCombined$", "pinned to the real GPU's value (llvmpipe reports a different cap)"),
     (r"^glPrecM$|^glPrecL$|^glPrecI$", "precision remapped to HIGH-class (i915 answers every level alike)"),
     (r"^gl2MaxSamples$", "pinned to the real GPU's value (llvmpipe reports a different cap)"),
+    (r"^glMaxTex$",
+     "capped at what the device's own backend answers: SwiftShader/Linux-EGL serves 8192 while the baseline's llvmpipe path serves 16384, and the mask never reports a ceiling above its own backend (issue #85 item 10)"),
     (r"^gl2ExtCount$|^gl2HasOvr$", "webgl2 extension list filtered to the real GPU's set"),
     (r"^workerGl$", "worker GL contexts carry the same identity as the page"),
     (r"^iframeGl$", "same-origin iframe contexts carry the same identity as the page"),
