@@ -53,6 +53,7 @@ jobs:
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
           echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+          google-chrome-stable --version
       - name: Stealth vectors
         run: |
           chmod +x target/gate/bladebro
@@ -76,7 +77,9 @@ jobs:
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
             | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+          sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils python3-websockets
+          echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+          google-chrome-stable --version
       - name: Differential oracle (divergent must be 0)
         run: |
           chmod +x target/gate/bladebro
@@ -101,6 +104,8 @@ jobs:
             | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+          echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+          google-chrome-stable --version
       - name: Input/action behavior suite
         run: |
           chmod +x target/gate/bladebro
@@ -124,6 +129,8 @@ jobs:
             | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+          echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+          google-chrome-stable --version
       - name: Cold start, five lanes
         run: |
           chmod +x target/gate/bladebro
@@ -147,6 +154,8 @@ jobs:
             | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+          echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+          google-chrome-stable --version
       - name: Acceptance probes
         run: |
           chmod +x target/gate/bladebro
@@ -172,6 +181,8 @@ jobs:
             | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update && sudo apt-get install -y google-chrome-stable xvfb xfwm4 x11-utils
+          echo "CHROME_PATH=$(command -v google-chrome-stable)" >> "$GITHUB_ENV"
+          google-chrome-stable --version
       - name: Agent contracts, persistence, downloads
         run: |
           chmod +x target/gate/bladebro
