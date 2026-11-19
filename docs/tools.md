@@ -41,7 +41,7 @@ Use `url` on supported actions to navigate before interacting. Targeted key pres
 | Scan headings | `mode: "outline"` |
 | Find text or inspect a subtree | `find`, `scope` |
 | Extract records | `extract: "auto"`, `"links"`, `"forms"`, or `"json"` with a template |
-| Inspect changes or logs | `changes: true`, `logs: "console"` or `"network"` |
+| Inspect changes or logs | `changes: true`, `logs: "console"`, `"network"`, or `"xhr"` |
 
 ```sh
 bladebro see content https://example.com
@@ -50,6 +50,8 @@ bladebro see extract links --json
 ```
 
 The model can fold navigation/footer items and list omitted controls by role. Use `filter` to narrow a crowded page. Auto extraction has site-aware paths for Reddit, X, GitHub, Hacker News, and products. A partial thread carries completeness and fallback information. `preview: true` shows an auto extraction's detected fields before you request rows.
+
+`logs: "xhr"` lists the deduplicated fetch/XHR endpoints a page called — method, status, the full URL with its query intact, and request header names only — with failures first. `format: "json"` returns rows, `clear: true` empties the ring, and reads past 30 endpoints offload to an artifact.
 
 Large reads give an artifact path and a paging receipt. With `see artifact="<path>"`, character paging returns JSON envelopes with a `data` string. Join the strings before parsing the payload. For JSON arrays, `items: true` pages complete rows using row offsets. Follow `next_offset` until null. JSON notices can wrap a result as `{data,note}`.
 

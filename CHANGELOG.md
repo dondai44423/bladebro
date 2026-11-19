@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `see logs=xhr` reports the deduplicated XHR/fetch API ring: method, status (or `PENDING`/the error), the full URL with its query and GraphQL variables intact, and the request's header *names* only — failures first, `format=json` for rows, `clear=true` to reset, and an artifact offload past 30 endpoints. Header values (`Authorization`, CSRF tokens) never leave the page.
+
+### Fixed
+- Body downloads (`body: true`) go direct when `BLADE_PROXY` is unset: an ambient `HTTP_PROXY`/`ALL_PROXY` no longer carries the request, and proxy scheme detection is case-insensitive (`SOCKS5:`, `QUIC:` are refused with the credential redacted).
+- `act download` validates the URL before any work: `javascript:`, `chrome:`, `devtools:`, `about:` and other unfetchable schemes are refused up front, a bare host gets its scheme, and a relative path resolves against the current page for the tab fallback while the in-page fetch keeps the page's own spelling.
+- A real-browser profile lock held by a sandbox pid (Flatpak's `steamdeck-2` colliding with host `[kthreadd]`, pid 1, a recycled pid) no longer reports the profile as in use: the lock must name a live Chromium process, a live host browser holding files inside the profile root, or a live `SingletonSocket`.
+- A CDP child session ends when Chrome detaches its target: `wait_for` returns `Closed` immediately instead of waiting out its deadline, so a closed tab or worker cannot stall the pipe lane.
+
+### Stealth
+- The console ring buffer lives only inside the injection closure — no window property, no window symbol (`Object.getOwnPropertySymbols(window)` is empty and `Symbol.for('q')` is gone) — read and cleared through a per-process secret `console.debug` receiver token; an ordinary `console.debug` call, foreign receiver included, logs normally and never returns it.
+- WebGL `getParameter` passes a native `null` straight through, so a lost context and extension-gated enums (`MAX_SAMPLES` on WebGL1, `UNMASKED_VENDOR_WEBGL`/`UNMASKED_RENDERER_WEBGL` before `WEBGL_debug_renderer_info`) answer exactly as stock instead of a fabricated cap; the differential oracle keys `winSyms`, `gl1UnenabledRenderer` and `gl1MaxSamples` to hold that line.
+- Xvfb runs at 96 DPI so Chromium derives `devicePixelRatio` 1 and a CSS screen that matches display pixels, instead of the 67/64 ratio its 100 DPI default produced (`innerWidth` above `screen.width`, `outerWidth` off by 25 px).
+
+### Build
+- The differential oracle resolves the stock baseline to a real browser binary and falls back candidate by candidate, so a distro's `/usr/bin/chromium` snap stub can no longer fail the nightly probe before Chrome starts; a launch failure quotes Chrome's own stderr instead of only "did not come up".
+- `actions/download-artifact` v7 → v8.
+
 ## [4.6.9] - 2026-11-13
 
 ### Added
