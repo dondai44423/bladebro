@@ -638,6 +638,7 @@ function _mkGP(proto){{
   var orig=proto.getParameter;
   _defFn(proto,'getParameter',orig,function(th,a,og){{
     var r=og.apply(th,a);
+    if(r===null||r===undefined)return r;
     var p=a[0];
     if(p===37445)return _fv;
     if(p===37446)return _fr;

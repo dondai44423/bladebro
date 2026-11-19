@@ -17,6 +17,7 @@ out.plugins = Array.from(navigator.plugins).map(p => p.name).join("|");
 out.mimeTypes = Array.from(navigator.mimeTypes).map(m => m.type).join("|");
 out.chromeObj = !!(window.chrome && window.chrome.app && window.chrome.runtime);
 out.chromeKeys = Object.keys(window.chrome || {}).sort().join("|");
+out.winSyms = Object.getOwnPropertySymbols(window).map(String).sort().join("|");
 out.pdfViewer = navigator.pdfViewerEnabled;
 out.cookieEnabled = navigator.cookieEnabled;
 out.tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -70,6 +71,8 @@ const mk = (t) => { try { const c = document.createElement("canvas"); return c.g
 const g = mk("webgl");
 out.gl1 = !!g;
 if (g) {
+  out.gl1UnenabledRenderer = String(g.getParameter(37446));
+  out.gl1MaxSamples = String(g.getParameter(36183));
   const e = g.getExtension("WEBGL_debug_renderer_info");
   out.glVendor = String(g.getParameter(g.VENDOR));
   out.glRenderer = String(g.getParameter(g.RENDERER));

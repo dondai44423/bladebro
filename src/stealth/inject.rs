@@ -87,6 +87,25 @@ pub fn has_full_script() -> bool {
     FULL_SCRIPT.read().map(|s| !s.is_empty()).unwrap_or(false)
 }
 
+/// Per-process secret receiver token for reading/clearing the closure-private
+/// console ring buffer without placing any property or symbol on `window`.
+pub fn console_secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut a = std::collections::hash_map::RandomState::new().build_hasher();
+        a.write_u32(std::process::id());
+        let mut b = std::collections::hash_map::RandomState::new().build_hasher();
+        b.write_u64(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+        );
+        format!("b{:016x}{:016x}", a.finish(), b.finish())
+    })
+}
+
 /// The GL-spoof decision baked into the most recently registered injection.
 /// Read by the mid-session GL reconciler (`Page::gl_health_refresh`): when a
 /// transition flips the decision (a crashed hardware GPU coming back
@@ -411,7 +430,9 @@ fn assemble_page_script(plan: &ScriptPlan<'_>) -> String {
         script.push_str(NOISE);
     }
     script.push_str(STEALTH_TAIL);
-    let script = script.replace("__SEED__", &plan.seed.to_string());
+    let script = script
+        .replace("__SEED__", &plan.seed.to_string())
+        .replace("__CONSOLE_KEY__", console_secret());
     // Shared proxy-mask helpers (also used by the worker scripts).
     let script = script.replace("__PROXY_HELPERS__", PROXY_HELPERS);
     if let Some(l) = plan.locale {

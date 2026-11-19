@@ -188,11 +188,13 @@ if(screen.pixelDepth!==24){_defGet(_sp2,'pixelDepth',_ogs(_sp2,'pixelDepth'),fun
 // no 'log' — verified against stock), so install where the method actually
 // lives: adding a prototype property stock doesn't have is itself a
 // differential. The hook is a proxy over the native method — masked in every
-// realm, native receiver/argument semantics preserved. The ring buffer lives
-// under a Symbol-keyed NON-ENUMERABLE window slot: invisible to for-in,
-// Object.keys, and getOwnPropertyNames. 200 entries, resets per document.
+// realm, native receiver/argument semantics preserved. The ring buffer stays
+// strictly inside this closure (never on window — even a Symbol-keyed property
+// is exposed by Object.getOwnPropertySymbols(window) / Reflect.ownKeys(window))
+// and is read/cleared via a per-process secret receiver token on console.debug.
+// 200 entries, resets per document.
 try{
-var _uk=Symbol.for('q');
+var _uck='__CONSOLE_KEY__';
 var _uxa=[];
 // Entry serializer. Plain data (primitives, boxed primitives, arrays and
 // objects of data properties, typed arrays, Dates) reads exactly as
@@ -322,11 +324,10 @@ function _uxp(l,a){try{var m='';for(var i=0;i<a.length&&m.length<400;i++){var v=
   var _host=_own?console:_cp;
   var _o=_own?_own.value:_cp[m];
   if(typeof _o!=='function')return;
-  try{Object.defineProperty(_host,m,{value:_fix(_mk(_o,function(th,a,og){_uxp(m,a);return og.apply(console,a);}),m,_o.length),writable:true,configurable:true,enumerable:true});}catch(e){}
+  try{Object.defineProperty(_host,m,{value:_fix(_mk(_o,function(th,a,og){if(m==='debug'&&th===_uck){if(a[0]===1)_uxa.length=0;return _uxa;}_uxp(m,a);return og.apply(console,a);}),m,_o.length),writable:true,configurable:true,enumerable:true});}catch(e){}
 });
 window.addEventListener('error',function(e){_uxp('exception',[String(e.message||'')+' @'+String(e.filename||'')+':'+String(e.lineno||'')]);});
 window.addEventListener('unhandledrejection',function(e){_uxp('unhandledrejection',[String(e.reason)]);});
-try{Object.defineProperty(window,_uk,{value:_uxa,writable:true,configurable:true,enumerable:false});}catch(e){try{window[_uk]=_uxa;}catch(e2){}}
 
 // Issue #9: macOS shows a system dialog "Chrome Helper needs to download
 // the font 'Osaka'/'STHeiti'" when on-demand CJK fonts are referenced in
