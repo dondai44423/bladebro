@@ -238,18 +238,80 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         assert_eq!(profile_in_use(&root), None, "no lock → not in use");
 
+        // Live SingletonSocket + SingletonLock reads as in use.
+        let sock_dir = std::env::temp_dir().join(format!("bsk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sock_dir);
+        std::fs::create_dir_all(&sock_dir).unwrap();
+        let sock_target = sock_dir.join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&sock_target).unwrap();
         let live = format!("host-{}", std::process::id());
         std::os::unix::fs::symlink(&live, root.join("SingletonLock")).unwrap();
+        std::os::unix::fs::symlink(&sock_target, root.join("SingletonSocket")).unwrap();
         assert_eq!(
             profile_in_use(&root),
             Some(format!("pid {}", std::process::id())),
-            "a lock held by a live pid reads as in use"
+            "a lock backed by a live SingletonSocket reads as in use"
         );
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&sock_dir);
+        let _ = std::fs::remove_file(root.join("SingletonSocket"));
+        let _ = std::fs::remove_file(root.join("SingletonLock"));
 
-        std::fs::remove_file(root.join("SingletonLock")).unwrap();
-        // Beyond any pid_max: kill(pid, 0) errors → not alive → stale.
-        std::os::unix::fs::symlink("host-99999999", root.join("SingletonLock")).unwrap();
-        assert_eq!(profile_in_use(&root), None, "a dead pid is a stale lock");
+        // Stale Flatpak sandbox pids (e.g. `steamdeck-2` where host pid 2 is
+        // `[kthreadd]`, or pid 1 `init`, or our own non-Chrome test runner pid
+        // without a socket) must never masquerade as a live browser lock.
+        for stale in [
+            "steamdeck-2".to_string(),
+            "host-1".to_string(),
+            format!("host-{}", std::process::id()),
+            "host-99999999".to_string(),
+        ] {
+            std::os::unix::fs::symlink(&stale, root.join("SingletonLock")).unwrap();
+            assert_eq!(
+                profile_in_use(&root),
+                None,
+                "stale or non-browser lock {stale} must read as not in use"
+            );
+            std::fs::remove_file(root.join("SingletonLock")).unwrap();
+        }
+
+        // Linux Flatpak live case: SingletonLock holds sandbox pid 2 while a
+        // host Chromium process holds files open inside `root` (even without
+        // `--user-data-dir=` in argv, as on default Flatpak profiles).
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            let held_file = root.join("Local State");
+            std::fs::write(&held_file, b"{}").unwrap();
+            std::os::unix::fs::symlink("steamdeck-2", root.join("SingletonLock")).unwrap();
+            let mut holder = std::process::Command::new("sh")
+                .arg0("/app/chromium/chrome")
+                .args(["-c", "exec 3< \"$1\"; read -r _"])
+                .arg("sh")
+                .arg(&held_file)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut detected = None;
+            while std::time::Instant::now() < deadline {
+                detected = profile_in_use(&root);
+                if detected.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            let expected_pid = holder.id();
+            let _ = holder.kill();
+            let _ = holder.wait();
+            assert_eq!(
+                detected,
+                Some(format!("pid {expected_pid}")),
+                "live sandboxed Chromium holding files in root must be detected"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }

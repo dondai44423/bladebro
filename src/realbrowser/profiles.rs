@@ -129,20 +129,112 @@ pub fn parse_singleton_owner(target: &str) -> Option<u32> {
     target.rsplit('-').next()?.parse::<u32>().ok()
 }
 
-/// The pid holding this profile, if a live process does (stale locks —
-/// dead pids — read as not running). `SingletonLock` lives in the root.
+/// The pid holding this profile, if a live Chromium browser process does
+/// (stale locks — dead pids, recycled non-browser pids, or sandbox-namespace
+/// pids like Flatpak's `steamdeck-2` colliding with host `[kthreadd]` — read
+/// as not running unless a live host browser holds `root`).
 pub fn profile_owner_pid(root: &Path) -> Option<u32> {
     let target = std::fs::read_link(root.join("SingletonLock")).ok()?;
     let pid = parse_singleton_owner(&target.to_string_lossy())?;
-    if platform::process_alive(pid) {
-        Some(pid)
-    } else {
-        None
+    if pid > 1 && platform::process_alive(pid) && platform::process_is_chrome(pid) {
+        return Some(pid);
     }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(host_pid) = sandbox_browser_holding_root(root) {
+        return Some(host_pid);
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sandbox_browser_holding_root(root: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let me = std::process::id();
+    let canon = root.canonicalize().ok();
+    let root_dev_ino = std::fs::metadata(root).ok().map(|m| (m.dev(), m.ino()));
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid <= 2 || pid == me {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        if cmdline.is_empty()
+            || cmdline
+                .split(|b| *b == 0 || *b == b' ')
+                .any(|arg| arg.starts_with(b"--type="))
+            || !platform::cmdline_is_chromium(&cmdline)
+        {
+            continue;
+        }
+        if cmdline_names_root(&cmdline, root)
+            || canon
+                .as_deref()
+                .is_some_and(|c| cmdline_names_root(&cmdline, c))
+            || proc_fds_touch_root(pid, root, canon.as_deref(), root_dev_ino)
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn cmdline_names_root(cmdline: &[u8], dir: &Path) -> bool {
+    let needle = format!("--user-data-dir={}", dir.display());
+    let needle = needle.as_bytes();
+    let bounded = |b: Option<&u8>| matches!(b, None | Some(0) | Some(b' '));
+    cmdline
+        .windows(needle.len())
+        .enumerate()
+        .any(|(at, window)| {
+            window == needle
+                && bounded(at.checked_sub(1).and_then(|i| cmdline.get(i)))
+                && bounded(cmdline.get(at + needle.len()))
+        })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn proc_fds_touch_root(
+    pid: u32,
+    root: &Path,
+    canon: Option<&Path>,
+    root_dev_ino: Option<(u64, u64)>,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    for fd in fds.flatten() {
+        let fd_path = fd.path();
+        if let Ok(link) = std::fs::read_link(&fd_path) {
+            if link.starts_with(root) || canon.is_some_and(|c| link.starts_with(c)) {
+                return true;
+            }
+        }
+        if let Some((rdev, rino)) = root_dev_ino {
+            if let Ok(meta) = std::fs::metadata(&fd_path) {
+                if meta.dev() == rdev && meta.ino() == rino {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn singleton_socket_active(root: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(root.join("SingletonSocket")).is_ok()
 }
 
 /// Human description of who holds this profile, if a live process does.
-/// POSIX/macOS: the `SingletonLock` symlink's pid. Windows: Chromium's
+/// POSIX/macOS: the `SingletonLock` browser pid, a sandboxed browser holding
+/// `root`, or a live `SingletonSocket` listener. Windows: Chromium's
 /// singleton is a `lockfile` opened with `FILE_FLAG_DELETE_ON_CLOSE`
 /// (chrome/browser/process_singleton_win.cc — there is no `SingletonLock`
 /// file at all), so the file's existence means a running browser holds the
@@ -151,6 +243,15 @@ pub fn profile_owner_pid(root: &Path) -> Option<u32> {
 pub fn profile_in_use(root: &Path) -> Option<String> {
     if let Some(pid) = profile_owner_pid(root) {
         return Some(format!("pid {pid}"));
+    }
+    #[cfg(unix)]
+    if singleton_socket_active(root) {
+        let label = std::fs::read_link(root.join("SingletonLock"))
+            .ok()
+            .and_then(|t| parse_singleton_owner(&t.to_string_lossy()))
+            .map(|pid| format!("pid {pid}"))
+            .unwrap_or_else(|| "SingletonSocket active".to_string());
+        return Some(label);
     }
     #[cfg(target_os = "windows")]
     {
