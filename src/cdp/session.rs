@@ -127,6 +127,7 @@ impl CdpSession {
         SessionSubscription {
             rx: self.client.subscribe(),
             session_id: self.session_id.clone(),
+            closed: false,
         }
     }
 
@@ -162,17 +163,30 @@ impl CdpSession {
 pub struct SessionSubscription {
     rx: broadcast::Receiver<CdpEvent>,
     session_id: Option<String>,
+    closed: bool,
 }
 
 impl SessionSubscription {
     /// Receive the next event belonging to this session. Root sessions
-    /// (no id) accept every event.
+    /// (no id) accept every event; child sessions end with `Closed` once
+    /// Chrome detaches their target (`Target.detachedFromTarget`).
     pub async fn recv(&mut self) -> std::result::Result<CdpEvent, broadcast::error::RecvError> {
+        if self.closed {
+            return Err(broadcast::error::RecvError::Closed);
+        }
         loop {
             let ev = self.rx.recv().await?;
             match (&self.session_id, &ev.session_id) {
                 (None, _) => return Ok(ev),
                 (Some(mine), Some(theirs)) if mine == theirs => return Ok(ev),
+                (Some(mine), None)
+                    if ev.method == "Target.detachedFromTarget"
+                        && ev.params.get("sessionId").and_then(Value::as_str)
+                            == Some(mine.as_str()) =>
+                {
+                    self.closed = true;
+                    return Err(broadcast::error::RecvError::Closed);
+                }
                 _ => continue,
             }
         }
@@ -184,5 +198,77 @@ impl std::fmt::Debug for CdpSession {
         f.debug_struct("CdpSession")
             .field("session_id", &self.session_id)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn child_subscription_closes_on_matching_target_detach() {
+        let (tx, rx) = broadcast::channel(16);
+        let mut sub = SessionSubscription {
+            rx,
+            session_id: Some("sess-a".into()),
+            closed: false,
+        };
+        tx.send(CdpEvent {
+            method: "Target.detachedFromTarget".into(),
+            params: json!({"sessionId": "sess-a", "targetId": "t-a"}),
+            session_id: None,
+        })
+        .unwrap();
+        tx.send(CdpEvent {
+            method: "Page.loadEventFired".into(),
+            params: json!({}),
+            session_id: Some("sess-a".into()),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            sub.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+        assert!(matches!(
+            sub.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn child_subscription_ignores_unrelated_detach_and_root_receives_all() {
+        let (tx, rx_child) = broadcast::channel(16);
+        let rx_root = tx.subscribe();
+        let mut child = SessionSubscription {
+            rx: rx_child,
+            session_id: Some("sess-a".into()),
+            closed: false,
+        };
+        let mut root = SessionSubscription {
+            rx: rx_root,
+            session_id: None,
+            closed: false,
+        };
+
+        tx.send(CdpEvent {
+            method: "Target.detachedFromTarget".into(),
+            params: json!({"sessionId": "sess-other", "targetId": "t-other"}),
+            session_id: None,
+        })
+        .unwrap();
+        tx.send(CdpEvent {
+            method: "Page.loadEventFired".into(),
+            params: json!({"ts": 1}),
+            session_id: Some("sess-a".into()),
+        })
+        .unwrap();
+
+        let root_ev = root.recv().await.unwrap();
+        assert_eq!(root_ev.method, "Target.detachedFromTarget");
+
+        let child_ev = child.recv().await.unwrap();
+        assert_eq!(child_ev.method, "Page.loadEventFired");
     }
 }
