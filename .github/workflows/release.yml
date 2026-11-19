@@ -209,4 +209,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
-        run: gh release edit "$TAG" --draft=false --latest
+        run: gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --latest
