@@ -158,9 +158,9 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
     }
     // format=json is only meaningful for extract=/artifact= reads; anything
     // else is refused instead of silently returning text.
-    if json_out && extract.is_empty() {
+    if json_out && extract.is_empty() && logs != "xhr" {
         return Err(BladeError::Other(
-            "format=json applies to extract= (auto/json/links/forms) and artifact= reads - this mode returns text; drop format or use an extract read".into(),
+            "format=json applies to extract= (auto/json/links/forms), artifact= and logs=xhr reads - this mode returns text; drop format or use an extract read".into(),
         ));
     }
 
@@ -213,14 +213,25 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
         return Ok(out);
     }
 
-    // V8: logs — console (injection hook) or network (tracker ring).
+    // V8: logs — console (injection hook), network (completed ring), or xhr (deduplicated API ring).
     if !logs.is_empty() {
-        let out = handle_logs(page, logs).await?;
-        if args.get("clear").and_then(Value::as_bool).unwrap_or(false) {
-            if logs == "network" {
-                page.clear_network_log();
+        let out = if logs == "xhr" && json_out {
+            let entries = page.xhr_log();
+            let value = serde_json::to_string(&xhr_entries_json(&entries))?;
+            if value.len() > 12000 {
+                let path = crate::artifacts::write_artifact(&value, "json")?;
+                json!({"artifact":path,"bytes":value.len(),"next_offset":0}).to_string()
             } else {
-                page.clear_console_log().await?;
+                value
+            }
+        } else {
+            handle_logs(page, logs).await?
+        };
+        if args.get("clear").and_then(Value::as_bool).unwrap_or(false) {
+            match logs {
+                "network" => page.clear_network_log(),
+                "xhr" => page.clear_xhr_log(),
+                _ => page.clear_console_log().await?,
             }
         }
         return Ok(out);
@@ -508,9 +519,162 @@ pub async fn handle_logs(page: &mut Page, kind: &str) -> Result<String> {
             }
             Ok(out)
         }
+        "xhr" => {
+            let entries = page.xhr_log();
+            format_xhr_log(&entries)
+        }
         _ => Err(BladeError::Other(format!(
-            "unknown logs kind: {kind} (use 'console' or 'network')"
+            "unknown logs kind: {kind} (use 'console', 'network', or 'xhr')"
         ))),
+    }
+}
+
+fn redacted_header_names(headers: &[(String, String)]) -> Vec<String> {
+    let mut names: Vec<String> = headers
+        .iter()
+        .map(|(k, _)| k.to_ascii_lowercase())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn xhr_entries_json(entries: &[crate::page::XhrEntry]) -> Vec<Value> {
+    entries
+        .iter()
+        .map(|e| {
+            json!({
+                "method": e.method,
+                "url": e.url,
+                "status": e.status,
+                "done": e.done,
+                "error": e.error,
+                "header_names": redacted_header_names(&e.headers),
+            })
+        })
+        .collect()
+}
+
+fn format_xhr_log(entries: &[crate::page::XhrEntry]) -> Result<String> {
+    if entries.is_empty() {
+        return Ok("xhr: (no XHR/fetch requests observed)".to_string());
+    }
+    let mut bad = Vec::new();
+    let mut good = Vec::new();
+    let mut pending = Vec::new();
+    for e in entries {
+        let status_str = if !e.done {
+            "PENDING".to_string()
+        } else if e.status > 0 {
+            e.status.to_string()
+        } else {
+            e.error.clone().unwrap_or_else(|| "ERR".into())
+        };
+        let names = redacted_header_names(&e.headers);
+        let hdr_note = if names.is_empty() {
+            String::new()
+        } else {
+            format!(" [headers: {}]", names.join(", "))
+        };
+        // Keep full URLs untruncated: GraphQL operations, cursors, and query
+        // filters are the exact state an agent inspects logs=xhr to read.
+        let line = format!("{} {} {}{}", e.method, status_str, e.url, hdr_note);
+        if !e.done {
+            pending.push(line);
+        } else if e.error.is_some() || e.status >= 400 {
+            bad.push(line);
+        } else {
+            good.push(line);
+        }
+    }
+    let mut out = format!("xhr ({} endpoints):\n", entries.len());
+    for l in bad.iter().chain(good.iter()).chain(pending.iter()).take(30) {
+        out.push_str(l);
+        out.push('\n');
+    }
+    if entries.len() > 30 {
+        let json_str = serde_json::to_string_pretty(&xhr_entries_json(entries))?;
+        let path = crate::artifacts::write_artifact(&json_str, "json")?;
+        out.push_str(&format!("…and {} more → {path}\n", entries.len() - 30));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod xhr_log_tests {
+    use super::*;
+    use crate::page::XhrEntry;
+
+    #[test]
+    fn xhr_log_orders_failures_preserves_full_query_and_redacts_secret_values() {
+        let long_url = "https://api.example.com/graphql?operationName=ListItems&variables=%7B%22cursor%22%3A%22abc1234567890def%22%2C%22limit%22%3A50%7D";
+        let entries = vec![
+            XhrEntry {
+                id: "1".into(),
+                method: "GET".into(),
+                url: long_url.into(),
+                status: 200,
+                done: true,
+                error: None,
+                headers: vec![
+                    (
+                        "Authorization".into(),
+                        "Bearer SECRET_TOKEN_DO_NOT_LEAK".into(),
+                    ),
+                    ("X-CSRF-Token".into(), "csrf_secret_999".into()),
+                ],
+            },
+            XhrEntry {
+                id: "2".into(),
+                method: "POST".into(),
+                url: "https://api.example.com/v1/submit".into(),
+                status: 429,
+                done: true,
+                error: None,
+                headers: vec![],
+            },
+            XhrEntry {
+                id: "3".into(),
+                method: "GET".into(),
+                url: "https://api.example.com/v1/poll".into(),
+                status: 0,
+                done: false,
+                error: None,
+                headers: vec![],
+            },
+        ];
+        let text = format_xhr_log(&entries).unwrap();
+        assert!(
+            text.contains(long_url),
+            "full query string must not be truncated: {text}"
+        );
+        assert!(text.contains("[headers: authorization, x-csrf-token]"));
+        assert!(
+            !text.contains("SECRET_TOKEN_DO_NOT_LEAK"),
+            "header values must never leak"
+        );
+        assert!(
+            !text.contains("csrf_secret_999"),
+            "csrf values must never leak"
+        );
+        let pos_429 = text.find("POST 429").unwrap();
+        let pos_200 = text.find("GET 200").unwrap();
+        let pos_pending = text.find("GET PENDING").unwrap();
+        assert!(pos_429 < pos_200 && pos_200 < pos_pending);
+
+        let json_rows = serde_json::to_string(&xhr_entries_json(&entries)).unwrap();
+        assert!(!json_rows.contains("SECRET_TOKEN_DO_NOT_LEAK"));
+        assert!(json_rows.contains("\"header_names\":[\"authorization\",\"x-csrf-token\"]"));
+    }
+
+    #[test]
+    fn validate_accepts_xhr_logs_and_json_format() {
+        crate::mcp::server::validate::see(&json!({"logs": "xhr"})).unwrap();
+        crate::mcp::server::validate::see(&json!({"logs": "xhr", "format": "json"})).unwrap();
+        assert!(
+            crate::mcp::server::validate::see(&json!({"logs": "network", "format": "json"}))
+                .is_err()
+        );
     }
 }
 

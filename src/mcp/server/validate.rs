@@ -374,9 +374,10 @@ pub(super) fn see(args: &Value) -> Result<()> {
         && !nonempty(args, "extract")
         && !nonempty(args, "artifact")
         && args.get("changes").and_then(Value::as_bool) != Some(true)
+        && args.get("logs").and_then(Value::as_str) != Some("xhr")
     {
         return Err(BladeError::Usage(
-            "format=json applies to extract=, artifact= or changes=true; this mode returns text"
+            "format=json applies to extract=, artifact=, changes=true or logs=xhr; this mode returns text"
                 .into(),
         ));
     }
@@ -398,7 +399,7 @@ pub(super) fn see(args: &Value) -> Result<()> {
     for (key, choices) in [
         ("mode", "model|content|outline"),
         ("extract", "auto|json|links|forms"),
-        ("logs", "console|network"),
+        ("logs", "console|network|xhr"),
         ("format", "text|json"),
     ] {
         if let Some(value) = args
