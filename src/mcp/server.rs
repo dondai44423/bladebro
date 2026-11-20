@@ -45,6 +45,7 @@ pub use boot::run;
 #[cfg(unix)]
 pub use boot::run_pipe;
 pub use proto::handle_tools_call;
+pub(crate) use proto::{append_notices, json_response};
 pub use run::handle_run;
 pub use see::{handle_see, handle_see_tool};
 pub use state::handle_state;
@@ -77,7 +78,7 @@ const SUPPORTED_VERSIONS: &[&str] = &[
 /// flailing at a surface they had to reverse-engineer from five schemas
 /// (the pi package now also bundles the same guidance as a skill). It is
 /// deliberately compact: it is paid for once per session, in every client.
-const INSTRUCTIONS: &str = "Stealth browser driver. act interacts (navigate/click/type/fill/batch/eval), see reads (extract=\"auto\" first on list/search/product pages; mode=\"content\" for articles; format=\"json\" for pure JSON), state manages cookies/tabs/sessions, run executes step batches with branching and inline reads, vision screenshots. WORK LOOP: navigate -> act by text (no see needed) or by ref (refs are page-scoped: refresh them after a navigation or tab switch; within a page they self-heal) -> every action returns an observation, so a see after acting is usually unnecessary. act eval answers one line, `result: <compact JSON>` (a returned string containing JSON is flagged in a note). Results disclose what the driver cannot verify: page_total/partial (lazy or paginated results), sponsored items, unwrapped redirect links, duplicates removed, and a URL range filter whose page prices fall outside it. Oversized payloads go to an artifact file, read back with see artifact=\"...\" - nothing is truncated silently. Errors carry the current page state; never blind-retry a submit.";
+const INSTRUCTIONS: &str = "Stealth Chromium driver with 5 tools: act (interact), see (read/extract), state (tabs/cookies/storage/sessions/block), run (branching/looping plans), vision (screenshots, last resort).\nFAST PATTERNS (collapse round-trips): (1) Read or scrape a URL in ONE call with see(url=..., mode=\"content\" | extract=\"auto\", format=\"json\", block=\"images,fonts\"). (2) Interactive task: act(navigate) returns refs + content preview; act by ref/text/label/selector directly; every action returns a verified verdict + delta so a follow-up see is rarely needed. (3) Multi-field forms: act(fill, fields=[...], submit=...) in one call; type+press=\"Enter\" submits search bars. (4) Straight sequences: act(batch, slim=true); branching/loops/JSON receipts: run(steps=[...]). (5) Arm act(dialog, expect=...) BEFORE clicking triggers that open confirm()/prompt(). (6) Inspect APIs with see(logs=\"xhr\", format=\"json\"); check HTTP/console errors with see(logs=\"network\"|\"console\", format=\"json\").\nCONTRACTS: Refs self-heal within a page; refresh after navigation or tab switch. Pick ONE read kind per see call (never mix extract= with mode/logs/find/scope). Large payloads offload to {artifact,bytes,next_offset:0} — page via see(artifact=..., items=true for JSON arrays). Navigation errors include exact HTTP status (e.g. HTTP 429 + Retry-After) and current page state; non-empty 4xx/5xx pages attach an http: notice. Never blind-retry a submit or mutation with degraded:true — inspect destination first.";
 
 /// Extract the per-request protocol version (SEP-2575). New-spec clients
 /// send `_meta["io.modelcontextprotocol/protocolVersion"]` on every

@@ -277,14 +277,16 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
         }
         "upload" => {
             let mut pi = 0usize;
-            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
+            if j.get("ref").is_none() && j.get("selector").is_none() {
                 if let Some(t) = pos.first() {
                     if is_ref(t) {
                         j["ref"] = json!(t);
-                    } else {
-                        j["label"] = json!(t);
+                        pi = 1;
+                    } else if j.get("label").is_none() {
+                        return Err(BladeError::Usage(format!(
+                            "upload target '{t}' is not a ref — pass a file-input ref (e.g. `act upload e5 /path/file.pdf`) or `--selector \"input[type=file]\"`"
+                        )));
                     }
-                    pi = 1;
                 }
             }
             // The MCP handler takes the file path in `text` (NOT `path`) —
@@ -310,9 +312,9 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
                 obj.remove("path");
             }
             j["text"] = json!(path);
-            if j.get("ref").is_none() && j.get("label").is_none() && j.get("selector").is_none() {
+            if j.get("ref").is_none() && j.get("selector").is_none() {
                 return Err(BladeError::Usage(
-                    "upload needs a target — `act upload <ref|label|--selector> <path>`".into(),
+                    "upload needs a target — `act upload <ref|--selector> <path>`".into(),
                 ));
             }
         }
@@ -336,8 +338,8 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
             }
             if j.get("condition").is_none() {
                 return Err(BladeError::Usage(
-                    "wait needs a condition — element, title, url, text, settle, or js \
-                     (e.g. `act wait settle`, `act wait js \"document.title\"`)"
+                    "wait needs a condition — element, selector, title, url, text, settle, network, or js \
+                     (e.g. `act wait settle`, `act wait selector \".ready\"`, `act wait js \"window.ready\"`)"
                         .into(),
                 ));
             }
@@ -355,7 +357,7 @@ pub(crate) fn parse_act_args(args: &[String]) -> Result<Value> {
                     | "network-idle"
             ) {
                 return Err(BladeError::Usage(format!(
-                    "unknown wait condition '{cond}' — element, title, url, text, settle, js"
+                    "unknown wait condition '{cond}' — element, selector, title, url, text, settle, network, js"
                 )));
             }
             if j.get("text").is_none() && pos.len() > 1 {

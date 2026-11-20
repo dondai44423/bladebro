@@ -19,8 +19,8 @@ Bladebro CLI — drive a real, stealthy browser from shell commands.
 SETUP: none. The first command auto-starts a background daemon (one Chrome for all later commands). --no-daemon forces isolated one-shot runs; 'bladebro stop' cleans up.
 DISCOVERY: 'bladebro help' (human) — 'bladebro help --json' (this document) — 'bladebro help <command>' for one command in depth.
 OUTPUT CONTRACT: --json on any command gives ONE JSON object on stdout: {\"ok\":bool,\"is_error\":bool,\"text\":string} (+ \"image_path\" for vision — the PNG is saved to a file, never inlined base64). Exit codes: 0 = success; 1 = the command ran but failed (read 'text' — it carries current page state so you can recover without an extra call); 2 = usage error (bad command/flag/argument — fix the command).
-WORKFLOW: 1) nav <url> gives refs + a content preview (often enough to act). 2) Address by text when you can: 'act click \"Sign in\"' needs no see; refs self-heal; labels work for form fields. 3) On list/search/product/profile pages, 'see extract auto' FIRST: one call returns structured items (site adapters add fields on Reddit/GitHub/product pages; on Reddit POST pages it returns the full comment tree — all replies, thread order, complete flag). 4) Collapse round-trips: 'act fill' for whole forms; 'act batch' / 'run' for sequences (if/while branching; {\"action\":\"see\"} steps read inline). 5) Big JSON payloads: @file or - (stdin) — no shell-quoting games. 6) Keep budgets default; big outputs are written to files with an inline preview.
-RELIABILITY: real Chromium with the full stealth stack and human-like input; per-domain knowledge (settle timing, block config, bot risk) compounds across runs. Errors are loud, never silent: unknown flags and missing values fail with exit 2; a failed action returns the page state for recovery. Vision is the last resort — refs and deltas are cheaper.
+WORKFLOW: 1) Read-only URL? 'see content <url>' or 'see extract auto <url> --format json --block images,fonts' navigates and reads in ONE call. 2) Interactive flow? 'nav <url>' gives refs + a content preview; act by ref/text/label/selector ('act click \"Sign in\"' needs no see; refs self-heal within a page). 3) On list/search/product/profile pages, 'see extract auto' FIRST: one call returns structured items (site adapters cover Reddit/X/GitHub/HN/products; on Reddit POST pages it returns the full comment tree). 4) Collapse round-trips: 'act fill' for whole forms (supports nth/role per field); 'act batch' for linear sequences; 'run' for if/while branching or --format json step receipts. 5) Big JSON payloads: @file or - (stdin) — no shell-quoting games. 6) Keep budgets default; large outputs offload to artifact files read back via 'see --artifact <path>'.
+RELIABILITY: real Chromium with the full stealth stack and human-like input; per-domain knowledge (settle timing, block config, bot risk) compounds across runs. Errors are loud, never silent: unknown flags and missing values fail with exit 2; navigation errors report exact HTTP status codes (e.g. HTTP 429 + Retry-After); failed actions return current page state for recovery. Vision is the last resort — refs and deltas are cheaper.
 ";
 
 /// The human manual — printed by `bladebro help` / `-h` / bare `bladebro`.
@@ -202,19 +202,21 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "extract": "auto | links | forms | json (json needs --template)"
             },
             "flags": {
+                "--block": "with url: images,fonts,media,trackers to skip during load",
                 "--filter": "role filter (model mode)",
-                "--find": "search by text → refs",
+                "--find": "search by text → refs (supports --format json)",
                 "--scope": "ref id — read one element's subtree",
                 "--content": "include page text in model mode",
                 "--budget": "max chars (default 8000)",
                 "--limit": "max extract items (default 50; Reddit post comments: all up to 1000 unless set)",
-                "--logs": "console | network",
+                "--logs": "console | network | xhr (all support --format json)",
+                "--sort": "Reddit post auto-extract: confidence|top|new|controversial|old|qa",
                 "--template": "JSON or @file — for extract=json",
                 "--artifact": "read offloaded text chunks (concatenate data then parse); --items pages JSON rows; offset/limit count chars or rows",
                 "--preview": "auto-extract container/schema without rows",
                 "--changes": "model delta since last capture; --format json for structured fields",
                 "--clear": "read then clear the selected log",
-                "--format": "text (default) | json — pure JSON output for extract/artifact reads ({offset,next_offset,data} pages)"
+                "--format": "text (default) | json — pure JSON output for extract, artifact, changes, find, and logs reads"
             },
             "examples": [
                 "bladebro see model",
@@ -285,6 +287,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "--http-only": "httpOnly cookie",
                 "--same-site": "Strict | Lax | None",
                 "--target-id": "close-tab / switch-tab id",
+                "--slim": "open-tab / switch-tab / close-tab: tab ID only, omit page model",
                 "--clear": "block: stop blocking",
                 "--mode": "compress: on | off | status"
             },
@@ -564,7 +567,8 @@ FLAGS
   --changes           model delta since last capture; --format json for structured fields
   --clear             read then clear --logs console|network|xhr
   --sort <sort>       Reddit post auto-extract: confidence|top|new|controversial|old|qa
-  --format text|json  json: pure JSON out for extract/artifact/eval reads
+  --format text|json  json: pure JSON out for extract, artifact, changes, find, and logs reads
+  --block <classes>   with url: skip images,fonts,media,trackers during load
   --url <url>         navigate first (or pass the URL positionally)
 
 EXAMPLES

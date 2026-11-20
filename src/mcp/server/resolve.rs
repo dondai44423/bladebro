@@ -264,19 +264,28 @@ pub(super) async fn resolve_text_target(
         return Ok(page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame));
     }
     let top = &matches[0];
-    let id = page
-        .model_mut()
-        .adopt(&top.sig, &top.role, &top.name, &top.frame);
-    for m in &matches[1..] {
-        let _ = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
+    let mut adopted: Vec<(String, &crate::action::TextMatch)> = Vec::with_capacity(matches.len());
+    for m in &matches {
+        let ref_id = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
+        adopted.push((ref_id, m));
     }
-    if matches.iter().filter(|m| m.score == top.score).count() > 1 {
+    let tied: Vec<_> = adopted
+        .iter()
+        .filter(|(_, m)| m.score == top.score)
+        .collect();
+    if tied.len() > 1 {
+        let list = tied
+            .iter()
+            .take(8)
+            .map(|(r, m)| format!("{r} {} \"{}\" [{}]", m.role, m.name, m.ctx))
+            .collect::<Vec<_>>()
+            .join("; ");
         return Err(BladeError::Other(format!(
-            "ambiguous \"{query}\": {} visible matches. Use ref, selector or nth (1-based).",
-            matches.len()
+            "ambiguous \"{query}\": {} equally ranked visible matches: {list}. Use ref, selector or nth (1-based).",
+            tied.len()
         )));
     }
-    Ok(id)
+    Ok(adopted[0].0.clone())
 }
 
 /// Format the hidden/unaddressable-match note shared by `see find` and text

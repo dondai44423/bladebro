@@ -69,7 +69,7 @@ pub fn all_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "act",
-            description: "Interact; verified verdict + page delta, navigate also returns refs/content. Prefer ref, then text/label, then CSS; click x,y overrides other targets. Refs self-heal within a page; refresh after navigation/tab switch. Ambiguity returns candidates: choose ref/selector/nth. Popup clicks keep opener active; switch-tab by returned ID.\nType replaces/verifies text; type+press=Enter submits once. Targeted press focuses first; otherwise current focus. fill sets multiple fields then optionally submits once.\nwait text= matches visible page text; selector= traverses open shadows/same-origin frames; condition=element matches visible role/text. title/url match text; js evaluates js= (legacy text=); settle waits DOM quiet; network waits 300ms without tracked requests, excluding streams.\nbatch runs sequential steps; optional:true continues runtime failures. Plans validate before effects (1000 steps, nesting 32); runtime failures retain prior effects. slim inherits through batch/run, preserves reads/errors. url= navigates first except download/state ops.\nErrors carry page state. trusted:false means untrusted input fallback; degraded:true means client deadline/transport failure with unknown outcome. Observe destination before repeating input. Quiet dispatched clicks never replay.",
+            description: "Interact; returns verified verdict + delta (navigate adds refs + content preview). Prefer ref > text/label > selector; click x,y overrides targets. Refs self-heal on-page; refresh after nav/tab switch. Ambiguity returns candidate refs (pick ref/selector/nth). Popups keep opener active; switch-tab by returned ID.\nActions — Nav: navigate(url,block?), back, forward, reload. Input: click, type(replaces+verifies; press=Enter submits once), clear, select(option), press(key/chord; targeted focuses first), fill(multi-field + opt submit), hover, scroll(dx/dy), upload(ref|selector + text=path). Wait/Inspect: wait(condition + text|selector|js), read(live value/toggle/select options; format=json), dialog(arm expect= before trigger), eval(js; ref|selector binds el; format=json). Data/Files: extract, paginate(next,max,extract), collect(url,max), download(url; body:true for <=32MiB HTTP body), pdf. Compose: batch(sequential steps, incl. see/extract/state; optional:true continues runtime failure; slim inherits).\nurl= navigates first (except download/collect/state). Plans validate before effects (<=1000 steps, depth <=32); runtime failures keep prior effects. Errors include page state + HTTP status (e.g. 429 + Retry-After). trusted:false = untrusted fallback; degraded:true = unknown outcome — inspect before retrying mutations. Quiet clicks never replay.",
             input_schema: json!({
                 "type": "object",
                 "required": ["action"],
@@ -78,71 +78,74 @@ pub fn all_tools() -> Vec<ToolDef> {
                         "type": "string",
                         "enum": ACT_ACTIONS,
                     },
-                    "ref":{"type":"string","description":"Page-scoped element ID, e.g. e5; refresh after navigation/tab switch."},
-                    "text": {"type": "string", "description": "click/hover: visible text; type: replacement value; upload: file path; wait: match text. navigate uses url=."},
-                    "label": {"type": "string", "description": "Field label for click/type/fill/select/clear/read/hover/press."},
-                    "selector":{"type":"string","description":"CSS target (including press/wait); open shadows. Wait selectors also traverse same-origin frames. nth disambiguates; hidden targets refuse."},
-                    "role": {"type": "string", "description": "Filter by role (button, textbox, link, etc.)."},
-                    "nth": {"type": "integer", "minimum": 1, "description": "1-based match index; out of range refuses with the real count."},
-                    "key": {"type": "string", "description": "Key or chord: Enter, Tab, Escape, Backspace, ArrowDown, Control+a, Meta+Enter, Shift+Tab."},
-                    "press": {"type":"string","description":"type: key/chord to dispatch once after verified typing, e.g. Enter."},
-                    "x": {"type":"number","description":"click: viewport CSS pixels; supply both x and y. Coordinates override other targets."},
-                    "y": {"type":"number"},
-                    "block": {"type":"string","description":"navigate: comma-separated images,fonts,media,trackers; applied before loading."},
-                    "url": {"type": "string", "description": "navigate requires url; download uses file URL; other actions navigate first except state ops (cookie scope/tab URL)."},
+                    "ref": {"type": "string", "description": "Element ID (e.g. e5); self-heals on-page, refresh after nav/tab switch."},
+                    "text": {"type": "string", "description": "click/hover: visible text; type: replacement value; upload: file path; wait: match text."},
+                    "label": {"type": "string", "description": "Control label for click/type/fill/select/clear/read/hover/press (not upload)."},
+                    "selector": {"type": "string", "description": "CSS selector (open shadows; wait also checks same-origin frames). Hidden targets refuse."},
+                    "role": {"type": "string", "description": "Role filter (button, textbox, link, checkbox, combobox, etc.)."},
+                    "nth": {"type": "integer", "minimum": 1, "description": "1-based match index; out of range refuses with count."},
+                    "key": {"type": "string", "description": "Key/chord: Enter, Tab, Escape, Backspace, ArrowDown, Control+a, Meta+Enter, Shift+Tab."},
+                    "press": {"type": "string", "description": "type: key/chord sent once after verified typing (e.g. Enter)."},
+                    "x": {"type": "number", "description": "click: viewport CSS px (supply x and y; overrides targets)."},
+                    "y": {"type": "number"},
+                    "block": {"type": "string", "description": "navigate: comma-separated images,fonts,media,trackers (remembered per domain)."},
+                    "url": {"type": "string", "description": "Target URL for navigate/download/collect; on other non-state actions, navigates first."},
                     "dx": {"type": "integer"},
                     "dy": {"type": "integer"},
                     "condition": {
                         "type": "string",
                         "enum": ["element", "selector", "title", "settle", "network", "network-idle", "url", "text", "js"],
-                        "description":"Wait kind; js needs js=, selector uses selector= (or text= with condition=selector). network waits 300ms idle."
+                        "description": "wait: element/text/title/url use text=; selector uses selector=; js uses js=; settle=DOM quiet; network=300ms idle."
                     },
-                    "timeout": {"type": "integer", "minimum":0, "maximum":3600, "description": "Seconds, integer 0-3600. Defaults: wait 10, download/collect/dialog 30."},
-                    "js": {"type": "string", "description": "eval: required JavaScript; ref/selector exposes target as el. wait/if/while condition=js: expression."},
-                    "expect": {"type": "string", "description": "dialog: alert|confirm|prompt|beforeunload|any|clear; arm before trigger. Other actions: expected navigation|dom-change|none|any."},
-                    "accept": {"type": "boolean", "description": "act dialog: accept (default true) or cancel the matching dialog."},
-                    "prompt_text": {"type": "string", "description": "act dialog: text typed into a matching prompt() when accepting."},
-                    "message": {"type": "string", "description": "act dialog: only match dialogs whose text contains this (case-insensitive)."},
-                    "option": {"type": "string", "description": "Select: label, text or value."},
-                    "slim": {"type": "boolean", "description": "Verdicts only for successful actions; batch/run inherit. Reads and errors retained."},
-                    "format": {"type": "string", "enum": ["text", "json"], "description": "read: live value/toggle state + select options (first 80; clipping explicit). eval/read/extract json: payload, {data,note} for notices, or {artifact,bytes,next_offset:0}; page artifacts with see."},
+                    "timeout": {"type": "integer", "minimum": 0, "maximum": 3600, "description": "Seconds 0-3600. Defaults: wait 10, download/collect/dialog 30."},
+                    "js": {"type": "string", "description": "eval: JS (ref/selector binds el). wait/if/while condition=js: expression."},
+                    "expect": {"type": "string", "description": "dialog: alert|confirm|prompt|beforeunload|any|clear (arm first). Other: navigation|dom-change|none|any."},
+                    "accept": {"type": "boolean", "description": "dialog: accept (default true) or cancel."},
+                    "prompt_text": {"type": "string", "description": "dialog: text for prompt() when accepting."},
+                    "message": {"type": "string", "description": "dialog: case-insensitive message substring filter."},
+                    "option": {"type": "string", "description": "select: label, text, or value."},
+                    "slim": {"type": "boolean", "description": "Verdict-only on success (batch/run inherit); reads/errors keep detail."},
+                    "format": {"type": "string", "enum": ["text", "json"], "description": "read/eval/extract: json returns payload, {data,note}, or {artifact,bytes,next_offset:0}."},
                     "fields": {
                         "type": "array",
-                        "description": "Fill: [{ref|label|selector,text|option|check}]. Toggles accept only check=true/false; omit values to toggle.",
+                        "description": "fill: [{ref|label|selector, role?, nth?, text|option|check}]. Toggles use check=true/false (omit to toggle).",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "ref": {"type": "string"},
                                 "label": {"type": "string"},
                                 "selector": {"type": "string"},
+                                "role": {"type": "string"},
+                                "nth": {"type": "integer", "minimum": 1},
                                 "text": {"type": "string"},
                                 "option": {"type": "string"},
                                 "check": {"type": "boolean", "description": "true=check, false=uncheck, omit=toggle."}
                             }
                         }
                     },
-                    "submit": {"type": "string", "description": "Fill: ref or text of submit button. Dispatched once; inspect the verdict before repeating."},
-                    "name": {"type":"string","description":"save/load: session name (state tool contract)."},
-                    "target_id": {"type":"string","description":"close-tab/switch-tab: ID returned by state tabs/open-tab."},
+                    "submit": {"type": "string", "description": "fill: submit ref, text, or selector=/ref=/text= prefix (dispatched once)."},
+                    "name": {"type": "string", "description": "save/load: session name."},
+                    "target_id": {"type": "string", "description": "switch-tab/close-tab: tab ID."},
                     "steps": {
                         "type": "array",
-                        "description": "Sequential act steps (no nested batch), see/extract reads and {action:state,op,...}. Reuse each tool's fields. optional:true continues runtime failures; otherwise stops with prior results/page state. Navigation continues on the new page.",
+                        "description": "batch: act/see/extract/state steps (no nested batch). optional:true continues runtime failure.",
                         "items": {
                             "type": "object",
                             "required": ["action"],
                             "properties": {
-                                "action": {"type": "string", "enum": batch_step_actions()}
+                                "action": {"type": "string", "enum": batch_step_actions()},
+                                "optional": {"type": "boolean"}
                             }
                         }
                     },
-                    "sort": {"type":"string","enum":["confidence","top","new","controversial","old","qa"],"description":"Reddit post extract sort."},
-                    "next": {"type":"string","description":"Paginate: CSS selector or text=Next / label= / ref=."},
-                    "max": {"type":"integer","description":"Collect items (default 100); paginate pages (default 5, max 100)."},
-                    "extract": {"type":"string","enum":["auto","json","links","forms"],"description":"Extract/paginate read kind; default auto."},
-                    "template": {"type":"object","description":"See template contract; for extract=json."},
-                    "limit": {"type":"integer","description":"Per-page extraction item limit."},
-                    "body": {"type":"boolean","description":"Download: HTTP body instead of browser attachment, <=32 MiB/30s. No browser cookies; honors HTTP(S) BLADE_PROXY, refuses other proxy types; returns status/path."},
-                    "path": {"type": "string", "description": "PDF: output path."},
+                    "sort": {"type": "string", "enum": ["confidence", "top", "new", "controversial", "old", "qa"], "description": "Reddit post extract sort."},
+                    "next": {"type": "string", "description": "paginate: CSS selector or text=/label=/ref= prefix."},
+                    "max": {"type": "integer", "description": "collect: max items (default 100); paginate: max pages (default 5, max 100)."},
+                    "extract": {"type": "string", "enum": ["auto", "json", "links", "forms"], "description": "extract/paginate read kind (default auto)."},
+                    "template": {"type": "object", "description": "extract=json template (see `see`)."},
+                    "limit": {"type": "integer", "description": "Per-page extraction item cap."},
+                    "body": {"type": "boolean", "description": "download: raw HTTP body (<=32MiB/30s, no cookies; HTTP(S) BLADE_PROXY) vs browser attachment."},
+                    "path": {"type": "string", "description": "pdf: output path."},
                     "landscape": {"type": "boolean"},
                     "printBackground": {"type": "boolean"},
                     "scale": {"type": "number"}
@@ -151,42 +154,44 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "see",
-            description: "Read: model gives refs, content rendered markdown, outline headings. extract=auto detects list/search/product/site fields; preview=true samples schema without rows. Reddit comments disclose complete/partial, API denial and fuzzed_score; sort overrides page sort. Opaque redirects are flagged. find searches text; scope narrows reads. Logs: console=doc, network=nav, xhr=API endpoints; clear=true reads then clears.\nformat=json: payload, {data,note} for caveats/events, or artifact envelope. Default artifact pages are character chunks: concatenate data strings before parsing payload. items=true pages JSON array rows independently. next_offset=0 starts paging; null ends. changes=true gives model delta since last capture (JSON supported). Large reads offload; inspect partial/limit notes.",
+            description: "Read page state, text, data, logs, or artifacts. Pass url= (opt block=) to open+read in ONE call. One read per call (never mix extract= with mode/logs/find/scope).\nModes: model (default: refs, opt filter=), content (Markdown, opt scope=eN), outline (headings). Structured: extract=auto (site-aware: Reddit/X/GitHub/HN/products; preview=true samples fields), extract=json (+ template), extract=links|forms. Search/Diff: find= (controls+refs or text location), changes=true (model delta), scope=eN (subtree). Logs: console (doc), network (nav), xhr (API/fetch URLs + header names); clear=true reads+clears.\nformat=json returns pure JSON for extract=, artifact=, changes=true, find=, and logs= ({data,note} with notices). Oversized payloads return {artifact,bytes,next_offset:0}: page via artifact= + offset/limit (concat char chunks, or items=true for array rows until next_offset=null).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "url": {"type": "string", "description": "Optional URL — opens first so you navigate+read in ONE call."},
+                    "block": {"type": "string", "description": "With url=: images,fonts,media,trackers to skip during load."},
                     "mode": {
                         "type": "string",
                         "enum": ["model", "content", "outline"],
-                        "description": "model (default): interactive elements with refs. content: page text as markdown for reading. outline: headings only, ultra-minimal."
+                        "description": "model (default): refs. content: Markdown. outline: headings."
                     },
-                    "filter": {"type": "string", "description": "Filter by role/name (comma-separated). model mode only."},
-                    "content": {"type": "boolean", "description": "Include page's visible text. model mode only. Use mode=content instead for clean markdown."},
-                    "find": {"type": "string", "description": "Search elements by text. Returns refs + scores."},
+                    "filter": {"type": "string", "description": "model only: comma-separated role/name filter."},
+                    "content": {"type": "boolean", "description": "model only: append visible text (prefer mode=content)."},
+                    "find": {"type": "string", "description": "Search controls by text -> refs + scores (or text location). Supports format=json."},
                     "extract": {
                         "type": "string",
                         "enum": ["links", "forms", "json", "auto"],
-                        "description": "auto (site-aware; Reddit posts attempt the full tree, inspect complete/partial), json (template), links, forms."
+                        "description": "auto (site-aware; Reddit posts fetch full tree with complete/partial), json (+ template), links, forms."
                     },
-                    "sort": {"type":"string","enum":["confidence","top","new","controversial","old","qa"],"description":"Reddit post auto-extract sort; overrides page sort."},
-                    "template": {"type": "object", "description": "For extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"name\":\"css or css@attr\"}}}. @attr reads the container attribute. Text reads are RENDERED - a hidden element is omitted (the item lists it in _omitted); read one explicitly with {\"sel\":\"css\",\"raw\":true}. Lookups span light DOM, open shadow roots and same-origin frames; skipped frames are reported."},
-                    "limit": {"type": "integer", "description": "Max items for extract. Default 50 (Reddit post comments: all available, capped at 1000, unless set). Artifact: chars (default 20000), or rows with items=true (default 50)."},
-                    "logs": {"type":"string","enum":["console","network","xhr"],"description":"Console: doc. Network: nav. XHR: deduplicated API/fetch URLs."},
-                    "clear": {"type":"boolean","description":"Read then clear selected log."},
-                    "preview": {"type":"boolean","description":"extract=auto: sampled container and fields, without rows."},
-                    "changes": {"type":"boolean","description":"Model delta since last capture; format=json for structured output."},
-                    "items": {"type":"boolean","description":"Artifact: page JSON array rows, not character chunks; offset/limit in items."},
-                    "scope": {"type": "string", "description": "Ref id of element to view subtree text of; with mode=content, returns just that element's subtree as markdown (budget honored)."},
-                    "budget": {"type": "integer", "description": "Max chars in response. Default 8000."},
-                    "artifact": {"type": "string", "description": "Read a previously offloaded payload from disk, paged. Pass the full payload path from a previous response; offset/limit are char-based (defaults 0 and 20000). With format=json each envelope is valid JSON; data is a text chunk, concatenate before parsing. items=true pages array rows."},
-                    "offset": {"type": "integer", "minimum":0, "description": "Artifact read: start char (row with items=true). Default 0."},
-                    "format": {"type": "string", "enum": ["text", "json"], "description": "text (default) | json — pure JSON output for extract= and artifact= reads (zero preamble; never truncated JSON)."}
+                    "sort": {"type": "string", "enum": ["confidence", "top", "new", "controversial", "old", "qa"], "description": "Reddit post extract=auto sort."},
+                    "template": {"type": "object", "description": "extract=json: {\"items\":{\"container\":\"css\",\"fields\":{\"k\":\"css|css@attr\"}}}. Rendered text by default (hidden in _omitted; {\"sel\":\"css\",\"raw\":true} reads hidden). Spans open shadows + same-origin frames."},
+                    "limit": {"type": "integer", "description": "extract max items (default 50; Reddit <=1000). artifact: chars (default 20000) or rows with items=true (default 50)."},
+                    "logs": {"type": "string", "enum": ["console", "network", "xhr"], "description": "console (doc), network (nav), xhr (API/fetch endpoints). All support format=json."},
+                    "clear": {"type": "boolean", "description": "logs: read then clear."},
+                    "preview": {"type": "boolean", "description": "extract=auto: container + fields without rows."},
+                    "changes": {"type": "boolean", "description": "Model delta since last capture (supports format=json)."},
+                    "items": {"type": "boolean", "description": "artifact: page JSON array rows instead of char chunks."},
+                    "scope": {"type": "string", "description": "Ref ID (e.g. e5) subtree text (Markdown with mode=content)."},
+                    "budget": {"type": "integer", "description": "Max response chars (default 8000)."},
+                    "artifact": {"type": "string", "description": "Offloaded payload path. Page with offset/limit (concat char chunks, or items=true for array rows)."},
+                    "offset": {"type": "integer", "minimum": 0, "description": "artifact start char (or row with items=true). Default 0."},
+                    "format": {"type": "string", "enum": ["text", "json"], "description": "text (default) | json — pure JSON for extract=, artifact=, changes=true, find=, logs=."}
                 }
             }),
         },
         ToolDef {
             name: "state",
-            description: "Manage tabs, cookies, storage, sessions, blocking. open-tab opens AND switches, returning an ID; switch-tab/close-tab require target_id. Save after login; navigate to saved origin before load, then reload. Setters require name/value (empty value allowed); ls/ss/cookies preserve full values, large reads offload to JSON artifacts. block affects inert assets, never first-party scripts. compress toggles response pruning. As steps use {action:\"state\",op:...,...}.",
+            description: "Manage tabs, cookies, storage, sessions, blocking, and compression. Tabs: tabs, open-tab(url — opens+switches, returns target_id), switch-tab/close-tab(target_id), opt slim:true. Cookies: cookies(url?/domain?), set-cookie(name,value,scope/flags), del-cookie(name). Storage: ls/ss, set-ls/set-ss(name,value — empty string valid), rm-ls/rm-ss(name), clear-ls/clear-ss. Sessions: save/load(name — navigate to origin before load, then reload). Perf: block(classes or clear:true; inert assets only), compress(mode=on|off|status). Reads preserve full values (offloading if large). In batch/run use {action:\"state\",op,...}.",
             input_schema: json!({
                 "type": "object",
                 "required": ["op"],
@@ -196,43 +201,44 @@ pub fn all_tools() -> Vec<ToolDef> {
                         "enum": STATE_OPS
                     },
                     "name": {"type": "string", "description": "Cookie name, storage key, or session name."},
-                    "value": {"type": "string", "description": "Cookie or storage value."},
-                    "url": {"type": "string", "description": "URL for open-tab, cookie scope (set-cookie/del-cookie), or domain filter (cookies)."},
-                    "domain": {"type": "string", "description": "Domain for del-cookie (alternative to url)."},
-                    "path": {"type":"string","description":"set-cookie scope path."},
-                    "secure": {"type":"boolean"},
-                    "httpOnly": {"type":"boolean"},
-                    "sameSite": {"type":"string","enum":["Strict","Lax","None"]},
-                    "slim": {"type":"boolean","description":"Tab lifecycle: retain tab ID, omit model."},
-                    "mode": {"type":"string","enum":["on","off","status"],"description":"compress: response pruning toggle."},
-                    "target_id": {"type": "string", "description": "Tab id for close-tab/switch-tab."},
-                    "classes": {"type": "string", "description": "Block: comma-separated (images, fonts, media, trackers)."},
-                    "clear": {"type": "boolean", "description": "Block: true stops blocking. Without classes/clear, returns measured blocked-request count; byte/time savings unmeasured."}
+                    "value": {"type": "string", "description": "Cookie or storage value (empty string allowed)."},
+                    "url": {"type": "string", "description": "open-tab URL, cookie scope (set/del-cookie), or cookies filter."},
+                    "domain": {"type": "string", "description": "Cookie domain filter/scope."},
+                    "path": {"type": "string", "description": "set-cookie path."},
+                    "secure": {"type": "boolean"},
+                    "httpOnly": {"type": "boolean"},
+                    "sameSite": {"type": "string", "enum": ["Strict", "Lax", "None"]},
+                    "slim": {"type": "boolean", "description": "open/switch/close-tab: return tab ID only, omit page model."},
+                    "mode": {"type": "string", "enum": ["on", "off", "status"], "description": "compress: toggle response pruning."},
+                    "target_id": {"type": "string", "description": "Tab ID for switch-tab/close-tab."},
+                    "classes": {"type": "string", "description": "block: comma-separated images,fonts,media,trackers."},
+                    "clear": {"type": "boolean", "description": "block: true clears rules. Omit classes/clear to read blocked-request count."}
                 }
             }),
         },
         ToolDef {
             name: "run",
-            description: "Sequential act actions (fill/eval included), see/extract reads and state ops with branches/loops. Reuse act/see/state fields. if: {action:\"if\",condition,text,then:[...],else:[...]}; while: {action:\"while\",condition,text,steps:[...],max:5}. JS conditions use js=; CSS uses selector=. False branches may finish before timeout on quiet pages; use wait for a deadline. wait+else falls back on timeout. optional:true continues runtime failure locally, including nested steps. Invalid plans fail before effects (1000 steps, nesting 32, while max 0-100). Other failures stop, preserving prior observations/effects; a failed batch stops enclosing run. slim inherits, reads/errors retained. url= navigates before each step; open-tab switches.",
+            description: "Execute multi-step browser plans in ONE call with if/while branching, inline see/extract/state reads, and optional structured JSON receipts. Use `act batch` for simple linear steps; use `run` for conditions, loops, or format=json step receipts.\nSteps reuse act/see/state fields (fill/eval/url/block included) plus optional:true (continues runtime failure locally, incl. nested steps). Control flow: {action:\"if\",condition,text|selector|js,then:[...],else:[...]}, {action:\"while\",condition,text|selector|js,steps:[...],max:10} (exit test required; max 0-100), or wait+else (runs else on timeout). Validated statically before any effect (<=1000 steps, depth <=32). Runtime errors halt and keep prior effects/observations (failed batch halts enclosing run). slim inherits; reads and errors stay full.",
             input_schema: json!({
                 "type": "object",
                 "required": ["steps"],
                 "properties": {
-                    "slim": {"type":"boolean","description":"Inherit verdict-only actions; preserve reads and errors."},
-                    "format": {"type":"string","enum":["text","json"],"description":"json: {status:completed|stopped,results:[{step,status:ok|optional_failed|failed,output,error?}],stopped_at?,error?,page?,note?}. Steps are 1-based; nested observations stay in output text. Not inherited: set each read's format explicitly. Oversized results use artifact paging."},
+                    "slim": {"type": "boolean", "description": "Inherit verdict-only actions; keep reads and errors."},
+                    "format": {"type": "string", "enum": ["text", "json"], "description": "json: {status:completed|stopped,results:[{step,status:ok|optional_failed|failed,output,error?}],stopped_at?,error?,page?,note?}. Set each read step's format explicitly."},
                     "steps": {
                         "type": "array",
-                        "description": "Steps reuse act/see/state fields plus optional:true and if/while branches. wait may carry else:[...].",
+                        "description": "Steps reuse act/see/state fields plus optional:true, if/while, and wait+else.",
                         "items": {
                             "type": "object",
                             "required": ["action"],
                             "properties": {
-                                "action": {"type": "string", "enum":run_step_actions()},
-                                "condition": {"type": "string", "description": "Same condition fields as act wait; js= expression, selector= CSS."},
-                                "then": {"type": "array", "description": "Sub-steps if condition met."},
-                                "else": {"type": "array", "description": "Sub-steps if condition times out."},
-                                "steps": {"type": "array", "description": "Body steps for while loop."},
-                                "max": {"type": "integer", "description": "Max iterations 0-100. Default 10.", "minimum":0,"maximum":100}
+                                "action": {"type": "string", "enum": run_step_actions()},
+                                "optional": {"type": "boolean", "description": "Record runtime failure and continue."},
+                                "condition": {"type": "string", "description": "Same as act wait; js= expression, selector= CSS, text= text/title/url."},
+                                "then": {"type": "array", "description": "Sub-steps when condition matches."},
+                                "else": {"type": "array", "description": "Sub-steps on condition false/timeout."},
+                                "steps": {"type": "array", "description": "Body steps for while/batch."},
+                                "max": {"type": "integer", "minimum": 0, "maximum": 100, "description": "while max iterations 0-100 (default 10)."}
                             }
                         }
                     }
@@ -241,11 +247,11 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "vision",
-            description: "PNG screenshot for canvas/image UIs, visual checks, or when refs/content cannot answer. marks=true overlays ref badges for visible main-frame elements; frames may be unmarked. Large PNGs offload to a local artifact; otherwise inline. Prefer act/see for structural interactions.",
+            description: "PNG screenshot for visual checks, canvas/image UIs, or layout debugging when act/see cannot answer. marks=true paints numbered ref badges on visible main-frame controls without mutating page DOM. Oversized PNGs offload to an artifact path. Prefer act/see for normal browsing.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "marks": {"type": "boolean", "description": "Overlay numbered ref badges on visible elements."}
+                    "marks": {"type": "boolean", "description": "Overlay numbered ref badges (Set-of-Marks) on visible controls."}
                 }
             }),
         },
@@ -278,6 +284,24 @@ mod tests {
         for key in ["x", "y", "press", "block", "name", "target_id"] {
             assert!(properties.get(key).is_some(), "missing {key}");
         }
+        let fill_props = &properties["fields"]["items"]["properties"];
+        for key in [
+            "ref", "label", "selector", "role", "nth", "text", "option", "check",
+        ] {
+            assert!(fill_props.get(key).is_some(), "missing fill field {key}");
+        }
+        assert!(
+            properties["steps"]["items"]["properties"]
+                .get("optional")
+                .is_some(),
+            "batch step schema must expose optional"
+        );
+        let see_props = &tools[1]["inputSchema"]["properties"];
+        for key in [
+            "url", "block", "mode", "extract", "logs", "find", "format", "artifact",
+        ] {
+            assert!(see_props.get(key).is_some(), "missing see {key}");
+        }
         let state = &tools[2]["inputSchema"]["properties"];
         for key in ["secure", "httpOnly", "sameSite", "path", "mode", "slim"] {
             assert!(state.get(key).is_some(), "missing {key}");
@@ -285,6 +309,11 @@ mod tests {
         assert_eq!(
             enum_of(&tools[2]["inputSchema"], &["properties", "op", "enum"]),
             STATE_OPS
+        );
+        let run_props = &tools[3]["inputSchema"]["properties"]["steps"]["items"]["properties"];
+        assert!(
+            run_props.get("optional").is_some(),
+            "run step schema must expose optional"
         );
         let run = enum_of(
             &tools[3]["inputSchema"],
@@ -302,7 +331,11 @@ mod tests {
         }
         // The 4.6.6 tool list was 15,463 serialized UTF-8 characters. Keep
         // missing-input fixes within that budget instead of duplicating schemas.
-        assert!(serde_json::to_string(&tools).unwrap().chars().count() <= 15463);
+        let serialized_len = serde_json::to_string(&tools).unwrap().chars().count();
+        assert!(
+            serialized_len <= 15463,
+            "tool schema budget exceeded: {serialized_len} > 15463"
+        );
     }
 
     fn enum_of(schema: &Value, path: &[&str]) -> Vec<String> {

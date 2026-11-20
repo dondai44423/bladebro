@@ -11,7 +11,7 @@ use crate::error::{BladeError, Result};
 use crate::page::Page;
 
 use super::act::handle_act;
-use super::see::handle_see;
+use super::see::handle_see_tool;
 use super::state::handle_state;
 
 pub async fn handle_run(args: &Value, page: &mut Page) -> Result<String> {
@@ -469,22 +469,9 @@ async fn execute_step(
                     obj.insert("budget".into(), serde_json::json!(3000));
                 }
             }
-            // url= navigates first — the documented contract for every act
-            // action; see/extract steps used to ignore it silently.
-            let step_url = step.get("url").and_then(|u| u.as_str()).unwrap_or("");
-            if !step_url.is_empty() {
-                if crate::realbrowser::input_paused() {
-                    return Err(crate::realbrowser::paused_error());
-                }
-                page.navigate(step_url).await?;
-                let _ = crate::page::wait_for_settle_with_network(
-                    page.cdp_ref(),
-                    std::time::Duration::from_millis(1200),
-                    Some(page.in_flight_ref()),
-                )
-                .await;
-            }
-            let out = handle_see(&see_args, page).await?;
+            // url= and block= navigate first via handle_see_tool (no duplicate
+            // settle wait after page.navigate).
+            let out = handle_see_tool(&see_args, page).await?;
             let chars = out.chars().count();
             observations.push(format!("step {path}: {action_str} ({chars} chars):\n{out}"));
         }

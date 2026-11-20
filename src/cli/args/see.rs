@@ -26,7 +26,7 @@ pub(crate) fn parse_see_args(args: &[String]) -> Result<Value> {
         };
         if let Some(flag) = long.strip_prefix("--") {
             match flag {
-                "filter" | "find" | "logs" | "scope" | "artifact" | "sort" => {
+                "filter" | "find" | "logs" | "scope" | "artifact" | "sort" | "block" => {
                     let v = take_value(args, &mut i, flag)?;
                     j[flag] = json!(v);
                 }

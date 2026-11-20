@@ -241,7 +241,7 @@ async fn tool_error(
 
 /// Keep format=json machine-readable even when dialogs, browser health or lane
 /// changes add notices. Artifact envelopes keep their paging fields at the top.
-pub(super) fn append_notices(text: String, notices: &str, json_mode: bool) -> String {
+pub(crate) fn append_notices(text: String, notices: &str, json_mode: bool) -> String {
     if notices.trim().is_empty() {
         return text;
     }
@@ -265,7 +265,7 @@ pub(super) fn append_notices(text: String, notices: &str, json_mode: bool) -> St
     format!("{text}\n{}", notices.trim())
 }
 
-pub(super) fn json_response(args: &Value) -> bool {
+pub(crate) fn json_response(args: &Value) -> bool {
     args.get("format").and_then(Value::as_str) == Some("json")
         || args.get("items").and_then(Value::as_bool) == Some(true)
         || args.get("action").and_then(Value::as_str) == Some("paginate")

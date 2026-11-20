@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Exact HTTP status codes on navigation errors and 4xx/5xx pages** (#97): empty-body HTTP failures (`net::ERR_HTTP_RESPONSE_CODE_FAILURE`) now report the exact status code, reason phrase (including HTTP/2+3 fallback when `statusText` is empty), `Retry-After` header when present, and actionable guidance (e.g. `HTTP 429 Too Many Requests (retry-after: 45s) — rate limited; wait/back off before retrying`). Landed 4xx/5xx pages with a body surface an `http:` notice automatically.
+- **One-call open + read/extract in MCP `see`**: `see` now exposes `url` and `block` in its MCP schema (and `--block` on CLI `see`), cutting read-only navigate-and-read workflows from two tool calls to one.
+- **Structured JSON output for `see logs=network`, `see logs=console`, and `see find`**: `format="json"` now returns parseable JSON (offloaded past 12 KB) for all three log kinds and element search, alongside `extract`, `artifact`, and `changes`.
+- **Upgraded `act fill` addressing**: per-field `nth` and `role` disambiguate repeated form labels without dropping out of `fill`, and `submit` accepts `selector=`/`ref=`/`text=`/`label=` prefixes.
+- **Overhauled MCP tool definitions, server instructions, and CLI help**: reorganized all five tool descriptions, server `INSTRUCTIONS`, and `help --json` within the existing context-token budget so agents master round-trip collapsing, addressing, and error contracts on turn one.
+
+### Fixed
+- **Live-DOM ambiguity recovery**: Phase 3 live-DOM ties in text/label addressing now return the full list of adopted candidate refs (`ref role "name" [ctx]`), eliminating the extra `see` call previously forced after dynamic renders.
+- **Truthful restart notes on navigating calls**: when Chrome reconnects before a call that itself navigates (`act navigate`, `act` with `url=`, `see` with `url=`), the note no longer falsely claims the page is reset to `about:blank`.
+- **CLI `--format json` and error parity**: CLI notices (dialogs, consent, `http:` status) now wrap JSON outputs as `{data,note}` instead of appending raw text, and CLI errors attach `--- current page state ---` and drain ambient notices like MCP.
+- **`act press` window focus**: targeted `press` now uses `activate_if_needed()` so `BLADE_NO_ACTIVATE=1` and no-window-raise behavior hold consistently.
+- **CLI parser & help parity**: added `--slim` to CLI `state` tab ops, `--block` to CLI `see`, `xhr` to `help see --json`, `selector`/`network` to `act wait` usage hints, and explicit target rejection for non-ref `act upload` positionals.
+
+### Stealth
+- **Isolated-world perception and mutation watcher**: DOM capture, load/settle waits, block detection, and the post-action mutation watcher now run in a cached CDP isolated world, eliminating `window[Symbol.for('m')]`/`window[Symbol.for('n')]` and `MutationObserver` leaks from main-world `window` on both the agent and real-browser lanes.
+
+### Performance
+- **Faster quiet navigations and `url=` batch/run read steps**: skipped the redundant post-drain `re_settle` when no network requests were in flight during settle (~120–160 ms saved per quiet navigation) and removed the duplicate 1.2 s settle wait after `page.navigate` in `act batch` and `run` `see`/`extract` steps.
+
 ## [4.6.10] - 2026-11-19
 
 ### Added

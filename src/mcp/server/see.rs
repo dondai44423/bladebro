@@ -77,6 +77,14 @@ pub async fn handle_see_tool(args: &Value, page: &mut Page) -> Result<String> {
         if crate::realbrowser::input_paused() {
             return Err(crate::realbrowser::paused_error());
         }
+        if let Some(block) = args
+            .get("block")
+            .and_then(Value::as_str)
+            .filter(|b| !b.is_empty())
+        {
+            let mask = page.set_block_classes(block).await?;
+            page.remember_block_choice(url, block, mask != 0);
+        }
         page.navigate(url).await?;
     }
     handle_see(args, page).await
@@ -156,11 +164,11 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
             Ok(page.delta_view(&delta, budget))
         };
     }
-    // format=json is only meaningful for extract=/artifact= reads; anything
-    // else is refused instead of silently returning text.
-    if json_out && extract.is_empty() && logs != "xhr" {
+    // format=json is only meaningful for structured reads; anything else is
+    // refused instead of silently returning text.
+    if json_out && extract.is_empty() && logs.is_empty() && find.is_empty() {
         return Err(BladeError::Other(
-            "format=json applies to extract= (auto/json/links/forms), artifact= and logs=xhr reads - this mode returns text; drop format or use an extract read".into(),
+            "format=json applies to extract= (auto/json/links/forms), artifact=, changes=true, find= and logs= (console/network/xhr) reads - this mode returns text; drop format or use a structured read".into(),
         ));
     }
 
@@ -215,15 +223,8 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
 
     // V8: logs — console (injection hook), network (completed ring), or xhr (deduplicated API ring).
     if !logs.is_empty() {
-        let out = if logs == "xhr" && json_out {
-            let entries = page.xhr_log();
-            let value = serde_json::to_string(&xhr_entries_json(&entries))?;
-            if value.len() > 12000 {
-                let path = crate::artifacts::write_artifact(&value, "json")?;
-                json!({"artifact":path,"bytes":value.len(),"next_offset":0}).to_string()
-            } else {
-                value
-            }
+        let out = if json_out {
+            handle_logs_json(page, logs).await?
         } else {
             handle_logs(page, logs).await?
         };
@@ -277,18 +278,36 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
             // control is not there" and "it is there but not visible from
             // here" - one flat "not found" sent an agent hunting through
             // raw eval for a desktop-hidden trigger.
-            let diag_note = miss_diag_note(
-                crate::action::find_miss_diag(page.cdp_ref(), find)
-                    .await
-                    .ok(),
-            );
+            let diag = crate::action::find_miss_diag(page.cdp_ref(), find)
+                .await
+                .ok();
+            let diag_note = miss_diag_note(diag);
             // M11 contract is full-page search: when no ACTIONABLE element
             // matches, locate the text itself - the deepest containing
             // element with its container chain plus the actionables inside
             // it. "Leftover body text" then explains WHERE it lives (the
             // header pill, a draft editor, a closed confirm row) instead of
             // costing the agent an ancestor-walk to find out.
-            if let Some(loc) = crate::action::locate_text(page.cdp_ref(), find).await {
+            let loc = crate::action::locate_text(page.cdp_ref(), find).await;
+            if json_out {
+                let mut payload = json!({
+                    "query": find,
+                    "count": 0,
+                    "matches": [],
+                });
+                if !diag_note.is_empty() {
+                    payload["diag"] = json!(diag_note.trim());
+                }
+                if let Some(loc) = loc {
+                    payload["text_match"] = json!({
+                        "snippet": loc.snippet,
+                        "container": loc.desc,
+                        "nearby_actionables": loc.near,
+                    });
+                }
+                return super::bounded_json(&payload);
+            }
+            if let Some(loc) = loc {
                 let near = if loc.near.is_empty() {
                     String::new()
                 } else {
@@ -305,6 +324,26 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
                 ));
             }
             return Ok(format!("no elements matching \"{find}\" found{diag_note}"));
+        }
+        if json_out {
+            let rows: Vec<Value> = matches
+                .iter()
+                .map(|m| {
+                    let ref_id = page.model_mut().adopt(&m.sig, &m.role, &m.name, &m.frame);
+                    json!({
+                        "ref": ref_id,
+                        "role": m.role,
+                        "name": m.name,
+                        "ctx": m.ctx,
+                        "score": m.score,
+                    })
+                })
+                .collect();
+            return super::bounded_json(&json!({
+                "query": find,
+                "count": rows.len(),
+                "matches": rows,
+            }));
         }
         let mut out = format!(
             "find \"{}\": {} match{}\n",
@@ -432,6 +471,80 @@ pub async fn handle_see(args: &Value, page: &mut Page) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// Structured JSON form of `see logs=console|network|xhr format=json`.
+/// Offloads payloads past 12 KB into a JSON artifact envelope so responses stay
+/// bounded and strictly parseable.
+async fn handle_logs_json(page: &mut Page, kind: &str) -> Result<String> {
+    let value = match kind {
+        "xhr" => {
+            let entries = page.xhr_log();
+            serde_json::to_string(&xhr_entries_json(&entries))?
+        }
+        "network" => {
+            let entries = page.network_log();
+            let mut bad = Vec::new();
+            let mut good = Vec::new();
+            for e in &entries {
+                let row = json!({
+                    "method": e.method,
+                    "url": e.url,
+                    "status": e.status,
+                    "error": e.error,
+                });
+                if e.error.is_some() || e.status >= 400 {
+                    bad.push(row);
+                } else {
+                    good.push(row);
+                }
+            }
+            bad.extend(good);
+            serde_json::to_string(&bad)?
+        }
+        "console" => {
+            if crate::realbrowser::real_lane() {
+                json!({
+                    "data": [],
+                    "note": "console: unavailable on the real-browser lane (page injection is off)"
+                })
+                .to_string()
+            } else {
+                let entries = page.console_log().await?;
+                let arr = entries.as_array().cloned().unwrap_or_default();
+                let mut errors = Vec::new();
+                let mut warnings = Vec::new();
+                let mut rest = Vec::new();
+                for e in arr {
+                    let level = e.get("l").and_then(Value::as_str).unwrap_or("");
+                    let row = json!({
+                        "level": level,
+                        "message": e.get("m").and_then(Value::as_str).unwrap_or(""),
+                        "timestamp": e.get("t").cloned().unwrap_or(Value::Null),
+                    });
+                    match level {
+                        "error" | "exception" | "unhandledrejection" => errors.push(row),
+                        "warn" => warnings.push(row),
+                        _ => rest.push(row),
+                    }
+                }
+                errors.extend(warnings);
+                errors.extend(rest);
+                serde_json::to_string(&errors)?
+            }
+        }
+        _ => {
+            return Err(BladeError::Other(format!(
+                "unknown logs kind: {kind} (use 'console', 'network', or 'xhr')"
+            )))
+        }
+    };
+    if value.len() > 12000 {
+        let path = crate::artifacts::write_artifact(&value, "json")?;
+        Ok(json!({"artifact":path,"bytes":value.len(),"next_offset":0}).to_string())
+    } else {
+        Ok(value)
+    }
 }
 
 /// V8: `see logs=console|network` — introspection for agent
@@ -668,13 +781,27 @@ mod xhr_log_tests {
     }
 
     #[test]
-    fn validate_accepts_xhr_logs_and_json_format() {
-        crate::mcp::server::validate::see(&json!({"logs": "xhr"})).unwrap();
-        crate::mcp::server::validate::see(&json!({"logs": "xhr", "format": "json"})).unwrap();
-        assert!(
-            crate::mcp::server::validate::see(&json!({"logs": "network", "format": "json"}))
-                .is_err()
-        );
+    fn validate_accepts_structured_json_reads_and_rejects_text_only_modes() {
+        for ok in [
+            json!({"logs": "xhr"}),
+            json!({"logs": "xhr", "format": "json"}),
+            json!({"logs": "network", "format": "json"}),
+            json!({"logs": "console", "format": "json"}),
+            json!({"find": "Submit", "format": "json"}),
+            json!({"url": "https://example.com", "block": "images,fonts", "mode": "content"}),
+        ] {
+            crate::mcp::server::validate::see(&ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in [
+            json!({"mode": "content", "format": "json"}),
+            json!({"mode": "outline", "format": "json"}),
+            json!({"mode": "model", "format": "json"}),
+        ] {
+            assert!(
+                crate::mcp::server::validate::see(&bad).is_err(),
+                "expected error for {bad}"
+            );
+        }
     }
 }
 

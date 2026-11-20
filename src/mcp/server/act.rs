@@ -11,7 +11,7 @@ use super::extract::handle_collect;
 use super::files::{handle_download, handle_pdf};
 use super::resolve::{resolve_selector_target, resolve_text_target};
 use super::run::resolve_wait_timeout;
-use super::see::handle_see;
+use super::see::{handle_see, handle_see_tool};
 use super::state::handle_state;
 
 /// `act dialog` (G03): arm a bounded ONE-USE expectation that answers the
@@ -119,6 +119,14 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
         let f_ref = field.get("ref").and_then(|r| r.as_str()).unwrap_or("");
         let f_label = field.get("label").and_then(|l| l.as_str()).unwrap_or("");
         let f_selector = field.get("selector").and_then(|s| s.as_str()).unwrap_or("");
+        let f_role = field
+            .get("role")
+            .and_then(|r| r.as_str())
+            .filter(|r| !r.is_empty());
+        let f_nth = field
+            .get("nth")
+            .and_then(|n| n.as_u64())
+            .map(|n| n as usize);
         let f_text = field
             .get("text")
             .and_then(|t| t.as_str())
@@ -126,15 +134,15 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
             .unwrap_or("");
         let f_check = field.get("check").and_then(|c| c.as_bool());
 
-        // Resolve the ref — try as-is first, then by label.
+        // Resolve the ref — try as-is first, then selector, then label.
         let resolved = if !f_ref.is_empty() {
             f_ref.to_string()
         } else if !f_selector.is_empty() {
-            resolve_selector_target(page, f_selector, None).await?
+            resolve_selector_target(page, f_selector, f_nth).await?
         } else if !f_label.is_empty() {
             // Don't restrict to textbox — the field could be a
             // checkbox or select. Search all actionable elements.
-            resolve_text_target(page, f_label, None, None).await?
+            resolve_text_target(page, f_label, f_role, f_nth).await?
         } else {
             continue;
         };
@@ -214,15 +222,27 @@ pub async fn handle_fill(args: &Value, page: &mut Page) -> Result<String> {
         count += 1;
     }
     let last_delta = if !submit.is_empty() {
-        // Refs are 'e' followed by digits (e1, e2, ...).
+        // Support explicit selector=/ref=/text=/label= prefixes (matching
+        // paginate's `next`), bare refs (`e8`), and bare visible button text.
         // 'Edit', 'Enter', 'Email' start with 'e' but are text, not refs.
-        let is_ref = submit.len() > 1
-            && submit.starts_with('e')
-            && submit[1..].chars().all(|c| c.is_ascii_digit());
-        let resolved = if is_ref {
-            submit.to_string()
+        let resolved = if let Some(sel) = submit.strip_prefix("selector=") {
+            resolve_selector_target(page, sel, None).await?
+        } else if let Some(r) = submit.strip_prefix("ref=") {
+            r.to_string()
+        } else if let Some(t) = submit
+            .strip_prefix("text=")
+            .or_else(|| submit.strip_prefix("label="))
+        {
+            resolve_text_target(page, t, None, None).await?
         } else {
-            resolve_text_target(page, submit, None, None).await?
+            let is_ref = submit.len() > 1
+                && submit.starts_with('e')
+                && submit[1..].chars().all(|c| c.is_ascii_digit());
+            if is_ref {
+                submit.to_string()
+            } else {
+                resolve_text_target(page, submit, None, None).await?
+            }
         };
         // Wait briefly for field validation to settle before clicking submit.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -429,7 +449,7 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                     return Err(crate::realbrowser::paused_error());
                 }
                 page.ensure_ref(&target).await?;
-                page.activate().await?;
+                page.activate_if_needed().await?;
                 crate::action::focus(page.cdp_ref(), page.model(), &target).await?;
             }
             Action::Press { key: key.into() }
@@ -648,31 +668,9 @@ pub async fn handle_act(args: &Value, page: &mut Page) -> Result<String> {
                             obj.insert("budget".into(), serde_json::json!(3000));
                         }
                     }
-                    // url= navigates first - the documented contract for every
-                    // act action; see/extract steps used to ignore it silently.
-                    let step_url = step
-                        .get("url")
-                        .and_then(|u| u.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let out_res: Result<String> = if step_url.is_empty() {
-                        Box::pin(handle_see(&see_args, page)).await
-                    } else if crate::realbrowser::input_paused() {
-                        Err(crate::realbrowser::paused_error())
-                    } else {
-                        match page.navigate(&step_url).await {
-                            Ok(_) => {
-                                let _ = crate::page::wait_for_settle_with_network(
-                                    page.cdp_ref(),
-                                    std::time::Duration::from_millis(1200),
-                                    Some(page.in_flight_ref()),
-                                )
-                                .await;
-                                Box::pin(handle_see(&see_args, page)).await
-                            }
-                            Err(e) => Err(e),
-                        }
-                    };
+                    // url= and block= navigate first via handle_see_tool (which
+                    // already ran load/settle/capture — no duplicate settle wait).
+                    let out_res: Result<String> = Box::pin(handle_see_tool(&see_args, page)).await;
                     match out_res {
                         Ok(out) => {
                             ok_count += 1;

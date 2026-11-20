@@ -620,6 +620,32 @@ mod tests {
         assert!(parse_see_args(&a(&["--template", "not-json"])).is_err());
     }
 
+    #[test]
+    fn see_block_and_state_slim_and_upload_target_validation() {
+        let v = parse_see_args(&a(&[
+            "content",
+            "https://example.com",
+            "--block",
+            "images,fonts",
+        ]))
+        .unwrap();
+        assert_eq!(v["mode"], "content");
+        assert_eq!(v["url"], "https://example.com");
+        assert_eq!(v["block"], "images,fonts");
+
+        let s = parse_state_args(&a(&["open-tab", "https://example.com", "--slim"])).unwrap();
+        assert_eq!(s["op"], "open-tab");
+        assert_eq!(s["slim"], true);
+
+        let err = parse_act_args(&a(&["upload", "Resume", "/tmp/cv.pdf"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not a ref") && err.contains("--selector"),
+            "{err}"
+        );
+    }
+
     // ── state parsing ──────────────────────────────────────────────────
 
     #[test]

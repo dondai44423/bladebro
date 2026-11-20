@@ -24,7 +24,7 @@ bladebro act read --label 'Country' --format json
 bladebro act wait element --text 'Results'
 ```
 
-Use `url` on supported actions to navigate before interacting. Targeted key presses check focus. An accepted click or submit dispatches once, even if the DOM stays quiet. If a disconnect makes a mutation's outcome unknown, inspect its destination before sending another action.
+Use `url` on supported actions to navigate before interacting. Targeted key presses check focus and only activate a background tab. An accepted click or submit dispatches once, even if the DOM stays quiet. If a disconnect makes a mutation's outcome unknown, inspect its destination before sending another action. Navigation failures caused by empty-body HTTP error responses report the exact status code, reason, and `Retry-After` header when present; landed 4xx/5xx pages attach an `http:` notice. `fill` fields accept optional `nth` and `role`, and `submit` accepts refs, text, or `selector=`/`ref=`/`text=` prefixes.
 
 `read` inspects live control values, including toggle state and select labels. Large results can be offloaded. Select choices report their bound when clipped. An upload verifies delivery in the page. A popup opened by a click reports its tab ID. Switch tabs explicitly before acting in it.
 
@@ -49,9 +49,9 @@ bladebro see model --json
 bladebro see extract links --json
 ```
 
-The model can fold navigation/footer items and list omitted controls by role. Use `filter` to narrow a crowded page. Auto extraction has site-aware paths for Reddit, X, GitHub, Hacker News, and products. A partial thread carries completeness and fallback information. `preview: true` shows an auto extraction's detected fields before you request rows.
+Pass `url` (and optional `block`) on `see` to navigate and read/extract in a single call. The model can fold navigation/footer items and list omitted controls by role. Use `filter` to narrow a crowded page. Auto extraction has site-aware paths for Reddit, X, GitHub, Hacker News, and products. A partial thread carries completeness and fallback information. `preview: true` shows an auto extraction's detected fields before you request rows.
 
-`logs: "xhr"` lists the deduplicated fetch/XHR endpoints a page called — method, status, the full URL with its query intact, and request header names only — with failures first. `format: "json"` returns rows, `clear: true` empties the ring, and reads past 30 endpoints offload to an artifact.
+`logs: "xhr"` lists the deduplicated fetch/XHR endpoints a page called — method, status, the full URL with its query intact, and request header names only — with failures first. `format: "json"` returns structured JSON for `extract`, `artifact`, `changes`, `find`, and all `logs` (`console`, `network`, `xhr`); `clear: true` empties the selected log ring, and reads past 30 endpoints (or 12 KB in JSON mode) offload to an artifact.
 
 Large reads give an artifact path and a paging receipt. With `see artifact="<path>"`, character paging returns JSON envelopes with a `data` string. Join the strings before parsing the payload. For JSON arrays, `items: true` pages complete rows using row offsets. Follow `next_offset` until null. JSON notices can wrap a result as `{data,note}`.
 
