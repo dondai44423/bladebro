@@ -75,80 +75,85 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 return Ok(());
             }
-            let state = if cfg.enabled {
-                ui::bold(&ui::green("ON"))
+            let badge = if cfg.enabled {
+                ("ACTIVE", ui::Tone::Success)
             } else {
-                ui::dim("off")
+                ("STANDBY", ui::Tone::Smoke)
             };
-            println!("{} {state}", ui::bold("Real-browser lane:"));
-            println!();
+            let mut rows: Vec<(&str, String)> = Vec::new();
             match sel {
                 Ok((spec, profile)) => {
-                    let auto = if cfg.browser.is_none() { " · auto (most recently used)" } else { "" };
-                    println!(
-                        "{}",
-                        rb_row("browser", &format!("{} ({}){auto}", spec.name, spec.brand.as_str()))
-                    );
+                    let auto = if cfg.browser.is_none() {
+                        " · auto (most recently used)"
+                    } else {
+                        ""
+                    };
+                    rows.push((
+                        "browser",
+                        format!("{} ({}){auto}", spec.name, spec.brand.as_str()),
+                    ));
                     let bin = if spec.binary.as_os_str().is_empty() {
-                        ui::yellow("none found — install it or set `rb use --binary <path>`")
+                        ui::amber("none found — install it or set `rb use --binary <path>`")
                     } else {
                         let p = spec.binary.display().to_string();
                         if cfg.binary.is_some() {
-                            format!("{p}  {}", ui::dim("(override)"))
+                            format!("{p}  {}", ui::smoke("(override)"))
                         } else {
                             p
                         }
                     };
-                    println!("{}", rb_row("binary", &bin));
-                    println!(
-                        "{}",
-                        rb_row(
-                            "profile",
-                            &format!("\"{}\" · {}", profile.name, ui::dim(&profile.path.display().to_string()))
-                        )
-                    );
-                    println!(
-                        "{}",
-                        rb_row(
-                            "mode",
-                            &format!(
-                                "{} → {} (now)",
-                                cfg.mode.as_str(),
-                                rb::effective_mode(&cfg, &profile.root).as_str()
-                            )
-                        )
-                    );
+                    rows.push(("binary", bin));
+                    rows.push((
+                        "profile",
+                        format!(
+                            "\"{}\" · {}",
+                            profile.name,
+                            ui::smoke(&profile.path.display().to_string())
+                        ),
+                    ));
+                    rows.push((
+                        "mode",
+                        format!(
+                            "{} → {} (now)",
+                            cfg.mode.as_str(),
+                            rb::effective_mode(&cfg, &profile.root).as_str()
+                        ),
+                    ));
                     if let Some(port) = rb::devtools_port(&profile.root) {
-                        println!(
-                            "{}",
-                            rb_row("attach", &format!("live debug endpoint on 127.0.0.1:{port} — auto would attach"))
-                        );
+                        rows.push((
+                            "attach",
+                            format!("live debug endpoint on 127.0.0.1:{port} — auto would attach"),
+                        ));
                     }
                     match rb::template_stats(&spec.id) {
                         Some((files, bytes)) => {
-                            println!("{}", rb_row("clone", &format!("{files} files ({})", rb::human_bytes(bytes))));
+                            rows.push((
+                                "clone",
+                                format!("{files} files ({})", rb::human_bytes(bytes)),
+                            ));
                             if let Some(src) = rb::template_source(&spec.id) {
-                                println!("{}", rb_row("source", &ui::dim(&src)));
+                                rows.push(("source", ui::smoke(&src)));
                             }
                         }
-                        None => println!(
-                            "{}",
-                            rb_row("clone", &ui::dim("not imported yet (first launch imports)"))
-                        ),
+                        None => rows.push((
+                            "clone",
+                            ui::smoke("not imported yet (first launch imports)"),
+                        )),
                     }
                 }
-                Err(e) => println!("{}", rb_row("selection", &ui::red(&e.to_string()))),
+                Err(e) => rows.push(("selection", ui::crimson(&e.to_string()))),
             }
             if paused {
-                println!(
-                    "{}",
-                    rb_row("paused", &ui::yellow("yes — input, navigation, downloads, collecting and tab ops refuse until `rb resume`"))
-                );
+                rows.push((
+                    "paused",
+                    ui::amber("yes — input, navigation, downloads, collecting and tab ops refuse until `rb resume`"),
+                ));
             }
-            println!();
-            println!(
-                "{}",
-                ui::dim("hint: `bladebro rb on|off` switches the lane · `bladebro help rb` for the full story")
+            ui::dossier_card(
+                "Real-Browser Lane",
+                badge,
+                &rows,
+                Some("`bladebro rb on|off` switches the lane · `bladebro help rb` for the full story"),
             );
             Ok(())
         }
@@ -195,36 +200,40 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 return Ok(());
             }
-            println!(
-                "{} {} — running surfaces switch at their next action",
-                ui::bold("Real-browser lane:"),
-                ui::bold(&ui::green("ON"))
+            let rows = vec![
+                ("browser", format!("{} ({})", spec.name, spec.brand.as_str())),
+                (
+                    "profile",
+                    format!(
+                        "\"{}\" · {}",
+                        profile.name,
+                        ui::smoke(&profile.path.display().to_string())
+                    ),
+                ),
+                ("mechanism", mode.as_str().to_string()),
+                (
+                    "stealth",
+                    "zero page patches — your real environment IS the stealth".into(),
+                ),
+                (
+                    "caution",
+                    ui::amber("the agent browses AS YOU (accounts, sessions, reputation) over a loopback debug port"),
+                ),
+                (
+                    "revert",
+                    "`bladebro rb off` · wipe imported copy: `rb forget`".into(),
+                ),
+                (
+                    "control",
+                    "`rb pause` / `rb resume` hand the browser back to you".into(),
+                ),
+            ];
+            ui::dossier_card(
+                "Real-Browser Lane",
+                ("ON", ui::Tone::Success),
+                &rows,
+                Some("Running surfaces (daemon, MCP) switch automatically at their next action"),
             );
-            println!();
-            println!("{}", rb_row("browser", &format!("{} ({})", spec.name, spec.brand.as_str())));
-            println!(
-                "{}",
-                rb_row("profile", &format!("\"{}\" · {}", profile.name, ui::dim(&profile.path.display().to_string())))
-            );
-            println!("{}", rb_row("mechanism", mode.as_str()));
-            println!("{}", rb_row("lane", "zero page patches — your real environment IS the stealth"));
-            println!();
-            println!(
-                "  {} the agent browses AS YOU — anything it does is attributable to your",
-                ui::yellow("⚠")
-            );
-            println!("    identity (accounts, sessions, reputation).");
-            println!();
-            println!(
-                "  {} while a session runs, browser control is served on a loopback debug",
-                ui::yellow("⚠")
-            );
-            println!("    endpoint any local user of this machine can reach — avoid shared/");
-            println!("    multi-user hosts (headless sessions idle-close automatically).");
-            println!();
-            println!("{}", rb_row("revert", "`bladebro rb off` · wipe the imported copy: `rb forget`"));
-            println!("{}", rb_row("control", "`rb pause` / `rb resume` hand the browser to you"));
-            println!("{}", rb_row("note", "running surfaces (daemon, MCP) switch at their next action — an owned browser relaunches; an attached browser is left running"));
             Ok(())
         }
 

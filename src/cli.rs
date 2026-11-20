@@ -466,6 +466,19 @@ fn send_to_daemon(req: &str) -> std::result::Result<ToolResult, DaemonCallError>
     })
 }
 
+/// Best-effort graceful stop of a running CLI daemon (used after self-update
+/// or rollback so the next command starts on the new binary instead of talking
+/// to the stale inode). Returns `true` if a live daemon was stopped.
+pub async fn stop_daemon_if_running() -> bool {
+    #[cfg(unix)]
+    {
+        if daemon_running() {
+            return stop_daemon().await.is_ok();
+        }
+    }
+    false
+}
+
 /// Main CLI entry point. Called from main.rs.
 ///
 /// Exit-code contract (documented in `help`):

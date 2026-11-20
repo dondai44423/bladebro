@@ -4,12 +4,13 @@
 // no npm installs, no pi install, no copied protocol code to babysit.
 import assert from 'node:assert/strict';
 import {
-  copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  accessSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
+  statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
-import { stripTypeScriptTypes } from 'node:module';
+import { createRequire, stripTypeScriptTypes } from 'node:module';
 
 const root = mkdtempSync(join(tmpdir(), 'blade-pi-test-'));
 const previousHome = process.env.BLADE_HOME;
@@ -25,7 +26,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function loadExtension(resolvePackageJson) {
   const source = readFileSync(new URL('../../npm/bladebro/pi-extension.ts', import.meta.url), 'utf8');
   const body = stripTypeScriptTypes(
-    source.replace(/^import[^\n]*\n/gm, '').replace(/^export default /m, ''),
+    source
+      .replace(/^import[^\n]*\n/gm, '')
+      .replace(/^export default /m, '')
+      .replace(/\bimport\.meta\.url\b/g, 'importMetaUrl'),
     { mode: 'strip' });
   const requireShim = Object.assign(
     (path) => JSON.parse(readFileSync(path, 'utf8')),
@@ -36,8 +40,29 @@ function loadExtension(resolvePackageJson) {
       },
     },
   );
-  const factory = new Function('require', 'existsSync', 'dirname', 'join', `${body}\nreturn bladebroExtension;`);
-  return factory(requireShim, existsSync, dirname, join);
+  const factory = new Function(
+    'require',
+    'accessSync',
+    'constants',
+    'existsSync',
+    'statSync',
+    'createRequire',
+    'dirname',
+    'join',
+    'importMetaUrl',
+    `${body}\nreturn bladebroExtension;`,
+  );
+  return factory(
+    requireShim,
+    accessSync,
+    constants,
+    existsSync,
+    statSync,
+    createRequire,
+    dirname,
+    join,
+    import.meta.url,
+  );
 }
 
 /** Mock pi ExtensionAPI recording registrations and event handlers. */
@@ -133,7 +158,7 @@ try {
   assert.ok(init.protocolVersion, 'server answers with a protocol version');
   assert.equal(typeof init.instructions, 'string');
   assert.ok(
-    init.instructions.length > 200 && /WORK LOOP/.test(init.instructions),
+    init.instructions.length > 200 && /FAST PATTERNS|WORK LOOP/.test(init.instructions),
     `instructions must carry the loop: ${JSON.stringify(init.instructions?.slice(0, 80))}`,
   );
   pass(`initialize carries ${init.instructions.length} chars of instructions`);

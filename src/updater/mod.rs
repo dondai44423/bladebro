@@ -14,6 +14,8 @@ pub mod swap;
 pub use crate::ui;
 pub mod version;
 
+use std::time::Instant;
+
 use crate::error::{BladeError, Result};
 
 /// The current version, baked in at compile time.
@@ -46,66 +48,125 @@ pub async fn run(cmd: &str, args: &[String]) -> Result<()> {
 ///   --check / -c  — dry run: check but don't install
 ///   --force / -f  — force update even if same version (reinstall)
 async fn update(args: &[String]) -> Result<()> {
+    let started = Instant::now();
     let force = args.iter().any(|a| a == "--force" || a == "-f");
     let dry_run = args.iter().any(|a| a == "--check" || a == "-c");
 
-    ui::header("Bladebro Update");
-
-    // Step 1: check current vs latest.
-    ui::step(1, 4, "Checking for updates...");
-    let latest = version::fetch_latest().await?;
-    let current = CURRENT_VERSION;
-
-    if !force && !version::is_newer(latest.tag(), current) {
-        if version::compare_versions(latest.tag(), current) == std::cmp::Ordering::Less {
-            ui::info(&format!(
-                "Local build (v{current}) is ahead of the latest release ({})",
-                latest.tag()
-            ));
+    let meta = format!(
+        "{} · {}",
+        version::platform_label(),
+        version::install_channel_label()
+    );
+    ui::masthead(
+        if dry_run {
+            "Update Check"
         } else {
-            ui::info(&format!("Already on the latest release (v{current})"));
+            "Self-Update"
+        },
+        &meta,
+    );
+
+    // Phase 1: check current vs latest.
+    ui::phase(1, 4, "Consulting the syndicate registry");
+    let spin = ui::Spinner::start("Checking latest GitHub & npm release...");
+    let latest = match version::fetch_latest().await {
+        Ok(rel) => rel,
+        Err(e) => {
+            spin.finish_fail("Could not reach release registry");
+            return Err(e);
+        }
+    };
+    let current = CURRENT_VERSION;
+    let cmp = version::compare_versions(latest.tag(), current);
+
+    if !force && cmp != std::cmp::Ordering::Greater {
+        if cmp == std::cmp::Ordering::Less {
+            spin.finish_ok(&format!(
+                "Local build v{current} is ahead of latest release {}",
+                latest.tag_name
+            ));
+            ui::verdict_card(
+                ui::Tone::Gold,
+                &format!("LOCAL BUILD AHEAD · v{current}"),
+                &ui::format_elapsed(started.elapsed()),
+                &[
+                    ("published", latest.tag_name.clone()),
+                    ("note", "Running a dev build or pending release".into()),
+                    (
+                        "downgrade",
+                        "Pass --force to reinstall the published release".into(),
+                    ),
+                ],
+            );
+        } else {
+            spin.finish_ok(&format!("Already on the latest release (v{current})"));
+            ui::verdict_card(
+                ui::Tone::Success,
+                &format!("ON THE LATEST RELEASE · v{current}"),
+                &ui::format_elapsed(started.elapsed()),
+                &[
+                    ("channel", version::install_channel_label().into()),
+                    ("reinstall", "Pass --force to reinstall this version".into()),
+                ],
+            );
         }
         return Ok(());
     }
 
-    if version::is_newer(latest.tag(), current) {
-        ui::info(&format!("Update available: v{current} -> {}", latest.tag()));
-    } else if version::compare_versions(latest.tag(), current) == std::cmp::Ordering::Less {
-        ui::warn(&format!(
-            "Local build (v{current}) is AHEAD of the latest release ({}).",
-            latest.tag()
-        ));
-        ui::warn("Downgrading is only possible with --force.");
-        if !force {
-            return Ok(());
+    match cmp {
+        std::cmp::Ordering::Greater => {
+            spin.finish_ok(&format!(
+                "Release {} available  (v{current} → {})",
+                latest.tag_name, latest.tag_name
+            ));
         }
-    } else {
-        ui::warn("Force update requested (same version)");
+        std::cmp::Ordering::Less => {
+            spin.finish_warn(&format!(
+                "Forcing downgrade: v{current} → {}",
+                latest.tag_name
+            ));
+        }
+        std::cmp::Ordering::Equal => {
+            spin.finish_warn(&format!(
+                "Force reinstall requested for {}",
+                latest.tag_name
+            ));
+        }
     }
 
     // Dry run: stop here.
     if dry_run {
-        ui::info("Dry run (--check): skipping download and install");
-        ui::hint("To update: bladebro -u");
+        ui::verdict_card(
+            ui::Tone::Gold,
+            &format!("UPDATE AVAILABLE · v{current} → {}", latest.tag_name),
+            &ui::format_elapsed(started.elapsed()),
+            &[
+                ("mode", "dry run (--check) — no files touched".into()),
+                ("upgrade", version::update_command_hint().into()),
+            ],
+        );
         return Ok(());
     }
 
-    // npm detection: warn if installed via npm.
-    if version::is_npm_install() && !force {
-        ui::warn("This binary was installed via npm (detected node_modules in path)");
-        ui::warn("Self-updating would break the npm installation.");
-        println!();
-        ui::info("To update via npm:");
-        ui::hint("npm update -g bladebro");
-        println!();
-        ui::hint("Or force self-update: bladebro -u --force");
+    // Package-manager detection: redirect to npm/pnpm/bun/yarn/Homebrew unless --force.
+    if version::is_package_managed() && !force {
+        let channel = version::install_channel_label();
+        let cmd = version::update_command_hint();
+        ui::verdict_card(
+            ui::Tone::Warn,
+            &format!("MANAGED BY {} — USE YOUR PACKAGE MANAGER", channel.to_uppercase()),
+            &ui::format_elapsed(started.elapsed()),
+            &[
+                ("reason", format!("Installed via {channel}; overwriting in-place would drift from your package manager")),
+                ("upgrade", cmd.into()),
+                ("override", "bladebro -u --force (forces direct binary swap)".into()),
+            ],
+        );
         return Ok(());
     }
 
     // Android publishes no builds: the released Linux binaries are glibc-linked
-    // and cannot run on bionic, so a self-update here would download an asset
-    // that can never start — and fail the run check with a misleading message.
-    // Refuse before the download and name the actual update path.
+    // and cannot run on bionic, so refuse before downloading.
     if cfg!(target_os = "android") {
         return Err(BladeError::Other(
             "self-update is not available on Android: the published Linux binaries are glibc builds and cannot run on Android.\n  \
@@ -114,96 +175,187 @@ async fn update(args: &[String]) -> Result<()> {
         ));
     }
 
-    // Step 2: download the binary.
-    let asset_name = version::platform_asset_name();
-    let asset_size = version::find_asset(&latest).map(|a| a.size).unwrap_or(0);
-    let download_label = if asset_size > 0 {
-        format!("{asset_name} (~{:.1} MB)", asset_size as f64 / 1_000_000.0)
-    } else {
-        asset_name
-    };
-    ui::step(2, 4, &format!("Downloading {download_label}..."));
+    // Pre-flight writability check BEFORE spending bandwidth on an 8 MB download.
+    swap::check_writable_current()?;
 
-    // `binary_path` owns the temp file: every return below drops it and
-    // removes the file (a failed verify or swap used to leave it behind).
+    // Phase 2: concurrent binary download + SHA-256 sidecar fetch with live progress bar.
+    let asset_name = version::platform_asset_name();
+    ui::phase(2, 4, &format!("Acquiring {asset_name} & SHA-256 seal"));
     let binary_path = download::download_binary(&latest).await?;
-    ui::info(&format!(
-        "Downloaded {:.1} MB",
-        binary_path.size as f64 / 1_000_000.0
+
+    // Phase 3: integrity verification (SHA-256 + magic + size + live execution probe).
+    ui::phase(3, 4, "Verifying cryptographic seal & binary health");
+    if let Some(ref digest) = binary_path.sha256 {
+        let short = if digest.len() >= 16 {
+            format!("{}…{}", &digest[..8], &digest[digest.len() - 8..])
+        } else {
+            digest.clone()
+        };
+        ui::success(&format!("SHA-256 seal verified  (sha256:{short})"));
+    } else {
+        ui::warn("Legacy pre-3.3.0 release — no .sha256 sidecar published");
+    }
+
+    download::verify_binary(&binary_path)?;
+    ui::success(&format!(
+        "Platform binary verified  ({} · magic + bounds + exec mode)",
+        ui::format_bytes(binary_path.size)
     ));
 
-    // Step 3: verify the download.
-    ui::step(3, 4, "Verifying...");
-    download::verify_binary(&binary_path)?;
-    ui::info("Binary verified (magic + size)");
-
-    // Try executing the binary to confirm it runs.
+    let probe_spin = ui::Spinner::start("Running live startup smoke test (--version)...");
     match download::verify_binary_runs(&binary_path).await {
-        Ok(()) => ui::info("Binary starts: confirmed"),
+        Ok(()) => probe_spin.finish_ok("Live startup verified — new binary executes cleanly"),
         Err(e) => {
+            probe_spin.finish_fail("Live startup probe failed");
             return Err(BladeError::Other(format!(
-                "downloaded binary failed verification: {e}\n\
-                 The binary may be for the wrong architecture or corrupted.\n\
+                "downloaded binary failed verification: {e}\n  \
+                 The binary may be for the wrong architecture or corrupted.\n  \
                  Try: npm install -g bladebro"
             )));
         }
     }
 
-    // Step 4: swap.
-    ui::step(4, 4, "Installing...");
-    let backup = swap::swap_binary(&binary_path.path)?;
-    ui::info(&format!(
-        "Backed up previous version to {}",
-        backup.display()
+    // Phase 4: backup + atomic swap + stale daemon stop.
+    ui::phase(4, 4, "Installing & sealing backup vault");
+    let swap_spin = ui::Spinner::start("Backing up current binary & performing atomic swap...");
+    let backup = match swap::swap_binary(&binary_path.path) {
+        Ok(b) => {
+            swap_spin.finish_ok("Atomic binary swap complete");
+            b
+        }
+        Err(e) => {
+            swap_spin.finish_fail("Atomic swap failed");
+            return Err(e);
+        }
+    };
+
+    let daemon_stopped = crate::cli::stop_daemon_if_running().await;
+    let mut rows = vec![
+        ("release", format!("v{current}  →  {}", latest.tag_name)),
+        ("vault", backup.display().to_string()),
+        ("rollback", "bladebro --rollback".into()),
+    ];
+    if daemon_stopped {
+        rows.push((
+            "daemon",
+            format!(
+                "stopped old daemon — next command starts on {}",
+                latest.tag_name
+            ),
+        ));
+    }
+    rows.push((
+        "clients",
+        "Restart any running MCP client to pick up the new binary".into(),
     ));
 
-    ui::success(&format!("Updated to {}", latest.tag()));
-    ui::hint("Restart your MCP client to use the new version.");
-    ui::hint("If anything breaks: bladebro --rollback");
+    ui::verdict_card(
+        ui::Tone::Success,
+        &format!("UPGRADE COMPLETE · {}", latest.tag_name),
+        &ui::format_elapsed(started.elapsed()),
+        &rows,
+    );
     Ok(())
 }
 
-/// `bladebro -v` / `bladebro --version` — show version + update status.
+/// `bladebro -v` / `bladebro --version` — show version identity card + live
+/// release status.
 ///
-/// Uses `fetch_latest_tag()` (non-rate-limited github.com redirect + npm)
-/// instead of `fetch_latest()` (GitHub API, 60 req/hr unauthenticated).
+/// Uses `fetch_latest_tag()` (non-rate-limited GitHub HEAD redirect + npm).
 /// Three honest states, never a misleading "up to date":
 /// - behind:  update available
 /// - equal:   on the latest release
 /// - ahead:   local build is newer than the latest release
 async fn show_version() -> Result<()> {
-    println!("bladebro v{CURRENT_VERSION} ({BUILD_ID})");
+    let platform = version::platform_label();
+    let channel = version::install_channel_label();
+    let check_disabled = std::env::var("BLADE_NO_UPDATE_CHECK")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
-    // Show install method.
-    let method = version::install_method();
-    if method == "npm" {
-        println!("  install: npm");
-    } else if method == "source" {
-        println!("  install: source build");
-    }
+    let fetched = if check_disabled {
+        None
+    } else {
+        let spin = ui::Spinner::start("Checking latest release...");
+        let res = version::fetch_latest_tag().await;
+        spin.finish_clear();
+        Some(res)
+    };
 
-    match version::fetch_latest_tag().await {
-        Ok(latest_tag) => {
-            match version::compare_versions(&latest_tag, CURRENT_VERSION) {
-                std::cmp::Ordering::Greater => {
-                    println!("  update available: {latest_tag}");
-                    if cfg!(target_os = "android") {
-                        println!("  (no Android builds are published — update from your package manager)");
-                    } else {
-                        println!("  run: bladebro -u");
-                    }
-                }
-                std::cmp::Ordering::Equal => {
-                    println!("  on the latest release");
-                }
-                std::cmp::Ordering::Less => {
-                    println!("  ahead of the latest release ({latest_tag})");
-                    println!("  (local build is newer — dev build or pending release)");
-                }
-            }
+    match fetched {
+        None => {
+            ui::version_card(&ui::VersionCard {
+                version: CURRENT_VERSION,
+                build_id: BUILD_ID,
+                platform: &platform,
+                install_channel: channel,
+                status_tone: ui::Tone::Smoke,
+                status_badge: "OFFLINE",
+                status_detail: "update check disabled (BLADE_NO_UPDATE_CHECK=1)",
+                action_cmd: None,
+            });
         }
-        Err(_) => {
-            println!("  (could not check for updates)");
+        Some(Ok(latest_tag)) => match version::compare_versions(&latest_tag, CURRENT_VERSION) {
+            std::cmp::Ordering::Greater => {
+                let hint = version::update_command_hint();
+                let detail = if cfg!(target_os = "android") {
+                    format!("v{latest_tag} available (no Android prebuilds — use package manager)")
+                } else {
+                    format!("update available: v{CURRENT_VERSION} → v{latest_tag}")
+                };
+                let cmd = if cfg!(target_os = "android") {
+                    None
+                } else {
+                    Some(hint)
+                };
+                ui::version_card(&ui::VersionCard {
+                    version: CURRENT_VERSION,
+                    build_id: BUILD_ID,
+                    platform: &platform,
+                    install_channel: channel,
+                    status_tone: ui::Tone::Gold,
+                    status_badge: "UPDATE",
+                    status_detail: &detail,
+                    action_cmd: cmd,
+                });
+            }
+            std::cmp::Ordering::Equal => {
+                ui::version_card(&ui::VersionCard {
+                    version: CURRENT_VERSION,
+                    build_id: BUILD_ID,
+                    platform: &platform,
+                    install_channel: channel,
+                    status_tone: ui::Tone::Success,
+                    status_badge: "LATEST",
+                    status_detail: "on the latest release",
+                    action_cmd: None,
+                });
+            }
+            std::cmp::Ordering::Less => {
+                let detail = format!("ahead of latest release (v{latest_tag}) — local dev build");
+                ui::version_card(&ui::VersionCard {
+                    version: CURRENT_VERSION,
+                    build_id: BUILD_ID,
+                    platform: &platform,
+                    install_channel: channel,
+                    status_tone: ui::Tone::Warn,
+                    status_badge: "AHEAD",
+                    status_detail: &detail,
+                    action_cmd: None,
+                });
+            }
+        },
+        Some(Err(_)) => {
+            ui::version_card(&ui::VersionCard {
+                version: CURRENT_VERSION,
+                build_id: BUILD_ID,
+                platform: &platform,
+                install_channel: channel,
+                status_tone: ui::Tone::Smoke,
+                status_badge: "OFFLINE",
+                status_detail: "could not reach release registry",
+                action_cmd: None,
+            });
         }
     }
     Ok(())

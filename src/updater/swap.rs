@@ -1,28 +1,85 @@
-//! Atomic binary swap and rollback.
+//! Atomic binary swap and verified rollback (cross-platform: Linux, macOS, Windows).
 
-use crate::error::{BladeError, Result};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use super::download;
+use super::ui;
+use super::version;
+use crate::error::{BladeError, Result};
 
 /// Maximum number of backups to keep. Old backups are pruned.
 const MAX_BACKUPS: usize = 5;
 
+/// Pre-flight writability check for the current binary's directory.
+/// Called before downloading so permission errors fail instantaneously.
+pub(crate) fn check_writable_current() -> Result<()> {
+    let current = std::env::current_exe()
+        .map_err(|e| BladeError::Other(format!("cannot find current exe: {e}")))?;
+    check_writable(&current)
+}
+
+/// Remove a leftover Windows `*.exe.old` from an earlier in-place update
+/// once the old process has exited and released its lock.
+#[cfg(windows)]
+pub(crate) fn sweep_windows_old(current: &Path) {
+    let old_path = current.with_extension("exe.old");
+    if old_path.exists() {
+        let _ = std::fs::remove_file(&old_path);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn sweep_windows_old(_current: &Path) {}
+
 /// Swap the current binary with a downloaded one.
 ///
-/// 1. Back up the current binary to ~/.blade/backups/
-/// 2. Move the downloaded binary into place
-/// 3. Set executable permissions (Unix)
-/// 4. Prune old backups (keep last MAX_BACKUPS)
-///
-/// On Windows: renames the running exe first (running exes are locked
-/// for overwrite but not for rename on Windows).
+/// 1. Pre-flight writability check.
+/// 2. Back up the current binary FIRST (before touching `current`) to
+///    `<data_dir>/backups/bladebro-v<CURRENT>` using O_EXCL on Unix.
+/// 3. Atomically rename the downloaded binary into place (on Windows:
+///    rename running exe aside to `.exe.old` first, then rename new binary
+///    with brief retry for AV scanners, restoring on error).
+/// 4. Set executable permissions (Unix) and prune old backups.
 pub fn swap_binary(downloaded: &Path) -> Result<PathBuf> {
     let current = std::env::current_exe()
         .map_err(|e| BladeError::Other(format!("cannot find current exe: {e}")))?;
 
-    // Pre-flight: check if we can write to the current binary's location.
     check_writable(&current)?;
+    sweep_windows_old(&current);
 
-    // Backup the current binary.
+    let backup = write_backup(&current)?;
+
+    #[cfg(windows)]
+    {
+        install_windows_exe(downloaded, &current)?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(downloaded, &current)
+            .map_err(|e| BladeError::Other(format!("cannot install new binary: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&current)
+                .map_err(|e| BladeError::Other(format!("cannot read new binary: {e}")))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&current, perms)
+                .map_err(|e| BladeError::Other(format!("cannot set permissions: {e}")))?;
+        }
+    }
+
+    let backup_dir = crate::platform::blade_dir().join("backups");
+    prune_backups(&backup_dir);
+
+    Ok(backup)
+}
+
+/// Copy `current` to `<data_dir>/backups/bladebro-v<CURRENT>` safely before
+/// modifying the live executable.
+fn write_backup(current: &Path) -> Result<PathBuf> {
     let backup_dir = crate::platform::blade_dir().join("backups");
     crate::platform::secure_create_dir_all(&backup_dir)
         .map_err(|e| BladeError::Other(format!("cannot create backup dir: {e}")))?;
@@ -40,80 +97,86 @@ pub fn swap_binary(downloaded: &Path) -> Result<PathBuf> {
         }
     }
 
-    #[cfg(windows)]
+    // O_EXCL copy: creation at an existing object (a raced-in symlink)
+    // fails instead of writing through it.
     {
-        // On Windows, we can't overwrite a running exe. But we CAN
-        // rename it. So: rename current to .old, copy new in place.
-        let old_path = current.with_extension("exe.old");
-        if old_path.exists() {
-            let _ = std::fs::remove_file(&old_path);
-        }
-        std::fs::rename(&current, &old_path).map_err(|e| {
-            BladeError::Other(format!(
-                "cannot rename current exe (is bladebro running?). Close it first. Error: {e}"
-            ))
-        })?;
-        if let Err(e) = std::fs::copy(downloaded, &current) {
-            // Put the old binary back: without this a failed copy left the
-            // install with NO binary at the original path.
-            let _ = std::fs::rename(&old_path, &current);
-            return Err(BladeError::Other(format!("cannot install new binary: {e}")));
-        }
-        std::fs::copy(&old_path, &backup)
+        let mut src = std::fs::File::open(current)
+            .map_err(|e| BladeError::Other(format!("cannot open current binary: {e}")))?;
+        let mut dst = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
             .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
-        let _ = std::fs::remove_file(downloaded);
+        std::io::copy(&mut src, &mut dst)
+            .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
+        use std::io::Write;
+        dst.flush()
+            .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
+        let _ = dst.sync_data();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = std::fs::metadata(current) {
+            let _ = std::fs::set_permissions(
+                &backup,
+                std::fs::Permissions::from_mode(m.permissions().mode() & 0o777),
+            );
+        }
+    }
+    Ok(backup)
+}
+
+/// On Windows, a running `.exe` cannot be overwritten directly, but it CAN be
+/// renamed. Move `current` aside to `.exe.old`, then atomically rename
+/// `staged` into place (with brief backoff for antivirus scanners), falling
+/// back to copy and restoring `current` on failure.
+#[cfg(windows)]
+fn install_windows_exe(staged: &Path, current: &Path) -> Result<()> {
+    let old_path = current.with_extension("exe.old");
+    if old_path.exists() {
         let _ = std::fs::remove_file(&old_path);
     }
+    std::fs::rename(current, &old_path).map_err(|e| {
+        BladeError::Other(format!(
+            "cannot rename current exe (is another bladebro running?). Close it first. Error: {e}"
+        ))
+    })?;
 
-    #[cfg(not(windows))]
-    {
-        // On Unix, we can atomically replace a running binary.
-        // The kernel keeps the old inode alive until the process exits.
-        // O_EXCL copy: creation at an existing object (a raced-in symlink)
-        // fails instead of writing through it.
-        {
-            let mut src = std::fs::File::open(&current)
-                .map_err(|e| BladeError::Other(format!("cannot open current binary: {e}")))?;
-            let mut dst = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&backup)
-                .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
-            std::io::copy(&mut src, &mut dst)
-                .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
-            use std::io::Write;
-            dst.flush()
-                .map_err(|e| BladeError::Other(format!("cannot save backup: {e}")))?;
+    // Same directory → rename is instant & atomic. Retry briefly in case
+    // Windows Defender briefly holds a scan handle on the newly written file.
+    let mut installed = false;
+    let mut last_err: Option<std::io::Error> = None;
+    for delay_ms in [0u64, 100, 250, 500] {
+        if delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(m) = std::fs::metadata(&current) {
-                let _ = std::fs::set_permissions(
-                    &backup,
-                    std::fs::Permissions::from_mode(m.permissions().mode() & 0o777),
-                );
+        match std::fs::rename(staged, current) {
+            Ok(()) => {
+                installed = true;
+                break;
             }
-        }
-        std::fs::rename(downloaded, &current)
-            .map_err(|e| BladeError::Other(format!("cannot install new binary: {e}")))?;
-        // Set executable permission.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&current)
-                .map_err(|e| BladeError::Other(format!("cannot read new binary: {e}")))?
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&current, perms)
-                .map_err(|e| BladeError::Other(format!("cannot set permissions: {e}")))?;
+            Err(e) => last_err = Some(e),
         }
     }
 
-    // Prune old backups.
-    prune_backups(&backup_dir);
+    if !installed {
+        if let Err(copy_err) = std::fs::copy(staged, current) {
+            let _ = std::fs::rename(&old_path, current);
+            let reason = last_err
+                .map(|r| format!("rename: {r}; copy: {copy_err}"))
+                .unwrap_or_else(|| copy_err.to_string());
+            return Err(BladeError::Other(format!(
+                "cannot install new binary: {reason}"
+            )));
+        }
+        let _ = std::fs::remove_file(staged);
+    }
 
-    Ok(backup)
+    // Best-effort cleanup; Windows locks the running old exe until exit, so
+    // `sweep_windows_old` removes it on the next update/rollback if busy now.
+    let _ = std::fs::remove_file(&old_path);
+    Ok(())
 }
 
 /// Check if the current binary's location is writable.
@@ -121,9 +184,6 @@ pub fn swap_binary(downloaded: &Path) -> Result<PathBuf> {
 fn check_writable(current: &Path) -> Result<()> {
     let parent = current.parent().unwrap_or(std::path::Path::new("."));
 
-    // Try creating a temp file in the same directory. Random suffix +
-    // O_EXCL: a fixed name let a local attacker pre-place a symlink and
-    // turn this probe into an arbitrary-file overwrite.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -142,24 +202,26 @@ fn check_writable(current: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Should not happen with a unique name; treat as writable-dir
-            // evidence and move on.
             let _ = std::fs::remove_file(&test_file);
             Ok(())
         }
         Err(e) => {
-            let method = super::version::install_method();
+            let update_cmd = version::update_command_hint();
             let hint = match e.kind() {
                 std::io::ErrorKind::PermissionDenied => {
-                    if method == "npm" {
-                        "This binary was installed via npm. \
-                         Use: npm update -g bladebro\n\
-                         Or if you need self-update: \
-                         sudo bladebro -u --force"
+                    if version::is_package_managed() {
+                        format!(
+                            "This binary is managed by {}. Use: {update_cmd}\n  \
+                             Or if you need self-update: sudo bladebro -u --force",
+                            version::install_channel_label()
+                        )
+                    } else if cfg!(windows) {
+                        "Permission denied. Run your terminal as Administrator, \
+                         or update via npm: npm install -g bladebro"
                             .to_string()
                     } else {
-                        "Permission denied. Try: sudo bladebro -u\n\
-                             Or update via npm: npm install -g bladebro"
+                        "Permission denied. Try: sudo bladebro -u\n  \
+                         Or update via npm: npm install -g bladebro"
                             .to_string()
                     }
                 }
@@ -184,14 +246,12 @@ fn prune_backups(backup_dir: &Path) {
         Err(_) => return,
     };
 
-    // Filter to bladebro-v* files.
     backups.retain(|e| e.file_name().to_string_lossy().starts_with("bladebro-v"));
 
     if backups.len() <= MAX_BACKUPS {
         return;
     }
 
-    // Sort by modification time, newest first.
     backups.sort_by_key(|e| {
         e.metadata()
             .and_then(|m| m.modified())
@@ -199,30 +259,29 @@ fn prune_backups(backup_dir: &Path) {
     });
     backups.reverse();
 
-    // Remove old backups beyond MAX_BACKUPS.
     for entry in backups.into_iter().skip(MAX_BACKUPS) {
         let _ = std::fs::remove_file(entry.path());
     }
 }
 
-/// List available backups (for rollback and display).
-fn list_backups(backup_dir: &Path) -> Vec<(PathBuf, String)> {
+/// List available backups (newest first).
+fn list_backups(backup_dir: &Path) -> Vec<(PathBuf, String, u64)> {
     let entries = match std::fs::read_dir(backup_dir) {
         Ok(d) => d,
         Err(_) => return vec![],
     };
 
-    let mut backups: Vec<(PathBuf, String)> = entries
+    let mut backups: Vec<(PathBuf, String, u64)> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().starts_with("bladebro-v"))
         .map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            (e.path(), name)
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            (e.path(), name, size)
         })
         .collect();
 
-    // Sort by modification time, newest first.
-    backups.sort_by_key(|(path, _)| {
+    backups.sort_by_key(|(path, _, _)| {
         std::fs::metadata(path)
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
@@ -233,137 +292,201 @@ fn list_backups(backup_dir: &Path) -> Vec<(PathBuf, String)> {
 
 /// Rollback to the previous binary.
 ///
-/// Finds the most recent backup in ~/.blade/backups/ and swaps it back.
-/// Verifies the backup is a valid binary before restoring.
+/// Finds the most recent verified backup in `<data_dir>/backups/`, stages it
+/// securely in the install directory, confirms it starts (`--version`), and
+/// atomically swaps it into place.
 pub async fn rollback() -> Result<()> {
-    super::ui::header("Bladebro Rollback");
+    let started = Instant::now();
+    let meta = format!(
+        "{} · {}",
+        version::platform_label(),
+        version::install_channel_label()
+    );
+    ui::masthead("Rollback", &meta);
 
     let backup_dir = crate::platform::blade_dir().join("backups");
     if !backup_dir.exists() {
         return Err(BladeError::Other(
-            "no backups found. Nothing to roll back to.".into(),
+            "no backups found in vault. Nothing to roll back to.".into(),
         ));
     }
 
     let backups = list_backups(&backup_dir);
     if backups.is_empty() {
         return Err(BladeError::Other(
-            "no backups found. Nothing to roll back to.".into(),
+            "no backups found in vault. Nothing to roll back to.".into(),
         ));
     }
 
-    // Show available backups if more than one.
-    if backups.len() > 1 {
-        super::ui::info(&format!(
-            "{} backup{} available:",
-            backups.len(),
-            if backups.len() == 1 { "" } else { "s" }
-        ));
-        for (i, (_, name)) in backups.iter().take(5).enumerate() {
-            let marker = if i == 0 { " ← most recent" } else { "" };
-            super::ui::hint(&format!("{name}{marker}"));
-        }
+    // Fail fast on permissions before staging anything.
+    check_writable_current()?;
+
+    // Display the Backup Vault.
+    ui::section("Backup Vault");
+    for (i, (_, name, size)) in backups.iter().take(MAX_BACKUPS).enumerate() {
+        let size_str = ui::format_bytes(*size);
+        let detail = if i == 0 {
+            format!("{size_str}  ◀ active target")
+        } else {
+            size_str
+        };
+        let tone = if i == 0 {
+            ui::Tone::Gold
+        } else {
+            ui::Tone::Smoke
+        };
+        ui::dossier_row(tone, name, &detail, None, 20);
     }
 
-    let (backup_path, backup_name) = &backups[0];
-    super::ui::info(&format!("Rolling back to {backup_name}"));
-
-    // Verify the backup is a valid binary before restoring.
-    if let Err(e) = verify_backup(backup_path) {
-        // Try the next backup if the most recent one is corrupted.
-        if backups.len() > 1 {
-            super::ui::warn(&format!(
-                "most recent backup is corrupted ({e}), trying next one..."
-            ));
-            for (path, name) in backups.iter().skip(1) {
-                super::ui::info(&format!("Trying {name}..."));
-                if verify_backup(path).is_ok() {
-                    return do_rollback(path, name).await;
-                }
+    ui::section("Restore");
+    for (idx, (path, name, _)) in backups.iter().enumerate() {
+        let spin = ui::Spinner::start(&format!("Verifying backup {name}..."));
+        if let Err(e) = verify_backup(path) {
+            spin.finish_warn(&format!("{name} failed static check ({e})"));
+            if idx + 1 < backups.len() {
+                continue;
             }
-            return Err(BladeError::Other(
-                "all backups are corrupted. Nothing to roll back to.\n\
+            return Err(BladeError::Other(format!(
+                "no valid backups could be restored (last error: {e})\n  \
                  Reinstall: npm install -g bladebro"
-                    .into(),
-            ));
+            )));
         }
-        return Err(BladeError::Other(format!(
-            "backup is corrupted and cannot be restored: {e}\n\
-             Reinstall: npm install -g bladebro"
-        )));
+        spin.finish_ok(&format!(
+            "Backup {name} passed ownership, magic & size checks"
+        ));
+
+        match do_rollback(path, name, started).await {
+            Ok(()) => return Ok(()),
+            Err(e) if idx + 1 < backups.len() => {
+                ui::warn(&format!(
+                    "{name} could not be restored ({e}); trying older backup..."
+                ));
+            }
+            Err(e) => return Err(e),
+        }
     }
 
-    do_rollback(backup_path, backup_name).await
+    Err(BladeError::Other(
+        "all backups are corrupted. Nothing to roll back to.\n  \
+         Reinstall: npm install -g bladebro"
+            .into(),
+    ))
 }
 
-async fn do_rollback(backup_path: &Path, backup_name: &str) -> Result<()> {
+/// Stage a backup into a unique file inside `parent`, verify it executes,
+/// and atomically swap it into `current`.
+async fn do_rollback(backup_path: &Path, backup_name: &str, started: Instant) -> Result<()> {
     let current = std::env::current_exe()
         .map_err(|e| BladeError::Other(format!("cannot find current exe: {e}")))?;
+    let parent = current.parent().unwrap_or(Path::new("."));
+    sweep_windows_old(&current);
 
+    let spin = ui::Spinner::start(&format!("Staging & smoke-testing {backup_name}..."));
+
+    // Stage into a unique temp file in the SAME directory as `current` so the
+    // final rename is atomic on Unix (zero window where `current` is absent)
+    // and avoids predictable `.old` paths. On Windows, append `.exe` so
+    // `verify_exe_runs` can spawn it before swap.
+    let staged_base = download::create_secure_tmp(parent)?;
+    let staged = if cfg!(windows) {
+        let exe_staged = staged_base.with_extension("exe");
+        let _ = std::fs::remove_file(&staged_base);
+        exe_staged
+    } else {
+        staged_base
+    };
+
+    // Guard so any early error removes the staged file cleanly.
+    struct StageGuard(PathBuf);
+    impl Drop for StageGuard {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+    }
+    let _guard = StageGuard(staged.clone());
+
+    {
+        let mut src = std::fs::File::open(backup_path)
+            .map_err(|e| BladeError::Other(format!("cannot open backup: {e}")))?;
+        let mut dst = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&staged)
+            .map_err(|e| BladeError::Other(format!("cannot create staging file: {e}")))?;
+        std::io::copy(&mut src, &mut dst)
+            .map_err(|e| BladeError::Other(format!("cannot stage backup: {e}")))?;
+        use std::io::Write;
+        dst.flush()
+            .map_err(|e| BladeError::Other(format!("cannot flush staging file: {e}")))?;
+        let _ = dst.sync_data();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| BladeError::Other(format!("cannot set executable permissions: {e}")))?;
+    }
+
+    // Confirm the staged backup actually starts on this host before replacing `current`.
+    if let Err(e) = download::verify_exe_runs(&staged).await {
+        spin.finish_fail(&format!("{backup_name} failed live startup check"));
+        return Err(BladeError::Other(format!(
+            "backup {backup_name} failed startup verification: {e}"
+        )));
+    }
+    spin.finish_ok(&format!(
+        "Backup {backup_name} starts cleanly (--version verified)"
+    ));
+
+    let swap_spin = ui::Spinner::start("Performing atomic binary swap...");
     #[cfg(windows)]
     {
-        let old_path = current.with_extension("exe.old");
-        if old_path.exists() {
-            let _ = std::fs::remove_file(&old_path);
+        if let Err(e) = install_windows_exe(&staged, &current) {
+            swap_spin.finish_fail("Atomic swap failed");
+            return Err(e);
         }
-        std::fs::rename(&current, &old_path).map_err(|e| {
-            BladeError::Other(format!(
-                "cannot rename current exe (is bladebro running?). Close it first. Error: {e}"
-            ))
-        })?;
-        if let Err(e) = std::fs::copy(backup_path, &current) {
-            // The current binary was already renamed aside — put it back so
-            // a failed restore never leaves the install empty.
-            let _ = std::fs::rename(&old_path, &current);
-            return Err(BladeError::Other(format!("cannot restore backup: {e}")));
-        }
-        let _ = std::fs::remove_file(&old_path);
     }
 
     #[cfg(not(windows))]
     {
-        // On Unix, rename works on a running binary (the kernel
-        // keeps the old inode alive until the process exits). But
-        // fs::copy fails with ETXTBSY. So: rename current out of the
-        // way, copy backup to current path, delete the old binary.
-        let old_path = current.with_extension("old");
-        if old_path.exists() {
-            let _ = std::fs::remove_file(&old_path);
-        }
-        std::fs::rename(&current, &old_path)
-            .map_err(|e| BladeError::Other(format!("cannot move current binary: {e}")))?;
-        if let Err(e) = std::fs::copy(backup_path, &current) {
-            // The current binary was already renamed aside — put it back so
-            // a failed restore never leaves the install empty.
-            let _ = std::fs::rename(&old_path, &current);
+        if let Err(e) = std::fs::rename(&staged, &current) {
+            swap_spin.finish_fail("Atomic swap failed");
             return Err(BladeError::Other(format!("cannot restore backup: {e}")));
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&current)
-                .map_err(|e| BladeError::Other(format!("cannot read restored binary: {e}")))?
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&current, perms)
-                .map_err(|e| BladeError::Other(format!("cannot set permissions: {e}")))?;
-        }
-        let _ = std::fs::remove_file(&old_path);
     }
+    swap_spin.finish_ok(&format!("Swapped {} atomically", current.display()));
 
-    super::ui::success(&format!("Rolled back to {backup_name}"));
-    super::ui::hint("Restart your MCP client to use the restored version.");
+    let daemon_stopped = crate::cli::stop_daemon_if_running().await;
+    let mut rows = vec![
+        ("restored", backup_name.to_string()),
+        ("binary", current.display().to_string()),
+    ];
+    if daemon_stopped {
+        rows.push((
+            "daemon",
+            "stopped stale daemon — next command boots on restored version".into(),
+        ));
+    }
+    rows.push((
+        "next",
+        "Restart any running MCP client to pick up the restored binary".into(),
+    ));
+
+    ui::verdict_card(
+        ui::Tone::Success,
+        &format!("ROLLBACK COMPLETE · {backup_name}"),
+        &ui::format_elapsed(started.elapsed()),
+        &rows,
+    );
     Ok(())
 }
 
 /// Verify a backup file is a valid binary (magic bytes + size) AND a
-/// regular file owned by the current user. SECURITY: the backups tree may
-/// be writable by a local co-user (degraded HOME resolution, relocated
-/// BLADE_HOME/XDG_STATE_HOME, legacy group-writable trees). A planted
-/// "backup" that passes magic+size is installed over the executable and
-/// chmodded 0755 by do_rollback — code execution at the next launch.
-/// Ownership is the one property the planter cannot forge: only the
-/// victim's own swap_binary writes create files owned by this uid.
+/// regular file owned by the current user.
 fn verify_backup(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -397,9 +520,6 @@ fn verify_backup(path: &Path) -> Result<()> {
         return Err(BladeError::Other("backup file too small".into()));
     }
 
-    // Shared with the download verifier (updater/download.rs) — one
-    // definition, so the macOS byte-order bug fixed there cannot survive
-    // here (this copy rejected every real darwin backup too).
     let magic_ok = crate::updater::download::binary_magic_ok(&data);
 
     if !magic_ok {
@@ -420,13 +540,10 @@ fn verify_backup(path: &Path) -> Result<()> {
 mod backup_verify_tests {
     use super::*;
 
-    /// The magic bytes of this platform's real release artifacts (must
-    /// agree with `download::binary_magic_ok`).
     fn platform_magic(data: &mut [u8]) {
         if cfg!(any(target_os = "linux", target_os = "android")) {
             data[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
         } else if cfg!(target_os = "macos") {
-            // Real darwin artifact header: MH_CIGAM_64.
             data[..4].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]);
         } else if cfg!(windows) {
             data[..2].copy_from_slice(b"MZ");
@@ -459,11 +576,6 @@ mod backup_verify_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `verify_backup` must accept a file whose magic matches this
-    /// platform's real release artifacts (via the shared
-    /// `download::binary_magic_ok`). Regression: the macOS arm used to
-    /// reject the little-endian Mach-O bytes every darwin asset starts
-    /// with, so rollback refused every valid backup on macOS.
     #[test]
     fn verify_backup_accepts_platform_real_magic() {
         let dir = std::env::temp_dir().join(format!("blade-swap-verify-{}", std::process::id()));
@@ -477,7 +589,6 @@ mod backup_verify_tests {
             verify_backup(&path).is_ok(),
             "a real-artifact-magic backup must verify"
         );
-        // Corrupting the magic must refuse it.
         let mut bad = data.clone();
         bad[0] ^= 0xFF;
         std::fs::write(&path, &bad).unwrap();

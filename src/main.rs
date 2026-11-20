@@ -83,16 +83,17 @@ fn exit_immediately(code: i32) -> ! {
     std::process::exit(code);
 }
 
-/// One error line: `bladebro:` dim, message red — or yellow for usage errors
-/// (a typo is not a failure).
+/// One error line: crimson/gold Noir prefix on stderr, yellow for usage
+/// errors (a typo is not a failure). Keeps classic `\x1b[31m` on 16-color
+/// stderr so legacy terminals and stream-isolation tests stay exact.
 fn print_error(e: &bladebro::BladeError) {
     let msg = e.to_string();
-    let styled = if matches!(e, bladebro::BladeError::Usage(_)) {
-        ui::err::yellow(&msg)
+    let (icon, styled) = if matches!(e, bladebro::BladeError::Usage(_)) {
+        (ui::err::gold("▲"), ui::err::yellow(&msg))
     } else {
-        ui::err::red(&msg)
+        (ui::err::bold_crimson("✖"), ui::err::red(&msg))
     };
-    eprintln!("{} {styled}", ui::err::dim("bladebro:"));
+    eprintln!("  {icon} {} {styled}", ui::err::dim("bladebro:"));
 }
 
 /// The `--json` failure object — the same shape run_cli prints.
@@ -246,9 +247,18 @@ fn run(args: Vec<String>, json_mode: bool) -> Result<()> {
                 "unknown command `{cmd}`{suggestion} (run `bladebro help` for the command list)"
             ));
         }
-        eprintln!("{} unknown command `{cmd}`{suggestion}", ui::err::red("✗"));
         eprintln!(
-            "  {}",
+            "  {} unknown command `{cmd}`{}",
+            ui::err::red("✗"),
+            if suggestion.is_empty() {
+                String::new()
+            } else {
+                ui::err::gold(&suggestion)
+            }
+        );
+        eprintln!(
+            "    {} {}",
+            ui::err::gold("›"),
             ui::err::dim("run `bladebro help` for the command list")
         );
         std::process::exit(2);

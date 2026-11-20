@@ -1,5 +1,16 @@
-//! Binary download and verification.
+//! Binary download and integrity verification.
+//!
+//! Performance & reliability design:
+//! - Reuses the shared pooled HTTP client (one rustls root store + keep-alive).
+//! - Fetches the `.sha256` sidecar **concurrently** with the binary download.
+//! - Computes SHA-256 in a **single streaming pass** on clean HTTP 200 downloads
+//!   (avoiding a second 8 MB disk read pass after download).
+//! - Checks disk space natively (`statvfs` / `GetDiskFreeSpaceExW`) as soon as
+//!   `Content-Length` arrives — before writing bytes to disk.
+//! - Recovers cleanly from HTTP 416 on stale partial files, skips wasted retries
+//!   on permanent 4xx errors, and falls back to legacy asset names on 404.
 
+use super::ui;
 use super::version;
 use crate::error::{BladeError, Result};
 use std::path::PathBuf;
@@ -13,6 +24,9 @@ pub struct DownloadedBinary {
     pub path: PathBuf,
     pub size: u64,
     pub asset_name: String,
+    /// Verified lowercase hex SHA-256 digest (None only for legacy <3.3.0 tags
+    /// without a sidecar).
+    pub sha256: Option<String>,
 }
 
 impl Drop for DownloadedBinary {
@@ -57,32 +71,14 @@ pub fn parse_checksum(text: &str) -> Option<String> {
     }
 }
 
-/// SECURITY: Verify the SHA256 hash of a downloaded binary against a
-/// checksum file from the same release.
+/// Fetch the expected SHA-256 digest for `asset_url`.
 ///
-/// Fail-closed policy: for release tags >= FIRST_CHECKSUMMED_TAG a missing,
-/// unreachable, or malformed checksum file ABORTS the update. The old
-/// warn-and-skip behavior turned the advertised "SHA256 verification"
-/// into a no-op whenever an attacker (or an ordinary release without
-/// checksum assets — none were uploaded before this fix) simply omitted
-/// the .sha256 file, and the downloaded binary was then executed by
-/// `verify_binary_runs` regardless.
-///
-/// G11: the checksum fetch is a safe, idempotent GET observation, so
-/// TRANSPORT-level failures (send error, reset, body-read drop) get a
-/// small bounded retry with backoff — the captured 4.3.0 failure was a
-/// transient transport send error while the asset was publicly reachable.
-/// PERMANENT outcomes (404, other non-success, malformed body, hash
-/// mismatch) never retry, and nothing is ever installed on a verification
-/// failure.
-async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str) -> Result<()> {
+/// Returns `Ok(Some(hash))` when a valid checksum is retrieved, `Ok(None)`
+/// only for legacy (< 3.3.0) tags without a sidecar, and `Err` (fail-closed)
+/// for all checksummed releases.
+async fn fetch_expected_sha256(asset_url: &str, tag: &str) -> Result<Option<String>> {
     let checksum_url = format!("{asset_url}.sha256");
-    let client = reqwest::Client::builder()
-        .user_agent("bladebro-updater")
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
-
+    let client = version::shared_download_client()?;
     let required = checksum_required(tag);
     let fetch_failed = |why: &str| -> BladeError {
         BladeError::Other(format!(
@@ -93,24 +89,26 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
         ))
     };
 
-    // Bounded transport retries (3 attempts, 400/800 ms backoff). Each
+    // Bounded transport retries (3 attempts, 300/600 ms backoff). Each
     // attempt refetches cleanly — the GET has no side effects.
     const ATTEMPTS: u32 = 3;
     let mut last_transport: Option<String> = None;
     let mut attempt = 0u32;
     let fetched: Option<(reqwest::StatusCode, std::result::Result<String, String>)> = loop {
         attempt += 1;
-        let mut resp = match client.get(&checksum_url).send().await {
+        let mut resp = match client
+            .get(&checksum_url)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 last_transport = Some(format!("{e}"));
                 if attempt >= ATTEMPTS {
                     break None;
                 }
-                eprintln!(
-                    "  retry: checksum fetch transport error (attempt {attempt}/{ATTEMPTS}): {e}"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(400 * attempt as u64)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
                 continue;
             }
         };
@@ -143,8 +141,7 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
                 if attempt >= ATTEMPTS {
                     break Some((status, Err(e.to_string())));
                 }
-                eprintln!("  retry: checksum body read failed (attempt {attempt}/{ATTEMPTS}): {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(400 * attempt as u64)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
             }
         }
     };
@@ -157,12 +154,7 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
                 last_transport.as_deref().unwrap_or("transport error")
             )))
         }
-        None => {
-            eprintln!(
-                "  warn: no checksum file found, skipping SHA256 verification (legacy release)"
-            );
-            return Ok(());
-        }
+        None => return Ok(None),
     };
 
     if status == reqwest::StatusCode::NOT_FOUND || !status.is_success() {
@@ -172,8 +164,7 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
                 checksum_url, status
             )));
         }
-        eprintln!("  warn: no checksum file found, skipping SHA256 verification (legacy release)");
-        return Ok(());
+        return Ok(None);
     }
 
     let checksum_text = body.map_err(|e| {
@@ -184,24 +175,21 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
         }
     })?;
 
-    let expected_hash = match parse_checksum(&checksum_text) {
-        Some(h) => h,
-        None if required => return Err(fetch_failed("malformed checksum file")),
-        None => {
-            eprintln!(
-                "  warn: invalid checksum file, skipping SHA256 verification (legacy release)"
-            );
-            return Ok(());
-        }
-    };
+    match parse_checksum(&checksum_text) {
+        Some(h) => Ok(Some(h)),
+        None if required => Err(fetch_failed("malformed checksum file")),
+        None => Ok(None),
+    }
+}
 
-    // Compute SHA256 of the downloaded binary.
+/// Compute lowercase hex SHA-256 of a file on disk.
+fn sha256_file(path: &std::path::Path) -> Result<String> {
     use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(binary_path)
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
         .map_err(|e| BladeError::Other(format!("cannot read binary for hash: {e}")))?;
     let mut hash = Sha256::new();
-    use std::io::Read;
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = [0u8; 64 * 1024];
     loop {
         let count = file
             .read(&mut buffer)
@@ -211,8 +199,23 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
         }
         hash.update(&buffer[..count]);
     }
-    let actual_hash: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
 
+/// Verify `binary_path` against `<asset_url>.sha256` (computing the hash from
+/// disk when `precomputed` is `None`).
+async fn verify_sha256_with_hash(
+    binary_path: &std::path::Path,
+    expected: Option<String>,
+    precomputed: Option<String>,
+) -> Result<Option<String>> {
+    let Some(expected_hash) = expected else {
+        return Ok(None);
+    };
+    let actual_hash = match precomputed {
+        Some(h) => h,
+        None => sha256_file(binary_path)?,
+    };
     if actual_hash != expected_hash {
         return Err(BladeError::Other(format!(
             "SHA256 mismatch! Expected {expected_hash}, got {actual_hash}.\n\
@@ -220,87 +223,152 @@ async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str
              Aborting update for safety."
         )));
     }
+    Ok(Some(actual_hash))
+}
 
-    eprintln!("  ok: SHA256 verified ({actual_hash})");
+/// SECURITY: Verify the SHA256 hash of a downloaded binary against a
+/// checksum file from the same release (kept as a clean helper for direct
+/// verification and tests).
+#[cfg(test)]
+async fn verify_sha256(binary_path: &std::path::Path, asset_url: &str, tag: &str) -> Result<()> {
+    let expected = fetch_expected_sha256(asset_url, tag).await?;
+    let _ = verify_sha256_with_hash(binary_path, expected, None).await?;
     Ok(())
 }
 
-/// Download the platform binary from a release.
-/// Retries up to 3 times with resume support.
+/// Download outcome classification so permanent 4xx errors don't waste retries.
+enum AttemptOutcome {
+    Done(u64, Option<String>),
+    NotFound(String),
+    Permanent(String),
+    Transient(String),
+}
+
+/// Download the platform binary from a release with concurrent SHA-256 sidecar
+/// fetch, single-pass hashing, resume support, legacy asset fallback, and a
+/// live animated Mafia Don progress bar on TTYs.
 pub async fn download_binary(release: &version::Release) -> Result<DownloadedBinary> {
-    let asset = version::find_asset(release).ok_or_else(|| {
+    let candidates = version::candidate_assets(release);
+    if candidates.is_empty() {
         let available = version::asset_names(release);
         let avail_str = if available.is_empty() {
             "(none)".to_string()
         } else {
             available.join(", ")
         };
-        BladeError::Other(format!(
+        return Err(BladeError::Other(format!(
             "no binary for {} in release {}. Available assets: {}\n\n\
              To update via npm:  npm install -g bladebro\n\
              Or build from source:  git clone https://github.com/dondai44423/bladebro.git && cd bladebro && cargo build --release",
             version::platform_label(),
             release.tag_name,
             avail_str,
-        ))
-    })?;
+        )));
+    }
 
     let current = std::env::current_exe()
         .map_err(|e| BladeError::Other(format!("cannot find current exe: {e}")))?;
     let dir = current.parent().unwrap_or(std::path::Path::new("."));
+
     // Unique, unpredictable temp name + O_EXCL create: a predictable
     // fixed name allowed a local attacker to pre-place a symlink at the
     // temp path and have the downloaded binary written through it.
-    // Owned from here on: every return below drops it and removes the
-    // temp file, a partial download included.
     let mut dl = DownloadedBinary {
         path: create_secure_tmp(dir)?,
         size: 0,
-        asset_name: asset.name.clone(),
+        asset_name: candidates[0].name.clone(),
+        sha256: None,
     };
 
     sweep_leftover_tmps(dir, &dl.path);
 
-    // Pre-flight: check available disk space if we know the asset size.
-    if asset.size > 0 {
-        if let Err(e) = check_disk_space(dir, asset.size) {
-            return Err(BladeError::Other(format!(
-                "insufficient disk space for download (~{} MB needed): {e}\n\
-                 Free space in {} and try again.",
-                asset.size / 1_000_000,
-                dir.display(),
-            )));
+    let mut last_err = String::new();
+    for (idx, asset) in candidates.iter().enumerate() {
+        dl.asset_name = asset.name.clone();
+        if asset.size > 0 {
+            if let Err(e) = check_disk_space(dir, asset.size) {
+                return Err(BladeError::Other(format!(
+                    "insufficient disk space for download (~{} MB needed): {e}\n\
+                     Free space in {} and try again.",
+                    asset.size / 1_000_000,
+                    dir.display(),
+                )));
+            }
+        }
+
+        // Launch the `.sha256` sidecar fetch concurrently with the binary download!
+        let checksum_fut = fetch_expected_sha256(&asset.browser_download_url, release.tag());
+        let bar = ui::ProgressBar::new(&asset.name, asset.size);
+        let download_fut = download_asset_with_retries(
+            &asset.browser_download_url,
+            &dl.path,
+            dir,
+            asset.size,
+            Some(&bar),
+        );
+
+        let (dl_outcome, checksum_res) = tokio::join!(download_fut, checksum_fut);
+
+        match dl_outcome {
+            AttemptOutcome::Done(size, stream_hash) => {
+                bar.finish_ok(size);
+                let expected = checksum_res?;
+                let verified_hash =
+                    verify_sha256_with_hash(&dl.path, expected, stream_hash).await?;
+                dl.size = size;
+                dl.sha256 = verified_hash;
+                return Ok(dl);
+            }
+            AttemptOutcome::NotFound(msg) => {
+                bar.abandon();
+                last_err = msg;
+                // Truncate temp before trying any fallback legacy asset name.
+                let _ = std::fs::File::create(&dl.path);
+                if idx + 1 < candidates.len() {
+                    continue;
+                }
+                return Err(BladeError::Other(last_err));
+            }
+            AttemptOutcome::Permanent(msg) => {
+                bar.abandon();
+                return Err(BladeError::Other(msg));
+            }
+            AttemptOutcome::Transient(msg) => {
+                bar.abandon();
+                last_err = msg;
+                return Err(BladeError::Other(format!(
+                    "download failed after 3 attempts: {last_err}"
+                )));
+            }
         }
     }
 
+    Err(BladeError::Other(format!("download failed: {last_err}")))
+}
+
+async fn download_asset_with_retries(
+    url: &str,
+    tmp: &std::path::Path,
+    dir: &std::path::Path,
+    expected_size: u64,
+    progress: Option<&ui::ProgressBar>,
+) -> AttemptOutcome {
     let mut last_err = String::new();
-    for attempt in 1..=3 {
+    for attempt in 1..=3u32 {
         if attempt > 1 {
-            eprintln!("  retry {attempt}/3...");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let backoff_ms = if attempt == 2 { 500 } else { 1500 };
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
         }
-        match download_once(&asset.browser_download_url, &dl.path, asset.size).await {
-            Ok(size) => {
-                // SECURITY: Verify SHA256 before the binary is ever
-                // executed or installed. Fail-closed for releases >=
-                // FIRST_CHECKSUMMED_TAG; abort + clean up on failure.
-                verify_sha256(&dl.path, &asset.browser_download_url, release.tag()).await?;
-                dl.size = size;
-                return Ok(dl);
-            }
-            Err(e) => {
-                last_err = e.to_string();
-                // KEEP the partial file: the next attempt resumes from it
-                // with a Range request. Deleting it here (as this used to)
-                // made the advertised resume support dead code — every
-                // retry was a full re-download. SHA256 verification still
-                // gates whatever a resumed download produces.
+        match download_once_inner(url, tmp, Some(dir), expected_size, progress).await {
+            AttemptOutcome::Done(size, hash) => return AttemptOutcome::Done(size, hash),
+            AttemptOutcome::NotFound(e) => return AttemptOutcome::NotFound(e),
+            AttemptOutcome::Permanent(e) => return AttemptOutcome::Permanent(e),
+            AttemptOutcome::Transient(e) => {
+                last_err = e;
             }
         }
     }
-    Err(BladeError::Other(format!(
-        "download failed after 3 attempts: {last_err}"
-    )))
+    AttemptOutcome::Transient(last_err)
 }
 
 /// A download temp untouched this long belongs to no live updater: a live
@@ -310,10 +378,7 @@ const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 6
 
 /// Remove download temps left in the install dir: this process's earlier
 /// attempts, and any temp that has sat untouched for STALE_TMP_AGE — a
-/// Ctrl-C'd or crashed run's partial download. Every run picks a fresh
-/// pid + nanos name, so the old pid-only sweep never matched an earlier
-/// run's file and none was ever removed. A fresh temp from another pid is
-/// left alone: it may belong to an updater that is running right now.
+/// Ctrl-C'd or crashed run's partial download.
 fn sweep_leftover_tmps(dir: &std::path::Path, keep: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -326,8 +391,6 @@ fn sweep_leftover_tmps(dir: &std::path::Path, keep: &std::path::Path) {
         if !name.starts_with(&any) || !name.ends_with(".tmp") || e.path() == keep {
             continue;
         }
-        // lstat: only regular files are ours — never follow or remove
-        // a planted symlink or directory by name.
         let Ok(meta) = std::fs::symlink_metadata(e.path()) else {
             continue;
         };
@@ -354,7 +417,6 @@ pub fn create_secure_tmp(dir: &std::path::Path) -> Result<std::path::PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    // Retry on the (astronomically unlikely) name collision.
     for _ in 0..5 {
         let tmp = dir.join(format!(
             "{TMP_PREFIX}-{}-{nanos}-{}.tmp",
@@ -400,55 +462,83 @@ fn rand_suffix() -> u64 {
         ^ n.wrapping_mul(0x1656_67B1_9E37_79F9)
 }
 
-/// Download a URL to a file, with resume support.
-///
-/// Resume logic: if a partial file exists, send a Range header.
-/// If the server responds 206 (Partial Content), append.
-/// If the server responds 200 (full content) despite the Range header,
-/// truncate and start fresh (server doesn't support range requests).
+/// Download a URL to a file, with resume support (wrapper for unit tests).
+#[cfg(test)]
 async fn download_once(url: &str, tmp: &std::path::Path, expected_size: u64) -> Result<u64> {
+    match download_once_inner(url, tmp, None, expected_size, None).await {
+        AttemptOutcome::Done(size, _) => Ok(size),
+        AttemptOutcome::NotFound(e)
+        | AttemptOutcome::Permanent(e)
+        | AttemptOutcome::Transient(e) => Err(BladeError::Other(e)),
+    }
+}
+
+/// Download a URL to a file, with resume support, live disk-space verification
+/// from `Content-Length`, real-time progress reporting, and single-pass
+/// streaming SHA-256 on full (HTTP 200) transfers.
+async fn download_once_inner(
+    url: &str,
+    tmp: &std::path::Path,
+    disk_dir: Option<&std::path::Path>,
+    expected_size: u64,
+    progress: Option<&ui::ProgressBar>,
+) -> AttemptOutcome {
+    use sha2::{Digest, Sha256};
     use std::io::Write;
-    // The post-download verifier has the same ceiling. Enforce it while
-    // reading, before a bad response can fill memory or the install disk.
+
     let limit = if expected_size == 0 {
         MAX_BINARY_SIZE
     } else {
         expected_size
     };
     if limit > MAX_BINARY_SIZE {
-        return Err(BladeError::Other("download size exceeds 500 MB".into()));
+        return AttemptOutcome::Permanent("download size exceeds 500 MB".into());
     }
     let existing = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
     if existing > limit {
-        return Err(BladeError::Other(
-            "partial download exceeds expected size".into(),
-        ));
+        return AttemptOutcome::Permanent("partial download exceeds expected size".into());
     }
-    // A connection can fail after all bytes reached disk. SHA256 still gates
-    // installation; requesting an empty suffix would only produce HTTP 416.
     if expected_size > 0 && existing == expected_size {
-        return Ok(existing);
+        return AttemptOutcome::Done(existing, None);
     }
-    let client = reqwest::Client::builder()
-        .user_agent("bladebro-updater")
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
-    let mut req = client.get(url);
+
+    let client = match version::shared_download_client() {
+        Ok(c) => c,
+        Err(e) => return AttemptOutcome::Permanent(e.to_string()),
+    };
+    let mut req = client.get(url).timeout(std::time::Duration::from_secs(300));
     if existing > 0 {
         req = req.header("Range", format!("bytes={existing}-"));
     }
-    let mut resp = req
-        .send()
-        .await
-        .map_err(|e| BladeError::Other(format!("download failed: {e}")))?;
-    let partial = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-    if resp.status() != reqwest::StatusCode::OK && !partial {
-        return Err(BladeError::Other(format!(
-            "download failed: HTTP {}",
-            resp.status()
-        )));
+    let mut resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return AttemptOutcome::Transient(format!("download failed: {e}")),
+    };
+
+    let status = resp.status();
+    // Stale partial file exceeded server size → truncate and retry from 0.
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && existing > 0 {
+        let _ = std::fs::File::create(tmp);
+        return AttemptOutcome::Transient("partial range invalid (HTTP 416), restarting".into());
     }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return AttemptOutcome::NotFound(format!("download failed: HTTP {status}"));
+    }
+    let partial = status == reqwest::StatusCode::PARTIAL_CONTENT;
+    if status != reqwest::StatusCode::OK && !partial {
+        let msg = format!("download failed: HTTP {status}");
+        if matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST
+                | reqwest::StatusCode::UNAUTHORIZED
+                | reqwest::StatusCode::FORBIDDEN
+                | reqwest::StatusCode::GONE
+        ) {
+            return AttemptOutcome::Permanent(msg);
+        }
+        return AttemptOutcome::Transient(msg);
+    }
+
     let offset = if partial { existing } else { 0 };
     let mut target_size = expected_size;
     let mut response_limit = limit;
@@ -482,102 +572,112 @@ async fn download_once(url: &str, tmp: &std::path::Path, expected_size: u64) -> 
                 response_limit = end + 1;
             }
             _ => {
-                return Err(BladeError::Other(
+                return AttemptOutcome::Permanent(
                     "download returned an invalid content range (Content-Range)".into(),
-                ))
+                )
             }
         }
     }
+
     if resp
         .content_length()
         .is_some_and(|len| len > response_limit - offset)
     {
-        return Err(BladeError::Other("download exceeds expected size".into()));
+        return AttemptOutcome::Permanent("download exceeds expected size".into());
     }
-    let mut file = std::fs::OpenOptions::new()
+
+    // Learn total bytes from headers when `synthetic_release` had `size: 0`.
+    let total_known = if target_size > 0 {
+        target_size
+    } else if let Some(cl) = resp.content_length() {
+        offset.saturating_add(cl)
+    } else {
+        0
+    };
+    if let (Some(dir), true) = (disk_dir, total_known > offset) {
+        let remaining = total_known - offset;
+        if let Err(e) = check_disk_space(dir, remaining) {
+            return AttemptOutcome::Permanent(format!(
+                "insufficient disk space for download (~{:.1} MB needed): {e}\n\
+                 Free space in {} and try again.",
+                remaining as f64 / 1_000_000.0,
+                dir.display(),
+            ));
+        }
+    }
+    if let Some(bar) = progress {
+        if total_known > 0 {
+            bar.set_total(total_known);
+        }
+        if offset > 0 {
+            bar.set_position(offset);
+        }
+    }
+
+    let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .append(partial)
         .truncate(!partial)
         .open(tmp)
-        .map_err(|e| BladeError::Other(format!("cannot open temp file: {e}")))?;
-    let mut size = offset;
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| BladeError::Other(format!("download interrupted: {e}")))?
     {
+        Ok(f) => f,
+        Err(e) => return AttemptOutcome::Permanent(format!("cannot open temp file: {e}")),
+    };
+
+    // Single-pass streaming SHA-256 on full HTTP 200 downloads.
+    let mut hasher = if !partial { Some(Sha256::new()) } else { None };
+    let mut size = offset;
+    while let Some(chunk) = match resp.chunk().await {
+        Ok(c) => c,
+        Err(e) => return AttemptOutcome::Transient(format!("download interrupted: {e}")),
+    } {
         if chunk.len() as u64 > response_limit - size {
-            return Err(BladeError::Other("download exceeds expected size".into()));
+            return AttemptOutcome::Permanent("download exceeds expected size".into());
         }
-        file.write_all(&chunk)
-            .map_err(|e| BladeError::Other(format!("cannot write temp file: {e}")))?;
+        if let Err(e) = file.write_all(&chunk) {
+            return AttemptOutcome::Permanent(format!("cannot write temp file: {e}"));
+        }
+        if let Some(ref mut h) = hasher {
+            h.update(&chunk);
+        }
         size += chunk.len() as u64;
+        if let Some(bar) = progress {
+            bar.set_position(size);
+        }
     }
+
     if size == 0 || (target_size > 0 && size != target_size) {
-        return Err(BladeError::Other(format!(
+        return AttemptOutcome::Transient(format!(
             "incomplete download: {size} bytes, expected {target_size}"
+        ));
+    }
+
+    // Flush OS buffers before verification / atomic rename.
+    let _ = file.sync_data();
+    let hex_hash = hasher.map(|h| h.finalize().iter().map(|b| format!("{b:02x}")).collect());
+    AttemptOutcome::Done(size, hex_hash)
+}
+
+/// Check if there's enough disk space for a download using native OS APIs
+/// (`statvfs` on Unix, `GetDiskFreeSpaceExW` on Windows). Falls through
+/// silently if the filesystem cannot be queried.
+fn check_disk_space(dir: &std::path::Path, needed: u64) -> Result<()> {
+    let Some(avail) = crate::platform::available_disk_bytes(dir) else {
+        return Ok(());
+    };
+    if avail < needed.saturating_add(10_000_000) {
+        return Err(BladeError::Other(format!(
+            "only {:.1} MB available on disk",
+            avail as f64 / 1_000_000.0
         )));
     }
-    Ok(size)
-}
-
-/// Check if there's enough disk space for a download.
-/// Uses `df` on Unix (safe, no FFI). Falls through silently on failure.
-#[cfg(unix)]
-fn check_disk_space(dir: &std::path::Path, needed: u64) -> Result<()> {
-    let output = std::process::Command::new("df")
-        .arg("-k")
-        .arg(dir)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            // df -k output:  Filesystem  1K-blocks  Used  Available  Use%  Mounted on
-            // The data line is the last line (handles multi-line headers on macOS).
-            if let Some(line) = stdout.lines().last() {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                // Available is typically the 4th field (index 3).
-                // But some systems add a Filesystem path with spaces.
-                // Find the field that looks like a number in the Available position.
-                // Strategy: the field before the Use% field (contains %).
-                let use_idx = fields.iter().position(|f| f.ends_with('%'));
-                let avail_idx = use_idx.and_then(|i| if i > 0 { Some(i - 1) } else { None });
-                if let Some(idx) = avail_idx {
-                    if let Ok(avail_kb) = fields[idx].parse::<u64>() {
-                        let avail = avail_kb * 1024;
-                        if avail < needed + 10_000_000 {
-                            return Err(BladeError::Other(format!(
-                                "only {:.1} MB available on disk",
-                                avail as f64 / 1_000_000.0
-                            )));
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-        _ => Ok(()), // Can't check — don't block the download.
-    }
-}
-
-#[cfg(windows)]
-fn check_disk_space(_dir: &std::path::Path, _needed: u64) -> Result<()> {
-    // Windows: skip pre-flight check. Download will fail naturally
-    // with a clear error if disk is full.
     Ok(())
 }
 
 /// Mach-O / fat-archive magic, accepting EVERY standard spelling. Modern
 /// macOS builds are little-endian 64-bit Mach-O — file bytes `cf fa ed fe`
 /// (MH_CIGAM_64), which is what every darwin asset in this repo starts
-/// with. The pre-fix check compared a big-endian u32 against only the
-/// big-endian spellings, so it rejected every real darwin binary: macOS
-/// `bladebro -u` and `--rollback` failed with "not a valid binary for this
-/// platform". Split from `binary_magic_ok` so the bytes stay unit-testable
-/// on every OS.
+/// with.
 pub(crate) fn macho_magic_ok(data: &[u8]) -> bool {
     if data.len() < 4 {
         return false;
@@ -589,8 +689,7 @@ pub(crate) fn macho_magic_ok(data: &[u8]) -> bool {
 }
 
 /// Platform magic-byte check for a candidate binary. Single definition,
-/// shared by `verify_binary` and the rollback's `verify_backup` — the two
-/// used to carry duplicated (and equally wrong) copies.
+/// shared by `verify_binary` and the rollback's `verify_backup`.
 pub(crate) fn binary_magic_ok(data: &[u8]) -> bool {
     if cfg!(any(target_os = "linux", target_os = "android")) {
         data.len() >= 4 && data[..4] == [0x7F, b'E', b'L', b'F']
@@ -607,7 +706,6 @@ pub(crate) fn binary_magic_ok(data: &[u8]) -> bool {
 /// 1. Correct magic bytes for the platform
 /// 2. Reasonable file size (1MB–500MB)
 /// 3. On Unix: set executable permissions
-/// 4. Try executing the binary with `--version` to confirm it runs
 pub fn verify_binary(dl: &DownloadedBinary) -> Result<()> {
     use std::io::Read;
     let mut file = std::fs::File::open(&dl.path)
@@ -645,7 +743,6 @@ pub fn verify_binary(dl: &DownloadedBinary) -> Result<()> {
         )));
     }
 
-    // Set executable permissions on Unix.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -656,23 +753,20 @@ pub fn verify_binary(dl: &DownloadedBinary) -> Result<()> {
     Ok(())
 }
 
-/// Try executing the downloaded binary to confirm it starts.
-/// This catches:
-/// - Wrong architecture (e.g. ARM binary on x86)
-/// - Missing shared libraries
-/// - Corrupted binary that passes magic check but won't execute
-///
-/// Runs `binary --version` and checks for a successful exit.
-pub async fn verify_binary_runs(dl: &DownloadedBinary) -> Result<()> {
-    let mut child = tokio::process::Command::new(&dl.path)
+/// Try executing any candidate binary at `path` with `--version` to confirm
+/// it starts on this host architecture and OS.
+pub(crate) async fn verify_exe_runs(path: &std::path::Path) -> Result<()> {
+    let mut child = tokio::process::Command::new(path)
         .arg("--version")
-        // Startup verification must not wait for GitHub/npm connectivity.
+        // Startup verification must not wait for GitHub/npm connectivity
+        // or spend time animating.
         .env("BLADE_NO_UPDATE_CHECK", "1")
+        .env("BLADE_PLAIN", "1")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| BladeError::Other(format!("cannot execute downloaded binary: {e}")))?;
+        .map_err(|e| BladeError::Other(format!("cannot execute binary: {e}")))?;
     let stdout = child
         .stdout
         .take()
@@ -699,14 +793,14 @@ pub async fn verify_binary_runs(dl: &DownloadedBinary) -> Result<()> {
         error => {
             let _ = child.kill().await;
             return Err(BladeError::Other(match error {
-                Ok(Err(error)) => format!("downloaded binary version probe failed: {error}"),
-                _ => "downloaded binary --version did not finish within 5s".into(),
+                Ok(Err(error)) => format!("binary version probe failed: {error}"),
+                _ => "binary --version did not finish within 5s".into(),
             }));
         }
     };
     if !output.status.success() {
         return Err(BladeError::Other(format!(
-            "downloaded binary failed to start (exit {:?})\n  stdout: {}\n  stderr: {}",
+            "binary failed to start (exit {:?})\n  stdout: {}\n  stderr: {}",
             output.status.code(),
             String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim(),
@@ -719,10 +813,15 @@ pub async fn verify_binary_runs(dl: &DownloadedBinary) -> Result<()> {
     );
     if !combined.to_lowercase().contains("bladebro") {
         return Err(BladeError::Other(
-            "downloaded binary ran but doesn't identify as bladebro".into(),
+            "binary ran but doesn't identify as bladebro".into(),
         ));
     }
     Ok(())
+}
+
+/// Try executing the downloaded binary to confirm it starts.
+pub async fn verify_binary_runs(dl: &DownloadedBinary) -> Result<()> {
+    verify_exe_runs(&dl.path).await
 }
 
 async fn read_version_output(
@@ -770,16 +869,15 @@ mod tests {
             path: path.clone(),
             size: 0,
             asset_name: "fixture".into(),
+            sha256: None,
         };
         let mut task = tokio::spawn(async move { verify_binary_runs(&dl).await });
         let result = tokio::time::timeout(std::time::Duration::from_secs(6), &mut task).await;
-        // Release the fixture even on the pre-fix path: no leaked shell.
         std::fs::remove_file(marker).unwrap();
         let outcome = match result {
             Ok(outcome) => outcome.unwrap(),
             Err(_) => task.await.unwrap(),
         };
-        // The task dropped the download, which removed the fixture.
         let _ = std::fs::remove_file(path);
         assert!(
             outcome.is_err(),
@@ -808,6 +906,7 @@ mod tests {
                 path: path.clone(),
                 size: 0,
                 asset_name: "fixture".into(),
+                sha256: None,
             };
             let result = verify_binary_runs(&dl).await;
             std::fs::remove_file(path).unwrap();
@@ -817,14 +916,13 @@ mod tests {
 
     #[test]
     fn a_rejected_download_does_not_leave_its_temp_file() {
-        // `bladebro -u` returned early on a failed verify/swap without
-        // removing the temp file it had downloaded into the install dir.
         let path = create_secure_tmp(&std::env::temp_dir()).unwrap();
         std::fs::write(&path, b"not a binary").unwrap();
         let dl = DownloadedBinary {
             path: path.clone(),
             size: 12,
             asset_name: "fixture".into(),
+            sha256: None,
         };
         assert!(verify_binary(&dl).is_err());
         drop(dl);
@@ -847,9 +945,7 @@ mod tests {
                 .set_modified(hour_ago)
                 .unwrap();
         };
-        // An earlier run's partial download (Ctrl-C, crash): another pid.
         let stale = dir.join(format!("{TMP_PREFIX}-1-1700000000000000000-7.tmp"));
-        // A concurrent updater mid-download: another pid, recently written.
         let fresh = dir.join(format!("{TMP_PREFIX}-2-1700000000000000001-8.tmp"));
         let unrelated = dir.join("bladebro");
         for p in [&stale, &fresh, &unrelated] {
@@ -857,7 +953,6 @@ mod tests {
         }
         age(&stale);
         age(&unrelated);
-        // The current download is never swept, however old its mtime.
         let current = create_secure_tmp(&dir).unwrap();
         age(&current);
         sweep_leftover_tmps(&dir, &current);
@@ -891,6 +986,7 @@ mod tests {
             path: path.clone(),
             size: 1_000_000,
             asset_name: "fixture".into(),
+            sha256: None,
         };
         let result = verify_binary(&dl);
         std::fs::remove_file(path).unwrap();
@@ -955,6 +1051,68 @@ mod tests {
             requests
         });
         (url, task)
+    }
+
+    #[tokio::test]
+    async fn single_pass_streaming_hash_matches_disk_sha256() {
+        use sha2::{Digest, Sha256};
+        let tmp = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        let payload = "bladebro-single-pass-streaming-digest-payload";
+        let expected: String = Sha256::digest(payload.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let (url, server) = http_fixture(vec![format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        )])
+        .await;
+        match download_once_inner(&url, &tmp, None, payload.len() as u64, None).await {
+            AttemptOutcome::Done(sz, hash) => {
+                assert_eq!(sz, payload.len() as u64);
+                assert_eq!(hash.as_deref(), Some(expected.as_str()));
+            }
+            _ => panic!("expected Done with single-pass hash"),
+        }
+        let _ = server.await.unwrap();
+        std::fs::remove_file(tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_416_truncates_stale_partial_and_recovers_on_retry() {
+        let tmp = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        std::fs::write(&tmp, b"stale-bytes").unwrap();
+        let (url, server) = http_fixture(vec![
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .into(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfresh".into(),
+        ])
+        .await;
+        let outcome = download_asset_with_retries(&url, &tmp, &std::env::temp_dir(), 0, None).await;
+        match outcome {
+            AttemptOutcome::Done(5, Some(_)) => {}
+            _ => panic!("expected recovery after 416"),
+        }
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"fresh");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].to_lowercase().contains("range: bytes=11-"));
+        assert!(!requests[1].to_lowercase().contains("range:"));
+        std::fs::remove_file(tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn permanent_404_fails_immediately_without_retrying() {
+        let tmp = create_secure_tmp(&std::env::temp_dir()).unwrap();
+        let (url, server) = http_fixture(vec![
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        ])
+        .await;
+        let outcome = download_asset_with_retries(&url, &tmp, &std::env::temp_dir(), 0, None).await;
+        assert!(matches!(outcome, AttemptOutcome::NotFound(_)));
+        assert_eq!(server.await.unwrap().len(), 1);
+        std::fs::remove_file(tmp).unwrap();
     }
 
     #[tokio::test]
@@ -1048,6 +1206,7 @@ mod tests {
             path,
             size: 0,
             asset_name: "test".into(),
+            sha256: None,
         };
         assert!(verify_binary(&dl).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1063,6 +1222,7 @@ mod tests {
             path,
             size: 2,
             asset_name: "test".into(),
+            sha256: None,
         };
         assert!(verify_binary(&dl).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1080,6 +1240,7 @@ mod tests {
             path,
             size: 2_000_000,
             asset_name: "test".into(),
+            sha256: None,
         };
         assert!(verify_binary(&dl).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1090,35 +1251,21 @@ mod tests {
         let dir = std::env::temp_dir().join("bladebro-test-verify-large");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("large.bin");
-        // Write a file with correct magic but fake size > 500MB
         let mut f = std::fs::File::create(&path).unwrap();
-        // Linux ELF magic
-        #[cfg(any(target_os = "linux", target_os = "android"))]
         f.write_all(&[0x7F, b'E', b'L', b'F']).unwrap();
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        f.write_all(&[0x7F, b'E', b'L', b'F']).unwrap();
-        // Write enough to pass the size check (> 500MB)
-        // Actually we can't write 500MB in a test. Just test the size check directly.
         drop(f);
         let dl = DownloadedBinary {
             path: path.clone(),
-            size: 600_000_000, // 600MB — over the limit
+            size: 600_000_000,
             asset_name: "test".into(),
+            sha256: None,
         };
-        // verify_binary reads the file and checks dl.size.
-        // The file is small but dl.size says 600MB, so it should fail on size.
-        // Actually verify_binary checks data.len() < 4 first, then magic,
-        // then dl.size. The magic check reads the actual file bytes.
-        // So this should pass magic (we wrote ELF header) but fail on size.
         assert!(verify_binary(&dl).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn checksum_transport_errors_retry_within_bounds_and_succeed() {
-        // G11: two connections die without a response (transport-level —
-        // the captured 4.3.0 failure class), the third serves the real
-        // checksum — the update must verify, not fail on the first hiccup.
         let dir = std::env::temp_dir().join(format!("blade-checksum-retry-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("bladebro");
@@ -1152,8 +1299,6 @@ mod tests {
 
     #[tokio::test]
     async fn checksum_permanent_failures_do_not_retry_and_fail_closed() {
-        // A 404 is permanent: exactly one attempt, no retry loop, no
-        // install — and the error names the next step.
         let dir = std::env::temp_dir().join(format!("blade-checksum-404-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("bladebro");
@@ -1184,11 +1329,6 @@ mod tests {
 mod magic_tests {
     use super::*;
 
-    /// First 4 bytes of the shipped v4.0.1 darwin assets (od -t x1): both
-    /// darwin-arm64 and darwin-x64 start `cf fa ed fe` — little-endian
-    /// 64-bit Mach-O (MH_CIGAM_64). The pre-fix check accepted only the
-    /// big-endian spellings and rejected these, so every macOS self-update
-    /// and rollback failed with "not a valid binary for this platform".
     #[test]
     fn macho_magic_accepts_the_real_artifact_headers() {
         assert!(macho_magic_ok(&[
@@ -1197,21 +1337,17 @@ mod magic_tests {
         assert!(macho_magic_ok(&[
             0xCF, 0xFA, 0xED, 0xFE, 0x07, 0x00, 0x00, 0x01
         ]));
-        // The other standard spellings stay accepted.
         assert!(macho_magic_ok(&[0xFE, 0xED, 0xFA, 0xCF]));
         assert!(macho_magic_ok(&[0xFE, 0xED, 0xFA, 0xCE]));
         assert!(macho_magic_ok(&[0xCE, 0xFA, 0xED, 0xFE]));
         assert!(macho_magic_ok(&[0xCA, 0xFE, 0xBA, 0xBE]));
         assert!(macho_magic_ok(&[0xBE, 0xBA, 0xFE, 0xCA]));
-        // Foreign formats and short inputs are refused.
         assert!(!macho_magic_ok(&[0x7F, b'E', b'L', b'F']));
         assert!(!macho_magic_ok(b"MZ\x90\x00"));
         assert!(!macho_magic_ok(&[]));
         assert!(!macho_magic_ok(&[0xCF, 0xFA]));
     }
 
-    /// The platform dispatch picks the right magic family per OS; the
-    /// target-specific arm must accept the same bytes the release assets use.
     #[test]
     fn binary_magic_matches_the_platform() {
         if cfg!(any(target_os = "linux", target_os = "android")) {

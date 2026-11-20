@@ -1,4 +1,8 @@
-//! Version checking against GitHub releases.
+//! Version checking against GitHub releases + npm registry, with shared HTTP
+//! connection pooling and accurate cross-platform install-channel detection.
+
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::error::{BladeError, Result};
 
@@ -20,17 +24,58 @@ impl Release {
 }
 
 /// A release asset (downloadable binary).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Asset {
     pub name: String,
     pub browser_download_url: String,
     pub size: u64,
 }
 
+/// Shared pooled HTTP client for downloads & checksum fetches: builds the
+/// rustls root store once per process, reuses keep-alive connections, and
+/// enforces an idle read timeout (45s) so stalled connections recover quickly
+/// via Range resume instead of hanging for minutes.
+pub(crate) fn shared_download_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: OnceLock<std::result::Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(concat!("bladebro-updater/", env!("CARGO_PKG_VERSION")))
+                .tcp_nodelay(true)
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(45))
+                .pool_idle_timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|e| format!("http client: {e}"))
+        })
+        .as_ref()
+        .map_err(|e| BladeError::Other(e.clone()))
+}
+
+/// Shared no-redirect client for fast `releases/latest` `HEAD` probes.
+fn shared_probe_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: OnceLock<std::result::Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(concat!("bladebro-updater/", env!("CARGO_PKG_VERSION")))
+                .tcp_nodelay(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|e| format!("http client: {e}"))
+        })
+        .as_ref()
+        .map_err(|e| BladeError::Other(e.clone()))
+}
+
 /// Fetch the latest version tag from non-rate-limited sources.
 ///
-/// 1. `github.com/.../releases/latest` — 301 redirect, parse tag from URL.
-/// 2. npm registry — JSON with the latest published version.
+/// 1. `HEAD github.com/.../releases/latest` — 302 redirect, zero body bytes,
+///    parse tag from `Location` (falls back to `GET` only if a proxy blocks
+///    `HEAD` with 405/501).
+/// 2. npm registry fallback — JSON with the latest published version.
 ///
 /// No API key needed. No rate limits. Works for all users out of the box.
 pub async fn fetch_latest_tag() -> Result<String> {
@@ -43,16 +88,12 @@ pub async fn fetch_latest_tag() -> Result<String> {
         ));
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("bladebro-updater")
-        .redirect(reqwest::redirect::Policy::none()) // don't follow, read Location
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| BladeError::Other(format!("http client: {e}")))?;
-
-    // 1. GitHub releases/latest redirect.
+    let client = shared_probe_client()?;
     let url = format!("https://github.com/{}/releases/latest", super::GITHUB_REPO);
-    if let Ok(resp) = client.get(&url).send().await {
+
+    // 1. Fast HEAD redirect check (avoids downloading any HTML body).
+    let mut try_get = false;
+    if let Ok(resp) = client.head(&url).send().await {
         let status = resp.status();
         if let Some(tag) = resp
             .headers()
@@ -62,10 +103,28 @@ pub async fn fetch_latest_tag() -> Result<String> {
         {
             return Ok(tag);
         }
-        // Some CDNs/proxies eat the 301. Fall through to npm.
+        if status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            || status == reqwest::StatusCode::NOT_IMPLEMENTED
+        {
+            try_get = true;
+        }
     }
 
-    // 2. npm registry fallback.
+    if try_get {
+        if let Ok(resp) = client.get(&url).send().await {
+            let status = resp.status();
+            if let Some(tag) = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|loc| loc.to_str().ok())
+                .and_then(|loc| tag_from_latest_redirect(status, loc))
+            {
+                return Ok(tag);
+            }
+        }
+    }
+
+    // 2. npm registry fallback (works even if GitHub is firewalled or a proxy strips 302).
     let npm_url = "https://registry.npmjs.org/bladebro/latest";
     if let Ok(resp) = client.get(npm_url).send().await {
         if resp.status().is_success() {
@@ -121,9 +180,11 @@ pub(crate) fn is_version_tag(v: &str) -> bool {
 /// Construct a Release from a tag.
 /// Download URLs are predictable:
 ///   https://github.com/{repo}/releases/download/v{tag}/bladebro-{os}-{arch}
-/// Both new and legacy asset names are included so `find_asset` can match.
+/// Both new and legacy asset names are included so `find_asset` (and 404
+/// fallback in `download_binary`) can match.
 pub fn synthetic_release(tag: &str) -> Release {
-    let tag_name = format!("v{tag}");
+    let clean = tag.strip_prefix('v').unwrap_or(tag);
+    let tag_name = format!("v{clean}");
     let base = format!(
         "https://github.com/{}/releases/download/{}",
         super::GITHUB_REPO,
@@ -131,26 +192,24 @@ pub fn synthetic_release(tag: &str) -> Release {
     );
 
     let mut assets = Vec::new();
-    let ext = if cfg!(windows) { ".exe" } else { "" };
 
     // New naming: bladebro-{os}-{arch}
+    let primary = platform_asset_name();
     assets.push(Asset {
-        name: platform_asset_name(),
-        browser_download_url: format!("{}/{}", base, platform_asset_name()),
-        size: 0, // unknown, skip pre-flight disk check
+        browser_download_url: format!("{base}/{primary}"),
+        name: primary,
+        size: 0, // learned from Content-Length on response headers
     });
 
     // Legacy naming: bladebro-{os}-{x86_64|aarch64}
     let legacy = legacy_platform_asset_name();
     if legacy != platform_asset_name() {
         assets.push(Asset {
-            name: legacy.clone(),
-            browser_download_url: format!("{}/{}", base, legacy),
+            browser_download_url: format!("{base}/{legacy}"),
+            name: legacy,
             size: 0,
         });
     }
-
-    let _ = ext; // ext already baked into platform_asset_name / legacy name
 
     Release {
         tag_name,
@@ -163,7 +222,7 @@ pub fn synthetic_release(tag: &str) -> Release {
 
 /// Fetch the latest release.
 ///
-/// Uses `fetch_latest_tag()` (github.com redirect + npm, no rate limits)
+/// Uses `fetch_latest_tag()` (github.com HEAD redirect + npm, no rate limits)
 /// and constructs download URLs via `synthetic_release()`. No API key needed.
 pub async fn fetch_latest() -> Result<Release> {
     let tag = fetch_latest_tag().await?;
@@ -282,9 +341,11 @@ fn platform_keywords() -> (Vec<&'static str>, Vec<&'static str>) {
     (os, arch)
 }
 
-/// Human-readable platform label for error messages.
+/// Human-readable platform label for display and error messages.
 pub fn platform_label() -> String {
-    let os = if cfg!(target_os = "linux") {
+    let os = if cfg!(target_os = "android") {
+        "Android"
+    } else if cfg!(target_os = "linux") {
         "Linux"
     } else if cfg!(target_os = "macos") {
         "macOS"
@@ -303,41 +364,53 @@ pub fn platform_label() -> String {
     format!("{os} ({arch})")
 }
 
-/// Find the asset for this platform in a release.
+/// Find the primary asset for this platform in a release.
 /// Strategy: exact match → legacy name → fuzzy keyword match.
 pub fn find_asset(release: &Release) -> Option<&Asset> {
-    // 1. Exact match with current naming.
+    candidate_assets(release).into_iter().next()
+}
+
+/// Ordered candidate assets for this platform: exact current name first,
+/// followed by legacy name (so a 404 on an older tag falls back cleanly),
+/// followed by fuzzy keyword matches.
+pub(crate) fn candidate_assets(release: &Release) -> Vec<&Asset> {
+    let mut out: Vec<&Asset> = Vec::new();
     let name = platform_asset_name();
     if let Some(a) = release.assets.iter().find(|a| a.name == name) {
-        return Some(a);
+        out.push(a);
     }
 
-    // 2. Exact match with legacy naming (pre-v3.0.3).
     let legacy = legacy_platform_asset_name();
     if legacy != name {
         if let Some(a) = release.assets.iter().find(|a| a.name == legacy) {
-            return Some(a);
+            if !out.iter().any(|x| x.name == a.name) {
+                out.push(a);
+            }
         }
     }
 
-    // 3. Fuzzy: asset name contains both an OS and arch keyword.
-    let (os_kws, arch_kws) = platform_keywords();
-    if os_kws.is_empty() || arch_kws.is_empty() {
-        return None;
+    if out.is_empty() {
+        let (os_kws, arch_kws) = platform_keywords();
+        if !os_kws.is_empty() && !arch_kws.is_empty() {
+            for a in &release.assets {
+                let lower = a.name.to_lowercase();
+                let os_match = os_kws.iter().any(|kw| lower.contains(kw));
+                let arch_match = arch_kws.iter().any(|kw| lower.contains(kw));
+                if os_match
+                    && arch_match
+                    && !lower.ends_with(".sha256")
+                    && !lower.ends_with(".txt")
+                    && !lower.ends_with(".md")
+                    && !lower.ends_with(".tar.gz")
+                    && !lower.ends_with(".zip")
+                {
+                    out.push(a);
+                }
+            }
+        }
     }
-    release.assets.iter().find(|a| {
-        let lower = a.name.to_lowercase();
-        let os_match = os_kws.iter().any(|kw| lower.contains(kw));
-        let arch_match = arch_kws.iter().any(|kw| lower.contains(kw));
-        // Exclude checksums, text files, source archives.
-        os_match
-            && arch_match
-            && !lower.ends_with(".sha256")
-            && !lower.ends_with(".txt")
-            && !lower.ends_with(".md")
-            && !lower.ends_with(".tar.gz")
-            && !lower.ends_with(".zip")
-    })
+
+    out
 }
 
 /// List asset names in a release (for error messages).
@@ -347,33 +420,91 @@ pub fn asset_names(release: &Release) -> Vec<String> {
 
 // ── install method detection ─────────────────────────────────────
 
-/// Detect if this binary was installed via npm.
-/// Heuristic: the exe path contains "node_modules".
+/// Pure cross-platform path classifier for install method detection.
+/// Normalizes `\` → `/` and matches case-insensitively so Windows paths work
+/// identically to Unix paths.
+pub(crate) fn detect_install_method(raw_path: &str) -> &'static str {
+    let norm = raw_path.replace('\\', "/").to_ascii_lowercase();
+    if norm.contains("/node_modules/") || norm.ends_with("/node_modules") {
+        if norm.contains("/pnpm/") || norm.contains("/.pnpm/") {
+            return "pnpm";
+        }
+        if norm.contains("/.bun/") || norm.contains("/bun/install/") {
+            return "bun";
+        }
+        if norm.contains("/yarn/") || norm.contains("/.yarn/") {
+            return "yarn";
+        }
+        return "npm";
+    }
+    if norm.contains("/cellar/bladebro/") || norm.contains("/homebrew/cellar/") {
+        return "homebrew";
+    }
+    if norm.contains("/.cargo/bin/") {
+        return "cargo";
+    }
+    if norm.contains("/target/release/")
+        || norm.contains("/target/debug/")
+        || norm.contains("/target/gate/")
+    {
+        return "source";
+    }
+    "binary"
+}
+
+/// Detect if this binary was installed via a JS package manager (npm/pnpm/bun/yarn).
 pub fn is_npm_install() -> bool {
-    std::env::current_exe()
-        .map(|p| p.to_string_lossy().contains("node_modules"))
-        .unwrap_or(false)
+    matches!(install_method(), "npm" | "pnpm" | "bun" | "yarn")
+}
+
+/// Detect if this binary is managed by an external package manager whose files
+/// should not be overwritten in-place without `--force`.
+pub fn is_package_managed() -> bool {
+    matches!(
+        install_method(),
+        "npm" | "pnpm" | "bun" | "yarn" | "homebrew"
+    )
 }
 
 /// Detect if this binary was built from source.
-/// Heuristic: the exe path contains "target/release" or "target/debug".
 pub fn is_source_build() -> bool {
-    std::env::current_exe()
-        .map(|p| {
-            let path = p.to_string_lossy();
-            path.contains("target/release") || path.contains("target/debug")
-        })
-        .unwrap_or(false)
+    install_method() == "source"
 }
 
 /// How was this binary installed?
 pub fn install_method() -> &'static str {
-    if is_npm_install() {
-        "npm"
-    } else if is_source_build() {
-        "source"
-    } else {
-        "binary"
+    std::env::current_exe()
+        .map(|p| detect_install_method(&p.to_string_lossy()))
+        .unwrap_or("binary")
+}
+
+/// Human-friendly channel name for display cards and doctor rows.
+pub fn install_channel_label() -> &'static str {
+    match install_method() {
+        "npm" => "npm",
+        "pnpm" => "pnpm",
+        "bun" => "bun",
+        "yarn" => "yarn",
+        "homebrew" => "Homebrew",
+        "cargo" => "Cargo",
+        "source" => "source build",
+        _ => "standalone binary",
+    }
+}
+
+/// Recommended upgrade command for the current install channel.
+pub fn update_command_hint() -> &'static str {
+    if cfg!(target_os = "android") {
+        return "update via your package manager or rebuild from source";
+    }
+    match install_method() {
+        "npm" => "npm update -g bladebro",
+        "pnpm" => "pnpm update -g bladebro",
+        "bun" => "bun update -g bladebro",
+        "yarn" => "yarn global upgrade bladebro",
+        "homebrew" => "brew upgrade bladebro",
+        "source" => "git pull && cargo build --release",
+        _ => "bladebro -u",
     }
 }
 
@@ -426,13 +557,10 @@ mod tests {
             .as_deref(),
             Some("4.7.0-rc.1")
         );
-        // A repo with no published release redirects to the release list:
-        // its last segment "releases" used to come back as the tag.
         assert_eq!(
             tag_from_latest_redirect(found, &format!("{repo}/releases")),
             None
         );
-        // A renamed repo / sign-in wall is not a release pointer either.
         assert_eq!(
             tag_from_latest_redirect(
                 StatusCode::MOVED_PERMANENTLY,
@@ -447,7 +575,6 @@ mod tests {
             ),
             None
         );
-        // A Location header on a non-redirect response carries no meaning.
         for status in [
             StatusCode::OK,
             StatusCode::TOO_MANY_REQUESTS,
@@ -484,6 +611,45 @@ mod tests {
     }
 
     #[test]
+    fn install_method_detection_handles_windows_and_all_package_managers() {
+        assert_eq!(
+            detect_install_method(
+                r"C:\Users\don\AppData\Roaming\npm\node_modules\bladebro-windows-x64\bladebro.exe"
+            ),
+            "npm"
+        );
+        assert_eq!(
+            detect_install_method(
+                "/home/don/.local/share/pnpm/global/5/node_modules/bladebro-linux-x64/bladebro"
+            ),
+            "pnpm"
+        );
+        assert_eq!(
+            detect_install_method(
+                "/home/don/.bun/install/global/node_modules/bladebro-linux-x64/bladebro"
+            ),
+            "bun"
+        );
+        assert_eq!(
+            detect_install_method("/opt/homebrew/Cellar/bladebro/4.8.0/bin/bladebro"),
+            "homebrew"
+        );
+        assert_eq!(
+            detect_install_method(r"C:\src\blade\target\release\bladebro.exe"),
+            "source"
+        );
+        assert_eq!(
+            detect_install_method("/home/don/blade/target/gate/bladebro"),
+            "source"
+        );
+        assert_eq!(
+            detect_install_method("/home/don/.cargo/bin/bladebro"),
+            "cargo"
+        );
+        assert_eq!(detect_install_method("/usr/local/bin/bladebro"), "binary");
+    }
+
+    #[test]
     fn find_asset_exact_match() {
         let release = Release {
             tag_name: "v3.0.3".into(),
@@ -517,9 +683,6 @@ mod tests {
 
     #[test]
     fn find_asset_fuzzy_match() {
-        // A non-standard name like "bladebro_linux_amd64_v3" would NOT match:
-        // "linux" matches, but "amd64" is not in our keyword list.
-        // Use a name that contains our keywords.
         let release2 = Release {
             tag_name: "v3.0.3".into(),
             assets: vec![Asset {

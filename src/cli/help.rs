@@ -57,7 +57,7 @@ COMMANDS
   hermes on|off|status             switch Hermes' browser to Bladebro; reversible MCP setup
   audit                           stealth audit — vector suite + boot self-check + drift stamp
   update | -u [--check] [--force]  self-update; --rollback restores the previous binary
-  doctor | -doc                   system diagnostics (13 checks)
+  doctor | -doc                   system diagnostics dossier (OS, browser, display, vault, release)
   -v | --version                  version + install method + update status
   help [command]                  this manual; 'help --json' for the machine version
 

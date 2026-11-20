@@ -1524,6 +1524,163 @@ pub fn stale_binary() -> bool {
     }
 }
 
+/// Available free disk bytes for the filesystem containing `path`.
+/// Zero-subprocess native implementation: `statvfs` on Unix,
+/// `GetDiskFreeSpaceExW` on Windows.
+pub fn available_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    // Walk up until an existing directory is found (callers may pass a file
+    // path or a directory not yet created).
+    let mut probe = path;
+    while !probe.exists() {
+        match probe.parent() {
+            Some(p) if p != probe => probe = p,
+            _ => return None,
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = CString::new(probe.as_os_str().as_bytes()).ok()?;
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c_path.as_ptr(), &mut st) } != 0 {
+            return None;
+        }
+        let frsize = if st.f_frsize > 0 {
+            st.f_frsize as u64
+        } else {
+            st.f_bsize as u64
+        };
+        (st.f_bavail as u64).checked_mul(frsize)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                directory_name: *const u16,
+                free_bytes_available_to_caller: *mut u64,
+                total_number_of_bytes: *mut u64,
+                total_number_of_free_bytes: *mut u64,
+            ) -> i32;
+        }
+        let mut wide: Vec<u16> = probe.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let mut avail = 0u64;
+        let mut total = 0u64;
+        let mut free = 0u64;
+        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, &mut total, &mut free) };
+        if ok != 0 {
+            Some(avail)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = probe;
+        None
+    }
+}
+
+/// Enable ANSI/VT escape processing on Windows consoles once per process.
+/// No-op on Unix (terminals speak ANSI natively).
+pub fn enable_virtual_terminal() {
+    #[cfg(windows)]
+    {
+        use std::sync::OnceLock;
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
+                fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+                fn SetConsoleMode(handle: *mut std::ffi::c_void, mode: u32) -> i32;
+            }
+            const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+            for std_id in [(-11i32) as u32, (-12i32) as u32] {
+                let handle = unsafe { GetStdHandle(std_id) };
+                if !handle.is_null() && handle != (-1isize) as *mut std::ffi::c_void {
+                    let mut mode = 0u32;
+                    if unsafe { GetConsoleMode(handle, &mut mode) } != 0 {
+                        let _ = unsafe {
+                            SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+                        };
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Detect the current terminal width in columns, if attached to a TTY.
+pub fn terminal_width() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        #[cfg(target_os = "android")]
+        let req = libc::TIOCGWINSZ as libc::c_int;
+        #[cfg(not(target_os = "android"))]
+        let req = libc::TIOCGWINSZ;
+        for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            if unsafe { libc::ioctl(fd, req, &mut ws) } == 0 && ws.ws_col > 0 {
+                return Some(ws.ws_col as usize);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Coord {
+            x: i16,
+            y: i16,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct SmallRect {
+            left: i16,
+            top: i16,
+            right: i16,
+            bottom: i16,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct ConsoleScreenBufferInfo {
+            size: Coord,
+            cursor_position: Coord,
+            attributes: u16,
+            window: SmallRect,
+            max_window_size: Coord,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
+            fn GetConsoleScreenBufferInfo(
+                handle: *mut std::ffi::c_void,
+                info: *mut ConsoleScreenBufferInfo,
+            ) -> i32;
+        }
+        for std_id in [(-11i32) as u32, (-12i32) as u32] {
+            let handle = unsafe { GetStdHandle(std_id) };
+            if !handle.is_null() && handle != (-1isize) as *mut std::ffi::c_void {
+                let mut info = ConsoleScreenBufferInfo::default();
+                if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } != 0 {
+                    let cols = info.window.right - info.window.left + 1;
+                    if cols > 0 {
+                        return Some(cols as usize);
+                    }
+                }
+            }
+        }
+    }
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&w| w > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

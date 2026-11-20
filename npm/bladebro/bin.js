@@ -5,27 +5,61 @@ const { spawn } = require('child_process');
 const { constants } = require('os');
 const { resolveBinary } = require('./binary.cjs');
 
+const useColor =
+  Boolean(process.stderr && process.stderr.isTTY) &&
+  !process.env.BLADE_PLAIN &&
+  !process.env.NO_COLOR &&
+  process.env.TERM !== 'dumb';
+
+const c = {
+  crimson: (s) => (useColor ? `\x1b[1;31m${s}\x1b[0m` : s),
+  gold: (s) => (useColor ? `\x1b[33m${s}\x1b[0m` : s),
+  dim: (s) => (useColor ? `\x1b[2m${s}\x1b[0m` : s),
+};
+
+function fail(headline, hint) {
+  if (useColor) {
+    process.stderr.write(`  ${c.crimson('✖')} ${c.dim('bladebro:')} ${headline}\n`);
+    if (hint) process.stderr.write(`    ${c.gold('›')} ${c.dim(hint)}\n`);
+  } else {
+    process.stderr.write(headline + '\n');
+    if (hint) process.stderr.write(hint + '\n');
+  }
+  process.exit(1);
+}
+
 let binPath;
 try {
   binPath = resolveBinary();
 } catch (error) {
-  process.stderr.write(error.message + '\n');
-  process.exit(1);
+  fail(error.message);
 }
 
 function launchFailed(error) {
   // The binary could not be spawned (missing exec bit, wrong arch, deleted
   // file). Without this the shim exited 0 while nothing ran — a silent no-op
   // that scripts and agents read as success.
-  process.stderr.write('bladebro: failed to launch ' + binPath + ': ' + error.message + '\n');
+  const headline = `bladebro: failed to launch ${binPath}: ${error.message}`;
   if (process.platform === 'linux' && error.code === 'ENOENT') {
     // The kernel reports ENOENT for a present ELF whose dynamic loader is
     // missing too. Reinstalling the same glibc prebuild cannot help musl hosts.
-    process.stderr.write('The executable or its loader is missing. Prebuilt Linux binaries require glibc >= 2.28; on Alpine/musl, build from source: https://github.com/dondai44423/bladebro#from-source\n');
+    fail(
+      headline,
+      'The executable or its loader is missing. Prebuilt Linux binaries require glibc >= 2.28; on Alpine/musl, build from source: https://github.com/dondai44423/bladebro#from-source',
+    );
+  } else if (error.code === 'ENOEXEC') {
+    fail(
+      headline,
+      `Binary architecture mismatch for ${process.platform}-${process.arch}. Reinstall with matching Node architecture: npm install -g bladebro`,
+    );
+  } else if (error.code === 'EACCES') {
+    fail(
+      headline,
+      `Permission denied. Run chmod +x "${binPath}" or reinstall: npm install -g bladebro`,
+    );
   } else {
-    process.stderr.write('Reinstall: npm install bladebro\n');
+    fail(headline, 'Reinstall: npm install bladebro');
   }
-  process.exit(1);
 }
 
 // ── spawn the Rust binary with inherited stdio ────────────────────────
@@ -69,5 +103,5 @@ child.on('exit', (code, signal) => {
     // success after the binary died. Report the death the way a shell does.
     process.exit(128 + (constants.signals[signal] || 0));
   }
-  process.exit(code || 0);
+  process.exit(code ?? 0);
 });

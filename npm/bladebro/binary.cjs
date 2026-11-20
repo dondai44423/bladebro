@@ -1,6 +1,6 @@
 'use strict';
 
-const { accessSync, constants, statSync } = require('fs');
+const { accessSync, chmodSync, constants, statSync } = require('fs');
 const { dirname, isAbsolute, join } = require('path');
 
 const PLATFORMS = {
@@ -31,7 +31,24 @@ function resolveBinary(override) {
   }
   try {
     if (!statSync(path).isFile()) throw new Error('not a file');
-    accessSync(path, process.platform === 'win32' ? constants.F_OK : constants.X_OK);
+    const mode = process.platform === 'win32' ? constants.F_OK : constants.X_OK;
+    try {
+      accessSync(path, mode);
+    } catch (accessErr) {
+      // Some tarball extractors / WSL setups strip the executable bit from
+      // optional-dependency binaries. Attempt a safe in-place 0755 repair on
+      // Unix before failing.
+      if (process.platform !== 'win32' && accessErr && accessErr.code === 'EACCES') {
+        try {
+          chmodSync(path, 0o755);
+          accessSync(path, mode);
+        } catch {
+          throw accessErr;
+        }
+      } else {
+        throw accessErr;
+      }
+    }
   } catch (error) {
     throw new Error(`bladebro: cannot execute ${path}: ${error.message}. Reinstall bladebro or set binaryPath.`);
   }

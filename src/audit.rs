@@ -42,6 +42,20 @@ pub async fn run_audit(base: &str) -> Result<()> {
         &crate::platform::blade_dir().join("audit"),
     )?);
 
+    let started = std::time::Instant::now();
+    let lane_label = if crate::realbrowser::real_lane() {
+        "real-browser lane"
+    } else {
+        "agent stealth lane"
+    };
+    ui::masthead(
+        "Stealth Audit",
+        &format!(
+            "{} · {lane_label}",
+            crate::updater::version::platform_label()
+        ),
+    );
+
     if crate::realbrowser::real_lane() {
         eprintln!(
             "{} the real-browser lane is ON — this audit measures YOUR browser (zero page patches); \
@@ -49,7 +63,7 @@ pub async fn run_audit(base: &str) -> Result<()> {
             ui::err::yellow("⚠")
         );
     }
-    println!("[audit] running stealth vectors...");
+    let spin = ui::Spinner::start("Executing stealth vector suite & boot probes...");
     page.navigate(&vectors_url).await?;
     let finished = page
         .act(Action::Wait {
@@ -80,61 +94,118 @@ pub async fn run_audit(base: &str) -> Result<()> {
         .ok()
         .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).map(String::from));
 
-    let bar = "=".repeat(52);
-    println!("\n{bar}");
-    println!("  BLADEBRO STEALTH AUDIT");
-    println!("{bar}");
+    spin.finish_clear();
 
     // The audit is a gate, not a printout (4.6.1): any vector FAIL,
     // self-check failure, or consistency drift makes the command exit
-    // non-zero, so CI and scripts can trust the exit code. The rendered
-    // report arrives as one flattened text blob, so vector failures are
-    // gated by the SCORE footer (pass == total) — the "FAIL " marker scan
-    // names them; it never gates on its own. A suite that never finished,
-    // or a footer that is missing or unreadable, fails the gate too.
+    // non-zero, so CI and scripts can trust the exit code.
+    ui::section("Vector Suite");
+    let mut failures = vector_failures(finished, &content);
+    let vector_tone = if failures.is_empty() {
+        ui::Tone::Success
+    } else {
+        ui::Tone::Fail
+    };
+    let mut printed_score = false;
     for line in content.lines() {
-        if line.contains("SCORE:") {
-            println!("  {line}");
+        if let Some(pos) = line.find("SCORE:") {
+            printed_score = true;
+            // Extract concise "SCORE: N/M pass" from the flattened vector blob
+            // so the dossier row stays razor-sharp instead of dumping 9 KB on one line.
+            let tail = &line[pos..];
+            let summary = tail
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            ui::dossier_row(vector_tone, "Vector scorecard", &summary, None, 20);
         }
     }
-    let mut failures = vector_failures(finished, &content);
+    if !printed_score {
+        ui::dossier_row(
+            ui::Tone::Fail,
+            "Vector scorecard",
+            "no SCORE footer received",
+            None,
+            20,
+        );
+    }
+    for f in &failures {
+        ui::dossier_row(ui::Tone::Fail, "Vector failure", f, None, 20);
+    }
 
+    ui::section("Boot Self-Check");
     if let Some(ref result) = selfcheck {
         let v: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
         let wd = v.get("wd").and_then(|x| x.as_bool()).unwrap_or(true);
         let cdc = v.get("cdc").and_then(|x| x.as_str()).unwrap_or("undefined");
         let plugins = v.get("plugins").and_then(|x| x.as_i64()).unwrap_or(0);
         let native = v.get("native").and_then(|x| x.as_bool()).unwrap_or(false);
-        println!("\n  Self-check:");
-        println!(
-            "    navigator.webdriver: {}",
-            if wd { "FAIL (true)" } else { "OK (false)" }
+
+        ui::dossier_row(
+            if wd {
+                ui::Tone::Fail
+            } else {
+                ui::Tone::Success
+            },
+            "navigator.webdriver",
+            if wd { "FAIL (true)" } else { "OK (false)" },
+            None,
+            20,
         );
         if wd {
             failures.push("self-check: navigator.webdriver is true".into());
         }
-        println!(
-            "    window.cdc_:         {} ({})",
-            if cdc == "undefined" { "OK" } else { "FAIL" },
-            cdc
+        ui::dossier_row(
+            if cdc == "undefined" {
+                ui::Tone::Success
+            } else {
+                ui::Tone::Fail
+            },
+            "window.cdc_",
+            &format!("{} ({cdc})", if cdc == "undefined" { "OK" } else { "FAIL" }),
+            None,
+            20,
         );
         if cdc != "undefined" {
             failures.push(format!("self-check: cdc_ residue ({cdc})"));
         }
-        println!(
-            "    navigator.plugins:   {} ({} plugins)",
-            if plugins > 0 { "OK" } else { "WARN" },
-            plugins
+        ui::dossier_row(
+            if plugins > 0 {
+                ui::Tone::Success
+            } else {
+                ui::Tone::Warn
+            },
+            "navigator.plugins",
+            &format!(
+                "{} ({plugins} plugins)",
+                if plugins > 0 { "OK" } else { "WARN" }
+            ),
+            None,
+            20,
         );
-        println!(
-            "    toString integrity:  {}",
-            if native { "OK (native)" } else { "FAIL" }
+        ui::dossier_row(
+            if native {
+                ui::Tone::Success
+            } else {
+                ui::Tone::Fail
+            },
+            "toString integrity",
+            if native { "OK (native)" } else { "FAIL" },
+            None,
+            20,
         );
         if !native {
             failures.push("self-check: toString integrity lost".into());
         }
     } else {
-        println!("\n  Self-check: FAIL (evaluate returned nothing)");
+        ui::dossier_row(
+            ui::Tone::Fail,
+            "Self-check",
+            "FAIL (evaluate returned nothing)",
+            None,
+            20,
+        );
         failures.push("self-check: evaluate returned nothing".into());
     }
 
@@ -181,18 +252,36 @@ return JSON.stringify(out);
         let prev = std::fs::read_to_string(&stamp_path)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-        println!("\n  Consistency (vs previous audit run):");
+        ui::section("Consistency Stamp");
         match prev.as_ref().and_then(|p| p.as_object()) {
-            None => println!("    first run — baseline recorded"),
+            None => ui::dossier_row(
+                ui::Tone::Gold,
+                "baseline",
+                "first run — baseline recorded",
+                None,
+                20,
+            ),
             Some(p) => {
                 if let Ok(cur) = serde_json::from_str::<serde_json::Value>(s) {
                     for f in ["canvas", "audio", "screen", "ua", "gl"] {
                         let a = p.get(f).and_then(|v| v.as_str()).unwrap_or("<none>");
                         let b = cur.get(f).and_then(|v| v.as_str()).unwrap_or("<none>");
                         if a == b {
-                            println!("    {f:<6} PASS stable ({b})");
+                            ui::dossier_row(
+                                ui::Tone::Success,
+                                f,
+                                &format!("PASS stable ({b})"),
+                                None,
+                                20,
+                            );
                         } else {
-                            println!("    {f:<6} FAIL drift — now {b} (was {a})");
+                            ui::dossier_row(
+                                ui::Tone::Fail,
+                                f,
+                                &format!("FAIL drift — now {b} (was {a})"),
+                                None,
+                                20,
+                            );
                             failures.push(format!("consistency drift: {f}"));
                         }
                     }
@@ -201,11 +290,23 @@ return JSON.stringify(out);
         }
         let _ = std::fs::write(&stamp_path, s);
     }
-    println!("{bar}");
+
+    let elapsed = ui::format_elapsed(started.elapsed());
     if failures.is_empty() {
-        println!("  VERDICT: PASS");
+        ui::verdict_card(
+            ui::Tone::Success,
+            "VERDICT: PASS · STEALTH SEAL INTACT",
+            &elapsed,
+            &[],
+        );
         Ok(())
     } else {
+        ui::verdict_card(
+            ui::Tone::Fail,
+            &format!("VERDICT: FAIL · {} ISSUE(S) DETECTED", failures.len()),
+            &elapsed,
+            &[],
+        );
         Err(BladeError::Other(format!(
             "stealth audit FAILED ({} issue(s)): {}",
             failures.len(),
