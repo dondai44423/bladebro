@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Noir Syndicate ("Mafia Don") CLI visual overhaul**: modularized terminal UI (`src/ui/{palette,anim,render}.rs`) with TrueColor → 256-color → 16-color → plain auto-negotiation, responsive box-framed mastheads with gold-shimmer reveal, animated diamond spinners with RAII cursor restoration, 8× sub-block gold-to-crimson gradient download progress bars with smoothed throughput and ETA, grouped dossier layouts, word-wrapped cards, and Windows `ENABLE_VIRTUAL_TERMINAL_PROCESSING` support across `-u`/`update`, `--rollback`, `doctor`, `-v`/`--version`, `audit`, `rb`, `hermes`, and `help` while keeping pipes, `--json`, `NO_COLOR`, and `BLADE_PLAIN=1` byte-clean.
+
+### Fixed
+- **Updater & rollback reliability across Linux, macOS, and Windows**: pre-flight install-directory writability check now fails immediately before downloading; live disk-space verification runs from response `Content-Length` headers via native OS APIs (`statvfs` on Unix, `GetDiskFreeSpaceExW` on Windows, eliminating permanent Windows `doctor` warnings); HTTP `416 Range Not Satisfiable` truncates stale partials and recovers cleanly; permanent 4xx errors fail fast with automatic fallback to legacy asset names on 404; Windows self-updates save the backup before moving the running executable, use retry-guarded atomic rename for AV scanners, and sweep leftover `*.exe.old` files; Unix rollbacks stage and smoke-test (`--version`) into a unique temp file before an atomic `rename` (eliminating the missing-binary window and `ETXTBSY`); both self-update and rollback gracefully stop any stale running CLI daemon.
+- **Cross-platform install-channel detection & npm launcher resilience**: normalized Windows backslashes and detected `npm`, `pnpm`, `bun`, `yarn`, `Homebrew`, `Cargo`, `source`, and standalone installs accurately so `-v`, `doctor`, and `-u` print the exact upgrade command; `npm/bladebro/binary.cjs` auto-repairs stripped Unix `+x` bits on optional-dependency binaries; `npm/bladebro/bin.js` adds actionable `ENOEXEC`/`EACCES` diagnostics and TTY-gated error formatting on `stderr`.
+- **Pi extension (`pi-extension.ts`) & Hermes CLI (`bladebro hermes`) fixes**: replaced bare global `require` in `pi-extension.ts` with a `createRequire(import.meta.url)` fallback so the extension loads cleanly under both jiti CJS and native Node/Bun ESM, verified executable files and Windows `.exe` fallback, added `/mcp` server description, updated `docs/setup.md` tool names (`mcp__bladebro__*`), and hardened `bladebro hermes` with Windows `.cmd` fallback and fresh-config `agent` defaults.
+
+### Performance
+- **Faster `bladebro doctor`, `-v`, and `-u`**: shared pooled HTTP clients (`tcp_nodelay`, 45s idle read timeout, `HEAD` release-tag probes); `bladebro doctor` runs Chrome `--version` and one shared release check in parallel with zero-subprocess Xvfb and disk-space lookups (~2× faster); `bladebro -u` fetches the `.sha256` sidecar concurrently with the binary download and computes SHA-256 in a single streaming pass on clean HTTP 200 transfers.
+
 ## [4.8.0] - 2026-11-20
 
 ### Added
