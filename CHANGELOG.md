@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.8.2] - 2026-11-20
+
 ### Added
 - **Muted-by-default browser audio with opt-in `bladebro audio [on|off|status]`**: both the isolated agent browser and owned real-browser launches now pass `--mute-audio` by default so background YouTube/video/media playback never plays unexpected sound without a pause button (zero Blink/WebAudio fingerprint impact, verified `103/103` audit and `0 divergent` on both oracle lanes). Users opt in via `bladebro audio on` (persisted in `audio.json`), `bladebro rb audio on|off`, or `BLADE_AUDIO=1|0`; toggling restarts the CLI daemon and drifts long-lived MCP sessions cleanly without touching externally attached browsers.
 - **Expanded Chromium-family discovery for the real-browser lane**: added first-class support for Google Chrome Beta/Canary, Ungoogled Chromium, Arc, Thorium, and Opera GX alongside Chromium, Chrome, Brave, Helium, Edge, Vivaldi, and Opera; added Linux `PATH` search for all browsers, Linux Flatpak export discovery and sandboxed `flatpak run` launches on the real lane, flat-root profile handling for Opera/Opera GX, portable/AppImage `--binary`-only resolution when no system browser is installed, and automatic fixed-port `--remote-debugging-port=<N>` attach discovery on Linux.
@@ -2291,7 +2293,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.1...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.2...HEAD
+[4.8.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.2
 [4.8.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.1
 [4.8.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.0
 [4.7.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.7.0
