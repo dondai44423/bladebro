@@ -34,7 +34,8 @@ mod consent;
 mod content;
 mod wait;
 
-pub(crate) use self::wait::wait_for_settle_and_report_drain;
+pub(crate) use self::consent::dismiss_consent_detailed;
+pub(crate) use self::wait::wait_for_settle_adaptive;
 pub use self::{
     block::{detect_block, remediation_ladder},
     consent::{dismiss_consent, dismiss_consent_with_stored},

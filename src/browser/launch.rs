@@ -5,7 +5,8 @@ use super::discover::{endpoint_owned_by_pid, find_chrome, free_port};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use super::display::{apply_xvfb_env, VirtualDisplay};
 use super::flags::{
-    classify_gl, gl_stages, launch_args, launch_args_real, stage_label, LaunchCfg, RealLaunchCfg,
+    classify_gl, launch_args, launch_args_real, ordered_gl_stages, stage_label, LaunchCfg,
+    RealLaunchCfg,
 };
 use super::probe::probe_gl_ws;
 use super::*;
@@ -73,7 +74,15 @@ impl Browser {
     /// next stage is tried (bounded — the ladder has four stages) so a
     /// GL-less browser is never what pages see.
     async fn launch_inner(port: u16, no_sandbox: bool) -> Result<Self> {
-        let stages = gl_stages();
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let headful_hint = VirtualDisplay::available();
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let headful_hint = true;
+        let chrome_hint = find_chrome().ok();
+        let preferred = chrome_hint
+            .as_deref()
+            .and_then(|p| crate::knowledge::preferred_gl_stage(p, headful_hint));
+        let stages = ordered_gl_stages(preferred);
         let mut last: Option<Self> = None;
         for (i, stage) in stages.iter().enumerate() {
             if let Some(b) = last.take() {
@@ -86,15 +95,20 @@ impl Browser {
             match probe {
                 Some(renderer) => {
                     let state = classify_gl(&renderer);
+                    let hardware = matches!(state, GpuState::Hardware(_));
                     eprintln!(
                         "[stealth] GL healthcheck: {renderer} ({}) via {}",
-                        if matches!(state, GpuState::Hardware(_)) {
-                            "hardware"
-                        } else {
-                            "software"
-                        },
+                        if hardware { "hardware" } else { "software" },
                         stage_label(*stage)
                     );
+                    if let Some(ref cp) = chrome_hint {
+                        crate::knowledge::record_working_gl_stage(
+                            cp,
+                            !launched_headless(),
+                            *stage,
+                            hardware,
+                        );
+                    }
                     set_gpu_state(Some(state));
                     return Ok(browser);
                 }
@@ -168,6 +182,11 @@ impl Browser {
             eprintln!("[launch-timing] profile: {:?}", t0.elapsed());
         }
         let user_data_dir = profile.dir().to_path_buf();
+        let disk_cache_dir = if !is_flatpak_browser(&chrome_path) {
+            profile.http_cache_dir().map(std::path::Path::to_path_buf)
+        } else {
+            None
+        };
         font_audit();
 
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -210,6 +229,7 @@ impl Browser {
             transport: Transport::Ws,
             port,
             user_data_dir: &user_data_dir,
+            disk_cache_dir: disk_cache_dir.as_deref(),
             proxy: proxy.as_ref().map(|s| s.server.as_str()),
             extra: &extra,
         });
@@ -701,6 +721,16 @@ pub async fn launch_lane() -> Result<(Option<Browser>, String)> {
 }
 
 /// The agent-lane browser process. A Flatpak export is started through
+#[cfg(target_os = "linux")]
+pub(super) fn is_flatpak_browser(chrome_path: &str) -> bool {
+    super::flatpak::is_flatpak_export(chrome_path)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn is_flatpak_browser(_chrome_path: &str) -> bool {
+    false
+}
+
 /// `flatpak run` with the session profile shared into the sandbox — run
 /// as-is, Chrome would use a sandbox-private profile that vanishes on exit.
 pub(super) fn browser_command(chrome_path: &str, user_data_dir: &std::path::Path) -> Command {

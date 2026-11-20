@@ -14,7 +14,7 @@ impl Page {
             let model_url = self.lpm.url();
             if !model_url.is_empty() {
                 let live_url = super::navigate::eval_location_href(&self.cdp).await;
-                if !live_url.is_empty() && live_url != model_url {
+                if !live_url.is_empty() && !same_page_url(&live_url, model_url) {
                     return Err(crate::error::BladeError::StaleRef(format!(
                         "{ref_id} ({} \"{}\") was from a previous page ({model_url}) and is invalid after navigation to {live_url} — run see to get fresh refs",
                         el.raw.role,
@@ -119,5 +119,55 @@ impl Page {
                 Err(crate::error::BladeError::StaleRef(lines.join("\n")))
             }
         }
+    }
+}
+
+/// True when two URLs name the same document: pure in-page `#anchor`
+/// fragments (e.g. `#reviews`, `#top`) stay on the same page, whereas any
+/// origin/path/query change or SPA hash-route (`#/…`, `#!…`) is a distinct
+/// page whose old refs must not silently rebind.
+pub(super) fn same_page_url(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (base_a, frag_a) = a.split_once('#').unwrap_or((a, ""));
+    let (base_b, frag_b) = b.split_once('#').unwrap_or((b, ""));
+    if base_a != base_b {
+        return false;
+    }
+    let is_hash_route = |f: &str| f.starts_with('/') || f.starts_with('!');
+    !is_hash_route(frag_a) && !is_hash_route(frag_b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_page_url;
+
+    #[test]
+    fn same_page_url_allows_anchor_fragments_but_rejects_routes_and_queries() {
+        assert!(same_page_url(
+            "https://example.com/p/1",
+            "https://example.com/p/1#reviews"
+        ));
+        assert!(same_page_url(
+            "https://example.com/p/1#top",
+            "https://example.com/p/1#bottom"
+        ));
+        assert!(!same_page_url(
+            "https://example.com/p/1",
+            "https://example.com/p/2"
+        ));
+        assert!(!same_page_url(
+            "https://example.com/p/1?page=1",
+            "https://example.com/p/1?page=2"
+        ));
+        assert!(!same_page_url(
+            "https://example.com/#/home",
+            "https://example.com/#/settings"
+        ));
+        assert!(!same_page_url(
+            "https://example.com/",
+            "https://example.com/#!/checkout"
+        ));
     }
 }

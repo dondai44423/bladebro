@@ -50,6 +50,11 @@ impl VirtualDisplay {
         Self::start_with_path(&xvfb_path)
     }
 
+    /// Lightweight availability check (does not spawn Xvfb).
+    pub(super) fn available() -> bool {
+        find_xvfb().is_some()
+    }
+
     fn start_with_path(xvfb_path: &str) -> Result<Self> {
         let mut last_err = String::new();
         for _attempt in 0..3 {

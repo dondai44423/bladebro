@@ -44,11 +44,13 @@ impl Page {
         // Reset previous navigation's HTTP document status so non-HTTP targets
         // (about:blank, data:, file:) never inherit an older status code.
         self.clear_doc_response();
-        // Knowledge: per-domain resource-block config the agent set before.
-        // Applied only when nothing is active — an explicit session choice
-        // always wins; `state block clear` erases the stored config.
+        // Knowledge: per-domain resource-block config, timing, chirpy network
+        // profile, and bot-risk level — one lock lookup for the whole navigation.
+        // Stored block configs apply ONLY when no explicit session block override
+        // is active, and revert cleanly to `none` when leaving for a domain
+        // without a stored config (never leaking domain A's rules onto domain B).
         let domain = crate::knowledge::domain_from_url(url);
-        let (stored_block, learned_settle) = self
+        let (stored_block, learned_settle, is_chirpy, domain_risk) = self
             .knowledge
             .as_ref()
             .and_then(|kb| kb.lock().ok())
@@ -56,13 +58,23 @@ impl Page {
                 (
                     kb.get_block_config(&domain).map(|s| s.to_string()),
                     kb.get_settle_ms(&domain),
+                    kb.is_chirpy(&domain),
+                    kb.get_bot_risk(&domain),
                 )
             })
-            .unwrap_or((None, None));
-        if let Some(spec) = stored_block.filter(|s| !s.is_empty()) {
-            if self.block_rules() == 0 {
-                if let Err(e) = self.set_block_classes(&spec).await {
-                    eprintln!("[bladebro] stored block config failed to apply: {e}");
+            .unwrap_or((None, None, false, crate::knowledge::BotRiskLevel::Unknown));
+        self.current_domain_risk = domain_risk;
+        if self.block_from_knowledge || self.block_rules() == 0 {
+            if let Some(spec) = stored_block.filter(|s| !s.is_empty()) {
+                let want_mask = crate::page::intercept::InterceptState::parse_classes(&spec);
+                if want_mask != self.block_rules() {
+                    if let Err(e) = self.apply_knowledge_block_classes(&spec).await {
+                        eprintln!("[bladebro] stored block config failed to apply: {e}");
+                    }
+                }
+            } else if self.block_from_knowledge {
+                if let Err(e) = self.set_block_classes("none").await {
+                    eprintln!("[bladebro] clearing prior domain block config failed: {e}");
                 }
             }
         }
@@ -171,42 +183,48 @@ impl Page {
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
         _t("load");
         let _settle_t = std::time::Instant::now();
-        let needs_re_settle = perception::wait_for_settle_and_report_drain(
+        let settle_report = perception::wait_for_settle_adaptive(
             &self.cdp,
             Duration::from_millis(settle_cap),
             Some(&self.in_flight),
+            is_chirpy,
         )
         .await?;
         // Bounded post-drain re-quiet: only needed when requests actually
-        // drained during the network window (or DOM settle hit its cap) so a
-        // late fetch mount is caught without taxing already-quiet pages.
-        if needs_re_settle {
+        // completed during the network window (or DOM settle hit its cap) so a
+        // late fetch mount is caught without taxing already-quiet or pure
+        // persistent-connection pages.
+        if settle_report.needs_re_settle {
             let _ = re_settle(&self.cdp).await;
         }
         _t("settle");
         // Knowledge: learn this domain's real settle duration (only when it
-        // finished early — a cap timeout is not a settle sample).
+        // finished early — a cap timeout is not a settle sample) and whether
+        // its network drain plateaued on persistent background connections.
         if !domain.is_empty() {
             let elapsed = _settle_t.elapsed().as_millis() as u64;
-            if elapsed + 150 < settle_cap {
-                if let Some(kb) = self.knowledge.as_ref() {
-                    if let Ok(mut kb) = kb.lock() {
+            if let Some(kb) = self.knowledge.as_ref() {
+                if let Ok(mut kb) = kb.lock() {
+                    if elapsed + 150 < settle_cap {
                         kb.update_timing(&domain, elapsed);
                     }
+                    kb.record_net_drain(&domain, settle_report.net_plateaued);
                 }
             }
         }
         // M4+M6: Check for consent banners and block pages after navigation.
-        // Knowledge-base integration: try stored consent selector first,
-        // learn from successful dismissals, record the visit.
+        // Knowledge-base integration: fused single-round-trip stored selector
+        // + fallback ladder, downgrading stale stored selectors when missed.
         let stored_consent = self
             .knowledge
             .as_ref()
             .and_then(|kb| kb.lock().ok())
             .and_then(|kb| kb.get_consent(&domain).map(|c| c.selector.clone()));
-        let consent = dismiss_consent_with_stored(&self.cdp, stored_consent.as_deref())
-            .await
-            .unwrap_or(None);
+        let consent_outcome =
+            perception::dismiss_consent_detailed(&self.cdp, stored_consent.as_deref())
+                .await
+                .unwrap_or_default();
+        let consent = consent_outcome.matched;
         let blocked = detect_block(&self.cdp).await.unwrap_or(None);
         // JS challenge handling: many anti-bot systems (Reddit, Cloudflare)
         // serve a JS challenge page that a real browser solves automatically.
@@ -219,12 +237,6 @@ impl Page {
         // walls never do (waiting there only added 5s latency to a final verdict).
         // Knowledge: heavier vendors get a longer self-solve window (learned
         // per domain, raised by every real block we hit there).
-        let domain_risk = self
-            .knowledge
-            .as_ref()
-            .and_then(|kb| kb.lock().ok())
-            .map(|kb| kb.get_bot_risk(&domain))
-            .unwrap_or_default();
         let challenge_polls: u32 = if domain_risk >= crate::knowledge::BotRiskLevel::Heavy {
             16
         } else {
@@ -389,27 +401,41 @@ impl Page {
             other => other.map(String::from),
         };
         // Knowledge: persist what this domain does to us — a real block wall
-        // counts in stats and raises the domain's risk level; a solved JS
-        // challenge marks the domain as challenge-serving (medium).
+        // counts in stats and raises risk (resetting clean streak); a solved JS
+        // challenge records the solve and marks medium risk; a clean load feeds
+        // the gradual decay streak so one-time cold-profile walls recover.
         if !domain.is_empty() {
             if let Some(kb) = self.knowledge.as_ref() {
                 if let Ok(mut kb) = kb.lock() {
                     if let Some(ref bt) = blocked {
                         kb.record_block_detected();
-                        kb.raise_bot_risk(&domain, crate::knowledge::vendor_risk(bt));
+                        kb.record_block(&domain, crate::knowledge::vendor_risk(bt));
                     } else if challenge_seen {
-                        kb.raise_bot_risk(&domain, crate::knowledge::BotRiskLevel::Medium);
+                        kb.record_challenge_solved();
+                        kb.record_block(&domain, crate::knowledge::BotRiskLevel::Medium);
+                    } else {
+                        kb.record_clean_visit(&domain);
                     }
+                    self.current_domain_risk = kb.get_bot_risk(&domain);
                 }
             }
         }
         // Learn from successful consent dismissal (only specific selectors, not "generic").
+        // If a stored selector missed and the generic pass had to dismiss the live
+        // banner instead, downgrade the stale stored selector's confidence.
         if let Some(ref result) = consent {
-            if result != "generic" && !result.is_empty() && !domain.is_empty() {
+            if !domain.is_empty() {
                 if let Some(kb) = self.knowledge.as_ref() {
                     if let Ok(mut kb) = kb.lock() {
-                        kb.learn_consent_result(&domain, result);
-                        kb.record_consent_dismissed();
+                        if result == "generic" {
+                            if consent_outcome.stored_missed {
+                                kb.downgrade_consent(&domain);
+                            }
+                            kb.record_consent_dismissed();
+                        } else if !result.is_empty() {
+                            kb.learn_consent_result(&domain, result);
+                            kb.record_consent_dismissed();
+                        }
                     }
                 }
             }
@@ -515,11 +541,7 @@ impl Page {
             return;
         }
         let path = crate::platform::blade_dir().join("profiles.json");
-        let profiles: std::collections::HashMap<String, DomainProfile> =
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
+        let profiles = load_domain_profiles_cached(&path);
         // Every field resolves for EVERY domain: the profile's value, else the
         // session baseline (BLADE_TZ / BLADE_LOCALE). Applying only what a
         // profile set left the previous domain's tz/locale on every later
@@ -720,10 +742,50 @@ fn error_page_failure(
 }
 
 /// S11: per-domain stealth settings stored in ~/.blade/profiles.json.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
 struct DomainProfile {
     tz: Option<String>,
     locale: Option<String>,
+}
+
+type ProfilesCacheKey = (std::path::PathBuf, Option<(u64, u64)>);
+type ProfilesMap = std::collections::HashMap<String, DomainProfile>;
+
+/// Mtime+size cached loader for `~/.blade/profiles.json`: avoids blocking
+/// disk read + JSON parse on every navigation while reflecting edits instantly.
+fn load_domain_profiles_cached(path: &std::path::Path) -> ProfilesMap {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(ProfilesCacheKey, ProfilesMap)>>> =
+        std::sync::OnceLock::new();
+    let stamp = std::fs::metadata(path).ok().map(|m| {
+        let mtime = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        (mtime, m.len())
+    });
+    let key = (path.to_path_buf(), stamp);
+    let cell = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cell.lock() {
+        if let Some((cached_key, map)) = guard.as_ref() {
+            if *cached_key == key {
+                return map.clone();
+            }
+        }
+    }
+    let parsed: ProfilesMap = if stamp.is_some() {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        ProfilesMap::new()
+    };
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some((key, parsed.clone()));
+    }
+    parsed
 }
 
 /// Extract the registrable domain from a URL for profile lookup.

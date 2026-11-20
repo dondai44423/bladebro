@@ -223,6 +223,14 @@ pub struct Page {
     intercept: intercept::InterceptState,
     /// Request-interception task handle.
     intercept_task: Option<tokio::task::JoinHandle<()>>,
+    /// True when the active `intercept` block rules were auto-applied from
+    /// domain knowledge rather than an explicit session `state block` call.
+    /// Ensures domain A's learned block config reverts cleanly when leaving
+    /// for domain B instead of leaking across the rest of the session.
+    block_from_knowledge: bool,
+    /// Cached bot-detection risk for the current page's domain (drives
+    /// lock-free adaptive pacing in `Page::pace`).
+    current_domain_risk: crate::knowledge::BotRiskLevel,
     /// Tracked downloads (V19), updated by the download-watch task. Newest
     /// last. `act action=download` waits on the newest entry.
     downloads: std::sync::Arc<Mutex<Vec<DownloadInfo>>>,
@@ -364,13 +372,56 @@ impl Page {
         // Keep the interception third-party baseline in sync with the
         // current page (covers SPA navigations that bypass navigate()).
         self.intercept.set_page_url(&cap.url);
-        Ok(self.lpm.ingest(cap))
+        let delta = self.lpm.ingest(cap);
+        if delta.navigated {
+            self.sync_domain_chrome_and_risk();
+        }
+        Ok(delta)
+    }
+
+    /// Observe live links on the current URL to learn/refresh confirmed site
+    /// chrome hashes and update the cached domain bot-risk for adaptive pacing.
+    pub(super) fn sync_domain_chrome_and_risk(&mut self) {
+        let url = self.lpm.url().to_string();
+        let domain = crate::knowledge::domain_from_url(&url);
+        if domain.is_empty() {
+            self.current_domain_risk = crate::knowledge::BotRiskLevel::Unknown;
+            self.lpm.set_chrome_hashes(std::collections::HashSet::new());
+            return;
+        }
+        let hashes = self.lpm.live_link_hashes();
+        let (confirmed, risk) = self
+            .knowledge
+            .as_ref()
+            .and_then(|kb| kb.lock().ok())
+            .map(|mut kb| {
+                let c = kb.observe_page_links(&domain, &url, &hashes);
+                let r = kb.get_bot_risk(&domain);
+                (c, r)
+            })
+            .unwrap_or_else(|| {
+                (
+                    std::collections::HashSet::new(),
+                    crate::knowledge::BotRiskLevel::Unknown,
+                )
+            });
+        self.current_domain_risk = risk;
+        self.lpm.set_chrome_hashes(confirmed);
+        let folded = self.lpm.learned_chrome_fold_count();
+        if folded > 0 {
+            if let Some(kb) = self.knowledge.as_ref() {
+                if let Ok(mut kb) = kb.lock() {
+                    kb.record_chrome_folded(folded);
+                }
+            }
+        }
     }
 
     /// Set active resource-block classes ("images,fonts,media,trackers").
     /// Empty / "none" clears blocking. Toggles the CDP Fetch domain so
     /// interception adds zero overhead while blocking is off.
     pub async fn set_block_classes(&mut self, spec: &str) -> Result<u32> {
+        self.block_from_knowledge = false;
         let mask = if spec.trim().eq_ignore_ascii_case("none")
             || spec.trim().eq_ignore_ascii_case("clear")
         {
@@ -379,6 +430,16 @@ impl Page {
             intercept::InterceptState::parse_classes(spec)
         };
         self.intercept.apply_rules(&self.cdp, mask).await
+    }
+
+    /// Apply a learned per-domain block config from `KnowledgeBase`. Marks the
+    /// active rules as knowledge-owned so navigating to a different domain
+    /// without a stored config cleanly reverts them to `none`.
+    pub(super) async fn apply_knowledge_block_classes(&mut self, spec: &str) -> Result<u32> {
+        let mask = intercept::InterceptState::parse_classes(spec);
+        let applied = self.intercept.apply_rules(&self.cdp, mask).await?;
+        self.block_from_knowledge = applied != 0;
+        Ok(applied)
     }
 
     /// Persist the agent's explicit resource-block choice for the domain of
@@ -506,6 +567,8 @@ impl Page {
             crate::action::Action::Wait { .. } | crate::action::Action::Read { .. } => return,
             _ => (140.0, 0.4),
         };
+        let risk_scale = crate::knowledge::pacing_multiplier(self.current_domain_risk);
+        let median_ms = median_ms * risk_scale;
         let mut rng = crate::stealth::biometrics::Rng::new();
         // v3.10 (speed pass): medians ~3x faster than the v3.9 pacing, and a
         // 3x-median cap so a rare log-normal tail can't stall an agent flow.
@@ -604,6 +667,7 @@ impl Page {
             None => verdict,
         };
         if delta.navigated {
+            self.sync_domain_chrome_and_risk();
             if let Some(doc) = self.doc_response().filter(|d| d.status >= 400) {
                 if let Ok(mut a) = self.ambient.lock() {
                     a.push(doc.ambient_note(delta.url.starts_with("chrome-error://")));

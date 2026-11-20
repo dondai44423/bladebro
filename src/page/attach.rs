@@ -56,11 +56,15 @@ impl Page {
         // replace just "HeadlessChrome" with "Chrome" — preserving the real
         // Chrome version and OS. This is a CDP-level override, not JS.
         let ua_info = cdp.send("Runtime.evaluate", Some(serde_json::json!({
-            "expression": "JSON.stringify({ua:navigator.userAgent,plt:navigator.platform,wd:navigator.webdriver})",
+            "expression": "JSON.stringify({ua:navigator.userAgent,plt:navigator.platform,wd:navigator.webdriver,href:location.href})",
             "returnByValue": true,
         }))).await.ok()
             .and_then(|r| r.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_str()).map(String::from))
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let initial_href = ua_info
+            .as_ref()
+            .and_then(|v| v.get("href").and_then(|h| h.as_str()))
+            .unwrap_or("");
 
         // Real-browser lane honesty probe (measured, Chrome 151.0.7922.108):
         // a browser armed with an EPHEMERAL `--remote-debugging-port=0` (or
@@ -826,9 +830,20 @@ impl Page {
         });
 
         let lpm = LivePageModel::new();
-        // M4+M6: Check for consent banners and block pages after initial load.
-        let consent = dismiss_consent(&cdp).await.unwrap_or(None);
-        let blocked = detect_block(&cdp).await.unwrap_or(None);
+        // M4+M6: Check for consent banners and block pages after initial load,
+        // skipping blank/internal targets (`about:blank`, `chrome://`) where no
+        // consent wall or bot challenge can exist (saves 2 CDP round-trips +
+        // isolated-world creation on every fresh launch / new tab).
+        let is_web_page =
+            initial_href.starts_with("http://") || initial_href.starts_with("https://");
+        let (consent, blocked) = if is_web_page {
+            (
+                dismiss_consent(&cdp).await.unwrap_or(None),
+                detect_block(&cdp).await.unwrap_or(None),
+            )
+        } else {
+            (None, None)
+        };
         if let Some(ref fw) = consent {
             if let Ok(mut a) = ambient.lock() {
                 a.push(format!(
@@ -903,6 +918,8 @@ impl Page {
             emulation,
             intercept,
             intercept_task: Some(intercept_task),
+            block_from_knowledge: false,
+            current_domain_risk: crate::knowledge::BotRiskLevel::Unknown,
             downloads,
             download_task: Some(download_task),
             knowledge: None,

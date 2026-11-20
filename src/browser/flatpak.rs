@@ -144,6 +144,11 @@ fn run_args(
     args
 }
 
+/// True when `chrome_path` points to a Flatpak export wrapper (`exports/bin/<app.id>`).
+pub(super) fn is_flatpak_export(chrome_path: &str) -> bool {
+    parse_export(Path::new(chrome_path), &|key| std::env::var(key).ok()).is_some()
+}
+
 /// `flatpak run` for a Flatpak export with the session profile, the
 /// downloads dir and the upload staging dir shared into the sandbox; `None`
 /// when `chrome_path` is not an export.

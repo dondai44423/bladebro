@@ -61,8 +61,32 @@ const INITIAL_CONFIDENCE: f64 = 0.6;
 const MAX_DOMAINS: usize = 2000;
 /// EWMA alpha for timing: newer samples weigh more.
 const TIMING_ALPHA: f64 = 0.3;
+/// Cap on confirmed repeated-chrome link hashes persisted per domain.
+const MAX_CHROME_PER_DOMAIN: usize = 128;
+/// Cap on in-memory single-visit chrome candidates per domain.
+const MAX_CHROME_CANDIDATES: usize = 512;
+/// Consecutive misses (on pages with >= 6 links) before a confirmed chrome link is evicted.
+const CHROME_EVICT_MISSES: u8 = 4;
+/// Consecutive plateaued drains needed before tightening drain grace on chirpy domains.
+const CHIRPY_STREAK_THRESHOLD: u32 = 2;
+/// Consecutive clean visits AND minimum cooldown since last block before bot risk decays one step.
+const CLEAN_DECAY_VISITS: u32 = 10;
+const CLEAN_DECAY_COOLDOWN_SECS: u64 = 86_400;
+/// Non-hardware learned GL stages expire after 7 days so hardware GL is re-probed periodically.
+const SOFTWARE_GL_TTL_SECS: u64 = 7 * 86_400;
 
 // ── Domain knowledge ──────────────────────────────────────────────────
+
+/// One confirmed repeated site-chrome link hash (`role + name + href`) seen
+/// identically across multiple distinct paths on a domain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChromeEntry {
+    pub hash: u64,
+    #[serde(default)]
+    pub last_seen: u64,
+    #[serde(default)]
+    pub misses: u8,
+}
 
 /// Per-site knowledge accumulated across sessions.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -75,6 +99,15 @@ pub struct DomainKnowledge {
     pub timing: Option<TimingKnowledge>,
     #[serde(default)]
     pub bot_risk: BotRiskLevel,
+    /// Consecutive clean navigations (no block/challenge) since last block or decay.
+    #[serde(default)]
+    pub clean_streak: u32,
+    /// Epoch seconds of the most recent observed block wall on this domain.
+    #[serde(default)]
+    pub last_block_at: u64,
+    /// Repeated navigation/sidebar/footer link hashes confirmed across >=2 distinct paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chrome: Vec<ChromeEntry>,
     #[serde(default)]
     pub visit_count: u32,
     #[serde(default)]
@@ -99,13 +132,17 @@ pub struct ConsentKnowledge {
     pub fail_count: u32,
 }
 
-/// EWMA of page settle time for a domain.
+/// EWMA of page settle time and network-drain profile for a domain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimingKnowledge {
     /// Exponentially-weighted moving average of settle duration (ms).
     pub settle_ms: u64,
     #[serde(default)]
     pub sample_count: u32,
+    /// Consecutive navigations where DOM settled cleanly while `in_flight`
+    /// plateaued > 0 with zero completions (persistent WS/SSE/beacons).
+    #[serde(default)]
+    pub net_plateau_streak: u32,
 }
 
 /// Observed bot detection risk for a domain.
@@ -129,6 +166,10 @@ pub struct GlobalStats {
     pub total_consent_dismissed: u32,
     #[serde(default)]
     pub total_blocks_detected: u32,
+    #[serde(default)]
+    pub total_challenges_solved: u32,
+    #[serde(default)]
+    pub total_chrome_folded: u64,
 }
 
 // ── Behavioral profile ────────────────────────────────────────────────
@@ -313,6 +354,10 @@ pub struct KnowledgeBase {
     changed: HashSet<String>,
     /// Domains evicted since the last sync: their files are deleted.
     evicted: HashSet<String>,
+    /// In-memory single-path chrome candidates per domain: `hash -> first path seen`.
+    /// Never persisted; a link only promotes to `DomainKnowledge.chrome` once it
+    /// appears identically on a SECOND distinct path of the same domain.
+    chrome_candidates: HashMap<String, HashMap<u64, String>>,
 }
 
 impl KnowledgeBase {
@@ -477,9 +522,12 @@ impl KnowledgeBase {
             let consent_ok = dk
                 .consent
                 .as_ref()
-                .map(|c| c.confidence >= EVICT_THRESHOLD || (now - c.last_validated) < evict_age)
+                .map(|c| {
+                    c.confidence >= EVICT_THRESHOLD
+                        || now.saturating_sub(c.last_validated) < evict_age
+                })
                 .unwrap_or(true);
-            let domain_fresh = dk.visit_count > 0 && (now - dk.last_visit) < evict_age;
+            let domain_fresh = dk.visit_count > 0 && now.saturating_sub(dk.last_visit) < evict_age;
             let keep =
                 consent_ok || domain_fresh || dk.block_config.is_some() || dk.timing.is_some();
             if !keep {
@@ -578,16 +626,22 @@ impl KnowledgeBase {
             .filter(|s| !s.trim().is_empty())
     }
 
-    /// Learn block config from agent's explicit setting.
+    /// Learn block config from agent's explicit setting. Empty/whitespace
+    /// erases the stored config (`None`) so stale domains can still be pruned.
     pub fn learn_block_config(&mut self, domain: &str, classes: &str) {
         let now = now_secs();
         let dk = self.domains.entry(domain.to_string()).or_default();
-        dk.block_config = Some(classes.to_string());
+        let trimmed = classes.trim();
+        dk.block_config = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
         dk.last_visit = now;
         self.touch(domain);
     }
 
-    // ── Timing knowledge ──────────────────────────────────────────────
+    // ── Timing & network-drain knowledge ──────────────────────────────
 
     /// Get stored settle time for a domain.
     pub fn get_settle_ms(&self, domain: &str) -> Option<u64> {
@@ -595,6 +649,16 @@ impl KnowledgeBase {
             .get(domain)
             .and_then(|d| d.timing.as_ref())
             .map(|t| t.settle_ms)
+    }
+
+    /// True when this domain repeatedly holds persistent in-flight connections
+    /// (WS/SSE/analytics beacons) after DOM quiet. Callers tighten the drain
+    /// plateau grace without skipping active request completions.
+    pub fn is_chirpy(&self, domain: &str) -> bool {
+        self.domains
+            .get(domain)
+            .and_then(|d| d.timing.as_ref())
+            .is_some_and(|t| t.net_plateau_streak >= CHIRPY_STREAK_THRESHOLD)
     }
 
     /// Update timing EWMA with a new settle duration sample.
@@ -608,15 +672,161 @@ impl KnowledgeBase {
                 TimingKnowledge {
                     settle_ms: ewma,
                     sample_count: t.sample_count + 1,
+                    net_plateau_streak: t.net_plateau_streak,
                 }
             }
             None => TimingKnowledge {
                 settle_ms,
                 sample_count: 1,
+                net_plateau_streak: 0,
             },
         });
         dk.last_visit = now;
         self.touch(domain);
+    }
+
+    /// Record whether this navigation's network drain plateaued on persistent
+    /// open connections (`plateaued = true`) or drained cleanly to zero (`false`).
+    pub fn record_net_drain(&mut self, domain: &str, plateaued: bool) {
+        if domain.is_empty() {
+            return;
+        }
+        let now = now_secs();
+        let dk = self.domains.entry(domain.to_string()).or_default();
+        let prev = dk
+            .timing
+            .as_ref()
+            .map(|t| t.net_plateau_streak)
+            .unwrap_or(0);
+        let next = if plateaued {
+            prev.saturating_add(1).min(10)
+        } else {
+            0
+        };
+        if next == prev && dk.timing.is_some() {
+            return;
+        }
+        dk.timing = Some(match &dk.timing {
+            Some(t) => TimingKnowledge {
+                settle_ms: t.settle_ms,
+                sample_count: t.sample_count,
+                net_plateau_streak: next,
+            },
+            None => TimingKnowledge {
+                settle_ms: 0,
+                sample_count: 0,
+                net_plateau_streak: next,
+            },
+        });
+        dk.last_visit = now;
+        self.touch(domain);
+    }
+
+    // ── Site chrome knowledge (zero-staleness live folding) ───────────
+
+    /// Return the currently confirmed repeated-chrome link hashes for a domain.
+    pub fn confirmed_chrome_hashes(&self, domain: &str) -> HashSet<u64> {
+        self.domains
+            .get(domain)
+            .map(|dk| dk.chrome.iter().map(|e| e.hash).collect())
+            .unwrap_or_default()
+    }
+
+    /// Observe live `link` hashes on `url` for `domain`, promote hashes seen
+    /// identically across >=2 distinct paths, decay missing confirmed entries
+    /// (so redesigned menus never linger), and return the active confirmed set.
+    pub fn observe_page_links(
+        &mut self,
+        domain: &str,
+        url: &str,
+        live_link_hashes: &[u64],
+    ) -> HashSet<u64> {
+        if domain.is_empty() || live_link_hashes.is_empty() {
+            return HashSet::new();
+        }
+        let path = normalized_url_path(url);
+        let live_set: HashSet<u64> = live_link_hashes.iter().copied().collect();
+        let now = now_secs();
+        let mut mutated = false;
+
+        let confirmed_existing: HashSet<u64> = self
+            .domains
+            .get(domain)
+            .map(|dk| dk.chrome.iter().map(|e| e.hash).collect())
+            .unwrap_or_default();
+
+        // Track candidates across distinct paths in this session.
+        let mut newly_confirmed: Vec<u64> = Vec::new();
+        {
+            let cand_map = self
+                .chrome_candidates
+                .entry(domain.to_string())
+                .or_default();
+            for &h in &live_set {
+                if confirmed_existing.contains(&h) {
+                    cand_map.remove(&h);
+                    continue;
+                }
+                match cand_map.get(&h) {
+                    Some(first_path) if first_path != &path => {
+                        newly_confirmed.push(h);
+                        cand_map.remove(&h);
+                    }
+                    Some(_) => {}
+                    None => {
+                        if cand_map.len() < MAX_CHROME_CANDIDATES {
+                            cand_map.insert(h, path.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if !newly_confirmed.is_empty() || !confirmed_existing.is_empty() {
+            let dk = self.domains.entry(domain.to_string()).or_default();
+            // Update hit/miss state on already-confirmed entries.
+            // Only charge misses on substantive pages (>=6 links) so an error
+            // or login interstitial never wipes a site's real chrome memory.
+            let substantive = live_set.len() >= 6;
+            for entry in &mut dk.chrome {
+                if live_set.contains(&entry.hash) {
+                    if entry.misses != 0 || now.saturating_sub(entry.last_seen) > 3600 {
+                        mutated = true;
+                    }
+                    entry.misses = 0;
+                    entry.last_seen = now;
+                } else if substantive {
+                    entry.misses = entry.misses.saturating_add(1);
+                    mutated = true;
+                }
+            }
+            let before_len = dk.chrome.len();
+            dk.chrome.retain(|e| e.misses < CHROME_EVICT_MISSES);
+            if dk.chrome.len() != before_len {
+                mutated = true;
+            }
+            for h in newly_confirmed {
+                if !dk.chrome.iter().any(|e| e.hash == h) {
+                    dk.chrome.push(ChromeEntry {
+                        hash: h,
+                        last_seen: now,
+                        misses: 0,
+                    });
+                    mutated = true;
+                }
+            }
+            if dk.chrome.len() > MAX_CHROME_PER_DOMAIN {
+                dk.chrome.sort_by_key(|e| std::cmp::Reverse(e.last_seen));
+                dk.chrome.truncate(MAX_CHROME_PER_DOMAIN);
+                mutated = true;
+            }
+            if mutated {
+                dk.last_visit = now;
+                self.touch(domain);
+            }
+        }
+
+        self.confirmed_chrome_hashes(domain)
     }
 
     // ── Bot risk ──────────────────────────────────────────────────────
@@ -644,6 +854,53 @@ impl KnowledgeBase {
         }
     }
 
+    /// Record an observed block wall or challenge: raises risk, resets clean
+    /// streak, and timestamps `last_block_at` (used to gate future decay).
+    pub fn record_block(&mut self, domain: &str, risk: BotRiskLevel) {
+        if domain.is_empty() {
+            return;
+        }
+        let now = now_secs();
+        let dk = self.domains.entry(domain.to_string()).or_default();
+        if risk > dk.bot_risk {
+            dk.bot_risk = risk;
+        }
+        dk.clean_streak = 0;
+        dk.last_block_at = now;
+        dk.last_visit = now;
+        self.touch(domain);
+    }
+
+    /// Record a clean navigation (no block wall, no challenge). After enough
+    /// consecutive clean visits AND cooldown since the last block, steps down
+    /// `Heavy -> Medium` or `Medium -> Low` so one-time cold-profile blocks do
+    /// not permanently penalize a domain.
+    pub fn record_clean_visit(&mut self, domain: &str) {
+        if domain.is_empty() {
+            return;
+        }
+        let now = now_secs();
+        let Some(dk) = self.domains.get_mut(domain) else {
+            return;
+        };
+        if dk.bot_risk <= BotRiskLevel::Low {
+            return;
+        }
+        dk.clean_streak = dk.clean_streak.saturating_add(1);
+        if dk.clean_streak >= CLEAN_DECAY_VISITS
+            && now.saturating_sub(dk.last_block_at) >= CLEAN_DECAY_COOLDOWN_SECS
+        {
+            dk.bot_risk = match dk.bot_risk {
+                BotRiskLevel::Heavy => BotRiskLevel::Medium,
+                BotRiskLevel::Medium => BotRiskLevel::Low,
+                other => other,
+            };
+            dk.clean_streak = 0;
+        }
+        dk.last_visit = now;
+        self.touch(domain);
+    }
+
     // ── Visit tracking ────────────────────────────────────────────────
 
     pub fn record_visit(&mut self, domain: &str) {
@@ -664,9 +921,119 @@ impl KnowledgeBase {
         self.dirty = true;
     }
 
+    pub fn record_challenge_solved(&mut self) {
+        self.stats.total_challenges_solved += 1;
+        self.dirty = true;
+    }
+
+    pub fn record_chrome_folded(&mut self, count: usize) {
+        if count > 0 {
+            self.stats.total_chrome_folded =
+                self.stats.total_chrome_folded.saturating_add(count as u64);
+            self.dirty = true;
+        }
+    }
+
     pub fn record_navigation(&mut self) {
         self.stats.total_navigations += 1;
         self.dirty = true;
+    }
+
+    /// Compact summary for `bladebro doctor` (read-only).
+    pub fn summary(&self) -> KnowledgeSummary {
+        let mut consent_rules = 0usize;
+        let mut chirpy_domains = 0usize;
+        let mut chrome_domains = 0usize;
+        let mut heavy_risk_domains = 0usize;
+        for dk in self.domains.values() {
+            if dk
+                .consent
+                .as_ref()
+                .is_some_and(|c| c.confidence >= TRUST_THRESHOLD)
+            {
+                consent_rules += 1;
+            }
+            if dk
+                .timing
+                .as_ref()
+                .is_some_and(|t| t.net_plateau_streak >= CHIRPY_STREAK_THRESHOLD)
+            {
+                chirpy_domains += 1;
+            }
+            if !dk.chrome.is_empty() {
+                chrome_domains += 1;
+            }
+            if dk.bot_risk >= BotRiskLevel::Heavy {
+                heavy_risk_domains += 1;
+            }
+        }
+        KnowledgeSummary {
+            domains: self.domains.len(),
+            consent_rules,
+            chirpy_domains,
+            chrome_domains,
+            heavy_risk_domains,
+            total_navigations: self.stats.total_navigations,
+            total_chrome_folded: self.stats.total_chrome_folded,
+        }
+    }
+}
+
+/// Read-only summary of what the self-improvement engine has accumulated.
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeSummary {
+    pub domains: usize,
+    pub consent_rules: usize,
+    pub chirpy_domains: usize,
+    pub chrome_domains: usize,
+    pub heavy_risk_domains: usize,
+    pub total_navigations: u32,
+    pub total_chrome_folded: u64,
+}
+
+/// Deterministic FNV-1a 64-bit hash of a live link's `(role, name, href)` for
+/// zero-staleness repeated site-chrome detection. Returns `None` for non-links
+/// or links missing a name or href, so dynamic/unnamed controls are never folded.
+pub fn link_chrome_hash(role: &str, name: &str, href: Option<&str>) -> Option<u64> {
+    if role != "link" {
+        return None;
+    }
+    let name = name.trim();
+    let href = href?.trim();
+    if name.is_empty() || href.is_empty() {
+        return None;
+    }
+    // Strip volatile in-page fragment only; keep full origin/path/query so any
+    // link whose destination or text changed today immediately misses the hash.
+    let clean_href = href.split('#').next().unwrap_or(href);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name
+        .as_bytes()
+        .iter()
+        .chain([0u8].iter())
+        .chain(clean_href.as_bytes().iter())
+    {
+        h ^= *byte as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    Some(h)
+}
+
+/// Normalized URL path (scheme+host+path, no query or fragment) used to ensure
+/// a link is only promoted to site chrome when seen on >=2 distinct paths.
+fn normalized_url_path(url: &str) -> String {
+    let base = url.split(['?', '#']).next().unwrap_or(url);
+    base.trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// Pacing multiplier derived from a domain's learned bot-detection risk.
+/// Heavy behavioral detectors (DataDome/PerimeterX/Akamai) get extra human
+/// patience; low/unknown domains keep the fast human baseline.
+pub fn pacing_multiplier(risk: BotRiskLevel) -> f64 {
+    match risk {
+        BotRiskLevel::Heavy => 1.45,
+        BotRiskLevel::Medium => 1.15,
+        BotRiskLevel::Low | BotRiskLevel::Unknown => 1.0,
     }
 }
 
@@ -705,9 +1072,163 @@ fn infer_consent_framework(selector: &str) -> &'static str {
         "quantcast"
     } else if s.contains("truste") {
         "truste"
+    } else if s.contains("sp-cc") {
+        "amazon"
+    } else if s.contains("cky-btn") {
+        "cookieyes"
+    } else if s.contains("fc-cta") {
+        "funding-choices"
+    } else if s.contains("cmplz") {
+        "complianz"
+    } else if s.contains("osano") {
+        "osano"
+    } else if s.contains("cm-btn") {
+        "klaro"
+    } else if s.contains("uc-") {
+        "usercentrics"
+    } else if s.contains("cn-") {
+        "cookie-notice"
     } else {
         "generic"
     }
+}
+
+// ── Host launch learning (GL stage preference) ────────────────────────
+
+/// Remembered working GL stage for this host + Chrome binary + display mode.
+/// Avoids wasting 3-12s on failed GL-stage relaunches on VMs/containers/odd
+/// GPU stacks, while auto-invalidating whenever Chrome is upgraded or after
+/// 7 days on software fallback (so hardware GL is re-probed periodically).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct HostLaunchKnowledge {
+    chrome_path: String,
+    chrome_mtime: u64,
+    headful: bool,
+    gl_stage: String,
+    hardware: bool,
+    updated_at: u64,
+}
+
+fn file_mtime_secs(path: &str) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn gl_stage_to_str(stage: crate::browser::GlStage) -> &'static str {
+    match stage {
+        crate::browser::GlStage::NativeGlEgl => "gl-egl",
+        crate::browser::GlStage::NativeGl => "gl",
+        crate::browser::GlStage::SwiftShader => "swiftshader",
+    }
+}
+
+fn gl_stage_from_str(s: &str) -> Option<crate::browser::GlStage> {
+    match s {
+        "gl-egl" => Some(crate::browser::GlStage::NativeGlEgl),
+        "gl" => Some(crate::browser::GlStage::NativeGl),
+        "swiftshader" => Some(crate::browser::GlStage::SwiftShader),
+        _ => None,
+    }
+}
+
+fn preferred_gl_stage_from(
+    root: &Path,
+    chrome_path: &str,
+    chrome_mtime: u64,
+    headful: bool,
+    now: u64,
+) -> Option<crate::browser::GlStage> {
+    let p = root.join("host_launch.json");
+    let content = std::fs::read_to_string(&p).ok()?;
+    let h: HostLaunchKnowledge = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = std::fs::remove_file(&p);
+            return None;
+        }
+    };
+    if h.chrome_path != chrome_path || h.chrome_mtime != chrome_mtime || h.headful != headful {
+        return None;
+    }
+    if !h.hardware && now.saturating_sub(h.updated_at) >= SOFTWARE_GL_TTL_SECS {
+        return None;
+    }
+    gl_stage_from_str(&h.gl_stage)
+}
+
+fn record_working_gl_stage_to(
+    root: &Path,
+    chrome_path: &str,
+    chrome_mtime: u64,
+    headful: bool,
+    stage: crate::browser::GlStage,
+    hardware: bool,
+    now: u64,
+) {
+    let p = root.join("host_launch.json");
+    let stage_str = gl_stage_to_str(stage).to_string();
+    if let Ok(existing) = std::fs::read_to_string(&p) {
+        if let Ok(cur) = serde_json::from_str::<HostLaunchKnowledge>(&existing) {
+            if cur.chrome_path == chrome_path
+                && cur.chrome_mtime == chrome_mtime
+                && cur.headful == headful
+                && cur.gl_stage == stage_str
+                && cur.hardware == hardware
+                && now.saturating_sub(cur.updated_at) < 86_400
+            {
+                return;
+            }
+        }
+    }
+    let rec = HostLaunchKnowledge {
+        chrome_path: chrome_path.to_string(),
+        chrome_mtime,
+        headful,
+        gl_stage: stage_str,
+        hardware,
+        updated_at: now,
+    };
+    let _ = crate::platform::secure_create_dir_all(root);
+    let tmp = root.join("host_launch.json.tmp");
+    if let Ok(json) = serde_json::to_string_pretty(&rec) {
+        if crate::platform::secure_write_file(&tmp, json.as_bytes()).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
+/// Return the remembered working GL stage for this Chrome binary + display mode,
+/// or `None` if unknown, binary upgraded, or software TTL expired.
+pub fn preferred_gl_stage(chrome_path: &str, headful: bool) -> Option<crate::browser::GlStage> {
+    preferred_gl_stage_from(
+        &knowledge_dir(),
+        chrome_path,
+        file_mtime_secs(chrome_path),
+        headful,
+        now_secs(),
+    )
+}
+
+/// Persist the GL stage that passed the live WebGL healthcheck on this host.
+pub fn record_working_gl_stage(
+    chrome_path: &str,
+    headful: bool,
+    stage: crate::browser::GlStage,
+    hardware: bool,
+) {
+    record_working_gl_stage_to(
+        &knowledge_dir(),
+        chrome_path,
+        file_mtime_secs(chrome_path),
+        headful,
+        stage,
+        hardware,
+        now_secs(),
+    );
 }
 
 impl KnowledgeBase {
@@ -1073,6 +1594,7 @@ mod tests {
                 timing: Some(TimingKnowledge {
                     settle_ms: 500,
                     sample_count: 1,
+                    net_plateau_streak: 0,
                 }),
                 visit_count: 1,
                 last_visit: old + i as u64,
@@ -1226,5 +1748,179 @@ mod tests {
             None,
             "explicit clear must not read as a config"
         );
+        assert!(
+            kb.domains
+                .get("example.com")
+                .and_then(|d| d.block_config.as_ref())
+                .is_none(),
+            "cleared block_config must store None so prune() can evict"
+        );
+    }
+
+    #[test]
+    fn site_chrome_requires_distinct_paths_and_adapts_to_changes() {
+        let mut kb = KnowledgeBase::default();
+        let nav_home = link_chrome_hash("link", "Home", Some("https://shop.test/")).unwrap();
+        let nav_books = link_chrome_hash("link", "Books", Some("https://shop.test/books")).unwrap();
+        let prod_a = link_chrome_hash("link", "Dune", Some("https://shop.test/p/dune")).unwrap();
+        let prod_b = link_chrome_hash("link", "1984", Some("https://shop.test/p/1984")).unwrap();
+
+        // Reloading the SAME path must NEVER promote links to site chrome.
+        let c1 = kb.observe_page_links(
+            "shop.test",
+            "https://shop.test/cat/a",
+            &[nav_home, nav_books, prod_a],
+        );
+        assert!(c1.is_empty(), "first visit must not confirm chrome");
+        let c2 = kb.observe_page_links(
+            "shop.test",
+            "https://shop.test/cat/a?page=2",
+            &[nav_home, nav_books, prod_a],
+        );
+        assert!(
+            c2.is_empty(),
+            "same normalized path must not promote chrome"
+        );
+
+        // Visiting a second DISTINCT path promotes only the links repeated identically.
+        let c3 = kb.observe_page_links(
+            "shop.test",
+            "https://shop.test/cat/b",
+            &[nav_home, nav_books, prod_b],
+        );
+        assert!(c3.contains(&nav_home));
+        assert!(c3.contains(&nav_books));
+        assert!(!c3.contains(&prod_a), "page-specific link must stay live");
+        assert!(!c3.contains(&prod_b), "page-specific link must stay live");
+
+        // If a link's label or href changes today, its hash immediately misses!
+        let nav_books_renamed =
+            link_chrome_hash("link", "All Books (New)", Some("https://shop.test/books")).unwrap();
+        assert!(!c3.contains(&nav_books_renamed));
+
+        // Non-links are never hashed as site chrome.
+        assert!(link_chrome_hash("button", "Add to cart", Some("/cart")).is_none());
+        assert!(link_chrome_hash("textbox", "Search", None).is_none());
+
+        // Redesign eviction: after CHROME_EVICT_MISSES substantive pages without
+        // nav_home, it is evicted automatically.
+        let other: Vec<u64> = (10..20)
+            .map(|i| {
+                link_chrome_hash("link", &format!("Item {i}"), Some(&format!("/i/{i}"))).unwrap()
+            })
+            .collect();
+        for i in 0..CHROME_EVICT_MISSES {
+            let mut page_links = vec![nav_books];
+            page_links.extend_from_slice(&other);
+            kb.observe_page_links(
+                "shop.test",
+                &format!("https://shop.test/redesign/{i}"),
+                &page_links,
+            );
+        }
+        let after = kb.confirmed_chrome_hashes("shop.test");
+        assert!(
+            !after.contains(&nav_home),
+            "disappeared chrome link must evict after misses"
+        );
+        assert!(
+            after.contains(&nav_books),
+            "still-present chrome link stays"
+        );
+    }
+
+    #[test]
+    fn chirpy_network_streak_activates_and_resets_cleanly() {
+        let mut kb = KnowledgeBase::default();
+        assert!(!kb.is_chirpy("feed.test"));
+        kb.record_net_drain("feed.test", true);
+        assert!(
+            !kb.is_chirpy("feed.test"),
+            "one plateau is not enough to classify chirpy"
+        );
+        kb.record_net_drain("feed.test", true);
+        assert!(
+            kb.is_chirpy("feed.test"),
+            "two consecutive plateaus confirm chirpy"
+        );
+        kb.record_net_drain("feed.test", false);
+        assert!(
+            !kb.is_chirpy("feed.test"),
+            "a clean zero drain immediately resets chirpy"
+        );
+    }
+
+    #[test]
+    fn bot_risk_decays_only_after_clean_streak_and_cooldown() {
+        let mut kb = KnowledgeBase::default();
+        kb.record_block("strict.test", BotRiskLevel::Heavy);
+        assert_eq!(kb.get_bot_risk("strict.test"), BotRiskLevel::Heavy);
+        assert!((pacing_multiplier(BotRiskLevel::Heavy) - 1.45).abs() < 0.01);
+
+        // Clean visits within 24h cooldown must NOT decay risk yet.
+        for _ in 0..CLEAN_DECAY_VISITS {
+            kb.record_clean_visit("strict.test");
+        }
+        assert_eq!(kb.get_bot_risk("strict.test"), BotRiskLevel::Heavy);
+
+        // Simulate cooldown elapsed -> next clean visit steps Heavy -> Medium.
+        kb.domains.get_mut("strict.test").unwrap().last_block_at =
+            now_secs().saturating_sub(CLEAN_DECAY_COOLDOWN_SECS + 10);
+        kb.record_clean_visit("strict.test");
+        assert_eq!(kb.get_bot_risk("strict.test"), BotRiskLevel::Medium);
+    }
+
+    #[test]
+    fn host_launch_gl_stage_persists_invalidates_on_upgrade_and_expires_software() {
+        let root = scratch_root("hostgl");
+        let now = 1_700_000_000u64;
+        record_working_gl_stage_to(
+            &root,
+            "/usr/bin/chromium",
+            12345,
+            true,
+            crate::browser::GlStage::NativeGl,
+            true,
+            now,
+        );
+        assert_eq!(
+            preferred_gl_stage_from(&root, "/usr/bin/chromium", 12345, true, now + 100),
+            Some(crate::browser::GlStage::NativeGl)
+        );
+        // Chrome upgrade (different mtime) invalidates immediately.
+        assert_eq!(
+            preferred_gl_stage_from(&root, "/usr/bin/chromium", 99999, true, now + 100),
+            None
+        );
+        // Display mode change (headful -> headless) invalidates immediately.
+        assert_eq!(
+            preferred_gl_stage_from(&root, "/usr/bin/chromium", 12345, false, now + 100),
+            None
+        );
+        // Software fallback expires after SOFTWARE_GL_TTL_SECS so hardware is re-probed.
+        record_working_gl_stage_to(
+            &root,
+            "/usr/bin/chromium",
+            12345,
+            true,
+            crate::browser::GlStage::SwiftShader,
+            false,
+            now,
+        );
+        assert_eq!(
+            preferred_gl_stage_from(&root, "/usr/bin/chromium", 12345, true, now + 100),
+            Some(crate::browser::GlStage::SwiftShader)
+        );
+        assert_eq!(
+            preferred_gl_stage_from(
+                &root,
+                "/usr/bin/chromium",
+                12345,
+                true,
+                now + SOFTWARE_GL_TTL_SECS + 1
+            ),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

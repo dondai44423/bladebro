@@ -287,6 +287,26 @@ pub(super) fn gl_stages() -> &'static [GlStage] {
     ]
 }
 
+/// Reorder [`gl_stages`] to try a host-learned working GL stage first while
+/// keeping every remaining fallback stage behind it.
+pub(super) fn ordered_gl_stages(preferred: Option<GlStage>) -> Vec<GlStage> {
+    let base = gl_stages();
+    let Some(pref) = preferred else {
+        return base.to_vec();
+    };
+    if base.first() == Some(&pref) {
+        return base.to_vec();
+    }
+    let mut out = Vec::with_capacity(base.len() + 1);
+    out.push(pref);
+    for &s in base {
+        if s != pref {
+            out.push(s);
+        }
+    }
+    out
+}
+
 /// Everything a Chrome command line depends on. Both transports build from
 /// [`launch_args`] — the v3.9.11 pipe path silently missing
 /// `--ignore-gpu-blocklist` is exactly the class of bug this prevents:
@@ -299,6 +319,7 @@ pub(super) struct LaunchCfg<'a> {
     pub(super) transport: Transport,
     pub(super) port: u16,
     pub(super) user_data_dir: &'a std::path::Path,
+    pub(super) disk_cache_dir: Option<&'a std::path::Path>,
     pub(super) proxy: Option<&'a str>,
     pub(super) extra: &'a [String],
 }
@@ -355,6 +376,15 @@ pub(super) fn launch_args(cfg: &LaunchCfg<'_>) -> Vec<String> {
         Transport::Pipe => args.push("--remote-debugging-pipe".into()),
     }
     args.push(format!("--user-data-dir={}", cfg.user_data_dir.display()));
+    if let Some(cache_dir) = cfg.disk_cache_dir {
+        if !cfg.extra.iter().any(|f| f.starts_with("--disk-cache-dir")) {
+            args.push(format!("--disk-cache-dir={}", cache_dir.display()));
+            if !cfg.extra.iter().any(|f| f.starts_with("--disk-cache-size")) {
+                // 100 MiB cap on the cross-session RFC-9111 HTTP cache.
+                args.push("--disk-cache-size=104857600".into());
+            }
+        }
+    }
     if let Some(proxy) = cfg.proxy {
         args.push(format!("--proxy-server={proxy}"));
     }
@@ -540,9 +570,44 @@ mod launch_flag_tests {
             transport,
             port: 9222,
             user_data_dir: Path::new("/tmp/bb-launch-args-test"),
+            disk_cache_dir: None,
             proxy: None,
             extra: EMPTY_EXTRA,
         }
+    }
+
+    #[test]
+    fn ordered_gl_stages_promotes_learned_stage_without_dropping_fallbacks() {
+        assert_eq!(ordered_gl_stages(None), gl_stages());
+        assert_eq!(ordered_gl_stages(Some(GlStage::NativeGlEgl)), gl_stages());
+        assert_eq!(
+            ordered_gl_stages(Some(GlStage::SwiftShader)),
+            vec![
+                GlStage::SwiftShader,
+                GlStage::NativeGlEgl,
+                GlStage::NativeGlEgl,
+                GlStage::NativeGl,
+            ]
+        );
+    }
+
+    #[test]
+    fn disk_cache_dir_sets_bounded_cache_unless_extra_overrides() {
+        let with_cache = launch_args(&LaunchCfg {
+            disk_cache_dir: Some(Path::new("/tmp/bb-cache-slot-0")),
+            ..cfg(GlStage::NativeGlEgl, true, Transport::Ws)
+        });
+        assert!(with_cache.contains(&"--disk-cache-dir=/tmp/bb-cache-slot-0".to_string()));
+        assert!(with_cache.contains(&"--disk-cache-size=104857600".to_string()));
+
+        let custom = vec!["--disk-cache-dir=/custom/cache".to_string()];
+        let overridden = launch_args(&LaunchCfg {
+            disk_cache_dir: Some(Path::new("/tmp/bb-cache-slot-0")),
+            extra: &custom,
+            ..cfg(GlStage::NativeGlEgl, true, Transport::Ws)
+        });
+        assert!(overridden.contains(&"--disk-cache-dir=/custom/cache".to_string()));
+        assert!(!overridden.contains(&"--disk-cache-dir=/tmp/bb-cache-slot-0".to_string()));
     }
 
     /// The v3.9.11 bug: the pipe path was missing `--ignore-gpu-blocklist` and

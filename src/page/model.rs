@@ -10,7 +10,7 @@
 //! token-budgeted text the agent reads: a one-line scene header plus one line
 //! per actionable element, `ref role "name" [state hints]`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::page::perception::{PageCapture, RawElement};
 use crate::page::refs::PrevState;
@@ -104,6 +104,11 @@ pub struct LivePageModel {
     /// The latest read went unanswered: the elements are the last answered
     /// state, not a fresh observation. Rendered as a note on every view.
     unanswered: bool,
+    /// Confirmed repeated site-chrome link hashes for the current domain
+    /// (learned from `KnowledgeBase` across >=2 distinct paths). Used purely
+    /// to fold repeated live nav/sidebar links in `compress()` — elements stay
+    /// live in `self.elements` with real refs and are never folded in `filter=`.
+    chrome_hashes: HashSet<u64>,
 }
 
 /// Max remembered dead-ref identities on the current page.
@@ -129,6 +134,7 @@ impl Default for LivePageModel {
             title: String::new(),
             phase: String::new(),
             unanswered: false,
+            chrome_hashes: HashSet::new(),
         }
     }
 }
@@ -136,6 +142,36 @@ impl Default for LivePageModel {
 impl LivePageModel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Supply the domain's confirmed repeated site-chrome link hashes for
+    /// live folding in [`Self::compress`].
+    pub fn set_chrome_hashes(&mut self, hashes: HashSet<u64>) {
+        self.chrome_hashes = hashes;
+    }
+
+    /// Live link chrome hashes currently rendered on the page (for feeding
+    /// into [`crate::knowledge::KnowledgeBase::observe_page_links`]).
+    pub fn live_link_hashes(&self) -> Vec<u64> {
+        self.elements
+            .iter()
+            .filter_map(|el| {
+                crate::knowledge::link_chrome_hash(
+                    &el.raw.role,
+                    &el.raw.name,
+                    el.raw.href.as_deref(),
+                )
+            })
+            .collect()
+    }
+
+    /// True if `el` matches a confirmed repeated site-chrome link hash.
+    fn is_learned_chrome(&self, el: &PageElement) -> bool {
+        if self.chrome_hashes.is_empty() {
+            return false;
+        }
+        crate::knowledge::link_chrome_hash(&el.raw.role, &el.raw.name, el.raw.href.as_deref())
+            .is_some_and(|h| self.chrome_hashes.contains(&h))
     }
 
     /// Current page URL.
@@ -339,16 +375,18 @@ impl LivePageModel {
             };
         }
         let navigated = self.initialized && self.url != cap.url;
+        let page_changed = navigated && !super::heal::same_page_url(&self.url, &cap.url);
         let title_changed = self.initialized && self.title != cap.title;
         let phase = cap.phase().to_string();
 
         // Refs are monotonic for the session's lifetime AND strictly
-        // page-scoped: on navigation, retire every old ref and mint fresh
-        // refs against an empty prev_state so a stale `e550` from page 1
-        // can NEVER silently rebind to a different item on page 2 that
-        // happens to share the same rank/sig (e.g. "Add to basket" #15).
+        // page-scoped: on a real page navigation (path/origin/query/hash-route),
+        // retire every old ref and mint fresh refs against an empty prev_state
+        // so a stale `e550` from page 1 can NEVER silently rebind to a
+        // different item on page 2. Pure in-page `#anchor` jumps stay on the
+        // same document and preserve live refs.
         let empty_prev = HashMap::new();
-        let stab = if navigated {
+        let stab = if page_changed {
             stabilize(&empty_prev, &cap.elements, &mut self.next_ref)
         } else {
             stabilize(&self.prev_state, &cap.elements, &mut self.next_ref)
@@ -392,7 +430,7 @@ impl LivePageModel {
             })
             .collect();
 
-        let removed: Vec<String> = if navigated {
+        let removed: Vec<String> = if page_changed {
             let old_url = self.url.clone();
             let old_live: Vec<(String, String, String)> = self
                 .elements
@@ -436,6 +474,12 @@ impl LivePageModel {
             unanswered: false,
         };
 
+        if navigated
+            && crate::knowledge::domain_from_url(&self.url)
+                != crate::knowledge::domain_from_url(&cap.url)
+        {
+            self.chrome_hashes.clear();
+        }
         self.elements = elements;
         self.by_ref = by_ref;
         self.prev_state = prev_state;
@@ -450,15 +494,65 @@ impl LivePageModel {
 
     // ---- compression / rendering ----
 
+    /// How many live links on the current page will be folded as learned
+    /// repeated site chrome (excluding elements already covered by ARIA
+    /// landmark folding). Returns 0 unless >=4 chrome links and >=2 unique
+    /// non-chrome elements exist so chrome-only pages are never hidden.
+    pub fn learned_chrome_fold_count(&self) -> usize {
+        if self.chrome_hashes.is_empty() {
+            return 0;
+        }
+        const FOLD_LANDMARKS: [&str; 4] = ["nav", "banner", "footer", "aside"];
+        let has_content_landmark = self.elements.iter().any(|e| {
+            matches!(
+                e.raw.landmark.as_deref(),
+                Some("main") | Some("dialog") | Some("search")
+            )
+        });
+        let is_landmark_folded = |el: &PageElement| -> bool {
+            if !has_content_landmark {
+                return false;
+            }
+            let Some(lm) = el.raw.landmark.as_deref() else {
+                return false;
+            };
+            FOLD_LANDMARKS.contains(&lm)
+                && self
+                    .elements
+                    .iter()
+                    .filter(|e| e.raw.landmark.as_deref() == Some(lm))
+                    .count()
+                    >= 3
+        };
+        let mut chrome_count = 0usize;
+        let mut non_chrome_count = 0usize;
+        for el in &self.elements {
+            if is_landmark_folded(el) {
+                continue;
+            }
+            if self.is_learned_chrome(el) {
+                chrome_count += 1;
+            } else {
+                non_chrome_count += 1;
+            }
+        }
+        if chrome_count >= 4 && non_chrome_count >= 2 {
+            chrome_count
+        } else {
+            0
+        }
+    }
+
     /// Render the *full* current model as the agent-facing view, capped at
     /// `budget` characters. One scene line + one line per element.
     ///
     /// V11 semantic folding: when the page has a content landmark
     /// (main/dialog/search), chrome landmarks (nav/banner/footer/
     /// aside) fold to one-liners at their document position.
-    /// Pages without a content landmark render flat (can't tell
-    /// chrome from content). Groups smaller than 3 elements render
-    /// inline (folding two items saves nothing).
+    /// Pages without a content landmark still benefit from learned site-chrome
+    /// folding once links repeat identically across >=2 distinct paths on the
+    /// same domain (live-verified: any changed label/href unfolds immediately,
+    /// and `compress_filtered` always renders every element).
     pub fn compress(&self, budget: usize, in_flight: usize) -> String {
         const FOLD_LANDMARKS: [&str; 4] = ["nav", "banner", "footer", "aside"];
         let has_content_landmark = self.elements.iter().any(|e| {
@@ -467,6 +561,8 @@ impl LivePageModel {
                 Some("main") | Some("dialog") | Some("search")
             )
         });
+        let learned_chrome_count = self.learned_chrome_fold_count();
+        let fold_learned_chrome = learned_chrome_count > 0;
 
         let mut out = String::new();
         out.push_str(&format!(
@@ -487,7 +583,8 @@ impl LivePageModel {
             out.push_str(UNANSWERED_NOTE);
         }
 
-        let mut folded_done: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut folded_done: HashSet<&str> = HashSet::new();
+        let mut chrome_folded_emitted = false;
         for (idx, el) in self.elements.iter().enumerate() {
             if has_content_landmark {
                 if let Some(lm) = el.raw.landmark.as_deref() {
@@ -515,9 +612,26 @@ impl LivePageModel {
                     }
                 }
             }
+            if fold_learned_chrome && self.is_learned_chrome(el) {
+                if chrome_folded_emitted {
+                    continue;
+                }
+                let fold_line = format!(
+                    "site-chrome \u{25b8} {learned_chrome_count} repeated site links folded (filter=link to expand)\n"
+                );
+                if out.len() + fold_line.len() > budget {
+                    break;
+                }
+                out.push_str(&fold_line);
+                chrome_folded_emitted = true;
+                continue;
+            }
             let line = format_element(el);
             if out.len() + line.len() > budget {
-                let remaining = &self.elements[idx..];
+                let remaining: Vec<&PageElement> = self.elements[idx..]
+                    .iter()
+                    .filter(|r| !(fold_learned_chrome && self.is_learned_chrome(r)))
+                    .collect();
                 // Deterministic summary: roles ordered by count (desc) then
                 // alphabetically. HashMap iter() order is randomized per
                 // process — an arbitrary order made the truncation line
@@ -974,5 +1088,98 @@ mod tests {
             "{line}"
         );
         assert!(line.ends_with(" | +8 more]"), "{line}");
+    }
+
+    #[test]
+    fn learned_chrome_folds_repeated_links_without_hiding_changed_or_filtered() {
+        let mut lpm = LivePageModel::new();
+        let make_el = |role: &str, name: &str, href: Option<&str>, idx: usize| RawElement {
+            tag: if role == "link" { "a" } else { "button" }.into(),
+            role: role.into(),
+            name: name.into(),
+            element_type: None,
+            value: None,
+            options: None,
+            disabled: false,
+            checked: None,
+            href: href.map(String::from),
+            placeholder: None,
+            required: false,
+            has_popup: false,
+            landmark: None,
+            box_: [0.0, (idx * 20) as f64, 100.0, 20.0],
+            sig: format!("|{role}|{name}|1"),
+            frame: Vec::new(),
+            shadow: false,
+            fingerprint: 0,
+            pending: false,
+            ctx: String::new(),
+        };
+        let mut els = Vec::new();
+        let mut chrome_hashes = HashSet::new();
+        for i in 0..8 {
+            let name = format!("Category {i}");
+            let href = format!("https://shop.test/cat/{i}");
+            chrome_hashes
+                .insert(crate::knowledge::link_chrome_hash("link", &name, Some(&href)).unwrap());
+            els.push(make_el("link", &name, Some(&href), i));
+        }
+        // One sidebar link whose label CHANGED today (e.g. "Deals (3)" -> "Deals (5)"):
+        // its old hash is in chrome_hashes, its new live label MUST stay visible!
+        chrome_hashes.insert(
+            crate::knowledge::link_chrome_hash(
+                "link",
+                "Deals (3)",
+                Some("https://shop.test/deals"),
+            )
+            .unwrap(),
+        );
+        els.push(make_el(
+            "link",
+            "Deals (5)",
+            Some("https://shop.test/deals"),
+            9,
+        ));
+        // Unique page controls that would have been pushed off a tight budget.
+        els.push(make_el(
+            "link",
+            "Tastes Like Fear",
+            Some("https://shop.test/book/1"),
+            10,
+        ));
+        els.push(make_el("button", "Add to basket", None, 11));
+
+        lpm.ingest(PageCapture {
+            url: "https://shop.test/cat/mystery".into(),
+            title: "Mystery".into(),
+            ready_state: "complete".into(),
+            muts: 0,
+            elements: els,
+        });
+        lpm.set_chrome_hashes(chrome_hashes);
+
+        let view = lpm.compress(500, 0);
+        assert!(
+            view.contains("site-chrome ▸ 8 repeated site links folded"),
+            "repeated chrome must fold cleanly:\n{view}"
+        );
+        assert!(
+            !view.contains("Category 0"),
+            "folded chrome should not consume default budget:\n{view}"
+        );
+        assert!(
+            view.contains("Deals (5)"),
+            "changed link must immediately unfold (zero staleness):\n{view}"
+        );
+        assert!(
+            view.contains("Tastes Like Fear") && view.contains("Add to basket"),
+            "unique page controls must now fit in budget:\n{view}"
+        );
+        // Filtered view must NEVER hide folded chrome.
+        let filtered = lpm.compress_filtered(2000, "Category", 0);
+        assert!(
+            filtered.contains("Category 0") && filtered.contains("Category 7"),
+            "filter= must still expose all live chrome refs:\n{filtered}"
+        );
     }
 }

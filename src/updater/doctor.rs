@@ -70,6 +70,9 @@ pub async fn run() -> Result<()> {
     // 6. Login sidecar (the logins that survive reboots/SIGKILL)
     checks.push(check_login_sidecar());
 
+    // 6b. Self-improvement knowledge & HTTP cache
+    checks.push(check_knowledge_and_cache());
+
     // 7. Session/profiles hygiene (orphans, disk usage)
     checks.push(check_profile_hygiene());
 
@@ -167,6 +170,39 @@ fn check_os() -> Check {
         name: "Operating system",
         status: Status::Pass,
         detail: format!("{os} ({arch})"),
+        fix: None,
+    }
+}
+
+fn check_knowledge_and_cache() -> Check {
+    let kb = crate::knowledge::KnowledgeBase::load();
+    let s = kb.summary();
+    let cache_root = crate::platform::blade_dir().join("http-cache");
+    let cache_slots = std::fs::read_dir(&cache_root)
+        .ok()
+        .map(|it| {
+            it.flatten()
+                .filter(|e| {
+                    e.file_type().is_ok_and(|t| t.is_dir())
+                        && e.file_name().to_string_lossy().starts_with("slot-")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let detail = format!(
+        "{} domains ({} consent, {} site-chrome, {} chirpy, {} heavy-risk; {} links folded); HTTP cache: {} warm slot(s)",
+        s.domains,
+        s.consent_rules,
+        s.chrome_domains,
+        s.chirpy_domains,
+        s.heavy_risk_domains,
+        s.total_chrome_folded,
+        cache_slots,
+    );
+    Check {
+        name: "Knowledge & cache",
+        status: Status::Pass,
+        detail,
         fix: None,
     }
 }

@@ -6,7 +6,7 @@ use super::discover::find_chrome;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use super::display::{apply_xvfb_env, VirtualDisplay};
 #[cfg(unix)]
-use super::flags::{classify_gl, gl_stages, launch_args, stage_label, LaunchCfg};
+use super::flags::{classify_gl, launch_args, ordered_gl_stages, stage_label, LaunchCfg};
 #[cfg(unix)]
 use super::launch::font_audit;
 #[cfg(unix)]
@@ -52,7 +52,15 @@ impl Browser {
     /// promise).
     #[cfg(unix)]
     async fn launch_pipe_inner(no_sandbox: bool) -> Result<(Self, crate::cdp::CdpClient)> {
-        let stages = gl_stages();
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let headful_hint = VirtualDisplay::available();
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let headful_hint = true;
+        let chrome_hint = find_chrome().ok();
+        let preferred = chrome_hint
+            .as_deref()
+            .and_then(|p| crate::knowledge::preferred_gl_stage(p, headful_hint));
+        let stages = ordered_gl_stages(preferred);
         let mut last: Option<(Self, crate::cdp::CdpClient)> = None;
         for (i, stage) in stages.iter().enumerate() {
             if let Some((b, c)) = last.take() {
@@ -64,15 +72,20 @@ impl Browser {
             match probe {
                 Some(renderer) => {
                     let state = classify_gl(&renderer);
+                    let hardware = matches!(state, GpuState::Hardware(_));
                     eprintln!(
                         "[stealth] GL healthcheck: {renderer} ({}) via {}",
-                        if matches!(state, GpuState::Hardware(_)) {
-                            "hardware"
-                        } else {
-                            "software"
-                        },
+                        if hardware { "hardware" } else { "software" },
                         stage_label(*stage)
                     );
+                    if let Some(ref cp) = chrome_hint {
+                        crate::knowledge::record_working_gl_stage(
+                            cp,
+                            !launched_headless(),
+                            *stage,
+                            hardware,
+                        );
+                    }
                     set_gpu_state(Some(state));
                     return Ok((browser, client));
                 }
@@ -136,6 +149,11 @@ impl Browser {
         let extra = super::compat::agent_extra_flags()?;
         let profile = crate::session_profile::SessionProfile::create()?;
         let user_data_dir = profile.dir().to_path_buf();
+        let disk_cache_dir = if !super::launch::is_flatpak_browser(&chrome_path) {
+            profile.http_cache_dir().map(std::path::Path::to_path_buf)
+        } else {
+            None
+        };
         font_audit();
 
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -170,6 +188,7 @@ impl Browser {
             transport: Transport::Pipe,
             port: 0,
             user_data_dir: &user_data_dir,
+            disk_cache_dir: disk_cache_dir.as_deref(),
             proxy: proxy.as_ref().map(|s| s.server.as_str()),
             extra: &extra,
         });

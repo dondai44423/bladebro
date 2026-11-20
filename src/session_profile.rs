@@ -58,6 +58,63 @@ pub(crate) use self::reap::{profile_in_use, session_owner_dead, session_roots};
 /// replaces a template of the SAME generation (see `sync_back_impl`).
 pub(crate) const IMPORT_MARKER: &str = ".blade-import";
 
+/// Exclusive lease on one cross-session HTTP disk-cache slot under
+/// `<blade_dir>/http-cache/slot-N`. Held for the browser's lifetime; the OS
+/// releases the lock automatically on normal exit or SIGKILL so concurrent
+/// sessions never share a Chromium Simple Cache directory.
+pub(crate) struct HttpCacheSlot {
+    dir: PathBuf,
+    _lock: std::fs::File,
+}
+
+impl HttpCacheSlot {
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+/// Number of concurrent persistent HTTP cache slots (beyond this, extra
+/// concurrent sessions fall back cleanly to their per-session cache dir).
+const HTTP_CACHE_SLOTS: usize = 4;
+
+/// Try to claim an unused HTTP disk-cache slot under `root/http-cache/`.
+/// Non-blocking: concurrent sessions step to the next free slot instantly.
+pub(crate) fn acquire_http_cache_at(root: &Path) -> Option<HttpCacheSlot> {
+    let base = root.join("http-cache");
+    platform::secure_create_dir_all(&base).ok()?;
+    for slot in 0..HTTP_CACHE_SLOTS {
+        let lock_path = base.join(format!("slot-{slot}.lock"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let Ok(file) = options.open(&lock_path) else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                continue;
+            }
+        }
+        let dir = base.join(format!("slot-{slot}"));
+        if create_private_profile_dir(&dir).is_err() {
+            continue;
+        }
+        return Some(HttpCacheSlot { dir, _lock: file });
+    }
+    None
+}
+
 /// A per-process session profile. Cleaned up by [`cleanup`]
 /// after Chrome has exited (never while Chrome holds it).
 #[derive(Clone)]
@@ -72,6 +129,10 @@ pub struct SessionProfile {
     /// (`<data-dir>/realbrowser/<id>`) whose `template/` this session
     /// syncs back to. `None` on the agent lane.
     real_root: Option<PathBuf>,
+    /// Persistent RFC-9111 HTTP disk-cache slot for owned seasoned agent
+    /// sessions (immutable JS/CSS/font bundles survive across sessions while
+    /// HTML/API documents still honor Cache-Control/ETag).
+    http_cache: Option<std::sync::Arc<HttpCacheSlot>>,
 }
 
 /// The OS lock protects stale-marker replacement and stays held through a copy.
@@ -265,6 +326,7 @@ impl SessionProfile {
                     owned: false,
                     seasoned: false,
                     real_root: None,
+                    http_cache: None,
                 });
             }
             session_dir()
@@ -281,13 +343,20 @@ impl SessionProfile {
             create_ephemeral_profile_dir()?
         };
 
-        Self::prepare_owned_dir(&platform::blade_dir(), &dir, seasoned)?;
+        let root = platform::blade_dir();
+        Self::prepare_owned_dir(&root, &dir, seasoned)?;
+        let http_cache = if seasoned && matches!(crate::browser::incognito_policy(), Ok(false)) {
+            acquire_http_cache_at(&root).map(std::sync::Arc::new)
+        } else {
+            None
+        };
 
         Ok(Self {
             dir,
             owned: true,
             seasoned,
             real_root: None,
+            http_cache,
         })
     }
 
@@ -348,6 +417,7 @@ impl SessionProfile {
             owned: true,
             seasoned: false,
             real_root: Some(root.to_path_buf()),
+            http_cache: None,
         })
     }
 
@@ -367,11 +437,18 @@ impl SessionProfile {
             owned: false,
             seasoned: false,
             real_root: None,
+            http_cache: None,
         })
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Exclusive persistent HTTP disk-cache directory for owned seasoned
+    /// agent-lane sessions (None for ephemeral/incognito/real/custom runs).
+    pub fn http_cache_dir(&self) -> Option<&Path> {
+        self.http_cache.as_deref().map(HttpCacheSlot::dir)
     }
 
     /// A session dir bladebro created for its own agent-lane browser (not an
@@ -390,6 +467,7 @@ impl SessionProfile {
             owned: true,
             seasoned: false,
             real_root: None,
+            http_cache: None,
         }
     }
 
@@ -1382,5 +1460,34 @@ mod ownership_tests {
             "path-only cleanup must preserve unowned directories"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn http_cache_slots_isolate_concurrent_sessions_and_release_on_drop() {
+        let root = std::env::temp_dir().join(format!(
+            "blade-http-cache-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let s0 = acquire_http_cache_at(&root).expect("slot-0");
+        assert!(s0.dir().ends_with("slot-0"));
+        assert!(s0.dir().is_dir());
+
+        let s1 = acquire_http_cache_at(&root).expect("slot-1 while slot-0 held");
+        assert!(s1.dir().ends_with("slot-1"));
+        assert_ne!(s0.dir(), s1.dir());
+
+        drop(s0);
+        let reclaimed = acquire_http_cache_at(&root).expect("reclaim slot-0 after drop");
+        assert!(
+            reclaimed.dir().ends_with("slot-0"),
+            "dropped slot must be reclaimed for the next session"
+        );
+        drop(s1);
+        drop(reclaimed);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -55,15 +55,43 @@ pub async fn wait_for_settle_with_network(
     Ok(())
 }
 
-/// Same as [`wait_for_settle_with_network`], returning `true` when network
-/// requests were in flight during the drain window (so callers know whether a
-/// post-drain `re_settle` is needed to catch late fetch mounts, skipping the
-/// extra 110ms wait when the page was already completely quiet).
+/// Outcome of an adaptive settle + network drain pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SettleReport {
+    /// True when at least one in-flight request actually completed during the
+    /// drain window or DOM settle hit its cap — signals that a bounded
+    /// post-drain `re_settle` is worthwhile to catch late fetch mounts.
+    pub needs_re_settle: bool,
+    /// True when DOM settled cleanly while `in_flight` remained > 0 with zero
+    /// completions (persistent WS/SSE/analytics connections). Fed back to the
+    /// domain knowledge base to classify chirpy domains.
+    pub net_plateaued: bool,
+}
+
+/// Same as [`wait_for_settle_with_network`], returning `true` when requests
+/// drained or DOM settle timed out.
 pub(crate) async fn wait_for_settle_and_report_drain(
     cdp: &CdpSession,
     timeout: Duration,
     in_flight: Option<&AtomicUsize>,
 ) -> Result<bool> {
+    Ok(wait_for_settle_adaptive(cdp, timeout, in_flight, false)
+        .await?
+        .needs_re_settle)
+}
+
+/// Adaptive network-aware settle used by navigation.
+///
+/// When `chirpy` is true (learned from >=2 consecutive plateaued drains on
+/// this domain), the idle-plateau grace tightens (280ms -> 110ms, cap 800ms ->
+/// 300ms). Active completions (`cur < lowest`) STILL reset the grace timer and
+/// trigger `re_settle`, so real fetches are never cut short.
+pub(crate) async fn wait_for_settle_adaptive(
+    cdp: &CdpSession,
+    timeout: Duration,
+    in_flight: Option<&AtomicUsize>,
+    chirpy: bool,
+) -> Result<SettleReport> {
     let ms = timeout.as_millis() as u64;
     let expr = format!(
         "new Promise(function(res){{\
@@ -76,7 +104,7 @@ pub(crate) async fn wait_for_settle_and_report_drain(
                 var now=performance.now();\
                 if(document.readyState!=='loading'&&(now-last)>=110){{fin('settled');return;}}\
                 if((now-t0)>={ms}){{fin('timeout');return;}}\
-                setTimeout(tick,40);\
+                setTimeout(tick,25);\
             }})();\
         }})",
     );
@@ -95,33 +123,32 @@ pub(crate) async fn wait_for_settle_and_report_drain(
 
     // DOM quiet (or we gave up waiting on a saturated page). Now drain the
     // network counter locally — no CDP round-trips, just an atomic read.
-    let mut drained_network = false;
+    let mut actually_drained = false;
+    let mut net_plateaued = false;
     if let Some(counter) = in_flight {
-        // Network drain: wait for the post-load burst to finish. We do
-        // NOT wait for a fully-quiet network — modern pages never go
-        // quiet (analytics beacons, websockets, long-poll) and the count
-        // keeps fluctuating, which used to burn the whole 5s deadline
-        // (measured: Wikipedia/BBC navigated in 8.5s, floor is 2.5s).
-        // Instead: keep waiting only while the count makes progress
-        // toward zero (each new low resets the grace timer); break once
-        // it has plateaued for GRACE, when it hits zero, or at the hard
-        // deadline. Fast by default; agents needing full network quiet
-        // can `act wait condition=network` explicitly.
-        const GRACE: Duration = Duration::from_millis(280);
-        // The drain is a SHORT confirmation window, not a second full
-        // settle: on chirpy sites (x.com keeps ~14 requests in flight)
-        // trickle completions keep resetting the grace timer, which used
-        // to burn the whole learned cap here — on top of the DOM-quiet wait.
-        const DRAIN_MAX: Duration = Duration::from_millis(800);
-        let hard_deadline = tokio::time::Instant::now() + timeout.min(DRAIN_MAX);
-        let mut lowest = counter.load(Ordering::Relaxed);
-        if lowest > 0 {
-            drained_network = true;
-        }
+        // Network drain: wait for the post-load burst to finish without
+        // stalling on persistent connections (analytics beacons, websockets,
+        // long-poll). Keep waiting while the count makes progress toward zero
+        // (each new low resets the grace timer); break once it plateaus for
+        // `grace`, hits zero, or reaches `drain_max`.
+        let grace = if chirpy {
+            Duration::from_millis(110)
+        } else {
+            Duration::from_millis(280)
+        };
+        let drain_max = if chirpy {
+            Duration::from_millis(300)
+        } else {
+            Duration::from_millis(800)
+        };
+        let hard_deadline = tokio::time::Instant::now() + timeout.min(drain_max);
+        let initial = counter.load(Ordering::Relaxed);
+        let mut lowest = initial;
         let mut last_new_low = tokio::time::Instant::now();
         loop {
             let cur = counter.load(Ordering::Relaxed);
             if cur == 0 {
+                lowest = 0;
                 break;
             }
             let now = tokio::time::Instant::now();
@@ -131,15 +158,24 @@ pub(crate) async fn wait_for_settle_and_report_drain(
             if cur < lowest {
                 lowest = cur;
                 last_new_low = now;
-            } else if now.duration_since(last_new_low) > GRACE {
-                // Plateaued: no new low in GRACE. Either stragglers
+            } else if now.duration_since(last_new_low) > grace {
+                // Plateaued: no new low in grace. Either stragglers
                 // finished or only persistent connections remain.
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        let final_cur = counter.load(Ordering::Relaxed);
+        // Only mark drained when at least one request actually finished during
+        // the drain window; pure persistent connections (initial == lowest > 0)
+        // delivered nothing new and do not need a follow-up re_settle.
+        actually_drained = lowest < initial;
+        net_plateaued = dom_settled && initial > 0 && lowest >= initial && final_cur > 0;
     }
-    Ok(drained_network || !dom_settled)
+    Ok(SettleReport {
+        needs_re_settle: actually_drained || !dom_settled,
+        net_plateaued,
+    })
 }
 
 /// Bounded post-drain re-quiet for NAVIGATIONS: the drain window can run
@@ -158,7 +194,7 @@ pub async fn re_settle(cdp: &CdpSession) -> Result<()> {
          (function tick(){{var now=performance.now();\
            if((now-last)>=110){{fin('quiet');return;}}\
            if((now-t0)>={CAP_MS}){{fin('timeout');return;}}\
-           setTimeout(tick,40);}})();\
+           setTimeout(tick,25);}})();\
          }})"
     );
     let _ = cdp

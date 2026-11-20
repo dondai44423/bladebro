@@ -21,6 +21,15 @@ const REJECT_SELECTORS: &[&str] = &[
     // and the cold ladder had no Amazon entry — the pre-seed never ran
     // (issue #85 item 1).
     "#sp-cc-rejectall-link",
+    // Major real-world CMPs (CookieYes, Google Funding Choices, Complianz,
+    // Osano, Klaro, Usercentrics, WP Cookie Notice).
+    ".cky-btn-reject",
+    ".fc-cta-do-not-consent",
+    ".cmplz-deny",
+    ".osano-cm-denyAll",
+    ".cm-btn-decline",
+    "button[data-testid=\"uc-deny-all-button\"]",
+    "#cn-refuse-cookie",
 ];
 
 /// The ladder's known-framework buttons for `BLADE_CONSENT=accept`.
@@ -30,7 +39,27 @@ const ACCEPT_SELECTORS: &[&str] = &[
     "#didomi-notice-agree-button",
     ".qc-cmp2-summary-buttons button[mode=primary]",
     "#truste-consent-button",
+    "#sp-cc-accept",
+    ".cky-btn-accept",
+    ".fc-cta-consent",
+    ".cmplz-accept",
+    ".osano-cm-accept-all",
+    ".cm-btn-accept-all",
+    "button[data-testid=\"uc-accept-all-button\"]",
+    "#cn-accept-cookie",
 ];
+
+/// Result of a consent dismissal pass (single CDP round-trip).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConsentOutcome {
+    /// Selector that dismissed the banner (`"generic"` for heuristic fallback),
+    /// or `None` when no consent banner was visible.
+    pub matched: Option<String>,
+    /// True when a policy-valid stored selector was tried first, did NOT match,
+    /// and a different ladder/generic button dismissed the live banner instead
+    /// (signals the knowledge base to downgrade or replace the stale selector).
+    pub stored_missed: bool,
+}
 
 /// A selector list as a JS array literal. Plain strings always serialize;
 /// the fallback still parses.
@@ -101,73 +130,114 @@ pub async fn dismiss_consent(cdp: &CdpSession) -> Result<Option<String>> {
     Ok(framework)
 }
 
-/// Try a stored consent selector first (one cheap querySelector+click),
-/// fall back to full [`dismiss_consent`] detection if it doesn't match.
+/// Try a stored consent selector first, falling back to the full ladder +
+/// generic pass in ONE single `Runtime.evaluate` round-trip.
 ///
-/// This is the knowledge-base integration point: on known sites, a trusted
-/// CSS selector (confidence >= 0.7) that is one of the current policy's
-/// ladder buttons skips the full 20-line detection JS, saving one large
-/// `Runtime.evaluate`. On unknown or changed sites, the full detection runs
-/// as usual — zero regression for cold starts.
-///
-/// Returns the selector that was clicked (stored selector, new selector, or
-/// `"generic"`), or `None` if no consent dialog was found.
+/// Previously, a miss on the stored selector (including every normal revisit
+/// where cookies already dismissed the banner!) ran TWO sequential CDP evals,
+/// and stale stored selectors were never reported back to the knowledge base.
+/// Fusing the stored fast-path and fallback into one script guarantees <= 1
+/// CDP round-trip on every navigation while preserving all security gates:
+///   - Only replays a stored selector present in the current policy's allowlist.
+///   - Re-validates the stored match inside a visible consent-flavored container.
+///   - Reports `stored_missed` ONLY when a live banner was dismissed by a
+///     different button (never downgrades a valid selector just because cookies
+///     kept the banner hidden).
+pub(crate) async fn dismiss_consent_detailed(
+    cdp: &CdpSession,
+    stored: Option<&str>,
+) -> Result<ConsentOutcome> {
+    let policy = std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
+    if policy == "off" {
+        return Ok(ConsentOutcome::default());
+    }
+    let reject = policy != "accept";
+    let replayable = if reject {
+        REJECT_SELECTORS
+    } else {
+        ACCEPT_SELECTORS
+    };
+    let stored_sel = stored.filter(|s| replayable.contains(s));
+    let stored_js = match stored_sel {
+        Some(sel) => serde_json::to_string(sel).unwrap_or_else(|_| "null".to_string()),
+        None => "null".to_string(),
+    };
+    let reject_js = if reject { "true" } else { "false" };
+
+    // Single-round-trip fused script:
+    // 1. If a policy-valid stored selector is provided, test it first with the
+    //    consent-context security gate; on match, click and return immediately.
+    // 2. Otherwise walk the policy ladder and then the bounded generic pass.
+    //    Prefix fallback matches with "M:" when a stored selector was present
+    //    and missed so the caller knows the stored selector went stale.
+    let expression = "(()=>{const stored=".to_string()
+        + &stored_js
+        + ";const reject="
+        + reject_js
+        + ";const rs="
+        + &js_list(REJECT_SELECTORS)
+        + ";const as="
+        + &js_list(ACCEPT_SELECTORS)
+        + ";if(stored){const b=document.querySelector(stored);if(b&&b.offsetWidth+b.offsetHeight>0){const d=b.closest('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');if(d&&/cookie|consent|gdpr/.test((d.textContent||'').toLowerCase())){b.click();return 'H:'+stored;}}}"
+        + "const pfx=stored?'M:':'H:';"
+        + "const sels=reject?rs:as;for(const sel of sels){const btn=document.querySelector(sel);if(btn&&btn.offsetWidth+btn.offsetHeight>0){btn.click();return (sel===stored?'H:':pfx)+sel;}}"
+        + "const dialogs=document.querySelectorAll('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');"
+        + "for(const d of dialogs){"
+        + "if(d.offsetWidth+d.offsetHeight===0)continue;"
+        + "const text=(d.textContent||'').toLowerCase();"
+        + "if(!(/cookie|consent|gdpr/.test(text)))continue;"
+        + "const buttons=[...d.querySelectorAll('button,a')];"
+        + "if(buttons.length>12)continue;"
+        + "const pattern=reject?/reject|decline|refuse|deny|necessary|essential/i:/accept|agree|allow|consent/i;"
+        + "const btn=buttons.find(b=>pattern.test(b.textContent||'')&&b.offsetWidth+b.offsetHeight>0);"
+        + "if(btn){btn.click();return pfx+'generic';}}"
+        + "return null;})()";
+
+    let res = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": expression,
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+
+    if res.get("exceptionDetails").is_some() {
+        return Ok(ConsentOutcome::default());
+    }
+    let Some(raw) = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+    else {
+        return Ok(ConsentOutcome::default());
+    };
+    if let Some(sel) = raw.strip_prefix("M:") {
+        Ok(ConsentOutcome {
+            matched: (!sel.is_empty()).then(|| sel.to_string()),
+            stored_missed: true,
+        })
+    } else if let Some(sel) = raw.strip_prefix("H:") {
+        Ok(ConsentOutcome {
+            matched: (!sel.is_empty()).then(|| sel.to_string()),
+            stored_missed: false,
+        })
+    } else if !raw.is_empty() {
+        Ok(ConsentOutcome {
+            matched: Some(raw.to_string()),
+            stored_missed: false,
+        })
+    } else {
+        Ok(ConsentOutcome::default())
+    }
+}
+
+/// Public wrapper around [`dismiss_consent_detailed`] returning the matched
+/// selector (`Some(sel)` / `Some("generic")`) or `None`.
 pub async fn dismiss_consent_with_stored(
     cdp: &CdpSession,
     stored: Option<&str>,
 ) -> Result<Option<String>> {
-    let policy = std::env::var("BLADE_CONSENT").unwrap_or_else(|_| "reject".to_string());
-    if policy == "off" {
-        return Ok(None);
-    }
-    // The store keeps ONE selector per domain, whatever policy learned it.
-    // Replay only a button from the current policy's own ladder list: an
-    // Accept selector learned under BLADE_CONSENT=accept pressed under the
-    // default reject policy would accept tracking and still be reported as
-    // "consent: rejected". The other policy's button, an unlisted entry or
-    // a tampered one goes to the full ladder, which picks by policy.
-    let replayable = if policy == "accept" {
-        ACCEPT_SELECTORS
-    } else {
-        REJECT_SELECTORS
-    };
-
-    // Try the stored selector first — skip the full detection JS if it works.
-    if let Some(sel) = stored.filter(|s| replayable.contains(s)) {
-        let sel_json = serde_json::to_string(sel).unwrap_or_default();
-        // SECURITY: re-validate before clicking. The store is file-backed
-        // state whose integrity rests on directory permissions — but the
-        // browser rendering this page can itself write those files (CDP
-        // download routing), so a stored selector is not proof of consent
-        // context. Require the same gates as the generic pass: a visible
-        // match inside a consent-looking container with consent vocabulary.
-        // A stale or poisoned selector falls through to full detection
-        // instead of clicking.
-        let expr = format!(
-            "(()=>{{const b=document.querySelector({sel_json});if(b&&b.offsetWidth+b.offsetHeight>0){{const d=b.closest('[role=dialog],[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[class*=gdpr i],[id*=gdpr i],[class*=onetrust i],[class*=didomi i],[class*=cmp i]');if(d&&/cookie|consent|gdpr/.test((d.textContent||'').toLowerCase())){{b.click();return {sel_json};}}}}return null;}})()"
-        );
-        let res = cdp
-            .send(
-                "Runtime.evaluate",
-                Some(json!({
-                    "expression": expr,
-                    "returnByValue": true,
-                })),
-            )
-            .await?;
-        if res.get("exceptionDetails").is_none() {
-            if let Some(v) = res
-                .get("result")
-                .and_then(|r| r.get("value"))
-                .and_then(|v| v.as_str())
-            {
-                if !v.is_empty() {
-                    return Ok(Some(v.to_string()));
-                }
-            }
-        }
-    }
-
-    // Fall through to full detection.
-    dismiss_consent(cdp).await
+    Ok(dismiss_consent_detailed(cdp, stored).await?.matched)
 }
