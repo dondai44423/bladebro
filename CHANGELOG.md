@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.8.0] - 2026-11-20
+
 ### Added
 - **Compounding site-chrome folding (zero-staleness)**: links repeating identically across 2+ distinct paths on a domain are learned in the knowledge base and auto-folded into one compact line (`site-chrome ▸ N repeated site links folded`) on default views, reclaiming token budget for page-specific controls without hiding anything from `filter=`, `find=`, or live refs. Any link whose text or destination changes unfolds immediately, and vanished chrome entries evict automatically.
 - **Cross-session persistent HTTP disk-cache slots**: owned seasoned agent-lane sessions acquire an exclusive OS-locked RFC-9111 HTTP cache slot (`--disk-cache-dir`, 100 MiB cap, up to 4 concurrent slots), reusing immutable JS/CSS/font bundles across restarts while dynamic HTML/API documents still honor `Cache-Control`/`ETag` with zero staleness.
@@ -2264,7 +2266,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.7.0...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.0...HEAD
+[4.8.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.0
 [4.7.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.7.0
 [4.6.10]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.10
 [4.6.9]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.9
