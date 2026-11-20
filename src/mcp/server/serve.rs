@@ -241,9 +241,11 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                         shutdown_browser(b).await;
                                     }
                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                    relaunch_note = Some(
+                                    relaunch_note = Some(if call_navigates(&params) {
+                                        "note: Chrome was restarted before this call (connection lost; prior tabs and refs cleared).".into()
+                                    } else {
                                         "note: Chrome was restarted (connection lost) — page state reset to about:blank. Navigate to continue.".into()
-                                    );
+                                    });
                                 }
                             } else if drifted {
                                 // Attach session (never owned): `rb off` /
@@ -264,9 +266,11 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                 // Post-idle relaunch: the agent's refs
                                 // are all gone. Say so explicitly.
                                 idle_closed = false;
-                                relaunch_note = Some(
+                                relaunch_note = Some(if call_navigates(&params) {
+                                    "note: Chrome was restarted before this call after idle shutdown (prior tabs and refs cleared).".into()
+                                } else {
                                     "note: Chrome was restarted after idle shutdown — page state reset to about:blank. Navigate to continue.".into()
-                                );
+                                });
                             } else {
                                 eprintln!("[bladebro] launching Chrome (first tool call)...");
                             }
@@ -719,6 +723,43 @@ fn cancelled_by_signal(
     send(out, &json!({"jsonrpc":"2.0","id":id,"result":result}));
 }
 
+/// True when the incoming MCP `tools/call` already navigates to a URL on its
+/// own (`act navigate`, `act` with `url=`, or `see` with `url=`). Used to keep
+/// pre-call restart notices truthful: claiming "page state reset to
+/// about:blank. Navigate to continue." on a call that JUST navigated misleads
+/// the agent.
+fn call_navigates(params: &Value) -> bool {
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = &params["arguments"];
+    let has_url = args
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|u| !u.trim().is_empty());
+    match name {
+        "see" => has_url,
+        "act" => {
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+            action == "navigate"
+                || (has_url
+                    && !matches!(
+                        action,
+                        "download"
+                            | "collect"
+                            | "state"
+                            | "set-cookie"
+                            | "cookies"
+                            | "del-cookie"
+                            | "open-tab"
+                            | "close-tab"
+                            | "switch-tab"
+                            | "save"
+                            | "load"
+                    ))
+        }
+        _ => false,
+    }
+}
+
 /// The answer to a tool handler that panicked (caught by `call_tool`).
 fn panicked(id: Option<Value>) -> Value {
     json!({
@@ -774,5 +815,33 @@ mod tests {
             matches!(res, Some(Err(_))),
             "a handler panic must be caught, not unwind out of serve()"
         );
+    }
+
+    #[test]
+    fn call_navigates_distinguishes_navigating_from_in_page_calls() {
+        assert!(call_navigates(&json!({
+            "name": "act",
+            "arguments": {"action": "navigate", "url": "https://example.com"}
+        })));
+        assert!(call_navigates(&json!({
+            "name": "act",
+            "arguments": {"action": "click", "text": "Go", "url": "https://example.com"}
+        })));
+        assert!(call_navigates(&json!({
+            "name": "see",
+            "arguments": {"mode": "content", "url": "https://example.com"}
+        })));
+        assert!(!call_navigates(&json!({
+            "name": "act",
+            "arguments": {"action": "click", "ref": "e5"}
+        })));
+        assert!(!call_navigates(&json!({
+            "name": "act",
+            "arguments": {"action": "download", "url": "https://example.com/a.pdf"}
+        })));
+        assert!(!call_navigates(&json!({
+            "name": "see",
+            "arguments": {"mode": "model"}
+        })));
     }
 }

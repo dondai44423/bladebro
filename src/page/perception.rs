@@ -23,7 +23,6 @@
 //! outline read modes).
 
 use serde::Deserialize;
-use serde_json::json;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -35,6 +34,7 @@ mod consent;
 mod content;
 mod wait;
 
+pub(crate) use self::wait::wait_for_settle_and_report_drain;
 pub use self::{
     block::{detect_block, remediation_ladder},
     consent::{dismiss_consent, dismiss_consent_with_stored},
@@ -457,15 +457,7 @@ pub async fn capture(cdp: &CdpSession) -> Result<PageCapture> {
     // JSON response page), Runtime.evaluate can hang. Return an unanswered
     // capture on timeout instead of erroring after 30s.
     let res = cdp
-        .send_with_timeout(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": &*CAPTURE_SCRIPT,
-                "returnByValue": true,
-                "awaitPromise": false,
-            })),
-            Duration::from_secs(10),
-        )
+        .eval_isolated_with_timeout(&CAPTURE_SCRIPT, true, false, Duration::from_secs(10))
         .await;
 
     let res = match res {

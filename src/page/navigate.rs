@@ -41,6 +41,9 @@ impl Page {
         self.apply_domain_profile(url).await;
         // Reset isolated world on navigation — old context is destroyed.
         self.reset_isolated();
+        // Reset previous navigation's HTTP document status so non-HTTP targets
+        // (about:blank, data:, file:) never inherit an older status code.
+        self.clear_doc_response();
         // Knowledge: per-domain resource-block config the agent set before.
         // Applied only when nothing is active — an explicit session choice
         // always wins; `state block clear` erases the stored config.
@@ -80,6 +83,11 @@ impl Page {
             .await?;
         let nav_error: Option<String> = nav_res
             .get("errorText")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let loader_id: Option<String> = nav_res
+            .get("loaderId")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(String::from);
@@ -134,7 +142,25 @@ impl Page {
             // launched with (the real lane runs the person's own Chrome).
             let blade_proxy = !crate::realbrowser::real_lane()
                 && matches!(crate::browser::proxy::env_blade_proxy(), Ok(Some(_)));
-            if let Some(msg) = error_page_failure(&target, err, frame, blade_proxy) {
+            // For HTTP response code failures (empty-body 4xx/5xx), wait
+            // briefly for the network tracker task to drain the preceding
+            // Network.responseReceived event if it hasn't landed yet.
+            let mut doc_resp = self.doc_response_for(loader_id.as_deref());
+            if err.contains("ERR_HTTP_RESPONSE_CODE_FAILURE") && doc_resp.is_none() {
+                for _ in 0..12 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    doc_resp = self.doc_response_for(loader_id.as_deref());
+                    if doc_resp.is_some() {
+                        break;
+                    }
+                }
+                if doc_resp.is_none() {
+                    doc_resp = self.doc_response_from_net_log(&target);
+                }
+            }
+            if let Some(msg) =
+                error_page_failure(&target, err, frame, blade_proxy, doc_resp.as_ref())
+            {
                 // Recapture so the error's page state is the tab's real
                 // state (Chrome's error page), not the page we left.
                 let _ = wait_for_load(&self.cdp, Duration::from_secs(3)).await;
@@ -145,16 +171,18 @@ impl Page {
         wait_for_load(&self.cdp, Duration::from_secs(10)).await?;
         _t("load");
         let _settle_t = std::time::Instant::now();
-        wait_for_settle_with_network(
+        let needs_re_settle = perception::wait_for_settle_and_report_drain(
             &self.cdp,
             Duration::from_millis(settle_cap),
             Some(&self.in_flight),
         )
         .await?;
-        // Bounded post-drain re-quiet: a late fetch resolving after the
-        // network plateau mounts its content a moment later; this catches
-        // that mount without taxing interactions (nav-only).
-        let _ = re_settle(&self.cdp).await;
+        // Bounded post-drain re-quiet: only needed when requests actually
+        // drained during the network window (or DOM settle hit its cap) so a
+        // late fetch mount is caught without taxing already-quiet pages.
+        if needs_re_settle {
+            let _ = re_settle(&self.cdp).await;
+        }
         _t("settle");
         // Knowledge: learn this domain's real settle duration (only when it
         // finished early — a cap timeout is not a settle sample).
@@ -426,6 +454,11 @@ impl Page {
         // only — it names what is missing, never why.
         if let Ok(delta) = &r {
             if delta.navigated {
+                if let Some(doc) = self.doc_response().filter(|d| d.status >= 400) {
+                    if let Ok(mut a) = self.ambient.lock() {
+                        a.push(doc.ambient_note(self.lpm.url().starts_with("chrome-error://")));
+                    }
+                }
                 if let Some(note) = nav_params_note(url, self.lpm.url()) {
                     if let Ok(mut a) = self.ambient.lock() {
                         a.push(note);
@@ -434,6 +467,37 @@ impl Page {
             }
         }
         r
+    }
+
+    /// Look up the latest main-frame Document response, preferring a match on
+    /// `loader_id` when supplied so an unrelated prior response is never used.
+    fn doc_response_for(&self, loader_id: Option<&str>) -> Option<DocResponse> {
+        let doc = self.doc_response()?;
+        if doc.status <= 0 {
+            return None;
+        }
+        if let Some(lid) = loader_id {
+            if !doc.request_id.is_empty() && doc.request_id != lid {
+                return None;
+            }
+        }
+        Some(doc)
+    }
+
+    /// Fallback lookup in the completed/failed network ring when
+    /// `doc_response` missed the response event.
+    fn doc_response_from_net_log(&self, target: &str) -> Option<DocResponse> {
+        let log = self.network_log();
+        log.into_iter()
+            .rev()
+            .find(|e| e.status >= 400 && (e.url == target || e.error.is_some()))
+            .map(|e| DocResponse {
+                request_id: String::new(),
+                url: e.url,
+                status: e.status,
+                status_text: String::new(),
+                retry_after: None,
+            })
     }
 
     /// S11: apply per-domain stealth settings from ~/.blade/profiles.json.
@@ -603,11 +667,14 @@ impl Emulation {
 /// place of the target, or None when a real document is showing.
 /// `blade_proxy`: the browser runs behind BLADE_PROXY (names the recovery
 /// path for a proxy/tunnel failure).
+/// `doc_resp`: the main-frame Document HTTP response (status, reason,
+/// `Retry-After`) when the server replied with an HTTP error status.
 fn error_page_failure(
     target: &str,
     err: &str,
     frame: Option<&Value>,
     blade_proxy: bool,
+    doc_resp: Option<&DocResponse>,
 ) -> Option<String> {
     let frame = frame?;
     let unreachable = frame
@@ -620,6 +687,19 @@ fn error_page_failure(
         .is_some_and(|u| u.starts_with("chrome-error://"));
     if !(unreachable || error_doc) {
         return None;
+    }
+    if err.contains("ERR_HTTP_RESPONSE_CODE_FAILURE") {
+        if let Some(doc) = doc_resp.filter(|d| d.status >= 400) {
+            let guidance = doc
+                .guidance()
+                .map(|g| format!(" — {g}"))
+                .unwrap_or_default();
+            return Some(format!(
+                "navigation to {target} failed: HTTP {}{} [{err}]{guidance} (the tab shows Chrome's error page, not the site; the server answered with an HTTP error status and an empty body)",
+                doc.label(),
+                doc.retry_suffix(),
+            ));
+        }
     }
     let hint = if err.contains("PROXY") || err.contains("TUNNEL") {
         if blade_proxy {
@@ -1092,6 +1172,7 @@ mod tests {
             "net::ERR_UNSAFE_PORT",
             Some(&error_page),
             false,
+            None,
         )
         .expect("Chrome's error page must fail the navigation");
         assert!(
@@ -1106,6 +1187,7 @@ mod tests {
             "net::ERR_PROXY_CONNECTION_FAILED",
             Some(&url_only),
             true,
+            None,
         )
         .expect("error document by url");
         assert!(
@@ -1119,6 +1201,7 @@ mod tests {
             "net::ERR_TUNNEL_CONNECTION_FAILED",
             Some(&url_only),
             false,
+            None,
         )
         .expect("error document by url");
         assert!(
@@ -1131,9 +1214,51 @@ mod tests {
             "net::ERR_HTTP_RESPONSE_CODE_FAILURE",
             Some(&url_only),
             false,
+            None,
         )
         .expect("error document by url");
         assert!(msg.contains("HTTP error status"), "{msg}");
+        // Issue #97: when the document's HTTP status was observed, surface the
+        // exact code, reason (including HTTP/2 empty statusText fallback),
+        // Retry-After header, and actionable hint directly in the error.
+        let doc_429 = crate::page::DocResponse {
+            request_id: "L1".into(),
+            url: "https://www.reddit.com/r/rust/comments/abc/".into(),
+            status: 429,
+            status_text: String::new(), // HTTP/2 omits reason phrase
+            retry_after: Some("45".into()),
+        };
+        let msg = error_page_failure(
+            "https://www.reddit.com/r/rust/comments/abc/",
+            "net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+            Some(&url_only),
+            false,
+            Some(&doc_429),
+        )
+        .expect("HTTP 429 error document");
+        assert!(msg.contains("HTTP 429 Too Many Requests"), "{msg}");
+        assert!(msg.contains("retry-after: 45s"), "{msg}");
+        assert!(msg.contains("rate limited"), "{msg}");
+        assert!(msg.contains("net::ERR_HTTP_RESPONSE_CODE_FAILURE"), "{msg}");
+
+        let doc_503 = crate::page::DocResponse {
+            request_id: "L2".into(),
+            url: "https://site.test/".into(),
+            status: 503,
+            status_text: "Service Unavailable".into(),
+            retry_after: None,
+        };
+        let msg = error_page_failure(
+            "https://site.test/",
+            "net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+            Some(&url_only),
+            false,
+            Some(&doc_503),
+        )
+        .expect("HTTP 503 error document");
+        assert!(msg.contains("HTTP 503 Service Unavailable"), "{msg}");
+        assert!(msg.contains("server error"), "{msg}");
+
         // A page-side navigation that superseded ours committed a REAL
         // document: that is still a successful navigation.
         let real = json!({"id": "MAIN", "url": "http://127.0.0.1:8080/next"});
@@ -1142,13 +1267,14 @@ mod tests {
                 "http://127.0.0.1:8080/a",
                 "net::ERR_ABORTED",
                 Some(&real),
-                false
+                false,
+                None,
             ),
             None
         );
         // Frame tree unavailable: no claim either way.
         assert_eq!(
-            error_page_failure("http://h/", "net::ERR_ABORTED", None, false),
+            error_page_failure("http://h/", "net::ERR_ABORTED", None, false, None),
             None
         );
     }

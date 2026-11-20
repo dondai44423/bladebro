@@ -478,11 +478,13 @@ impl Page {
         let route = Arc::new(RouteEpoch::new());
         let net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let doc_response: Arc<Mutex<Option<DocResponse>>> = Arc::new(Mutex::new(None));
         let xhr_log: Arc<Mutex<std::collections::VecDeque<XhrEntry>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let cdp_for_net = cdp.clone();
         let net_counter = in_flight.clone();
         let net_log_t = net_log.clone();
+        let doc_response_t = doc_response.clone();
         let xhr_log_t = xhr_log.clone();
         let route_t = route.clone();
         let main_frame = cdp
@@ -492,6 +494,7 @@ impl Page {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        cdp.set_main_frame(main_frame.clone());
         let intercept_main_frame = main_frame.clone();
         let network_task = tokio::spawn(async move {
             use std::collections::HashMap;
@@ -506,6 +509,8 @@ impl Page {
                 std::collections::HashMap::new();
             // Pending request metadata for the V8 net log.
             let mut pending: HashMap<String, (String, String, i64)> = HashMap::new();
+            // Active main-frame Document requestId for HTTP status/Retry-After tracking.
+            let mut doc_req_id: Option<String> = None;
             let mut last_sweep = std::time::Instant::now();
             let mut sweep_tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -527,15 +532,27 @@ impl Page {
                             .get("requestId")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
+                        let req_url = ev
+                            .params
+                            .pointer("/request/url")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
                         if ty == "Document"
                             && ev.params.get("frameId").and_then(Value::as_str)
                                 == Some(main_frame.as_str())
+                            && !req_url.starts_with("chrome-error://")
                         {
                             if let Ok(mut log) = net_log_t.lock() {
                                 log.clear();
                             }
                             if let Ok(mut log) = xhr_log_t.lock() {
                                 log.clear();
+                            }
+                            if !id.is_empty() && doc_req_id.as_deref() != Some(id) {
+                                doc_req_id = Some(id.to_string());
+                                if let Ok(mut doc) = doc_response_t.lock() {
+                                    *doc = None;
+                                }
                             }
                             pending.clear();
                             open.clear();
@@ -610,15 +627,59 @@ impl Page {
                             pending.insert(id.to_string(), (method, url, 0));
                         }
                     }
+                    Some(Ok(ev)) if ev.method == "Network.responseReceivedExtraInfo" => {
+                        let id = ev
+                            .params
+                            .get("requestId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if !id.is_empty() && doc_req_id.as_deref() == Some(id) {
+                            let status = ev
+                                .params
+                                .get("statusCode")
+                                .and_then(Value::as_i64)
+                                .unwrap_or(0);
+                            if status > 0 {
+                                let retry_after =
+                                    super::logs::extract_retry_after(ev.params.get("headers"));
+                                if let Ok(mut doc) = doc_response_t.lock() {
+                                    match doc.as_mut() {
+                                        Some(existing)
+                                            if existing.request_id == id
+                                                && existing.status == status =>
+                                        {
+                                            if existing.retry_after.is_none() {
+                                                existing.retry_after = retry_after;
+                                            }
+                                        }
+                                        _ => {
+                                            *doc = Some(DocResponse {
+                                                request_id: id.to_string(),
+                                                url: String::new(),
+                                                status,
+                                                status_text: String::new(),
+                                                retry_after,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Some(Ok(ev)) if ev.method == "Network.responseReceived" => {
                         let id = ev
                             .params
                             .get("requestId")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let status = ev
+                        let ty = ev.params.get("type").and_then(Value::as_str).unwrap_or("");
+                        let frame_id = ev
                             .params
-                            .get("response")
+                            .get("frameId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let resp = ev.params.get("response");
+                        let status = resp
                             .and_then(|r| r.get("status"))
                             .and_then(|s| s.as_i64())
                             .unwrap_or(0);
@@ -626,6 +687,35 @@ impl Page {
                             entry.2 = status;
                         }
                         if status > 0 {
+                            let resp_url = resp
+                                .and_then(|r| r.get("url"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            let is_main_doc = (ty == "Document" && frame_id == main_frame.as_str())
+                                || (!id.is_empty() && doc_req_id.as_deref() == Some(id));
+                            if is_main_doc && !resp_url.starts_with("chrome-error://") {
+                                let status_text = resp
+                                    .and_then(|r| r.get("statusText"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                let retry_after = super::logs::extract_retry_after(
+                                    resp.and_then(|r| r.get("headers")),
+                                );
+                                if let Ok(mut doc) = doc_response_t.lock() {
+                                    let prev_ra = doc
+                                        .as_ref()
+                                        .filter(|d| d.request_id == id && d.status == status)
+                                        .and_then(|d| d.retry_after.clone());
+                                    *doc = Some(DocResponse {
+                                        request_id: id.to_string(),
+                                        url: resp_url.to_string(),
+                                        status,
+                                        status_text,
+                                        retry_after: retry_after.or(prev_ra),
+                                    });
+                                }
+                            }
                             if let Ok(mut log) = xhr_log_t.lock() {
                                 if let Some(e) = log.iter_mut().rev().find(|e| e.id == id) {
                                     e.status = status;
@@ -799,6 +889,7 @@ impl Page {
             in_flight,
             route,
             net_log,
+            doc_response,
             xhr_log,
             network_task: Some(network_task),
             ambient,
@@ -816,7 +907,6 @@ impl Page {
             download_task: Some(download_task),
             knowledge: None,
             last_mouse,
-            isolated_ctx: Arc::new(std::sync::Mutex::new(None)),
             act_count: std::sync::atomic::AtomicU32::new(0),
             compress_enabled: std::sync::atomic::AtomicBool::new(
                 std::env::var("BLADE_NO_COMPRESS").as_deref() != Ok("1"),

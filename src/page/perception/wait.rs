@@ -4,8 +4,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use serde_json::json;
-
 use crate::cdp::CdpSession;
 use crate::error::Result;
 
@@ -26,15 +24,7 @@ pub async fn wait_for_load(cdp: &CdpSession, timeout: Duration) -> Result<()> {
         }})",
     );
     let _ = cdp
-        .send_with_timeout(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-            timeout + Duration::from_secs(3),
-        )
+        .eval_isolated_with_timeout(&expr, true, true, timeout + Duration::from_secs(3))
         .await;
     Ok(())
 }
@@ -61,6 +51,19 @@ pub async fn wait_for_settle_with_network(
     timeout: Duration,
     in_flight: Option<&AtomicUsize>,
 ) -> Result<()> {
+    let _ = wait_for_settle_and_report_drain(cdp, timeout, in_flight).await?;
+    Ok(())
+}
+
+/// Same as [`wait_for_settle_with_network`], returning `true` when network
+/// requests were in flight during the drain window (so callers know whether a
+/// post-drain `re_settle` is needed to catch late fetch mounts, skipping the
+/// extra 110ms wait when the page was already completely quiet).
+pub(crate) async fn wait_for_settle_and_report_drain(
+    cdp: &CdpSession,
+    timeout: Duration,
+    in_flight: Option<&AtomicUsize>,
+) -> Result<bool> {
     let ms = timeout.as_millis() as u64;
     let expr = format!(
         "new Promise(function(res){{\
@@ -77,20 +80,22 @@ pub async fn wait_for_settle_with_network(
             }})();\
         }})",
     );
-    let _ = cdp
-        .send_with_timeout(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-            timeout + Duration::from_secs(3),
-        )
+    let dom_res = cdp
+        .eval_isolated_with_timeout(&expr, true, true, timeout + Duration::from_secs(3))
         .await;
+    let dom_settled = dom_res
+        .ok()
+        .and_then(|v| {
+            v.get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|s| s.as_str())
+                .map(|s| s == "settled")
+        })
+        .unwrap_or(false);
 
     // DOM quiet (or we gave up waiting on a saturated page). Now drain the
     // network counter locally — no CDP round-trips, just an atomic read.
+    let mut drained_network = false;
     if let Some(counter) = in_flight {
         // Network drain: wait for the post-load burst to finish. We do
         // NOT wait for a fully-quiet network — modern pages never go
@@ -110,6 +115,9 @@ pub async fn wait_for_settle_with_network(
         const DRAIN_MAX: Duration = Duration::from_millis(800);
         let hard_deadline = tokio::time::Instant::now() + timeout.min(DRAIN_MAX);
         let mut lowest = counter.load(Ordering::Relaxed);
+        if lowest > 0 {
+            drained_network = true;
+        }
         let mut last_new_low = tokio::time::Instant::now();
         loop {
             let cur = counter.load(Ordering::Relaxed);
@@ -131,7 +139,7 @@ pub async fn wait_for_settle_with_network(
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     }
-    Ok(())
+    Ok(drained_network || !dom_settled)
 }
 
 /// Bounded post-drain re-quiet for NAVIGATIONS: the drain window can run
@@ -154,15 +162,7 @@ pub async fn re_settle(cdp: &CdpSession) -> Result<()> {
          }})"
     );
     let _ = cdp
-        .send_with_timeout(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-            Duration::from_millis(CAP_MS + 3000),
-        )
+        .eval_isolated_with_timeout(&expr, true, true, Duration::from_millis(CAP_MS + 3000))
         .await;
     Ok(())
 }

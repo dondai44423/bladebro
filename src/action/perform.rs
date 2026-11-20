@@ -141,12 +141,7 @@ pub async fn perform_with_network(
             // S10: coordinate-based click — works on cross-origin iframes,
             // canvas, shadow DOM (anything Input-domain can reach).
             let _ = cdp
-                .send(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": MUT_WATCH,
-                    })),
-                )
+                .eval_isolated_strict(MUT_WATCH, Duration::from_secs(3))
                 .await;
             // G09: snapshot the toggle state under the point before/after so
             // a click that flips a hidden control (a visible label toggling
@@ -173,12 +168,7 @@ pub async fn perform_with_network(
             // Install the mutation watcher first: it sees DOM effects on
             // non-actionable content that the element delta cannot.
             let _ = cdp
-                .send(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": MUT_WATCH,
-                    })),
-                )
+                .eval_isolated_strict(MUT_WATCH, Duration::from_secs(3))
                 .await;
             // Strategy order is role-aware (W5). Menu items get the KEYBOARD
             // activation lane first: reddit's rpl-dropdown items ignore
@@ -876,12 +866,7 @@ pub async fn perform_with_network(
             // and tooltips mutate the DOM, and we want the delta
             // to reflect what the hover actually revealed.
             let _ = cdp
-                .send(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": MUT_WATCH,
-                    })),
-                )
+                .eval_isolated_strict(MUT_WATCH, Duration::from_secs(3))
                 .await;
             // "hover" mode scrolls the element into view
             // (block:center) and returns its post-scroll box.

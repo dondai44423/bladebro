@@ -60,95 +60,14 @@ impl Page {
     /// Error.stack frames. Lazily creates the world; recreates on navigation.
     /// Falls back to regular Runtime.evaluate if the isolated world fails.
     pub async fn eval_isolated(&self, expr: &str) -> Result<Value> {
-        // Try to get or create the isolated world context.
-        let ctx_id = {
-            let guard = self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner());
-            *guard
-        };
-
-        if let Some(id) = ctx_id {
-            // Try the isolated world first.
-            let res = self
-                .cdp
-                .send(
-                    "Runtime.callFunctionOn",
-                    Some(json!({
-                        "executionContextId": id,
-                        "functionDeclaration": format!("function() {{ return ({expr}); }}"),
-                        "returnByValue": true,
-                        "awaitPromise": true,
-                    })),
-                )
-                .await;
-
-            match res {
-                Ok(v) => return Ok(v),
-                Err(_) => {
-                    // Context is stale (navigation) — clear and recreate.
-                    *self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                }
-            }
-        }
-
-        // Lazily create the isolated world.
-        let frame_id = self
-            .cdp
-            .send("Page.getFrameTree", None)
-            .await
-            .ok()
-            .and_then(|v| {
-                v.get("frameTree")?
-                    .get("frame")?
-                    .get("id")?
-                    .as_str()
-                    .map(String::from)
-            })
-            .unwrap_or_default();
-        if let Ok(v) = self
-            .cdp
-            .send(
-                "Page.createIsolatedWorld",
-                Some(json!({
-                    "frameId": frame_id,
-                    "worldName": "",
-                    "grantUniveralAccess": true,
-                })),
-            )
-            .await
-        {
-            if let Some(id) = v.get("executionContextId").and_then(|i| i.as_i64()) {
-                *self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
-                return self
-                    .cdp
-                    .send(
-                        "Runtime.callFunctionOn",
-                        Some(json!({
-                            "executionContextId": id,
-                            "functionDeclaration": format!("function() {{ return ({expr}); }}"),
-                            "returnByValue": true,
-                            "awaitPromise": true,
-                        })),
-                    )
-                    .await;
-            }
-        }
-
-        // Fallback: regular Runtime.evaluate.
         self.cdp
-            .send(
-                "Runtime.evaluate",
-                Some(json!({
-                    "expression": expr,
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                })),
-            )
+            .eval_isolated_with_timeout(expr, true, true, Duration::from_secs(30))
             .await
     }
 
     /// Reset the isolated world context (call on navigation).
     pub fn reset_isolated(&self) {
-        *self.isolated_ctx.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.cdp.reset_isolated();
     }
 
     /// List the browser's page targets — over the pipe's browser-level

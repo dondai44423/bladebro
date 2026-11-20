@@ -24,7 +24,7 @@ pub mod tabs;
 mod gl;
 mod route;
 
-pub use self::logs::{NetEntry, XhrEntry};
+pub use self::logs::{http_status_reason, DocResponse, NetEntry, XhrEntry};
 pub(crate) use self::navigate::{validate_nav_url, with_scheme};
 pub use self::route::{RouteEpoch, RouteSettle, ROUTE_BUDGET};
 
@@ -187,6 +187,8 @@ pub struct Page {
     route: Arc<RouteEpoch>,
     /// Ring buffer of the last 50 completed/failed requests (V8).
     net_log: Arc<Mutex<std::collections::VecDeque<NetEntry>>>,
+    /// Latest main-frame Document HTTP response (status, statusText, Retry-After).
+    doc_response: Arc<Mutex<Option<DocResponse>>>,
     /// Ring of the last 128 XHR/fetch requests (start-observed, full URLs) —
     /// API introspection used by site fast paths to read the page's own API
     /// calls (query ids, cursors) and replay them.
@@ -234,11 +236,6 @@ pub struct Page {
     /// PerimeterX/HUMAN specifically tracks these coordinate deltas; missing
     /// or always-zero values are an instant bot flag.
     last_mouse: Arc<std::sync::Mutex<Option<(f64, f64)>>>,
-    /// Isolated world execution context ID for DOM operations. None until
-    /// lazily created. Reset on navigation. In the isolated world, DOM
-    /// methods are native (not patched by anti-bot scripts), and
-    /// Error.stack traces don't contain main-world eval frames.
-    isolated_ctx: Arc<std::sync::Mutex<Option<i64>>>,
     /// Context pruning: how many `act` calls have happened on the current
     /// page without a `see` call or navigation to reset it. Used to
     /// progressively compress responses after turn 3.
@@ -606,6 +603,13 @@ impl Page {
             Some(note) => format!("{verdict} [{note}]"),
             None => verdict,
         };
+        if delta.navigated {
+            if let Some(doc) = self.doc_response().filter(|d| d.status >= 400) {
+                if let Ok(mut a) = self.ambient.lock() {
+                    a.push(doc.ambient_note(delta.url.starts_with("chrome-error://")));
+                }
+            }
+        }
         if is_click {
             let after = self.list_page_targets().await;
             let new_tabs: Vec<_> = after

@@ -2,8 +2,6 @@
 //! per-type remediation ladder the surfaces append to ambient events.
 //! Split from the `perception` core.
 
-use serde_json::json;
-
 use crate::cdp::CdpSession;
 use crate::error::Result;
 
@@ -78,12 +76,11 @@ pub(super) const DETECT_BLOCK_SCRIPT: &str = include_str!("../js/detect_block.js
 /// Returns the block type if detected, or None.
 pub async fn detect_block(cdp: &CdpSession) -> Result<Option<String>> {
     let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(json!({
-                "expression": DETECT_BLOCK_SCRIPT,
-                "returnByValue": true,
-            })),
+        .eval_isolated_with_timeout(
+            DETECT_BLOCK_SCRIPT,
+            true,
+            false,
+            std::time::Duration::from_secs(10),
         )
         .await?;
 
