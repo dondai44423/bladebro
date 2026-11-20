@@ -842,7 +842,7 @@ async fn probe_click_point(cdp: &CdpSession) -> Option<(f64, f64)> {
 
 /// Get the current page URL via CDP. Used by JS challenge detection
 /// to detect redirects after a challenge page is served.
-async fn eval_location_href(cdp: &CdpSession) -> String {
+pub(super) async fn eval_location_href(cdp: &CdpSession) -> String {
     cdp.send(
         "Runtime.evaluate",
         Some(json!({

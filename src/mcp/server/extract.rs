@@ -690,7 +690,8 @@ pub async fn handle_collect(page: &mut Page, args: &Value) -> Result<String> {
         if new_count == 0 {
             no_new_streak += 1;
             if no_new_streak >= 2 {
-                stop = "feed exhausted (no new items after 2 scrolls)".to_string();
+                let pager = detect_pager(page).await;
+                stop = collect_stop_reason(all_items.len(), &val, pager.as_ref());
                 break;
             }
         } else {
@@ -763,6 +764,78 @@ fn merge_collected(
     new_count
 }
 
+const DETECT_PAGER_JS: &str = include_str!("js/detect_pager.js");
+
+/// Check if the current page exposes a visible pagination "next" control.
+/// Used by `handle_collect` so scrolling a paginated listing does not falsely
+/// assert "feed exhausted".
+async fn detect_pager(page: &Page) -> Option<Value> {
+    let res = page
+        .cdp_ref()
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": DETECT_PAGER_JS,
+                "returnByValue": true,
+            })),
+        )
+        .await
+        .ok()?;
+    let val = res.get("result")?.get("value")?;
+    if val.is_object() {
+        Some(val.clone())
+    } else {
+        None
+    }
+}
+
+/// Truthful terminal reason for `handle_collect` after 2 scrolls yield 0 new items.
+fn collect_stop_reason(collected: usize, last_val: &Value, pager: Option<&Value>) -> String {
+    let paged = last_val.get("paged").and_then(Value::as_bool) == Some(true);
+    let page_total = last_val
+        .get("page_total")
+        .and_then(Value::as_u64)
+        .filter(|&t| (t as usize) > collected);
+    let next_hint = pager.and_then(|p| {
+        if let Some(sel) = p
+            .get("selector")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            Some(format!("next={sel}"))
+        } else {
+            p.get("text")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|t| format!("next=text={t}"))
+        }
+    });
+
+    if paged || next_hint.is_some() {
+        let mut details = Vec::new();
+        if let Some(total) = page_total {
+            details.push(format!("page states {total} total"));
+        }
+        if let Some(hint) = next_hint {
+            details.push(format!("live next control ({hint})"));
+        }
+        let detail_str = if details.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", details.join("; "))
+        };
+        return format!(
+            "scrolling added no new items — pagination detected{detail_str}; use act paginate instead of collect"
+        );
+    }
+    if let Some(total) = page_total {
+        return format!(
+            "scrolling added no new items after 2 scrolls (page states {total} total — remaining items may require clicking a pager or load-more button)"
+        );
+    }
+    "feed exhausted (no new items after 2 scrolls)".to_string()
+}
+
 #[cfg(test)]
 mod collect_tests {
     use super::*;
@@ -790,6 +863,37 @@ mod collect_tests {
         ];
         assert_eq!(merge_collected(&mut all, &mut seen, pass, 100), 1);
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn collect_discloses_pagination_instead_of_claiming_feed_exhausted() {
+        let paged_val = json!({"page_total": 32, "paged": true, "partial": true});
+        let pager = json!({"selector": "li.next > a", "text": "next"});
+        let stop = collect_stop_reason(20, &paged_val, Some(&pager));
+        assert!(
+            stop.contains("pagination detected")
+                && stop.contains("32 total")
+                && stop.contains("li.next > a")
+                && stop.contains("act paginate")
+                && !stop.contains("feed exhausted"),
+            "unexpected stop: {stop}"
+        );
+
+        // Live next link even without a total banner.
+        let plain_val = json!({"items": []});
+        let stop_pager_only = collect_stop_reason(20, &plain_val, Some(&pager));
+        assert!(
+            stop_pager_only.contains("pagination detected")
+                && !stop_pager_only.contains("feed exhausted"),
+            "unexpected stop: {stop_pager_only}"
+        );
+
+        // Genuine infinite-scroll feed with no pager and no unreached total.
+        let stop_exhausted = collect_stop_reason(20, &plain_val, None);
+        assert_eq!(
+            stop_exhausted,
+            "feed exhausted (no new items after 2 scrolls)"
+        );
     }
 }
 

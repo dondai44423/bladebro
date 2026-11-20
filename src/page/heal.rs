@@ -4,14 +4,32 @@
 use super::*;
 
 impl Page {
-    /// Ensure a ref is live, healing it from the graveyard if dead.
+    /// Ensure a ref is live, healing it from the same-page graveyard if dead.
     /// Returns Some(heal note) if a heal happened, None if the ref was
-    /// already live. Errors when the ref is dead AND cannot be
-    /// re-resolved on the current page (with candidate list when
-    /// ambiguous — candidates are adopted so their refs are usable).
+    /// already live on the same URL. Errors loudly with StaleRef if the page
+    /// navigated since the ref was issued (never silently rebinds across
+    /// navigation) or if the element cannot be re-resolved on the current page.
     pub async fn ensure_ref(&mut self, ref_id: &str) -> Result<Option<String>> {
-        if self.lpm.element(ref_id).is_some() {
+        if let Some(el) = self.lpm.element(ref_id) {
+            let model_url = self.lpm.url();
+            if !model_url.is_empty() {
+                let live_url = super::navigate::eval_location_href(&self.cdp).await;
+                if !live_url.is_empty() && live_url != model_url {
+                    return Err(crate::error::BladeError::StaleRef(format!(
+                        "{ref_id} ({} \"{}\") was from a previous page ({model_url}) and is invalid after navigation to {live_url} — run see to get fresh refs",
+                        el.raw.role,
+                        crate::page::model::truncate_pub(&el.raw.name, 40)
+                    )));
+                }
+            }
             return Ok(None);
+        }
+        if let Some((role, name, old_url)) = self.lpm.nav_retired_lookup(ref_id) {
+            return Err(crate::error::BladeError::StaleRef(format!(
+                "{ref_id} ({role} \"{}\") was from a previous page ({old_url}) and is invalid after navigation to {} — run see to get fresh refs",
+                crate::page::model::truncate_pub(&name, 40),
+                self.lpm.url()
+            )));
         }
         self.heal_by_identity(ref_id).await
     }
@@ -21,8 +39,8 @@ impl Page {
     /// the ref is re-adopted to the found element. On multiple, the
     /// error lists candidates with usable refs.
     pub(super) async fn heal_by_identity(&mut self, ref_id: &str) -> Result<Option<String>> {
-        // Identity from live model first, then graveyard. Keep the sig too:
-        // with the V25c global per-frame rank sig scheme, the sig uniquely
+        // Identity from live model first, then same-page graveyard. Keep the sig
+        // too: with the V25c global per-frame rank sig scheme, the sig uniquely
         // identifies the ORIGINAL element even among duplicate-named ones.
         let (role, name, want_sig) = if let Some(el) = self.lpm.element(ref_id) {
             (
@@ -30,6 +48,12 @@ impl Page {
                 el.raw.name.clone(),
                 Some(el.raw.sig.clone()),
             )
+        } else if let Some((role, name, old_url)) = self.lpm.nav_retired_lookup(ref_id) {
+            return Err(crate::error::BladeError::StaleRef(format!(
+                "{ref_id} ({role} \"{}\") was from a previous page ({old_url}) and is invalid after navigation to {} — run see to get fresh refs",
+                crate::page::model::truncate_pub(&name, 40),
+                self.lpm.url()
+            )));
         } else if let Some((sig, role, name)) = self.lpm.graveyard_lookup(ref_id) {
             (role, name, Some(sig))
         } else {

@@ -1013,3 +1013,211 @@ fn unanswered_capture_is_not_a_navigation_and_keeps_refs() {
     assert_eq!(after, refs);
     assert_eq!(lpm.phase(), "ready");
 }
+
+/// Regression (Bug #3): refs are strictly page-scoped. Navigating to a new URL
+/// whose DOM happens to contain an identical sig (e.g. "Add to basket" #15 on
+/// page 1 vs page 2 of a product catalog) must NEVER silently reuse page 1's
+/// ref or allow page 1's graveyard to heal onto page 2.
+#[test]
+fn navigation_retires_old_refs_and_never_rebinds_across_pages() {
+    let mut lpm = LivePageModel::new();
+    lpm.ingest(cap(
+        "https://books.example/mystery/index.html",
+        vec![
+            el(
+                "button",
+                "Add to basket",
+                "|button|Add to basket|15",
+                None,
+                false,
+            ),
+            el("link", "next", "|link|next|1", None, false),
+        ],
+    ));
+    let p1_btn = lpm.elements()[0].ref_id.clone();
+    let p1_next = lpm.elements()[1].ref_id.clone();
+
+    // Same-page disappearance sends p1_next to the same-page graveyard.
+    lpm.ingest(cap(
+        "https://books.example/mystery/index.html",
+        vec![el(
+            "button",
+            "Add to basket",
+            "|button|Add to basket|15",
+            None,
+            false,
+        )],
+    ));
+    assert!(lpm.graveyard_lookup(&p1_next).is_some());
+
+    // Navigating to page 2 must mint fresh refs, clear the graveyard, and
+    // retire page 1's refs into nav_retired with their old URL.
+    let d = lpm.ingest(cap(
+        "https://books.example/mystery/page-2.html",
+        vec![el(
+            "button",
+            "Add to basket",
+            "|button|Add to basket|15",
+            None,
+            false,
+        )],
+    ));
+    assert!(d.navigated);
+    let p2_btn = lpm.elements()[0].ref_id.clone();
+    assert_ne!(
+        p1_btn, p2_btn,
+        "page 2 must mint a fresh ref instead of reusing page 1's ref"
+    );
+    assert!(lpm.element(&p1_btn).is_none());
+    assert!(
+        lpm.graveyard_lookup(&p1_btn).is_none() && lpm.graveyard_lookup(&p1_next).is_none(),
+        "graveyard must be cleared on navigation so old refs cannot heal across pages"
+    );
+    let (role, name, old_url) = lpm
+        .nav_retired_lookup(&p1_btn)
+        .expect("old ref must be recorded in nav_retired");
+    assert_eq!(role, "button");
+    assert_eq!(name, "Add to basket");
+    assert_eq!(old_url, "https://books.example/mystery/index.html");
+}
+
+/// Regression (Bug #1): `mode=content` must not collapse multi-card `<article>`
+/// product grids (like books.toscrape.com) into either a single-product card or
+/// just the first `<article>` element.
+#[test]
+fn markdown_renders_all_cards_in_article_product_grids() {
+    let script = include_str!("../src/page/js/markdown.js")
+        .replace("__SCOPE_FLAG__", "false")
+        .replace("__BUDGET__", "8000")
+        .replace("__SCOPE_MAIN__", "findMain(document)");
+    let probe = format!(
+        r#"
+const assert = require('node:assert/strict');
+global.location = {{ hostname: 'books.toscrape.com', href: 'https://books.toscrape.com/catalogue/category/books/mystery_3/index.html' }};
+const makeText = (t) => ({{ nodeType: 3, textContent: t, childNodes: [] }});
+const view = {{ getComputedStyle: () => ({{ display: 'block', visibility: 'visible', opacity: '1' }}) }};
+const makeEl = (tag, attrs, children, text) => {{
+  const el = {{
+    nodeType: 1,
+    tagName: tag.toUpperCase(),
+    className: (attrs && attrs.class) || '',
+    id: (attrs && attrs.id) || '',
+    innerHTML: 'x',
+    hidden: false,
+    ownerDocument: {{ defaultView: view }},
+    childNodes: children || (text ? [makeText(text)] : []),
+    get innerText() {{
+      if (text !== undefined) return text;
+      return this.childNodes.map(c => c.nodeType === 3 ? c.textContent : c.innerText).join(' ');
+    }},
+    getAttribute: (k) => (attrs && attrs[k]) || null,
+    hasAttribute: (k) => Boolean(attrs && k in attrs),
+    closest: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  }};
+  return el;
+}};
+const cards = [];
+for (let i = 1; i <= 5; i++) {{
+  cards.push(makeEl('article', {{ class: 'product_pod' }}, [
+    makeEl('h3', null, [makeEl('a', {{ href: '/book-' + i }}, null, 'Mystery Book ' + i)]),
+    makeEl('p', {{ class: 'price_color' }}, null, '£' + (10 + i) + '.99'),
+    makeEl('button', null, null, 'Add to basket'),
+  ]));
+}}
+const h1 = makeEl('h1', null, null, 'Mystery');
+const section = makeEl('section', null, [h1, ...cards]);
+const body = makeEl('body', null, [section]);
+global.document = {{
+  title: 'Mystery | Books to Scrape',
+  body,
+  querySelector(sel) {{
+    if (sel === 'h1') return h1;
+    if (sel === 'article') return cards[0];
+    return null;
+  }},
+  querySelectorAll(sel) {{
+    if (sel === 'article') return cards;
+    return [];
+  }},
+}};
+const md = {script};
+for (let i = 1; i <= 5; i++) {{
+  assert.ok(md.includes('Mystery Book ' + i), 'missing card ' + i + ' in:\n' + md);
+}}
+assert.ok(!md.includes('**Price:**'), 'grid must not collapse into single product card:\n' + md);
+"#
+    );
+    let output = std::process::Command::new("node")
+        .arg("-e")
+        .arg(probe)
+        .output()
+        .expect("node is required for injected-script tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Regression (Gap #1A): repeated card buttons ("Add to basket") inside
+/// `<article class="product_pod">` inherit the card's heading title so filtered
+/// views distinguish items, while `#id` landmarks stay unchanged.
+#[test]
+fn ctx_fn_enriches_card_controls_with_heading_title() {
+    let ctx_fn = include_str!("../src/page/js/ctx_fn.js");
+    let probe = format!(
+        r#"
+const assert = require('node:assert/strict');
+global.document = {{ body: {{}}, documentElement: {{}} }};
+{ctx_fn}
+const headingLink = {{ getAttribute: (k) => k === 'title' ? 'Tastes Like Fear (DI Marnie Rome #3)' : null, textContent: 'Tastes Like Fear...' }};
+const h3 = {{ innerText: 'Tastes Like Fear...', querySelector: (s) => s === 'a[title]' ? headingLink : null }};
+const card = {{
+  tagName: 'ARTICLE',
+  id: '',
+  className: 'product_pod',
+  getAttribute: () => '',
+  hasAttribute: () => false,
+  querySelector: (s) => s.includes('h3') ? h3 : null,
+  parentElement: null,
+}};
+const priceDiv = {{
+  tagName: 'DIV',
+  id: '',
+  className: 'product_price',
+  getAttribute: () => '',
+  hasAttribute: () => false,
+  querySelector: () => null,
+  parentElement: card,
+}};
+const btn = {{ tagName: 'BUTTON', parentElement: priceDiv }};
+const ctx = ctxOf(btn);
+assert.ok(ctx.includes('Tastes Like Fear (DI Marnie Rome #3)'), 'expected full card title in ctx: ' + ctx);
+
+// Explicit #id ancestor still takes precedence and formats identically.
+const idRow = {{
+  tagName: 'DIV',
+  id: 'hash-row',
+  className: '',
+  getAttribute: (k) => k === 'id' ? 'hash-row' : '',
+  hasAttribute: (k) => k === 'id',
+  querySelector: () => null,
+  parentElement: null,
+}};
+const idBtn = {{ tagName: 'BUTTON', parentElement: idRow }};
+assert.equal(ctxOf(idBtn), 'div#hash-row');
+"#
+    );
+    let output = std::process::Command::new("node")
+        .arg("-e")
+        .arg(probe)
+        .output()
+        .expect("node is required for injected-script tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -60,10 +60,9 @@ pub(super) async fn handle_paginate(args: &Value, page: &mut Page) -> Result<Str
             Ok(_) => {}
             Err(BladeError::Closed) => return Err(BladeError::Closed),
             Err(e) => {
-                let message = e.to_string();
-                complete = message.contains("no element matching")
-                    || message.contains("0 raw matches, 0 actionable");
-                stop = format!("next unavailable: {message}");
+                let (done, reason) = classify_next_error(pages.len(), &e.to_string());
+                complete = done;
+                stop = reason;
                 break;
             }
         }
@@ -72,7 +71,101 @@ pub(super) async fn handle_paginate(args: &Value, page: &mut Page) -> Result<Str
     let output = serde_json::to_string(&payload)?;
     if output.len() > 12000 {
         let path = crate::artifacts::write_artifact(&output, "json")?;
-        return Ok(json!({"artifact":path,"bytes":output.len(),"next_offset":0,"pages":pages.len(),"complete":complete}).to_string());
+        return Ok(json!({"artifact":path,"bytes":output.len(),"next_offset":0,"pages":pages.len(),"complete":complete,"stop":stop}).to_string());
     }
     Ok(output)
+}
+
+/// Classify why advancing to the next page failed.
+///
+/// Only treat a missing/disabled next control as `complete = true` when
+/// pagination actually succeeded at least once (`pages_collected > 1`). If
+/// `next` never matched even on page 1, a broken selector is indistinguishable
+/// from a single-page result, so `complete` stays `false` and the stop reason
+/// states both possibilities instead of claiming the dataset is complete.
+fn classify_next_error(pages_collected: usize, message: &str) -> (bool, String) {
+    let summary = message
+        .split("\n\n--- current page state ---")
+        .next()
+        .unwrap_or(message)
+        .trim();
+    let is_ambiguous_or_invalid = summary.contains("ambiguous")
+        || (summary.contains("matches ") && summary.contains("visible elements"))
+        || summary.contains("SyntaxError")
+        || summary.contains("not a valid selector");
+    if is_ambiguous_or_invalid {
+        return (false, format!("next unavailable: {summary}"));
+    }
+    let next_absent = summary.contains("no element matching")
+        || summary.contains("no actionable element matches selector")
+        || summary.contains("but none is visible")
+        || summary.contains("is disabled")
+        || summary.contains("gone from the current page");
+    if next_absent {
+        if pages_collected > 1 {
+            return (
+                true,
+                format!(
+                    "reached last page (page {pages_collected}): next control is no longer available"
+                ),
+            );
+        }
+        return (
+            false,
+            format!(
+                "next control never matched on page 1 — single-page result or wrong next target ({summary})"
+            ),
+        );
+    }
+    (false, format!("next unavailable: {summary}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_next_error;
+
+    #[test]
+    fn real_pagination_end_with_suffix_fallback_diag_is_complete() {
+        let diag = "no actionable element matches selector \"li.next a\" (searched light DOM + open shadow roots) - closest live matches for \"a\" (75 found): link \"Books\" - adjust the selector (a tag or class in the path may have changed)";
+        let (complete, stop) = classify_next_error(2, diag);
+        assert!(
+            complete,
+            "page 2 end must be complete=true, got stop={stop}"
+        );
+        assert!(
+            stop.contains("reached last page (page 2)") && !stop.contains("adjust the selector"),
+            "stop should cleanly report last page without blaming the selector: {stop}"
+        );
+    }
+
+    #[test]
+    fn broken_selector_on_page_one_is_never_complete() {
+        let diag = "no actionable element matches selector \".definitely-not-real\" (searched light DOM + open shadow roots) - 0 raw matches, 0 actionable: the selector matched nothing - check its spelling against the live page";
+        let (complete, stop) = classify_next_error(1, diag);
+        assert!(
+            !complete,
+            "page 1 never-matched selector must be complete=false"
+        );
+        assert!(
+            stop.contains("never matched on page 1"),
+            "stop should explain page-1 miss: {stop}"
+        );
+    }
+
+    #[test]
+    fn text_next_end_after_multiple_pages_is_complete() {
+        let diag =
+            "no element matching \"Next\" found\n\n--- current page state ---\nPage: /pages/3";
+        let (complete, stop) = classify_next_error(3, diag);
+        assert!(complete);
+        assert!(stop.contains("page 3") && !stop.contains("current page state"));
+    }
+
+    #[test]
+    fn ambiguous_or_invalid_selector_is_never_complete() {
+        let amb = "selector \"a.next\" matches 2 visible elements - add nth=N";
+        assert!(!classify_next_error(2, amb).0);
+        let bad = "SyntaxError: '[bad' is not a valid selector";
+        assert!(!classify_next_error(2, bad).0);
+    }
 }

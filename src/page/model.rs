@@ -84,11 +84,18 @@ pub struct LivePageModel {
     /// rebound an agent's stale `e5` to a DIFFERENT element on the new
     /// page — the worst failure mode a ref system can have.
     next_ref: u64,
-    /// Identities of refs that died in recent captures, most recent last.
-    /// Powers ref self-healing: when the agent uses a dead ref, we know
-    /// what it USED to point at and can re-resolve it on the live page.
+    /// Identities of refs that died in recent captures on the CURRENT page,
+    /// most recent last. Powers same-page ref self-healing: when the agent
+    /// uses a dead ref, we know what it USED to point at and can re-resolve
+    /// it on the live page. Cleared on navigation so old-page refs can never
+    /// silently rebind onto a different page.
     /// Entries: (ref id, sig, role, name). Capped at GRAVEYARD_CAP.
     graveyard: Vec<(String, String, String, String)>,
+    /// Refs retired specifically because the page navigated to a new URL.
+    /// Never healed — used solely to produce a clear StaleRef error naming
+    /// what the ref used to be and which page it belonged to.
+    /// Entries: (ref id, role, name, old_url). Capped at NAV_RETIRED_CAP.
+    nav_retired: Vec<(String, String, String, String)>,
     /// False until the first capture completes; gates `navigated`.
     initialized: bool,
     url: String,
@@ -99,8 +106,11 @@ pub struct LivePageModel {
     unanswered: bool,
 }
 
-/// Max remembered dead-ref identities.
+/// Max remembered dead-ref identities on the current page.
 const GRAVEYARD_CAP: usize = 64;
+
+/// Max remembered refs retired by navigation (for clear StaleRef errors).
+const NAV_RETIRED_CAP: usize = 256;
 
 /// Shown under the page line while the latest read went unanswered.
 const UNANSWERED_NOTE: &str = "(page did not answer this read - busy or mid-navigation; showing the last answered state, refs kept - observe again)\n";
@@ -113,6 +123,7 @@ impl Default for LivePageModel {
             prev_state: HashMap::new(),
             next_ref: 1,
             graveyard: Vec::new(),
+            nav_retired: Vec::new(),
             initialized: false,
             url: String::new(),
             title: String::new(),
@@ -287,6 +298,26 @@ impl LivePageModel {
             .map(|(_, sig, role, name)| (sig.clone(), role.clone(), name.clone()))
     }
 
+    /// Record a ref invalidated by a page navigation so stale-ref errors
+    /// name what it pointed at and which page it belonged to.
+    fn retire_on_nav(&mut self, id: String, role: String, name: String, old_url: String) {
+        self.nav_retired.retain(|(g, _, _, _)| *g != id);
+        self.nav_retired.push((id, role, name, old_url));
+        if self.nav_retired.len() > NAV_RETIRED_CAP {
+            let excess = self.nav_retired.len() - NAV_RETIRED_CAP;
+            self.nav_retired.drain(..excess);
+        }
+    }
+
+    /// Look up a ref that was invalidated by navigation: (role, name, old_url).
+    pub fn nav_retired_lookup(&self, ref_id: &str) -> Option<(String, String, String)> {
+        self.nav_retired
+            .iter()
+            .rev()
+            .find(|(id, _, _, _)| id == ref_id)
+            .map(|(_, role, name, url)| (role.clone(), name.clone(), url.clone()))
+    }
+
     /// Ingest a fresh capture: stabilize refs, compute the delta, update state.
     ///
     /// This is the core mutation. Returns the delta to surface to the agent.
@@ -311,13 +342,17 @@ impl LivePageModel {
         let title_changed = self.initialized && self.title != cap.title;
         let phase = cap.phase().to_string();
 
-        // Refs are monotonic for the session's lifetime — the counter
-        // never resets, even across navigations. If it reset, a stale
-        // `e5` from the previous page would silently resolve to a
-        // DIFFERENT element on the new page (silent misclick). With
-        // monotonic refs, a stale ref always errors or self-heals.
-
-        let stab = stabilize(&self.prev_state, &cap.elements, &mut self.next_ref);
+        // Refs are monotonic for the session's lifetime AND strictly
+        // page-scoped: on navigation, retire every old ref and mint fresh
+        // refs against an empty prev_state so a stale `e550` from page 1
+        // can NEVER silently rebind to a different item on page 2 that
+        // happens to share the same rank/sig (e.g. "Add to basket" #15).
+        let empty_prev = HashMap::new();
+        let stab = if navigated {
+            stabilize(&empty_prev, &cap.elements, &mut self.next_ref)
+        } else {
+            stabilize(&self.prev_state, &cap.elements, &mut self.next_ref)
+        };
 
         // Build the new element list + ref index from the stabilized live map.
         // `stab.live` maps sig -> ref id; cap.elements carries the matching sigs.
@@ -357,14 +392,35 @@ impl LivePageModel {
             })
             .collect();
 
-        let removed: Vec<String> = stab.removed.iter().map(|r| r.id.clone()).collect();
-
-        // Move dead refs' identities into the graveyard for self-healing.
-        // The agent may still hold e5; when it acts on e5 we re-resolve
-        // what e5 used to be (role+name) against the live page.
-        for r in stab.removed {
-            self.bury(r.id, r.sig, r.role, r.name);
-        }
+        let removed: Vec<String> = if navigated {
+            let old_url = self.url.clone();
+            let old_live: Vec<(String, String, String)> = self
+                .elements
+                .iter()
+                .map(|e| (e.ref_id.clone(), e.raw.role.clone(), e.raw.name.clone()))
+                .collect();
+            let old_graveyard: Vec<(String, String, String)> = std::mem::take(&mut self.graveyard)
+                .into_iter()
+                .map(|(id, _, role, name)| (id, role, name))
+                .collect();
+            let removed_ids = old_live.iter().map(|(id, _, _)| id.clone()).collect();
+            for (id, role, name) in old_graveyard {
+                self.retire_on_nav(id, role, name, old_url.clone());
+            }
+            for (id, role, name) in old_live {
+                self.retire_on_nav(id, role, name, old_url.clone());
+            }
+            removed_ids
+        } else {
+            let removed_ids: Vec<String> = stab.removed.iter().map(|r| r.id.clone()).collect();
+            // Move dead refs' identities into the same-page graveyard for self-healing.
+            // The agent may still hold e5; when it acts on e5 on the same page we
+            // re-resolve what e5 used to be (role+name) against the live DOM.
+            for r in stab.removed {
+                self.bury(r.id, r.sig, r.role, r.name);
+            }
+            removed_ids
+        };
 
         let delta = PageDelta {
             navigated,

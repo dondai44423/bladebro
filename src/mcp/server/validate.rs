@@ -136,6 +136,13 @@ fn act_fields(args: &Value) -> Result<()> {
             action,
         )));
     }
+    for key in ["filter", "scope"] {
+        if args.get(key).is_some() {
+            return Err(BladeError::Usage(format!(
+                "{key} is a see option, not supported on act {action} — use see(url=..., {key}=...) to navigate and read in one call"
+            )));
+        }
+    }
     if action == "paginate" {
         if args
             .get("next")
@@ -805,5 +812,25 @@ mod tests {
         ] {
             assert!(see(&args).is_err(), "{args}");
         }
+    }
+
+    #[test]
+    fn act_rejects_see_only_filter_and_scope_instead_of_ignoring_them() {
+        for args in [
+            json!({"action":"navigate","url":"https://example.com","filter":"button"}),
+            json!({"action":"navigate","url":"https://example.com","scope":"main"}),
+            json!({"action":"click","text":"Next","filter":"link"}),
+        ] {
+            let err = act(&args).unwrap_err().to_string();
+            assert!(
+                err.contains("see(url=..."),
+                "expected pointer to see: {err}"
+            );
+        }
+        // `see` steps inside `run` still accept filter and scope.
+        assert!(run(
+            &json!({"steps":[{"action":"see","url":"https://example.com","filter":"button"}]})
+        )
+        .is_ok());
     }
 }
