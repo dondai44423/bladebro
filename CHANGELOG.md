@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.7.0] - 2026-11-20
+
 ### Added
 - **Exact HTTP status codes on navigation errors and 4xx/5xx pages** (#97): empty-body HTTP failures (`net::ERR_HTTP_RESPONSE_CODE_FAILURE`) now report the exact status code, reason phrase (including HTTP/2+3 fallback when `statusText` is empty), `Retry-After` header when present, and actionable guidance (e.g. `HTTP 429 Too Many Requests (retry-after: 45s) — rate limited; wait/back off before retrying`). Landed 4xx/5xx pages with a body surface an `http:` notice automatically.
 - **One-call open + read/extract in MCP `see`**: `see` now exposes `url` and `block` in its MCP schema (and `--block` on CLI `see`), cutting read-only navigate-and-read workflows from two tool calls to one.
@@ -2245,7 +2247,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.6.10...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.7.0...HEAD
+[4.7.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.7.0
 [4.6.10]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.10
 [4.6.9]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.9
 [4.6.8]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.8
