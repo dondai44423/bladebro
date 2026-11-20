@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Compounding site-chrome folding (zero-staleness)**: links repeating identically across 2+ distinct paths on a domain are learned in the knowledge base and auto-folded into one compact line (`site-chrome ▸ N repeated site links folded`) on default views, reclaiming token budget for page-specific controls without hiding anything from `filter=`, `find=`, or live refs. Any link whose text or destination changes unfolds immediately, and vanished chrome entries evict automatically.
+- **Cross-session persistent HTTP disk-cache slots**: owned seasoned agent-lane sessions acquire an exclusive OS-locked RFC-9111 HTTP cache slot (`--disk-cache-dir`, 100 MiB cap, up to 4 concurrent slots), reusing immutable JS/CSS/font bundles across restarts while dynamic HTML/API documents still honor `Cache-Control`/`ETag` with zero staleness.
+- **Self-learning host GL stage, chirpy-network settle, and bidirectional bot-risk pacing**: remembers the working WebGL stage per Chrome binary and display mode (re-probing on binary upgrade or 7-day software TTL), learns persistent-connection domains to tighten idle network-drain grace without cutting short active fetches, scales pacing patience on high-risk anti-bot domains while gradually recovering after sustained clean visits, and surfaces knowledge + cache health in `bladebro doctor`.
+- **Overhauled `extract=auto` adapter engine & 10 new top site adapters**: modularized per-site JS adapters (`src/adapters/js/`), added adapters for Stack Exchange, Wikipedia, Amazon (search + product), arXiv, PyPI, npm, crates.io, Google/DuckDuckGo/Bing search, and JSON-LD structured-data fallback, and hardened existing Reddit, X, GitHub, HN, and YouTube adapters.
+- **Inline small `act download body:true` payloads**: UTF-8 text/JSON/XML/CSV/YAML downloads ≤ 8 KiB now include `body` inline alongside `path`, removing an extra `see artifact=` round-trip.
+
+### Fixed
+- **Stale refs never silently rebind across navigation**: monotonic session refs are retired on real page navigations (path/query/hash-route) and error loudly with `StaleRef` naming the old element and URLs instead of acting on a different item; pure in-page `#anchor` jumps keep live refs intact.
+- **`see mode=content` on `<article>`-based grids**: catalog/product grids using multiple `<article>` cards (e.g. e-commerce listings) now render all cards instead of collapsing to the first `<article>`.
+- **Truthful `act paginate` and `act collect` terminal states**: `paginate` only sets `complete: true` when pagination advanced past page 1 and the next control disappeared/disabled (a broken page-1 selector returns `complete: false`), and `collect` detects live pagination controls instead of falsely reporting `"feed exhausted"`.
+- **Per-domain `block_config` scoping and fused single-round-trip consent**: auto-applied domain block rules revert cleanly to `none` when leaving for a domain without one (stopping cross-domain leakage), cleared configs store `None` for proper pruning, consent fast-path + fallback fuse into one CDP evaluate with working confidence downgrade on stale selectors, and 8 additional major CMPs are supported.
+- **Card control context, `act` validation, and `act fill` clarity**: repeated card controls inside un-IDed `<article>`/`<li>`/`<tr>` cards include their heading title in `ctx`, `act` rejects ignored `filter`/`scope` args loudly, `fill` accepts bare CSS selectors in `submit` without requiring `selector=`, and partial `fill` failures disclose which fields were already written.
+
+### Performance
+- **Faster attach, settle, and domain profile lookup**: skipped redundant consent/block probes on `about:blank` attaches, eliminated false post-drain `re_settle` round-trips when zero requests completed during idle persistent connections, tightened settle observer polling to 25 ms, and mtime-cached `profiles.json`.
+
 ## [4.7.0] - 2026-11-20
 
 ### Added
