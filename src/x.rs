@@ -75,6 +75,8 @@ pub struct XPost {
     pub author: String,
     pub name: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quoted: Option<String>,
     pub date: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,6 +105,8 @@ pub struct XItem {
     pub reply_to: Option<String>,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub quoted: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub replies: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reposts: Option<i64>,
@@ -130,7 +134,9 @@ pub struct XPayload {
 
 /// Extract structured data for an x.com page. Dispatches on page kind:
 /// status → the conversation thread; profile/search/home → the timeline.
-pub async fn extract(page: &Page, kind: &str, cap: usize) -> Result<XPayload> {
+/// `live_url` is the page's current `location.href` captured at extract time so
+/// SPA navigation never reads a stale cached URL from the page model.
+pub async fn extract(page: &Page, kind: &str, live_url: &str, cap: usize) -> Result<XPayload> {
     // Transient React boot failures ("Something went wrong. Try reloading.")
     // are common on missed first paints; one bounded reload clears them.
     if is_flaky_render(page).await {
@@ -158,7 +164,13 @@ pub async fn extract(page: &Page, kind: &str, cap: usize) -> Result<XPayload> {
     );
     let mut budget = Budget::new();
     let payload = match kind {
-        "status" => fetch_thread(page, &templates, cap, &mut budget).await?,
+        "status" => match fetch_thread(page, &templates, live_url, cap, &mut budget).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!("x: status replay failed ({e}); DOM fallback");
+                dom_collect(page, "status", cap).await?
+            }
+        },
         "profile" | "search" | "home" => {
             match fetch_timeline(page, kind, &templates, cap, &mut budget).await {
                 Ok(p) => p,
@@ -984,6 +996,7 @@ mod tests {
                 name: t.name.clone(),
                 date: t.date.clone(),
                 text: t.text.clone(),
+                quoted: t.quoted.clone(),
                 replies: t.replies,
                 reposts: t.reposts,
                 likes: t.likes,
@@ -1006,5 +1019,89 @@ mod tests {
         assert!(s.contains("\"complete\":false"));
         assert!(s.contains("\"depth\":"));
         assert!(!s.contains("\"op\":false"), "false op omitted");
+    }
+
+    #[test]
+    fn dom_collect_script_is_valid_js_and_compact_counts_parse() {
+        let js = super::dom::dom_collect_expr(25);
+        assert!(!js.contains("__CAP__"));
+        assert!(js.contains("const cap = 25;"));
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            let path = std::env::temp_dir().join("bladebro-js-check-x-dom-collect.js");
+            std::fs::write(&path, &js).expect("write js fixture");
+            let out = std::process::Command::new("node")
+                .arg("--check")
+                .arg(&path)
+                .output()
+                .expect("node --check");
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                out.status.success(),
+                "node --check failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let j = json!({
+            "exhausted": true,
+            "items": [{
+                "id": "9",
+                "author": "alice",
+                "name": "Alice",
+                "date": "2026-09-24T16:18:18.000Z",
+                "text": "hello",
+                "replies": "1.2K Replies. Reply",
+                "reposts": "3.5M reposts. Repost",
+                "likes": "42 Likes. Like",
+                "media": ["https://pbs.twimg.com/media/abc.jpg"],
+                "url": "https://x.com/alice/status/9"
+            }]
+        });
+        let (items, _) = dom_items_from_json(&j);
+        assert_eq!(items[0].replies, Some(1200));
+        assert_eq!(items[0].reposts, Some(3_500_000));
+        assert_eq!(items[0].likes, Some(42));
+        assert_eq!(items[0].media, vec!["https://pbs.twimg.com/media/abc.jpg"]);
+    }
+
+    #[test]
+    fn quoted_tweets_and_alternate_gql_origins_are_preserved() {
+        let mut t = tweet("7002", "carol", None);
+        t["quoted_status_result"] = json!({
+            "result": tweet("7003", "dan", None)
+        });
+        let page = parse_timeline_page(&json!({"instructions": [
+            add_entries(vec![tweet_entry(t)])
+        ]}));
+        assert_eq!(
+            page.tweets[0].quoted.as_deref(),
+            Some("@dan: tweet 7003"),
+            "quoted tweet text should be preserved"
+        );
+
+        let mobile_url =
+            "https://mobile.x.com/i/api/graphql/qid1/TweetDetail?variables=%7B%7D&features=%7B%7D";
+        let (qid, op, _) = parse_gql_url(mobile_url).expect("mobile url parses");
+        let tpl = GqlTemplate {
+            qid,
+            op,
+            url: mobile_url.to_string(),
+            params: vec![("features".into(), "{}".into())],
+            variables: json!({}),
+            headers: Vec::new(),
+        };
+        let rebuilt = build_url(&tpl, &json!({"a": 1}));
+        assert!(
+            rebuilt.starts_with("https://mobile.x.com/i/api/graphql/qid1/TweetDetail?"),
+            "{rebuilt}"
+        );
+
+        let api_url = "https://api.x.com/graphql/qid2/SearchTimeline?variables=%7B%7D";
+        let (qid2, op2, _) = parse_gql_url(api_url).expect("/graphql/ url parses");
+        assert_eq!((qid2.as_str(), op2.as_str()), ("qid2", "SearchTimeline"));
     }
 }

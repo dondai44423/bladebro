@@ -49,7 +49,7 @@ bladebro see model --json
 bladebro see extract links --json
 ```
 
-Pass `url` (and optional `block`) on `see` to navigate and read/extract in a single call. The model can fold navigation/footer items and list omitted controls by role. Use `filter` to narrow a crowded page. Auto extraction has site-aware paths for Reddit, X, GitHub, Hacker News, and products. A partial thread carries completeness and fallback information. `preview: true` shows an auto extraction's detected fields before you request rows.
+Pass `url` (and optional `block`) on `see` to navigate and read/extract in a single call. The model can fold navigation/footer items and list omitted controls by role. Use `filter` to narrow a crowded page. Auto extraction has site-aware paths for Reddit, X, GitHub (repos, issues, PRs, releases, search), Hacker News (stories and comment threads), YouTube (search, feeds, watch pages), Google/DuckDuckGo/Bing search, Stack Overflow/Stack Exchange, Wikipedia, Amazon search, arXiv/PyPI/npm/crates.io, products, and schema.org JSON-LD detail pages. A partial thread carries completeness and fallback information. `preview: true` shows an auto extraction's detected fields before you request rows.
 
 `logs: "xhr"` lists the deduplicated fetch/XHR endpoints a page called — method, status, the full URL with its query intact, and request header names only — with failures first. `format: "json"` returns structured JSON for `extract`, `artifact`, `changes`, `find`, and all `logs` (`console`, `network`, `xhr`); `clear: true` empties the selected log ring, and reads past 30 endpoints (or 12 KB in JSON mode) offload to an artifact.
 

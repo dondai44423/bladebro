@@ -58,6 +58,7 @@ pub struct SearchPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
     pub count: usize,
+    pub complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub items: Vec<SearchItem>,
@@ -231,14 +232,18 @@ fn parse_search(
         });
     }
     let count = items.len();
-    let mut note = raw["data"]["after"]
-        .as_str()
-        .filter(|a| !a.is_empty())
-        .map(|_| {
+    let has_more = raw["data"]["after"].as_str().is_some_and(|a| !a.is_empty());
+    let mut note = has_more.then(|| {
+        if page >= MAX_SEARCH_PAGE {
+            format!(
+                "showing the first {count} results — at Reddit's {MAX_SEARCH_PAGE}-item single-page listing ceiling"
+            )
+        } else {
             format!(
                 "showing the first {count} results — reddit pages search listings at {MAX_SEARCH_PAGE} per request (raise limit to fetch more)"
             )
-        });
+        }
+    });
     if skipped_ads > 0 {
         let ads = format!("{skipped_ads} promoted post(s) skipped");
         note = Some(match note {
@@ -252,6 +257,7 @@ fn parse_search(
         sort,
         time,
         count,
+        complete: !has_more,
         note,
         items,
     })
@@ -388,12 +394,31 @@ mod tests {
             "self-post excerpt present"
         );
         // Reddit still has pages of results behind this one.
+        assert!(!p.complete, "listing with `after` is partial");
         assert!(
             p.note
                 .as_deref()
                 .is_some_and(|n| n.contains("showing the first 3 results")),
             "paging note: {:?}",
             p.note
+        );
+        // At MAX_SEARCH_PAGE, the note must not suggest raising limit further.
+        assert!(
+            !p.note
+                .as_deref()
+                .unwrap_or("")
+                .contains("raise limit to fetch more"),
+            "ceiling note must not give impossible advice: {:?}",
+            p.note
+        );
+        let small = parse_search(&fixture(), "q", None, None, 25).expect("parse");
+        assert!(
+            small
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("raise limit to fetch more")),
+            "below ceiling should suggest raising limit: {:?}",
+            small.note
         );
         // Field order keeps `container` first (payload contract).
         let s = serde_json::to_string(&p).unwrap();
@@ -413,6 +438,7 @@ mod tests {
         assert_eq!(p.count, 1, "t5 and blank-title children dropped");
         assert_eq!(p.items[0].author, "[deleted]");
         assert_eq!(p.items[0].text, None, "empty selftext stays absent");
+        assert!(p.complete, "no `after` = complete listing");
         assert!(p.note.is_none(), "no `after` = complete listing");
 
         let empty = serde_json::json!({"kind":"Listing","data":{"after":null,"children":[]}});

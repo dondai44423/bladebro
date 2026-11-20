@@ -28,13 +28,19 @@ fn focal_id_from_url(url: &str) -> Option<String> {
 pub(super) async fn fetch_thread(
     page: &Page,
     templates: &HashMap<String, GqlTemplate>,
+    live_url: &str,
     cap: usize,
     budget: &mut Budget,
 ) -> Result<XPayload> {
     let tpl = templates.get("TweetDetail").ok_or_else(|| {
         BladeError::Other("x: TweetDetail not captured (page API traffic not seen yet)".into())
     })?;
-    let focal_id = focal_id_from_url(page.model().url())
+    let url = if live_url.is_empty() {
+        page.model().url()
+    } else {
+        live_url
+    };
+    let focal_id = focal_id_from_url(url)
         .ok_or_else(|| BladeError::Other("x: URL has no /status/<id>".into()))?;
     thread_walk(page.cdp_ref(), tpl, &focal_id, cap, budget).await
 }
@@ -83,6 +89,7 @@ pub(super) async fn thread_walk(
             name: t.name,
             date: t.date,
             text: t.text,
+            quoted: t.quoted,
             replies: t.replies,
             reposts: t.reposts,
             likes: t.likes,
@@ -98,6 +105,7 @@ pub(super) async fn thread_walk(
             author: focal.author.clone(),
             name: focal.name.clone(),
             text: cut_chars(&focal.text, POST_TEXT_CAP),
+            quoted: focal.quoted.clone(),
             date: focal.date.clone(),
             url: focal.permalink(),
             replies: focal.replies,
@@ -178,6 +186,7 @@ pub(super) async fn timeline_walk(
                 name: t.name,
                 date: t.date,
                 text: t.text,
+                quoted: t.quoted,
                 replies: t.replies,
                 reposts: t.reposts,
                 likes: t.likes,

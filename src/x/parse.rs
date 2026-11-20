@@ -10,6 +10,7 @@ pub(super) struct T {
     pub(super) author: String,
     pub(super) name: String,
     pub(super) text: String,
+    pub(super) quoted: Option<String>,
     pub(super) date: String,
     pub(super) in_reply_to: Option<String>,
     pub(super) reply_to: Option<String>,
@@ -351,12 +352,28 @@ fn tweet_from_item(ic: &Value) -> Option<T> {
         .and_then(|l| l.get("in_reply_to_screen_name"))
         .and_then(|v| v.as_str())
         .map(String::from);
+    let quoted = tr
+        .pointer("/quoted_status_result/result")
+        .map(unwrap_visibility)
+        .and_then(|qt| {
+            let txt = tweet_text(qt)?;
+            let who = qt
+                .pointer("/core/user_results/result/core/screen_name")
+                .or_else(|| qt.pointer("/core/user_results/result/legacy/screen_name"))
+                .and_then(|s| s.as_str());
+            let formatted = match who {
+                Some(w) if !w.is_empty() => format!("@{w}: {txt}"),
+                _ => txt.to_string(),
+            };
+            Some(cut_chars(&formatted, 1000))
+        });
     let media = collect_media(legacy);
     Some(T {
         id,
         author,
         name,
         text: cut_chars(text_raw, ITEM_TEXT_CAP),
+        quoted,
         date,
         in_reply_to,
         reply_to,

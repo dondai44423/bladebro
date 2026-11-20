@@ -61,9 +61,13 @@ pub fn capture_templates(page: &Page) -> HashMap<String, GqlTemplate> {
     out
 }
 
-/// Split `…/i/api/graphql/<qid>/<Op>?<query>` → (qid, op, query).
+/// Split `…/i/api/graphql/<qid>/<Op>?<query>` (or `…/graphql/<qid>/<Op>?<query>`)
+/// → (qid, op, query).
 pub(super) fn parse_gql_url(url: &str) -> Option<(String, String, String)> {
-    let rest = url.split("/i/api/graphql/").nth(1)?;
+    let rest = url
+        .split("/i/api/graphql/")
+        .nth(1)
+        .or_else(|| url.split("/graphql/").nth(1))?;
     let (qid, after) = rest.split_once('/')?;
     let (op, query) = match after.split_once('?') {
         Some((o, q)) => (o, q),
@@ -76,7 +80,8 @@ pub(super) fn parse_gql_url(url: &str) -> Option<(String, String, String)> {
 }
 
 /// Rebuild the request URL with different variables — everything else
-/// (features, fieldToggles) stays exactly as captured.
+/// (features, fieldToggles) stays exactly as captured, preserving the
+/// captured origin (`mobile.x.com`, `twitter.com`, `x.com`).
 pub fn build_url(tpl: &GqlTemplate, variables: &Value) -> String {
     let mut q: Vec<(String, String)> = tpl
         .params
@@ -88,7 +93,14 @@ pub fn build_url(tpl: &GqlTemplate, variables: &Value) -> String {
         "variables".to_string(),
         serde_json::to_string(variables).unwrap_or_default(),
     ));
-    let mut out = format!("https://x.com/i/api/graphql/{}/{}?", tpl.qid, tpl.op);
+    let prefix = if let Some(idx) = tpl.url.find("/i/api/graphql/") {
+        format!("{}/i/api/graphql", &tpl.url[..idx])
+    } else if let Some(idx) = tpl.url.find("/graphql/") {
+        format!("{}/graphql", &tpl.url[..idx])
+    } else {
+        "https://x.com/i/api/graphql".to_string()
+    };
+    let mut out = format!("{prefix}/{}/{}?", tpl.qid, tpl.op);
     {
         let mut ser = url::form_urlencoded::Serializer::new(&mut out);
         ser.extend_pairs(q.iter().map(|(k, v)| (k.as_str(), v.as_str())));

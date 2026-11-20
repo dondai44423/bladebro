@@ -48,7 +48,11 @@ pub(super) fn parse_discussion(raw: &Value) -> Result<(PostMeta, Tree)> {
         score: as_int(&post_data["score"]),
         comments: as_int(&post_data["num_comments"]),
         date: as_epoch(&post_data["created_utc"]).map(format_epoch),
-        url: format!("https://www.reddit.com{permalink}"),
+        url: if permalink.starts_with('/') {
+            format!("https://www.reddit.com{permalink}")
+        } else {
+            format!("https://www.reddit.com/{permalink}")
+        },
         body,
     };
 

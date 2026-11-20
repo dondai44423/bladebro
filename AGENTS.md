@@ -40,7 +40,7 @@ Big modules follow **thin parent + focused children**: `src/foo.rs` holds the pu
 | Real-browser lane (`rb`: select, clone, attach) | `src/realbrowser.rs`, `src/realbrowser/` |
 | Owned profiles, seasoning, orphan reaper | `src/session_profile.rs`, `src/session_profile/` |
 | Cookies, web storage, tabs, named sessions | `src/state.rs`, `src/logins.rs`, `src/knowledge.rs`, `src/fingerprint.rs` |
-| Site `extract=auto` adapters | `src/reddit.rs` + `src/reddit/`, `src/x.rs` + `src/x/` |
+| Site `extract=auto` adapter engine & adapters | `src/adapters.rs` + `src/adapters/js/`, `src/reddit.rs` + `src/reddit/`, `src/x.rs` + `src/x/` |
 | Self-updater, rollback, `doctor`, audit runner | `src/updater/`, `src/audit.rs` |
 | OS process/signal/job abstractions, artifacts, UI | `src/platform.rs` + `src/platform/`, `src/artifacts.rs`, `src/ui.rs`, `src/error.rs` |
 | Integration tests & fixtures / live probes | `tests/`, `tools/` (see [tools/README.md](tools/README.md)) |

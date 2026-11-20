@@ -10,49 +10,7 @@ use super::*;
 /// are single-use, so the page's own rendering is the reliable source.
 /// Slower than a replay, still one tool call.
 pub(super) async fn dom_collect(page: &Page, kind: &str, cap: usize) -> Result<XPayload> {
-    let script = format!(
-        r#"(async()=>{{
-const cap={cap};
-const items=new Map();
-function txt(e){{return e?(e.innerText||e.textContent||'').trim():'';}}
-function aria(a,sel){{const e=a.querySelector(sel);return (e&&e.getAttribute('aria-label'))||'';}}
-function collect(){{
-  for(const a of document.querySelectorAll('article[data-testid="tweet"]')){{
-    const link=a.querySelector('a[href*="/status/"]');
-    if(!link)continue;
-    const m=(link.getAttribute('href')||'').match(/\/([^\/]+)\/status\/(\d+)/);
-    if(!m)continue;
-    const id=m[2];
-    if(items.has(id))continue;
-    const un=txt(a.querySelector('[data-testid="User-Name"]'));
-    const at=(un.match(/@[A-Za-z0-9_]+/)||[''])[0];
-    const t=a.querySelector('time');
-    items.set(id,{{
-      id:id,
-      url:'https://x.com/'+m[1]+'/status/'+id,
-      author:at.replace('@',''),
-      name:(un.split('\n')[0]||''),
-      date:t?(t.getAttribute('datetime')||''):'',
-      text:txt(a.querySelector('[data-testid="tweetText"]')),
-      replies:aria(a,'[data-testid="reply"]'),
-      reposts:aria(a,'[data-testid="retweet"]'),
-      likes:aria(a,'[data-testid="like"]')
-    }});
-  }}
-}}
-collect();
-let idle=0,steps=0;
-while(items.size<cap&&idle<6&&steps<40){{
-  const before=items.size;
-  window.scrollBy(0,Math.round(window.innerHeight*0.9));
-  await new Promise(r=>setTimeout(r,350));
-  collect();
-  steps++;
-  if(items.size===before)idle++;else idle=0;
-}}
-return JSON.stringify({{count:items.size,exhausted:idle>=6,items:[...items.values()].slice(0,cap)}});
-}})()"#
-    );
+    let script = dom_collect_expr(cap);
     let res = page
         .cdp_ref()
         .send(
@@ -82,25 +40,45 @@ return JSON.stringify({{count:items.size,exhausted:idle>=6,items:[...items.value
         .unwrap_or("{}");
     let j: Value = serde_json::from_str(raw)
         .map_err(|e| BladeError::Other(format!("x: dom collect parse ({e})")))?;
+    let hit_step_cap = j
+        .get("hit_step_cap")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let (items, exhausted) = dom_items_from_json(&j);
-    let complete = exhausted && items.len() < cap;
+    let complete = exhausted && !hit_step_cap && !items.is_empty() && items.len() < cap;
+    let note = if items.is_empty() {
+        "x: no tweets found in rendered DOM (login wall or empty page)".into()
+    } else if complete {
+        "x: collected from the rendered page (rapid replay unavailable for this page)".into()
+    } else if hit_step_cap {
+        format!(
+            "x: collected from the rendered page — scroll step limit reached after {} items",
+            items.len()
+        )
+    } else {
+        format!(
+            "x: collected from the rendered page — capped at {} items",
+            items.len()
+        )
+    };
     Ok(XPayload {
-        container: "x-timeline".into(),
+        container: if kind == "status" {
+            "x-thread".into()
+        } else {
+            "x-timeline".into()
+        },
         kind: kind.to_string(),
         post: None,
         count: items.len(),
         total: None,
         complete,
-        note: Some(if complete {
-            "x: collected from the rendered page (rapid replay unavailable for this page)".into()
-        } else {
-            format!(
-                "x: collected from the rendered page — capped at {} items",
-                items.len()
-            )
-        }),
+        note: Some(note),
         items,
     })
+}
+
+pub(super) fn dom_collect_expr(cap: usize) -> String {
+    include_str!("js/dom_collect.js").replace("__CAP__", &cap.to_string())
 }
 
 /// X's transient "Something went wrong. Try reloading." state — a React
@@ -146,13 +124,17 @@ pub(super) fn dom_items_from_json(j: &Value) -> (Vec<XItem>, bool) {
         }
         let count_of = |k: &str| -> Option<i64> {
             let s = it.get(k).and_then(|v| v.as_str()).unwrap_or("");
-            let digits: String = s
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == ',')
-                .filter(|c| *c != ',')
-                .collect();
-            digits.parse::<i64>().ok()
+            crate::adapters::parse_compact_count(s)
         };
+        let media = it
+            .get("media")
+            .and_then(|m| m.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         items.push(XItem {
             op: false,
             depth: None,
@@ -173,10 +155,11 @@ pub(super) fn dom_items_from_json(j: &Value) -> (Vec<XItem>, bool) {
                 it.get("text").and_then(|v| v.as_str()).unwrap_or(""),
                 ITEM_TEXT_CAP,
             ),
+            quoted: None,
             replies: count_of("replies"),
             reposts: count_of("reposts"),
             likes: count_of("likes"),
-            media: Vec::new(),
+            media,
             url: it
                 .get("url")
                 .and_then(|v| v.as_str())

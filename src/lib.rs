@@ -14,6 +14,7 @@
 #![recursion_limit = "256"]
 
 pub mod action;
+pub mod adapters;
 pub mod artifacts;
 pub mod audit;
 pub mod browser;
