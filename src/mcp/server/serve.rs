@@ -229,10 +229,11 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                         shutdown_browser(b).await;
                                     }
                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                    relaunch_note = Some(if crate::realbrowser::real_lane() {
-                                        "note: the real-browser lane is now ON — Chrome was relaunched as the user's own browser (their profile data; page patches off). Page state reset to about:blank; navigate to continue.".into()
-                                    } else {
-                                        "note: the real-browser lane is now OFF — Chrome was relaunched as the isolated agent browser. Page state reset to about:blank; navigate to continue.".into()
+                                    relaunch_note = Some(match (lane_switched, crate::realbrowser::real_lane()) {
+                                        (true, true) => "note: the real-browser lane is now ON — Chrome was relaunched as the user's own browser (their profile data; page patches off). Page state reset to about:blank; navigate to continue.".into(),
+                                        (true, false) => "note: the real-browser lane is now OFF — Chrome was relaunched as the isolated agent browser. Page state reset to about:blank; navigate to continue.".into(),
+                                        (false, true) => "note: real-browser settings or cloned profile updated — Chrome was relaunched with the updated profile/settings. Page state reset to about:blank; navigate to continue.".into(),
+                                        (false, false) => "note: browser settings changed (e.g. audio) — Chrome was relaunched with the updated settings. Page state reset to about:blank; navigate to continue.".into(),
                                     });
                                 } else {
                                     // Chrome crashed or is dead, kill it first.
@@ -373,6 +374,7 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                                     Ok((new_page, new_browser)) => {
                                         browser = new_browser;
                                         page = Some(new_page);
+                                        launched = crate::realbrowser::launch_fingerprint();
                                         // Set knowledge base on the new page.
                                         if let Some(ref mut p) = page {
                                             p.set_knowledge(knowledge.clone());
@@ -583,6 +585,17 @@ pub(super) async fn serve(use_pipe: bool, host: &str, port: u16) -> Result<()> {
                 }
             }
             _ = idle_check.tick() => {
+                // Reap an owned browser that already exited (e.g. user closed
+                // a visible real-browser window manually): frees the child
+                // wait status immediately (no `<defunct>` zombie) and cleans
+                // up `sess-<pid>` so `rb refresh` / `rb forget` work right away.
+                if browser.as_mut().is_some_and(|b| b.has_exited()) {
+                    eprintln!("[bladebro] owned browser exited externally — cleaning up session");
+                    if let Some(b) = browser.take() {
+                        shutdown_browser(b).await;
+                    }
+                    page = None;
+                }
                 // Periodic login snapshot for crash/power-loss resilience.
                 // We persist the authoritative live cookie store (CDP), never
                 // a hot copy of the on-disk profile: copying a live Chrome

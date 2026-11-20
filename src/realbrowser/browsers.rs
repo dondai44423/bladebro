@@ -5,14 +5,18 @@ use std::path::PathBuf;
 /// Browser family — drives the CDP-hardening gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Brand {
-    /// Google Chrome (branded): refuses CDP on the default profile dir (M136+).
+    /// Google Chrome (branded: Stable, Beta, Canary): refuses CDP on the
+    /// default profile dir (M136+).
     Chrome,
     Chromium,
+    UngoogledChromium,
     Brave,
     Helium,
     Edge,
     Vivaldi,
     Opera,
+    Arc,
+    Thorium,
 }
 
 impl Brand {
@@ -20,11 +24,14 @@ impl Brand {
         match self {
             Brand::Chrome => "Chrome",
             Brand::Chromium => "Chromium",
+            Brand::UngoogledChromium => "Ungoogled Chromium",
             Brand::Brave => "Brave",
             Brand::Helium => "Helium",
             Brand::Edge => "Edge",
             Brand::Vivaldi => "Vivaldi",
             Brand::Opera => "Opera",
+            Brand::Arc => "Arc",
+            Brand::Thorium => "Thorium",
         }
     }
 }
@@ -54,7 +61,55 @@ pub fn brand_from_version(out: &str) -> Option<Brand> {
         Some(Brand::Opera)
     } else if l.contains("helium") {
         Some(Brand::Helium)
+    } else if l.contains("thorium") {
+        Some(Brand::Thorium)
+    } else if l.contains("ungoogled") {
+        Some(Brand::UngoogledChromium)
+    } else if l.contains("arc") && l.contains("chrom") {
+        Some(Brand::Arc)
     } else if l.contains("chromium") {
+        Some(Brand::Chromium)
+    } else {
+        None
+    }
+}
+
+/// Best-effort brand inference from an executable path (used when
+/// `rb use --binary` overrides discovery so Chrome's default-dir gate still
+/// matches the overridden binary without spawning it).
+pub fn brand_from_binary_path(path: &std::path::Path) -> Option<Brand> {
+    let raw = path.to_string_lossy().to_lowercase();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if name.contains("google-chrome")
+        || raw.contains("google chrome")
+        || raw.contains("google/chrome")
+        || raw.contains("google\\chrome")
+    {
+        Some(Brand::Chrome)
+    } else if name.contains("brave") || raw.contains("com.brave.browser") {
+        Some(Brand::Brave)
+    } else if name.contains("msedge")
+        || name.contains("microsoft-edge")
+        || raw.contains("microsoft edge")
+        || raw.contains("com.microsoft.edge")
+    {
+        Some(Brand::Edge)
+    } else if name.contains("vivaldi") || raw.contains("com.vivaldi.vivaldi") {
+        Some(Brand::Vivaldi)
+    } else if name.contains("opera") {
+        Some(Brand::Opera)
+    } else if name.contains("helium") {
+        Some(Brand::Helium)
+    } else if name.contains("thorium") {
+        Some(Brand::Thorium)
+    } else if name.contains("ungoogled") {
+        Some(Brand::UngoogledChromium)
+    } else if name == "arc" || name == "arc.exe" || raw.contains("arc.app") {
+        Some(Brand::Arc)
+    } else if name.contains("chromium") || name == "chrome" || name == "chrome.exe" {
         Some(Brand::Chromium)
     } else {
         None
@@ -74,11 +129,53 @@ pub struct BrowserSpec {
     pub profile_root: PathBuf,
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn path_bins(names: &[&str]) -> Vec<PathBuf> {
+    let mut native = Vec::new();
+    let mut snap = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        for name in names {
+            for dir in std::env::split_paths(&path) {
+                let full = dir.join(name);
+                let s = full.to_string_lossy();
+                if s.starts_with("/snap/") || s.starts_with("/var/lib/snapd/") {
+                    snap.push(full);
+                } else {
+                    native.push(full);
+                }
+            }
+        }
+    }
+    native.extend(snap);
+    native
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn flatpak_export_candidates(home: &std::path::Path, app_id: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let user_root = std::env::var_os("FLATPAK_USER_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.join(".local/share"))
+                .join("flatpak")
+        });
+    let sys_root = std::env::var_os("FLATPAK_SYSTEM_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/flatpak"));
+    out.push(user_root.join("exports/bin").join(app_id));
+    out.push(sys_root.join("exports/bin").join(app_id));
+    out
+}
+
 /// Candidate browser installs for this OS. Pure-ish (paths only); the
-/// caller filters by existence. Flatpak is deliberately NOT a binary
-/// candidate: `/usr/bin/flatpak` is a launcher, not a browser — spawning
-/// it with Chrome flags just fails. Flatpak profile roots are listed so a
-/// flatpak system can still work via `rb use --binary <wrapper>`.
+/// caller filters by existence. Native binaries come first, then PATH
+/// entries (non-snap before snap), then Flatpak exports (launched via
+/// `flatpak run` with `--filesystem=<user_data_dir>` in `Browser::launch_real`).
 #[allow(clippy::type_complexity)]
 fn candidates() -> Vec<(
     &'static str,
@@ -108,8 +205,14 @@ fn candidates() -> Vec<(
         let mut push = |id: &'static str,
                         name: &'static str,
                         brand: Brand,
-                        bins: Vec<PathBuf>,
+                        mut bins: Vec<PathBuf>,
+                        path_names: &[&str],
+                        flatpak_app: Option<&str>,
                         roots: Vec<PathBuf>| {
+            bins.extend(path_bins(path_names));
+            if let Some(app) = flatpak_app {
+                bins.extend(flatpak_export_candidates(&home, app));
+            }
             out.push((id, name, brand, bins, roots));
         };
         push(
@@ -120,8 +223,10 @@ fn candidates() -> Vec<(
                 PathBuf::from("/usr/sbin/chromium"),
                 PathBuf::from("/usr/bin/chromium"),
                 PathBuf::from("/usr/bin/chromium-browser"),
-                PathBuf::from("/snap/bin/chromium"),
+                PathBuf::from("/run/current-system/sw/bin/chromium"),
             ],
+            &["chromium", "chromium-browser"],
+            Some("org.chromium.Chromium"),
             vec![
                 xdg.join("chromium"),
                 home.join("snap/chromium/common/chromium"),
@@ -136,11 +241,26 @@ fn candidates() -> Vec<(
                 PathBuf::from("/usr/bin/google-chrome"),
                 PathBuf::from("/usr/bin/google-chrome-stable"),
                 PathBuf::from("/opt/google/chrome/chrome"),
+                PathBuf::from("/run/current-system/sw/bin/google-chrome"),
             ],
+            &["google-chrome", "google-chrome-stable"],
+            Some("com.google.Chrome"),
             vec![
                 xdg.join("google-chrome"),
                 home.join(".var/app/com.google.Chrome/config/google-chrome"),
             ],
+        );
+        push(
+            "chrome-beta",
+            "Google Chrome Beta",
+            Brand::Chrome,
+            vec![
+                PathBuf::from("/usr/bin/google-chrome-beta"),
+                PathBuf::from("/opt/google/chrome-beta/chrome"),
+            ],
+            &["google-chrome-beta"],
+            None,
+            vec![xdg.join("google-chrome-beta")],
         );
         push(
             "brave",
@@ -151,6 +271,8 @@ fn candidates() -> Vec<(
                 PathBuf::from("/usr/bin/brave-browser"),
                 PathBuf::from("/opt/brave.com/brave/brave"),
             ],
+            &["brave", "brave-browser"],
+            Some("com.brave.Browser"),
             vec![
                 xdg.join("BraveSoftware/Brave-Browser"),
                 home.join(".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
@@ -159,15 +281,6 @@ fn candidates() -> Vec<(
         // Official packages use /opt/helium; PATH also covers Nix and
         // user-local tarball wrappers. AppImages with arbitrary names use
         // the existing --binary override (their profile is still discovered).
-        let mut helium_bins = vec![
-            PathBuf::from("/usr/bin/helium"),
-            PathBuf::from("/usr/local/bin/helium"),
-            PathBuf::from("/opt/helium/helium-wrapper"),
-            PathBuf::from("/opt/helium/helium"),
-        ];
-        if let Some(path) = std::env::var_os("PATH") {
-            helium_bins.extend(std::env::split_paths(&path).map(|p| p.join("helium")));
-        }
         let helium_config = std::env::var_os("HELIUM_CONFIG_HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
@@ -176,7 +289,14 @@ fn candidates() -> Vec<(
             "helium",
             "Helium",
             Brand::Helium,
-            helium_bins,
+            vec![
+                PathBuf::from("/usr/bin/helium"),
+                PathBuf::from("/usr/local/bin/helium"),
+                PathBuf::from("/opt/helium/helium-wrapper"),
+                PathBuf::from("/opt/helium/helium"),
+            ],
+            &["helium"],
+            None,
             vec![helium_config.join("net.imput.helium")],
         );
         push(
@@ -188,6 +308,8 @@ fn candidates() -> Vec<(
                 PathBuf::from("/usr/bin/microsoft-edge-stable"),
                 PathBuf::from("/opt/microsoft/msedge/msedge"),
             ],
+            &["microsoft-edge", "microsoft-edge-stable"],
+            Some("com.microsoft.Edge"),
             vec![
                 xdg.join("microsoft-edge"),
                 home.join(".var/app/com.microsoft.Edge/config/microsoft-edge"),
@@ -201,6 +323,8 @@ fn candidates() -> Vec<(
                 PathBuf::from("/usr/bin/vivaldi"),
                 PathBuf::from("/usr/bin/vivaldi-stable"),
             ],
+            &["vivaldi", "vivaldi-stable"],
+            Some("com.vivaldi.Vivaldi"),
             vec![
                 xdg.join("vivaldi"),
                 home.join(".var/app/com.vivaldi.Vivaldi/config/vivaldi"),
@@ -211,7 +335,35 @@ fn candidates() -> Vec<(
             "Opera",
             Brand::Opera,
             vec![PathBuf::from("/usr/bin/opera")],
+            &["opera"],
+            None,
             vec![xdg.join("opera")],
+        );
+        push(
+            "ungoogled-chromium",
+            "Ungoogled Chromium",
+            Brand::UngoogledChromium,
+            vec![PathBuf::from("/usr/bin/ungoogled-chromium")],
+            &["ungoogled-chromium"],
+            Some("io.github.ungoogled_software.ungoogled_chromium"),
+            vec![
+                home.join(
+                    ".var/app/io.github.ungoogled_software.ungoogled_chromium/config/chromium",
+                ),
+                xdg.join("ungoogled-chromium"),
+            ],
+        );
+        push(
+            "thorium",
+            "Thorium",
+            Brand::Thorium,
+            vec![
+                PathBuf::from("/usr/bin/thorium-browser"),
+                PathBuf::from("/opt/chromium.org/thorium/thorium-browser"),
+            ],
+            &["thorium-browser", "thorium"],
+            None,
+            vec![xdg.join("thorium")],
         );
     }
 
@@ -238,12 +390,34 @@ fn candidates() -> Vec<(
             vec![sup.join("Google/Chrome")],
         );
         push(
+            "chrome-beta",
+            "Google Chrome Beta",
+            Brand::Chrome,
+            vec![
+                apps.join("Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"),
+                user_apps.join("Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"),
+            ],
+            vec![sup.join("Google/Chrome Beta")],
+        );
+        push(
+            "chrome-canary",
+            "Google Chrome Canary",
+            Brand::Chrome,
+            vec![
+                apps.join("Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"),
+                user_apps.join("Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"),
+            ],
+            vec![sup.join("Google/Chrome Canary")],
+        );
+        push(
             "chromium",
             "Chromium",
             Brand::Chromium,
             vec![
                 apps.join("Chromium.app/Contents/MacOS/Chromium"),
                 user_apps.join("Chromium.app/Contents/MacOS/Chromium"),
+                PathBuf::from("/opt/homebrew/bin/chromium"),
+                PathBuf::from("/usr/local/bin/chromium"),
             ],
             vec![sup.join("Chromium")],
         );
@@ -266,6 +440,16 @@ fn candidates() -> Vec<(
                 user_apps.join("Helium.app/Contents/MacOS/Helium"),
             ],
             vec![sup.join("net.imput.helium")],
+        );
+        push(
+            "arc",
+            "Arc",
+            Brand::Arc,
+            vec![
+                apps.join("Arc.app/Contents/MacOS/Arc"),
+                user_apps.join("Arc.app/Contents/MacOS/Arc"),
+            ],
+            vec![sup.join("Arc/User Data")],
         );
         push(
             "edge",
@@ -296,6 +480,26 @@ fn candidates() -> Vec<(
                 user_apps.join("Opera.app/Contents/MacOS/Opera"),
             ],
             vec![sup.join("com.operasoftware.Opera")],
+        );
+        push(
+            "opera-gx",
+            "Opera GX",
+            Brand::Opera,
+            vec![
+                apps.join("Opera GX.app/Contents/MacOS/Opera"),
+                user_apps.join("Opera GX.app/Contents/MacOS/Opera"),
+            ],
+            vec![sup.join("com.operasoftware.OperaGX")],
+        );
+        push(
+            "thorium",
+            "Thorium",
+            Brand::Thorium,
+            vec![
+                apps.join("Thorium.app/Contents/MacOS/Thorium"),
+                user_apps.join("Thorium.app/Contents/MacOS/Thorium"),
+            ],
+            vec![sup.join("Thorium")],
         );
     }
 
@@ -340,10 +544,32 @@ fn candidates() -> Vec<(
             vec![j(&local, "Google/Chrome/User Data")],
         );
         push(
+            "chrome-beta",
+            "Google Chrome Beta",
+            Brand::Chrome,
+            vec![
+                j(&local, "Google/Chrome Beta/Application/chrome.exe"),
+                j(&pf, "Google/Chrome Beta/Application/chrome.exe"),
+                j(&pf86, "Google/Chrome Beta/Application/chrome.exe"),
+            ],
+            vec![j(&local, "Google/Chrome Beta/User Data")],
+        );
+        push(
+            "chrome-canary",
+            "Google Chrome Canary",
+            Brand::Chrome,
+            vec![j(&local, "Google/Chrome SxS/Application/chrome.exe")],
+            vec![j(&local, "Google/Chrome SxS/User Data")],
+        );
+        push(
             "chromium",
             "Chromium",
             Brand::Chromium,
-            vec![j(&local, "Chromium/Application/chrome.exe")],
+            vec![
+                j(&local, "Chromium/Application/chrome.exe"),
+                j(&pf, "Chromium/Application/chrome.exe"),
+                j(&pf86, "Chromium/Application/chrome.exe"),
+            ],
             vec![j(&local, "Chromium/User Data")],
         );
         push(
@@ -353,6 +579,7 @@ fn candidates() -> Vec<(
             vec![
                 j(&local, "BraveSoftware/Brave-Browser/Application/brave.exe"),
                 j(&pf, "BraveSoftware/Brave-Browser/Application/brave.exe"),
+                j(&pf86, "BraveSoftware/Brave-Browser/Application/brave.exe"),
             ],
             vec![j(&local, "BraveSoftware/Brave-Browser/User Data")],
         );
@@ -374,6 +601,7 @@ fn candidates() -> Vec<(
             vec![
                 j(&pf86, "Microsoft/Edge/Application/msedge.exe"),
                 j(&pf, "Microsoft/Edge/Application/msedge.exe"),
+                j(&local, "Microsoft/Edge/Application/msedge.exe"),
             ],
             vec![j(&local, "Microsoft/Edge/User Data")],
         );
@@ -381,7 +609,10 @@ fn candidates() -> Vec<(
             "vivaldi",
             "Vivaldi",
             Brand::Vivaldi,
-            vec![j(&local, "Vivaldi/Application/vivaldi.exe")],
+            vec![
+                j(&local, "Vivaldi/Application/vivaldi.exe"),
+                j(&pf, "Vivaldi/Application/vivaldi.exe"),
+            ],
             vec![j(&local, "Vivaldi/User Data")],
         );
         push(
@@ -398,6 +629,29 @@ fn candidates() -> Vec<(
                 j(&roaming, "Opera Software/Opera Stable"),
                 j(&local, "Opera Software/Opera Stable"),
             ],
+        );
+        push(
+            "opera-gx",
+            "Opera GX",
+            Brand::Opera,
+            vec![
+                j(&local, "Programs/Opera GX/opera.exe"),
+                j(&pf, "Programs/Opera GX/opera.exe"),
+            ],
+            vec![
+                j(&roaming, "Opera Software/Opera GX Stable"),
+                j(&local, "Opera Software/Opera GX Stable"),
+            ],
+        );
+        push(
+            "thorium",
+            "Thorium",
+            Brand::Thorium,
+            vec![
+                j(&local, "Thorium/Application/thorium.exe"),
+                j(&pf, "Thorium/Application/thorium.exe"),
+            ],
+            vec![j(&local, "Thorium/User Data")],
         );
     }
 

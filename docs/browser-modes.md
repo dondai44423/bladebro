@@ -20,14 +20,14 @@ Real-browser mode uses your Chromium-family binary and selected profile. It runs
 
 | `rb mode` | What Bladebro does |
 |---|---|
-| `auto` · default | Attaches if a debug endpoint is available, otherwise imports and uses a clone. |
-| `clone` | Imports your profile into a Bladebro-owned copy. The source profile can stay open and is left untouched. |
+| `auto` · default | Attaches if a live, reachable debug endpoint is available, otherwise imports and uses a clone. |
+| `clone` | Imports your profile into a Bladebro-owned copy and automatically refreshes whenever your real browser writes newer logins, cookies, or storage. The source profile can stay open and is left untouched. |
 | `profile` | Launches on your live profile. Close the browser first. Branded Chrome 136+ refuses remote debugging on its default data directory. |
-| `attach` | Connects to an existing debug endpoint. The browser remains caller-owned and stays open when Bladebro detaches. |
+| `attach` | Connects to an existing debug endpoint (including `DevToolsActivePort`, Chrome 144+ `chrome://inspect#remote-debugging`, and fixed-port Linux browsers). The browser remains caller-owned and stays open when Bladebro detaches. |
 
-For a given install, use `bladebro rb use <id>` and `bladebro rb profile <key>` to select a browser and profile. Recognized Chromium-family installs include Chromium, Chrome, Brave, Helium, Edge, Vivaldi, and Opera. Recognition and full runtime verification differ by engine. See the [support matrix](../SUPPORT-MATRIX.md).
+For a given install, use `bladebro rb use <id>` and `bladebro rb profile <key>` to select a browser and profile. Recognized Chromium-family installs include Chromium, Chrome (Stable/Beta/Canary), Ungoogled Chromium, Brave, Helium, Arc, Edge, Vivaldi, Opera, Opera GX, and Thorium — including PATH installs and Linux Flatpak exports. Recognition and full runtime verification differ by engine. See the [support matrix](../SUPPORT-MATRIX.md).
 
-For a portable binary, launch it once to create the profile, then use `bladebro rb use --binary /absolute/path/to/browser`. An explicit browser path is useful for AppImage or custom installations. `bladebro rb refresh` reimports the clone and `bladebro rb forget` removes the imported copy.
+For a portable binary or AppImage, launch it once to create the profile, then use `bladebro rb use --binary /absolute/path/to/browser` (and `bladebro rb profile /absolute/path/to/profile` if stored in a custom location). `bladebro rb refresh` forces an immediate re-import and `bladebro rb forget` removes the imported copy. If a running browser locks `Cookies` during a clone import (common on Windows), Bladebro surfaces a warning so you can close the browser and run `bladebro rb refresh`.
 
 ## Pause and switch back
 
@@ -39,4 +39,4 @@ bladebro rb off
 
 Pause blocks input, navigation, downloads, collection, and tab operations while you take control. Reads, waits, and eval remain available. Resume re-enables input. Turning the mode off switches back to the agent browser. The CLI restarts its daemon on a lane change. MCP picks up the change on the next use, relaunching an owned browser or detaching an attached one. `rb status --json` reports the current selection and live state.
 
-Real-browser mode can act in authenticated sessions. Choose the profile and account you want the agent to use before handing it control. To leave a caller-owned browser open, use attach mode. For visual and idle behavior run `bladebro help rb` or inspect the current settings with `rb status`.
+Real-browser mode can act in authenticated sessions. Choose the profile and account you want the agent to use before handing it control. To leave a caller-owned browser open, use attach mode. Owned launches (both agent and real-browser modes) mute audio by default so media players never produce unexpected sound; opt in with `bladebro audio on` (or `BLADE_AUDIO=1`). For visual and idle behavior run `bladebro help rb` or inspect the current settings with `rb status`.

@@ -103,53 +103,95 @@ pub fn sole_root_id() -> Option<String> {
 /// Resolve the configured (or best) browser + profile.
 pub fn resolve_selection(cfg: &Config) -> Result<(BrowserSpec, ProfileInfo)> {
     let browsers = discover();
-    if browsers.is_empty() {
-        return Err(BladeError::Other(
-            "no Chromium-family browser found. Install one (Chromium, Chrome, Brave, Helium, Edge, Vivaldi, Opera) or set a custom binary via `bladebro rb use --binary <path>`.".into(),
-        ));
-    }
+    let binary_override = cfg
+        .binary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
-    let mut spec = match cfg.browser.as_deref() {
-        Some(id) => browsers
-            .iter()
-            .find(|b| b.id == id)
-            .cloned()
-            .ok_or_else(|| {
-                let avail: Vec<&str> = browsers.iter().map(|b| b.id.as_str()).collect();
-                BladeError::Other(format!(
-                    "browser `{id}` not found. Available: {}",
-                    avail.join(", ")
-                ))
-            })?,
-        None => {
-            // Most recently used wins; equal recency keeps the FIRST browser
-            // in table order (chromium first). `max_by_key` returns the LAST
-            // maximum — on a machine where every profile is equally fresh
-            // that silently picked the last table browser (opera).
-            let recency: Vec<u64> = browsers
+    let mut spec = if browsers.is_empty() {
+        // Portable/AppImage-only hosts: if the user explicitly set `--binary`
+        // (and typically an absolute `rb profile <dir>`), allow it instead of
+        // refusing because none of the standard system paths matched.
+        if let Some(ov) = binary_override {
+            let bin = validate_binary_override(ov)?;
+            let brand = brand_from_binary_path(&bin).unwrap_or(Brand::Chromium);
+            let root = cfg
+                .profile
+                .as_deref()
+                .filter(|p| Path::new(p).is_absolute())
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            BrowserSpec {
+                id: cfg.browser.clone().unwrap_or_else(|| "custom".into()),
+                name: format!("{} (custom)", brand.as_str()),
+                brand,
+                binary: bin,
+                profile_root: root,
+            }
+        } else {
+            return Err(BladeError::Other(
+                "no Chromium-family browser found. Install one (Chromium, Chrome, Brave, Helium, Arc, Edge, Vivaldi, Opera, Thorium) or set a custom binary via `bladebro rb use --binary <path>`.".into(),
+            ));
+        }
+    } else {
+        match cfg.browser.as_deref() {
+            Some(id) => browsers
                 .iter()
-                .map(|b| {
-                    list_profiles(&b.profile_root)
-                        .first()
-                        .map(|p| p.last_used)
-                        .unwrap_or(0)
-                })
-                .collect();
-            let idx = pick_recency_index(&recency).expect("non-empty");
-            browsers[idx].clone()
+                .find(|b| b.id == id)
+                .cloned()
+                .ok_or_else(|| {
+                    let avail: Vec<&str> = browsers.iter().map(|b| b.id.as_str()).collect();
+                    BladeError::Other(format!(
+                        "browser `{id}` not found. Available: {}",
+                        avail.join(", ")
+                    ))
+                })?,
+            None => {
+                // Prefer browsers that are actually usable (have a launchable
+                // binary, an explicit `--binary` override, or a live debug
+                // endpoint) over uninstalled ghost profile dirs left on disk.
+                let usable: Vec<&BrowserSpec> = browsers
+                    .iter()
+                    .filter(|b| {
+                        binary_override.is_some()
+                            || !b.binary.as_os_str().is_empty()
+                            || devtools_port_live(&b.profile_root).is_some()
+                    })
+                    .collect();
+                let pool: Vec<&BrowserSpec> = if usable.is_empty() {
+                    browsers.iter().collect()
+                } else {
+                    usable
+                };
+                // Most recently used wins; equal recency keeps the FIRST
+                // browser in table order (chromium first). `max_by_key`
+                // returns the LAST maximum — on a machine where every profile
+                // is equally fresh that silently picked the last table browser.
+                let recency: Vec<u64> = pool
+                    .iter()
+                    .map(|b| {
+                        list_profiles(&b.profile_root)
+                            .first()
+                            .map(|p| p.last_used)
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                let idx = pick_recency_index(&recency).expect("non-empty");
+                pool[idx].clone()
+            }
         }
     };
 
     // `rb use --binary`: an explicit override always wins over discovery.
     // Re-validated here so a binary deleted since it was set fails with the
     // path named, not with a spawn error inside a launch.
-    if let Some(ov) = cfg
-        .binary
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        spec.binary = validate_binary_override(ov)?;
+    if let Some(ov) = binary_override {
+        let bin = validate_binary_override(ov)?;
+        if let Some(inferred) = brand_from_binary_path(&bin) {
+            spec.brand = inferred;
+        }
+        spec.binary = bin;
     }
 
     // Profile: absolute path override → use as-is; key → lookup; else most
@@ -230,14 +272,11 @@ pub fn session_drifted(
 pub fn effective_mode(cfg: &Config, user_data_root: &Path) -> Mode {
     match cfg.mode {
         Mode::Auto => {
-            // SECURITY: `Auto` must not attach on a dead flag file — the
-            // endpoint named by a stale DevToolsActivePort (deleted only on
-            // graceful exit) could be squatted. Require a live browser of
-            // this user to actually hold the port (Linux; elsewhere the
-            // file's existence remains the signal).
-            if devtools_port(user_data_root)
-                .is_some_and(crate::browser::endpoint_owned_by_own_browser)
-            {
+            // SECURITY & RELIABILITY: `Auto` must not attach on a dead flag
+            // file — `devtools_port_live` requires both a live browser of this
+            // user (Linux) and a reachable loopback port (all OSes) so stale
+            // DevToolsActivePort files fall back cleanly to Clone.
+            if devtools_port_live(user_data_root).is_some() {
                 Mode::Attach
             } else {
                 Mode::Clone
@@ -248,31 +287,52 @@ pub fn effective_mode(cfg: &Config, user_data_root: &Path) -> Mode {
 }
 
 /// Import unless the clone already holds the selected profile's user-data
-/// root — shared by `rb on` and the launch path so their behavior cannot
-/// drift apart. Without the root check, `rb profile` pointing into another
-/// user-data dir launched the OLD root's clone with the new profile's
-/// directory name: the agent browsed as the wrong identity.
-pub fn ensure_current_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<()> {
-    if template_matches(&spec.id, &profile.root) {
-        return Ok(());
+/// root AND is still fresh relative to the user's live profile — shared by
+/// `rb on` and the launch path so their behavior cannot drift apart.
+///
+/// Re-imports automatically when:
+/// 1. No clone exists yet.
+/// 2. The clone was imported from a different user-data root (`rb profile <abs>`).
+/// 3. The user's real browser wrote newer auth/storage state (`Cookies`,
+///    `Local Storage`, `Preferences`, `Local State`, etc.) since the last import.
+///
+/// Returns `Ok(Some(stats))` when an import ran, `Ok(None)` when the existing
+/// clone was already up to date.
+pub fn ensure_current_import(
+    spec: &BrowserSpec,
+    profile: &ProfileInfo,
+) -> Result<Option<ImportStats>> {
+    if template_is_fresh(&spec.id, &profile.root, &profile.key) {
+        return Ok(None);
     }
-    if let Some(old) = template_source(&spec.id).filter(|_| has_template(&spec.id)) {
-        eprintln!(
-            "{} the clone holds {old}, but the selected profile lives in {} — re-importing",
-            crate::ui::dim("[realbrowser]"),
-            profile.root.display()
-        );
+    if has_template(&spec.id) {
+        if !template_matches(&spec.id, &profile.root) {
+            if let Some(old) = template_source(&spec.id) {
+                eprintln!(
+                    "{} the clone holds {old}, but the selected profile lives in {} — re-importing",
+                    crate::ui::err::dim("[realbrowser]"),
+                    profile.root.display()
+                );
+            }
+        } else {
+            eprintln!(
+                "{} source profile `{}` has newer logins/state since the last import — refreshing clone",
+                crate::ui::err::dim("[realbrowser]"),
+                profile.name
+            );
+        }
     }
-    ensure_import(spec, profile).map(|_| ())
+    ensure_import(spec, profile).map(Some)
 }
 
 /// Import (or re-import) the selected profile's root into the clone.
 pub fn ensure_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<ImportStats> {
-    if let Some(owner) = profile_in_use(&profile.root) {
+    let running_owner = profile_in_use(&profile.root);
+    if let Some(owner) = &running_owner {
         eprintln!(
-            "{} your browser ({owner}) is open — importing its profile now. The \
-             copy may miss the last few writes (SQLite snapshot); the source is never written \
-             to. `bladebro rb refresh` with the browser closed gives a clean copy.",
+            "{} your browser ({owner}) is open — importing its profile now. Very recent \
+             in-memory cookie writes may not have flushed to disk yet; the source is never \
+             written to. Close it and run `bladebro rb refresh` for a guaranteed clean snapshot.",
             crate::ui::err::dim("[realbrowser]")
         );
     }
@@ -291,5 +351,16 @@ pub fn ensure_import(spec: &BrowserSpec, profile: &ProfileInfo) -> Result<Import
         human_bytes(stats.bytes),
         stats.ms
     );
+    if !stats.failed_critical.is_empty() {
+        let joined = stats.failed_critical.join(", ");
+        let msg = format!(
+            "real-browser clone could not copy locked profile file(s): {joined}. \
+             Logins/cookies may be missing — close {} and run `bladebro rb refresh`, \
+             or attach via `chrome://inspect#remote-debugging` / `--remote-debugging-port`.",
+            spec.name
+        );
+        eprintln!("{} WARNING: {msg}", crate::ui::err::dim("[realbrowser]"));
+        crate::browser::set_rb_note(format!("warning: {msg}"));
+    }
     Ok(stats)
 }

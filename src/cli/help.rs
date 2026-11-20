@@ -54,6 +54,7 @@ COMMANDS
   daemon | stop                   manage the persistent Chrome session
   mcp                             MCP server on stdio — add to your agent's client config
   rb on|off [sub]                 real-browser lane: drive YOUR browser (see 'help rb')
+  audio [on|off|status]           browser sound output (muted by default; opt-in with 'audio on')
   hermes on|off|status             switch Hermes' browser to Bladebro; reversible MCP setup
   audit                           stealth audit — vector suite + boot self-check + drift stamp
   update | -u [--check] [--force]  self-update; --rollback restores the previous binary
@@ -112,6 +113,9 @@ pub fn suggest_command(cmd: &str) -> Option<&'static str> {
         ("browsers", "rb use"),
         ("lane", "rb"),
         ("real", "rb"),
+        ("mute", "audio"),
+        ("unmute", "audio"),
+        ("sound", "audio"),
     ];
     let lower = cmd.to_ascii_lowercase();
     if let Some((_, target)) = ALIASES.iter().find(|(a, _)| *a == lower) {
@@ -129,6 +133,7 @@ pub fn suggest_command(cmd: &str) -> Option<&'static str> {
         "help",
         "rb",
         "realbrowser",
+        "audio",
         "hermes",
         "mcp",
         "audit",
@@ -338,8 +343,23 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             "examples": ["bladebro help --json", "bladebro help act"],
             "notes": ["the single self-teaching surface — fetch 'help --json' once"]
         }),
+        "audio" => json!({
+            "usage": "bladebro audio [on|off|status] [--json]",
+            "tool": null,
+            "examples": [
+                "bladebro audio",
+                "bladebro audio on",
+                "bladebro audio off",
+                "bladebro audio status --json"
+            ],
+            "notes": [
+                "browser audio is muted by default (`--mute-audio`) on both the isolated agent browser and owned real-browser launches so media/video pages never play unexpected sound",
+                "opt in to audible playback with `bladebro audio on` (persisted) or `BLADE_AUDIO=1` (per-process override); `bladebro audio off` restores silent mode",
+                "does not alter externally attached browsers (`rb mode attach` / `--port`), and does not affect Blink media APIs or WebAudio fingerprinting"
+            ]
+        }),
         "rb" | "realbrowser" => json!({
-            "usage": "bladebro rb [on|off|status|mode <m>|use [id|--binary <path|auto>]|profile [key|auto]|visible on|off|idle-hum on|off|idle-shutdown on|off|refresh|forget|pause|resume]",
+            "usage": "bladebro rb [on|off|status|mode <m>|use [id|--binary <path|auto>]|profile [key|auto]|visible on|off|idle-hum on|off|idle-shutdown on|off|audio on|off|status|refresh|forget|pause|resume]",
             "tool": null,
             "examples": [
                 "bladebro rb on",
@@ -350,10 +370,10 @@ fn command_help_json(cmd: &str) -> Option<Value> {
             ],
             "notes": [
                 "real-browser lane: the agent drives YOUR Chromium-family browser (your profile data, your display) with zero page patches; the driver-side stack (perception, LPM, refs, adapters, token efficiency, biometrics) is unchanged",
-                "mechanisms: clone (default — imported copy; your browser may stay open), profile (your live profile — close the browser first), attach (a running browser exposing a debug endpoint, incl. Chrome 144+ chrome://inspect#remote-debugging); auto = attach if one is live, else clone",
+                "mechanisms: clone (default — imported copy that auto-refreshes whenever your source profile has newer logins/state; your browser may stay open), profile (your live profile — close the browser first), attach (a running browser exposing a debug endpoint, incl. fixed-port Linux discovery and Chrome 144+ chrome://inspect#remote-debugging); auto = attach if a live endpoint is reachable, else clone",
                 "attach caveat (measured, Chrome 151): an ephemeral `--remote-debugging-port=0` arm — and Chrome's approval flow — makes Chrome itself report navigator.webdriver=true; arm a FIXED port for a false reading (the lane never masks Chrome's own value)",
-                "every surface picks a switch up at its next action — the CLI daemon restarts immediately; a running MCP session switches its browser on the next call (owned browsers relaunch; an attached browser is detached, not closed)",
-                "`rb pause` refuses input, navigation, history, downloads, collecting and tab operations (reads, waits and eval stay available); `rb forget` wipes the imported copy; `rb refresh` re-imports; `rb use --binary` supports custom/nix/flatpak-wrapper binaries"
+                "every surface picks a switch or refreshed clone up at its next action — the CLI daemon restarts immediately; a running MCP session switches its browser on the next call (owned browsers relaunch; an attached browser is detached, not closed)",
+                "`rb pause` refuses input, navigation, history, downloads, collecting and tab operations (reads, waits and eval stay available); `rb forget` wipes the imported copy; `rb refresh` forces a fresh re-import; `rb use --binary` supports custom/nix/AppImage/Flatpak binaries"
             ]
         }),
         "hermes" => json!({
@@ -730,6 +750,25 @@ data dir; socket + pid file are 0600). Idle timeout: BLADE_IDLE_TIMEOUT
 seconds (default 600), then Chrome shuts down; the next command relaunches it.
 "#
         }
+        "audio" => {
+            r#"bladebro audio — browser sound output (muted by default)
+
+USAGE
+  bladebro audio                  show current audio state (same as `audio status`)
+  bladebro audio on               opt in to audible browser playback
+  bladebro audio off              mute browser audio again (default)
+  bladebro audio status [--json]  show effective audio state + env override
+
+Browser sound is muted by default (`--mute-audio`) on both the isolated agent
+browser and owned real-browser launches so YouTube, video ads, and media
+players never play unexpected sound while an agent browses.
+
+Opt in persistently with `bladebro audio on`, or for one run with
+`BLADE_AUDIO=1` (`BLADE_AUDIO=0` forces muted). The CLI daemon restarts
+immediately and running MCP sessions pick up the change on their next call.
+Externally attached browsers (`rb mode attach` / `--port`) are untouched.
+"#
+        }
         "rb" | "realbrowser" => {
             r#"bladebro rb — the real-browser lane
 
@@ -739,8 +778,8 @@ USAGE
   bladebro rb mode <m>            auto | clone | profile | attach
   bladebro rb use [id]            list / choose the browser
   bladebro rb use --binary <path|auto>
-                                  custom browser binary (nix wrapper, flatpak
-                                  launcher script, dev build)
+                                  custom browser binary (nix wrapper, AppImage,
+                                  flatpak export, dev build)
   bladebro rb profile [key]       list / choose the profile (an absolute path
                                   to a profile dir also works; `auto` resets)
   bladebro rb visible on|off      real window (default) vs --headless=new
@@ -748,6 +787,8 @@ USAGE
   bladebro rb idle-shutdown on|off
                                   may the idle timeout close the real browser?
                                   (default off — it is the user's)
+  bladebro rb audio [on|off|status]
+                                  alias for `bladebro audio` (muted by default)
   bladebro rb refresh             re-import the profile into the clone
   bladebro rb forget              wipe the imported copy
   bladebro rb pause | resume      hand the browser to yourself / back
@@ -761,12 +802,13 @@ page-injection layer switches OFF entirely (a real environment needs no
 masks; truth has no tells to catch). Everything driver-side still runs:
 perception, refs, adapters, token efficiency, biometrics + idle hum.
 
-Mechanisms: clone (default — imports your profile once; your browser may
+Mechanisms: clone (default — imports your profile and automatically refreshes
+whenever your real browser has newer logins/cookies/storage; your browser may
 stay open; the source is never written to), profile (launches on your live
 profile — close the browser first; branded Google Chrome 136+ refuses CDP
 on the default dir, so use clone/attach there), attach (drives a running
-browser that already exposes a debug endpoint — classic
---remote-debugging-port, or Chrome 144+ chrome://inspect#remote-debugging
+browser that already exposes a debug endpoint — fixed-port Linux discovery,
+--remote-debugging-port=0, or Chrome 144+ chrome://inspect#remote-debugging
 with per-connection approval). Attach caveat (measured, Chrome 151): an
 ephemeral `--remote-debugging-port=0` arm — and the approval flow — makes
 Chrome itself report navigator.webdriver=true on every page; arm a FIXED

@@ -100,16 +100,18 @@ pub fn config_path() -> PathBuf {
 /// (switch off). Malformed is deliberately NOT fatal: every command reads
 /// this, and a corrupted byte must never brick the CLI.
 pub fn config() -> Config {
-    // Cached by (mtime, size): refresh_lane + launch_fingerprint run on every
-    // tool call, and each used to re-read + re-parse the file. One stat per
-    // call now; the file is re-read the moment it changes on disk.
+    // Cached by (path, mtime, size): refresh_lane + launch_fingerprint run on
+    // every tool call, and each used to re-read + re-parse the file. One stat
+    // per call now; the file is re-read the moment it changes on disk or
+    // BLADE_HOME switches to another directory.
     use std::sync::{Mutex, OnceLock};
-    type Key = Option<(std::time::SystemTime, u64)>;
+    type Key = (PathBuf, Option<(std::time::SystemTime, u64)>);
     static CACHE: OnceLock<Mutex<Option<(Key, Config)>>> = OnceLock::new();
     let path = config_path();
-    let key: Key = std::fs::metadata(&path)
+    let meta_key = std::fs::metadata(&path)
         .ok()
         .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+    let key: Key = (path.clone(), meta_key);
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = match cache.lock() {
         Ok(g) => g,

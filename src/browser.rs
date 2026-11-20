@@ -40,7 +40,7 @@ mod probe;
 pub mod proxy;
 
 pub use self::alerts::{
-    pending_notes, reset_gl_alert, set_stealth_inject_failed, set_ua_override_failed,
+    pending_notes, reset_gl_alert, set_rb_note, set_stealth_inject_failed, set_ua_override_failed,
 };
 pub(crate) use self::compat::{incognito_policy, launched_incognito};
 pub(crate) use self::discover::endpoint_owned_by_own_browser;
@@ -49,9 +49,11 @@ pub(crate) use self::discover::find_chrome;
 pub use self::display::VirtualDisplay;
 pub(crate) use self::flags::env_chrome_flags;
 pub use self::flags::{
+    audio_config_path, audio_enabled, audio_enabled_from, audio_persisted, audio_persisted_from,
     gl_mid_session_loss, gpu_state, is_software_renderer, launched_headless, launched_no_sandbox,
-    launched_pipe, mark_gl_mid_session_loss, reconcile_gl, set_gpu_state, set_launched_headless,
-    set_launched_no_sandbox, set_launched_pipe, GlReconcile, GlStage, GpuState, Transport,
+    launched_pipe, mark_gl_mid_session_loss, reconcile_gl, set_audio_enabled, set_gpu_state,
+    set_launched_headless, set_launched_no_sandbox, set_launched_pipe, GlReconcile, GlStage,
+    GpuState, Transport,
 };
 pub use self::launch::launch_lane;
 pub use self::probe::{probe_gl_live, GlLive, WorkerEvidence};
@@ -105,6 +107,13 @@ impl Browser {
     pub fn base(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }
+
+    /// Non-blocking liveness probe: returns `true` once the owned browser
+    /// process has exited (e.g. user closed the real-browser window manually),
+    /// reaping its wait status so it never sits around as a `<defunct>` zombie.
+    pub fn has_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
 }
 
 impl Drop for Browser {
@@ -151,7 +160,10 @@ pub(crate) fn stop_profile_processes(
     profile: &crate::session_profile::SessionProfile,
     close_requested: bool,
 ) {
-    if !profile.is_owned_agent_session() {
+    // Only bladebro's own per-process session dirs (agent lane AND real-lane
+    // clone `sess-<pid>` dirs) qualify — borrowed `BLADE_PROFILE_DIR` and
+    // adopted user profiles (`rb mode profile`) have `is_owned() == false`.
+    if !profile.is_owned() {
         return;
     }
     #[cfg(target_os = "linux")]

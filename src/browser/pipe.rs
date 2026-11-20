@@ -185,6 +185,7 @@ impl Browser {
             stage,
             headful,
             no_sandbox,
+            mute_audio: !audio_enabled(),
             transport: Transport::Pipe,
             port: 0,
             user_data_dir: &user_data_dir,

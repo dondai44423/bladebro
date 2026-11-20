@@ -55,7 +55,8 @@ mod select;
 mod template;
 
 pub use self::browsers::{
-    brand_from_version, discover, find_browser, requires_non_default_dir, Brand, BrowserSpec,
+    brand_from_binary_path, brand_from_version, discover, find_browser, requires_non_default_dir,
+    Brand, BrowserSpec,
 };
 pub use self::config::{
     config, config_from, config_path, save_config, save_config_to, Config, Mode,
@@ -64,16 +65,19 @@ pub use self::controls::{
     hum_enabled, input_paused, pause_path, paused_error, set_paused, should_idle_shutdown,
 };
 pub use self::profiles::{
-    devtools_port, list_profiles, parse_devtools_active_port, parse_singleton_owner,
-    profile_in_use, profile_owner_pid, same_dir, ProfileInfo,
+    devtools_port, devtools_port_live, list_profiles, parse_devtools_active_port,
+    parse_remote_debugging_port_arg, parse_singleton_owner, profile_in_use, profile_owner_pid,
+    same_dir, ProfileInfo,
 };
 pub use self::select::{
     effective_mode, ensure_current_import, ensure_import, resolve_selection, session_drifted,
     sole_root_id, validate_binary_override,
 };
 pub use self::template::{
-    forget, has_template, human_bytes, import_template, live_clone_sessions, root_for,
-    source_meta_path, template_dir, template_matches, template_source, template_stats, ImportStats,
+    forget, has_template, human_bytes, import_template, live_clone_sessions, profile_state_stamp,
+    root_for, source_meta_path, template_dir, template_failed_critical, template_import_generation,
+    template_is_fresh, template_matches, template_source, template_stats, ImportStats,
+    ProfileStamp,
 };
 
 // ── Lane switch ─────────────────────────────────────────────────────────
@@ -130,19 +134,73 @@ pub fn refresh_lane() -> bool {
     }
 }
 
+/// Collect current clone template import generations under
+/// `<blade_dir>/realbrowser/` (cheap: 1 tiny file read per imported browser).
+/// Hashing this into `launch_fingerprint` guarantees a long-lived MCP or
+/// daemon session notices `rb refresh` / `rb on` re-imports and relaunches
+/// onto the freshly copied profile on its next action.
+fn active_import_generation(cfg: &Config) -> Option<String> {
+    if cfg.mode == Mode::Attach {
+        return None;
+    }
+    if let Some(id) = cfg.browser.as_deref() {
+        return template_import_generation(id);
+    }
+    let dir = crate::platform::blade_dir().join("realbrowser");
+    let mut pairs: Vec<(String, String)> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let id = e.file_name().to_string_lossy().to_string();
+            let gen = template_import_generation(&id)?;
+            Some((id, gen))
+        })
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    pairs.sort();
+    Some(
+        pairs
+            .into_iter()
+            .map(|(id, gen)| format!("{id}={gen}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+    )
+}
+
 /// Fingerprint of everything that decides how the next launch behaves.
 /// Long-lived surfaces snapshot it after each launch and compare it on every
 /// call: a mismatch means the running browser no longer matches the config
-/// (`rb on|off`, `rb mode|use|profile|visible`) and must be relaunched.
+/// (`rb on|off`, `rb mode|use|profile|visible`, a refreshed clone template, or
+/// audio output preference) and must be relaunched.
 /// On the agent lane the real-browser fields cannot affect the browser, so
-/// the fingerprint is constant there — an agent session never pays a
-/// relaunch for config that does not concern it.
+/// only the lane (and audio setting) enter the fingerprint.
 pub fn launch_fingerprint() -> u64 {
-    launch_fingerprint_from(std::env::var("BLADE_LANE").ok().as_deref(), &config())
+    let env_lane = std::env::var("BLADE_LANE").ok();
+    let cfg = config();
+    let lane = lane_from(env_lane.as_deref(), cfg.enabled);
+    let import_gen = if lane {
+        active_import_generation(&cfg)
+    } else {
+        None
+    };
+    let audio = crate::browser::audio_enabled();
+    launch_fingerprint_full(env_lane.as_deref(), &cfg, import_gen.as_deref(), audio)
 }
 
 /// Testable core of [`launch_fingerprint`] (no env/disk reads).
 pub fn launch_fingerprint_from(env_override: Option<&str>, cfg: &Config) -> u64 {
+    launch_fingerprint_full(env_override, cfg, None, false)
+}
+
+/// Testable core including optional clone template import generation and audio state.
+pub fn launch_fingerprint_full(
+    env_override: Option<&str>,
+    cfg: &Config,
+    import_generation: Option<&str>,
+    audio_enabled: bool,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let lane = lane_from(env_override, cfg.enabled);
@@ -152,12 +210,17 @@ pub fn launch_fingerprint_from(env_override: Option<&str>, cfg: &Config) -> u64 
         cfg.browser.hash(&mut h);
         cfg.profile.hash(&mut h);
         cfg.binary.hash(&mut h);
-        // `visible` shapes launches we OWN. An attach session never launches
-        // (the browser belongs to the user), so toggling it must not reset an
-        // attached page; every other mode still gets the relaunch.
+        // `visible`, `audio_enabled`, and clone import generation shape
+        // launches we OWN. An attach session never launches (the browser
+        // belongs to the user), so toggling them must not reset an attached
+        // page; every other mode still gets the relaunch.
         if cfg.mode != Mode::Attach {
             cfg.visible.hash(&mut h);
+            import_generation.hash(&mut h);
+            audio_enabled.hash(&mut h);
         }
+    } else {
+        audio_enabled.hash(&mut h);
     }
     h.finish()
 }
@@ -202,11 +265,14 @@ mod tests {
         assert!(requires_non_default_dir(Brand::Chrome));
         for b in [
             Brand::Chromium,
+            Brand::UngoogledChromium,
             Brand::Brave,
             Brand::Helium,
             Brand::Edge,
             Brand::Vivaldi,
             Brand::Opera,
+            Brand::Arc,
+            Brand::Thorium,
         ] {
             assert!(!requires_non_default_dir(b), "{b:?} must not be gated");
         }
@@ -645,5 +711,98 @@ mod tests {
             None => std::env::remove_var(key),
         }
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn opera_flat_root_profile_is_enumerated_with_dot_key() {
+        let root = std::env::temp_dir().join(format!("blade-rb-opera-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Preferences"), "{}").unwrap();
+        let got = list_profiles(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].key, ".");
+        assert_eq!(got[0].path, root);
+        assert_eq!(got[0].root, root);
+    }
+
+    #[test]
+    fn parse_remote_debugging_port_arg_extracts_fixed_port() {
+        assert_eq!(
+            parse_remote_debugging_port_arg(b"/usr/bin/chromium\0--remote-debugging-port=9222\0"),
+            Some(9222)
+        );
+        assert_eq!(
+            parse_remote_debugging_port_arg(b"/usr/bin/chromium --remote-debugging-port=0"),
+            None
+        );
+        assert_eq!(
+            parse_remote_debugging_port_arg(b"/usr/bin/chromium --no-first-run"),
+            None
+        );
+    }
+
+    #[test]
+    fn brand_from_binary_path_covers_all_families() {
+        use std::path::Path;
+        assert_eq!(
+            brand_from_binary_path(Path::new("/usr/bin/google-chrome-beta")),
+            Some(Brand::Chrome)
+        );
+        assert_eq!(
+            brand_from_binary_path(Path::new("/Applications/Arc.app/Contents/MacOS/Arc")),
+            Some(Brand::Arc)
+        );
+        assert_eq!(
+            brand_from_binary_path(Path::new("/usr/bin/thorium-browser")),
+            Some(Brand::Thorium)
+        );
+        assert_eq!(
+            brand_from_binary_path(Path::new("/usr/bin/ungoogled-chromium")),
+            Some(Brand::UngoogledChromium)
+        );
+        assert_eq!(
+            brand_from_binary_path(Path::new("/var/lib/flatpak/exports/bin/com.brave.Browser")),
+            Some(Brand::Brave)
+        );
+    }
+
+    #[test]
+    fn fingerprint_tracks_import_generation_and_audio_state() {
+        let clone_cfg = Config {
+            enabled: true,
+            mode: Mode::Clone,
+            ..Default::default()
+        };
+        assert_ne!(
+            launch_fingerprint_full(None, &clone_cfg, Some("gen-1"), false),
+            launch_fingerprint_full(None, &clone_cfg, Some("gen-2"), false),
+            "refreshed clone template must drift running MCP/daemon sessions"
+        );
+        assert_ne!(
+            launch_fingerprint_full(None, &clone_cfg, Some("gen-1"), false),
+            launch_fingerprint_full(None, &clone_cfg, Some("gen-1"), true),
+            "audio toggle must drift owned real-lane sessions"
+        );
+        let agent_cfg = Config {
+            enabled: false,
+            ..Default::default()
+        };
+        assert_ne!(
+            launch_fingerprint_full(None, &agent_cfg, None, false),
+            launch_fingerprint_full(None, &agent_cfg, None, true),
+            "audio toggle must drift agent-lane sessions"
+        );
+        let attach_cfg = Config {
+            enabled: true,
+            mode: Mode::Attach,
+            ..Default::default()
+        };
+        assert_eq!(
+            launch_fingerprint_full(None, &attach_cfg, Some("gen-1"), false),
+            launch_fingerprint_full(None, &attach_cfg, Some("gen-2"), true),
+            "attach mode never owns launches so clone gen and audio must not reset it"
+        );
     }
 }

@@ -266,33 +266,43 @@ pub(super) fn free_port() -> Option<u16> {
         .ok()
 }
 
-/// Inode of the listening socket on 127.0.0.1:`port`, read from
-/// /proc/net/tcp. Linux-only; `None` when /proc is unavailable or no
-/// listener exists (callers then skip verification).
+/// Inode of the listening socket on loopback (`127.0.0.1:<port>` or
+/// `[::1]:<port>`), read from `/proc/net/tcp` and `/proc/net/tcp6`.
+/// Linux-only; `None` when `/proc` is unavailable or no listener exists.
 #[cfg(target_os = "linux")]
 pub(crate) fn loopback_listener_inode(port: u16) -> Option<u64> {
-    let tcp = std::fs::read_to_string("/proc/net/tcp").ok()?;
     let want_port = format!("{port:04X}");
-    for line in tcp.lines().skip(1) {
-        let mut f = line.split_whitespace();
-        let Some(_sl) = f.next() else { continue };
-        let Some(local) = f.next() else { continue };
-        let Some(_rem) = f.next() else { continue };
-        let Some(state) = f.next() else { continue };
-        if state != "0A" {
-            continue; // 0A = LISTEN
+    let scan = |path: &str, prefixes: &[&str]| -> Option<u64> {
+        let tcp = std::fs::read_to_string(path).ok()?;
+        for line in tcp.lines().skip(1) {
+            let mut f = line.split_whitespace();
+            let Some(_sl) = f.next() else { continue };
+            let Some(local) = f.next() else { continue };
+            let Some(_rem) = f.next() else { continue };
+            let Some(state) = f.next() else { continue };
+            if state != "0A" {
+                continue; // 0A = LISTEN
+            }
+            if !prefixes.iter().any(|p| local.starts_with(p)) {
+                continue;
+            }
+            if local.rsplit(':').next() != Some(want_port.as_str()) {
+                continue;
+            }
+            // Column 10 of the row carries the socket inode.
+            return line.split_whitespace().nth(9).and_then(|i| i.parse().ok());
         }
-        // 127.0.0.1 in /proc/net/tcp's byte-swapped hex.
-        if !local.starts_with("0100007F:") {
-            continue;
-        }
-        if local.rsplit(':').next() != Some(want_port.as_str()) {
-            continue;
-        }
-        // Column 10 of the row carries the socket inode.
-        return line.split_whitespace().nth(9).and_then(|i| i.parse().ok());
-    }
-    None
+        None
+    };
+    scan("/proc/net/tcp", &["0100007F:"]).or_else(|| {
+        scan(
+            "/proc/net/tcp6",
+            &[
+                "00000000000000000000000001000000:",
+                "0000000000000000FFFF00000100007F:",
+            ],
+        )
+    })
 }
 
 /// True when the listening socket for `port` is held by the process `pid`

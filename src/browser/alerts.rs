@@ -21,6 +21,17 @@ static STEALTH_INJECT_FAILED: AtomicBool = AtomicBool::new(false);
 /// Failed headless UA override (pages may see `HeadlessChrome`).
 static UA_OVERRIDE_FAILED: AtomicBool = AtomicBool::new(false);
 
+/// One-shot real-browser lane advisory (e.g., locked Cookies during clone).
+static RB_NOTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Queue a one-shot advisory note for the real-browser lane (drained by
+/// [`pending_notes`] on the next tool response).
+pub fn set_rb_note(note: String) {
+    if let Ok(mut g) = RB_NOTE.lock() {
+        *g = Some(note);
+    }
+}
+
 /// Record a failed stealth injection (`Page::attach`).
 pub fn set_stealth_inject_failed() {
     STEALTH_INJECT_FAILED.store(true, Ordering::Relaxed);
@@ -92,6 +103,10 @@ pub fn pending_notes() -> Vec<String> {
                  'HeadlessChrome' to pages."
                     .into(),
             );
+        }
+    } else if let Ok(mut g) = RB_NOTE.lock() {
+        if let Some(note) = g.take() {
+            notes.push(note);
         }
     }
     if crate::browser::launched_no_sandbox() && claim(&NO_SANDBOX_NOTE) {

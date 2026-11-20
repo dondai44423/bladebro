@@ -96,13 +96,46 @@ pub async fn list_page_targets(base: &str) -> Result<Vec<TargetInfo>> {
         .collect())
 }
 
-/// Pick the first page target with a WebSocket URL, or [`BladeError::NoTarget`].
+/// Pick the best page target with a WebSocket URL, or [`BladeError::NoTarget`].
+///
+/// In a user's real browser with extensions or DevTools open, `/json` can list
+/// `devtools://` or `chrome-extension://` targets ahead of normal web tabs.
+/// Prefer real web pages (`http://`/`https://`), then ordinary blank/newtab
+/// pages, and only fall back to extension/internal targets if nothing else
+/// exists.
 pub async fn first_page_target(base: &str) -> Result<TargetInfo> {
-    list_page_targets(base)
+    let mut pages: Vec<TargetInfo> = list_page_targets(base)
         .await?
         .into_iter()
-        .find(|t| t.web_socket_debugger_url.is_some())
-        .ok_or(BladeError::NoTarget)
+        .filter(|t| t.web_socket_debugger_url.is_some())
+        .collect();
+    if pages.is_empty() {
+        return Err(BladeError::NoTarget);
+    }
+    let priority = |url: &str| -> u8 {
+        if url.starts_with("https://") || url.starts_with("http://") {
+            0
+        } else if url.is_empty()
+            || url == "about:blank"
+            || url.starts_with("chrome://newtab")
+            || url.starts_with("edge://newtab")
+            || url.starts_with("brave://newtab")
+        {
+            1
+        } else if url.starts_with("devtools://") || url.starts_with("chrome-extension://") {
+            3
+        } else {
+            2
+        }
+    };
+    if let Some((best_idx, _)) = pages
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, t)| priority(&t.url))
+    {
+        return Ok(pages.swap_remove(best_idx));
+    }
+    Err(BladeError::NoTarget)
 }
 
 /// Best-effort raw JSON dump of `/json` — used by the probe subcommand for

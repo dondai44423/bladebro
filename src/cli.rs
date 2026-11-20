@@ -49,7 +49,7 @@ use self::args::{
 use self::daemon::{daemon_request, MAX_REQUEST_BYTES};
 use self::daemon::{run_daemon, stop_daemon};
 pub use self::help::{command_help_text, help_json, help_text, suggest_command};
-use self::rb::run_rb;
+use self::rb::{run_audio, run_rb};
 
 /// Unix socket path for the CLI daemon.
 #[cfg(unix)]
@@ -553,6 +553,7 @@ async fn run_cli_inner(
 
     match cmd {
         "rb" | "realbrowser" => run_rb(rest, json_mode).await,
+        "audio" => run_audio(rest, json_mode).await,
         "hermes" => hermes::run(rest, json_mode).await,
         "daemon" => run_daemon().await,
         "stop" => {

@@ -325,7 +325,7 @@ fn run(args: Vec<String>, json_mode: bool) -> Result<()> {
         }
         // CLI commands go through the new CLI module.
         "nav" | "see" | "act" | "state" | "run" | "vision" | "daemon" | "stop" | "help" | "rb"
-        | "realbrowser" | "hermes" => {
+        | "realbrowser" | "audio" | "hermes" => {
             let mut cli_args: Vec<String> = std::iter::once(cmd.clone())
                 .chain(positional.iter().cloned())
                 .collect();
@@ -410,6 +410,7 @@ fn is_cli_command(cmd: &str) -> bool {
             | "help"
             | "rb"
             | "realbrowser"
+            | "audio"
             | "hermes"
     )
 }

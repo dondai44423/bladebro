@@ -1,6 +1,6 @@
 # Support Matrix
 
-Current verification coverage by platform, browser engine, and runnable instrument. Current release: `4.6.9` (verified locally on Arch Linux x86_64 with Chromium `157.0.8103.38` and pinned `rustc 1.100.0`).
+Current verification coverage by platform, browser engine, and runnable instrument. Current release: `4.8.2` (verified locally on Arch Linux x86_64 with Chromium `158.0.8127.36` and pinned `rustc 1.100.0`).
 
 ## Platforms
 
@@ -17,10 +17,10 @@ Current verification coverage by platform, browser engine, and runnable instrume
 
 | Engine | Verified scope |
 |---|---|
-| Chromium `157` (Arch Linux x86_64) | Full local verification floor (`audit`, `diff_oracle` agent + real lanes, `qol_probe`, `lane_matrix`, `gap44`, `reliability_probe`) |
-| Google Chrome Stable (Ubuntu CI) | Parallel `probes.yml` browser jobs (`audit`, `qol`, `lanes`, `gap44`, `reliability`) |
+| Chromium `158` (Arch Linux x86_64) | Full local verification floor (`audit`, `diff_oracle` agent + real lanes, `qol_probe`, `lane_matrix`, `gap44`, `reliability_probe`) |
+| Google Chrome Stable (Ubuntu CI) | Parallel `probes.yml` browser jobs (`audit`, `oracle`, `qol`, `lanes`, `gap44`, `reliability`) |
 | Flatpak `org.chromium.Chromium` (`1.18.4` x86_64) | Discovery, sandboxed launch, host persistence, upload staging, download, and teardown verified on Linux x86_64 |
-| Chromium forks (Brave, Helium, Edge, Vivaldi, Opera) | Discovery, wrapper/AppImage PID ownership, and clone unit/integration fixtures (`tools/rb_live/helium.py` available for manual Helium runs) |
+| Chromium forks (Brave, Helium, Arc, Edge, Vivaldi, Opera, Opera GX, Thorium, Ungoogled Chromium) | Discovery, wrapper/AppImage PID ownership, and clone unit/integration fixtures (`tools/rb_live/helium.py` available for manual Helium runs) |
 
 ## Feature-to-Instrument Map
 
@@ -44,7 +44,6 @@ See [tools/README.md](tools/README.md) for exact invocations and pass criteria.
 
 ## Unverified Gaps
 
-- **Remote `oracle` job in `probes.yml`**: currently fails on GitHub's Ubuntu runner before comparison starts (`stock Chrome debug endpoint did not come up`); verified locally on Linux x86_64.
 - **macOS & Windows live browser probes**: `gate.yml` runs native compile, unit tests, and release linking on `macos-26` and `windows-latest`; the live browser probe suite (`probes.yml`) runs on Linux only.
 - **Physical ARM64 / Raspberry Pi & SteamOS/Silverblue hosts**: covered by cross-builds, ABI checks, host-selector unit tests, and x86_64 Flatpak runs, not physical device runs.
 - **Commercial upstream proxies & non-stock fork GUIs**: proxy tests use local forward proxies; non-Chromium forks outside manual Helium runs are covered by discovery/ownership fixtures rather than full GUI suites.

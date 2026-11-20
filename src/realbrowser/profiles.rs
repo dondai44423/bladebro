@@ -22,27 +22,67 @@ pub struct ProfileInfo {
     pub last_used: u64,
 }
 
+/// Latest modification timestamp (seconds since epoch) across the profile's
+/// active state files (`Preferences`, `Cookies`, `Network/Cookies`, `History`,
+/// `Local Storage/leveldb`). Chrome writes Cookies/History when logging into
+/// sites without always rewriting `Preferences` immediately.
+fn profile_last_used_secs(profile_dir: &Path) -> u64 {
+    let candidates = [
+        profile_dir.join("Preferences"),
+        profile_dir.join("Cookies"),
+        profile_dir.join("Cookies-wal"),
+        profile_dir.join("Network").join("Cookies"),
+        profile_dir.join("Network").join("Cookies-wal"),
+        profile_dir.join("History"),
+        profile_dir.join("Local Storage").join("leveldb"),
+    ];
+    candidates
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Enumerate profiles under a root: `Local State`'s `info_cache` names,
 /// unioned with any dir that holds a `Preferences` file (covers odd
-/// installs). Sorted most-recently-used first.
+/// installs), plus flat-root profiles (Opera / Opera GX, where `Preferences`
+/// and `Cookies` sit directly inside `root` with no `Default/` subdir).
+/// Sorted most-recently-used first (respecting `Local State`'s active profile
+/// on ties).
 pub fn list_profiles(root: &Path) -> Vec<ProfileInfo> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
 
     let mut names: BTreeMap<String, String> = BTreeMap::new();
+    let mut active_keys: HashSet<String> = HashSet::new();
     if let Ok(txt) = std::fs::read_to_string(root.join("Local State")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
-            if let Some(cache) = v
-                .get("profile")
-                .and_then(|p| p.get("info_cache"))
-                .and_then(|c| c.as_object())
-            {
-                for (key, entry) in cache {
-                    let name = entry
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(key.as_str());
-                    names.insert(key.clone(), name.to_string());
+            if let Some(profile_obj) = v.get("profile") {
+                if let Some(last) = profile_obj.get("last_used").and_then(|s| s.as_str()) {
+                    if !last.is_empty() {
+                        active_keys.insert(last.to_string());
+                    }
+                }
+                if let Some(arr) = profile_obj
+                    .get("last_active_profiles")
+                    .and_then(|a| a.as_array())
+                {
+                    for item in arr {
+                        if let Some(k) = item.as_str().filter(|s| !s.is_empty()) {
+                            active_keys.insert(k.to_string());
+                        }
+                    }
+                }
+                if let Some(cache) = profile_obj.get("info_cache").and_then(|c| c.as_object()) {
+                    for (key, entry) in cache {
+                        let name = entry
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(key.as_str());
+                        names.insert(key.clone(), name.to_string());
+                    }
                 }
             }
         }
@@ -54,8 +94,13 @@ pub fn list_profiles(root: &Path) -> Vec<ProfileInfo> {
                 continue;
             }
             let key = e.file_name().to_string_lossy().to_string();
-            // A profile dir always carries a Preferences JSON.
-            if p.join("Preferences").is_file() {
+            // A user profile dir carries Preferences (or Cookies/History on a
+            // live first-run profile before Chromium's first Preferences flush).
+            if p.join("Preferences").is_file()
+                || p.join("Cookies").is_file()
+                || p.join("Network").join("Cookies").is_file()
+                || p.join("History").is_file()
+            {
                 names.entry(key).or_default();
             }
         }
@@ -82,12 +127,7 @@ pub fn list_profiles(root: &Path) -> Vec<ProfileInfo> {
         })
         .map(|(key, name)| {
             let path = root.join(&key);
-            let last_used = std::fs::metadata(path.join("Preferences"))
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let last_used = profile_last_used_secs(&path);
             ProfileInfo {
                 name: if name.is_empty() { key.clone() } else { name },
                 key,
@@ -97,7 +137,26 @@ pub fn list_profiles(root: &Path) -> Vec<ProfileInfo> {
             }
         })
         .collect();
-    out.sort_by_key(|p| std::cmp::Reverse(p.last_used));
+
+    // Opera and Opera GX store `Preferences` and `Cookies` directly in the
+    // user-data root with no `Default/` subdirectory. Surface that flat root
+    // with sentinel key `.` (omitted from `--profile-directory` at launch).
+    if out.is_empty() && root.join("Preferences").is_file() {
+        out.push(ProfileInfo {
+            key: ".".into(),
+            name: "Default".into(),
+            path: root.to_path_buf(),
+            root: root.to_path_buf(),
+            last_used: profile_last_used_secs(root),
+        });
+    }
+
+    out.sort_by_key(|p| {
+        (
+            std::cmp::Reverse(p.last_used),
+            std::cmp::Reverse(active_keys.contains(&p.key)),
+        )
+    });
     out
 }
 
@@ -113,15 +172,70 @@ pub fn parse_devtools_active_port(body: &str) -> Option<u16> {
         .filter(|p| *p > 0)
 }
 
-/// The live debug port of a user-data root, if one is exposed right now
-/// (Chrome writes `DevToolsActivePort` into the root).
+/// Parse `--remote-debugging-port=<N>` (N > 0) from a NUL- or space-separated
+/// browser command line. Used as a Linux fallback when a browser was armed
+/// with a FIXED port (which does not always write `DevToolsActivePort`).
+pub fn parse_remote_debugging_port_arg(cmdline: &[u8]) -> Option<u16> {
+    let text = String::from_utf8_lossy(cmdline);
+    for token in text.split(['\0', ' ', '\t', '\n', '\r']) {
+        if let Some(val) = token.strip_prefix("--remote-debugging-port=") {
+            if let Ok(port) = val.parse::<u16>() {
+                if port > 0 {
+                    return Some(port);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The debug port advertised for a user-data root: `DevToolsActivePort`
+/// (ephemeral `--remote-debugging-port=0` or Chrome 144+ `chrome://inspect`
+/// approval flow), or on Linux a live owner browser's fixed
+/// `--remote-debugging-port=<N>` command-line flag.
 pub fn devtools_port(root: &Path) -> Option<u16> {
-    // Nuance (measured, Chrome 151): the file is written when the browser
-    // was started with `--remote-debugging-port=0` (auto-assigned port) or
-    // via the chrome://inspect approval flow — NOT for fixed-port launches.
-    std::fs::read_to_string(root.join("DevToolsActivePort"))
+    if let Some(port) = std::fs::read_to_string(root.join("DevToolsActivePort"))
         .ok()
         .and_then(|b| parse_devtools_active_port(&b))
+    {
+        return Some(port);
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(pid) = profile_owner_pid(root) {
+        if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+            if let Some(port) = parse_remote_debugging_port_arg(&cmdline) {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
+/// True when `127.0.0.1:<port>` (or `[::1]:<port>`) accepts a loopback TCP
+/// connection within a tight local budget — catches stale `DevToolsActivePort`
+/// files left behind by crashed browsers on macOS/Windows too.
+fn loopback_port_reachable(port: u16) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+    use std::time::Duration;
+    let timeout = Duration::from_millis(80);
+    let v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    if TcpStream::connect_timeout(&v4, timeout).is_ok() {
+        return true;
+    }
+    let v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port);
+    TcpStream::connect_timeout(&v6, timeout).is_ok()
+}
+
+/// Live debug port owned by a real browser of this user on `root`. Filters
+/// out stale `DevToolsActivePort` files on every OS (Linux verifies process
+/// ownership; macOS/Windows verify the loopback port is actually listening).
+pub fn devtools_port_live(root: &Path) -> Option<u16> {
+    let port = devtools_port(root)?;
+    if crate::browser::endpoint_owned_by_own_browser(port) && loopback_port_reachable(port) {
+        Some(port)
+    } else {
+        None
+    }
 }
 
 /// Parse a Chrome `SingletonLock` symlink target (`<hostname>-<pid>`).

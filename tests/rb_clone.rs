@@ -198,3 +198,141 @@ fn refresh_and_forget_abort_when_the_daemon_does_not_stop() {
         );
     }
 }
+
+#[test]
+fn stale_clone_auto_refreshes_when_source_cookies_update() {
+    // Reproduces the exact reported bug: user ran `rb on` earlier, then logged
+    // into a site (e.g. x.com) in their real browser, then ran `rb on` again.
+    // The stale clone used to be reused verbatim, leaving the user logged out.
+    let f = Fixture::new();
+    let src_default = f.0.join("helium-config/net.imput.helium/Default");
+    std::fs::write(src_default.join("Cookies"), "logged-out-cookies").unwrap();
+
+    f.cli(&["on"]);
+    assert_eq!(f.cli(&["status"])["template_fresh"], true);
+    assert_eq!(
+        std::fs::read_to_string(f.rb_root().join("template/Default/Cookies")).unwrap(),
+        "logged-out-cookies"
+    );
+
+    // User logs into x.com in their real browser (Cookies grows + mtime bumps).
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(
+        src_default.join("Cookies"),
+        "logged-in-x-auth-token-and-ct0-cookies",
+    )
+    .unwrap();
+    assert_eq!(
+        f.cli(&["status"])["template_fresh"],
+        false,
+        "status must report stale clone after source Cookies change"
+    );
+
+    // Running `rb on` while already on must automatically refresh the clone.
+    let on_again = f.cli(&["on"]);
+    assert_eq!(on_again["refreshed"], true, "{on_again}");
+    assert_eq!(f.cli(&["status"])["template_fresh"], true);
+    assert_eq!(
+        std::fs::read_to_string(f.rb_root().join("template/Default/Cookies")).unwrap(),
+        "logged-in-x-auth-token-and-ct0-cookies"
+    );
+}
+
+#[test]
+fn clone_sanitizes_crashed_preferences_and_skips_sessions_and_component_caches() {
+    let f = Fixture::new();
+    let src_root = f.0.join("helium-config/net.imput.helium");
+    let src_default = src_root.join("Default");
+    let crashed_prefs =
+        r#"{"profile":{"exit_type":"Crashed","exited_cleanly":false,"name":"Main"}}"#;
+    std::fs::write(src_default.join("Preferences"), crashed_prefs).unwrap();
+    std::fs::write(src_default.join("Cookies"), "cookie-bytes").unwrap();
+    std::fs::create_dir_all(src_default.join("Local Storage/leveldb")).unwrap();
+    std::fs::write(src_default.join("Local Storage/leveldb/001.ldb"), "ls").unwrap();
+    std::fs::create_dir_all(src_default.join("Extensions/ext1/1.0")).unwrap();
+    std::fs::write(src_default.join("Extensions/ext1/1.0/manifest.json"), "{}").unwrap();
+    // Session restore dirs (modern Chromium) and huge component caches must be skipped.
+    std::fs::create_dir_all(src_default.join("Sessions")).unwrap();
+    std::fs::write(src_default.join("Sessions/Session_1"), "old-tabs").unwrap();
+    std::fs::create_dir_all(src_default.join("Sessions_Encrypted")).unwrap();
+    std::fs::write(src_default.join("Sessions_Encrypted/S1"), "old-tabs").unwrap();
+    std::fs::create_dir_all(src_root.join("component_crx_cache")).unwrap();
+    std::fs::write(src_root.join("component_crx_cache/big.crx"), "cache").unwrap();
+    std::fs::create_dir_all(src_root.join("WasmTtsEngine")).unwrap();
+    std::fs::write(src_root.join("WasmTtsEngine/engine.wasm"), "wasm").unwrap();
+    std::fs::create_dir_all(src_root.join("Safe Browsing")).unwrap();
+    std::fs::write(src_root.join("Safe Browsing/sb.db"), "sb").unwrap();
+
+    f.cli(&["on"]);
+
+    let tpl = f.rb_root().join("template");
+    // Source must remain completely untouched.
+    assert_eq!(
+        std::fs::read_to_string(src_default.join("Preferences")).unwrap(),
+        crashed_prefs
+    );
+    // Cloned Preferences must be sanitized so no "Restore pages?" bubble pops up.
+    let cloned_prefs: Value =
+        serde_json::from_str(&std::fs::read_to_string(tpl.join("Default/Preferences")).unwrap())
+            .unwrap();
+    assert_eq!(cloned_prefs["profile"]["exit_type"], "Normal");
+    assert_eq!(cloned_prefs["profile"]["exited_cleanly"], true);
+    // User auth/storage/extensions preserved.
+    assert_eq!(
+        std::fs::read_to_string(tpl.join("Default/Cookies")).unwrap(),
+        "cookie-bytes"
+    );
+    assert!(tpl.join("Default/Local Storage/leveldb/001.ldb").is_file());
+    assert!(tpl
+        .join("Default/Extensions/ext1/1.0/manifest.json")
+        .is_file());
+    // Session restore dirs & component caches skipped.
+    assert!(!tpl.join("Default/Sessions").exists());
+    assert!(!tpl.join("Default/Sessions_Encrypted").exists());
+    assert!(!tpl.join("component_crx_cache").exists());
+    assert!(!tpl.join("WasmTtsEngine").exists());
+    assert!(!tpl.join("Safe Browsing").exists());
+}
+
+#[test]
+fn audio_cli_defaults_muted_and_persists_opt_in_toggle() {
+    let f = Fixture::new();
+    let run_audio = |args: &[&str], env_audio: Option<&str>| -> Value {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_bladebro"));
+        cmd.arg("--json")
+            .args(args)
+            .env("HOME", f.0.join("home"))
+            .env("BLADE_HOME", f.0.join("blade"))
+            .env_remove("BLADE_AUDIO");
+        if let Some(val) = env_audio {
+            cmd.env("BLADE_AUDIO", val);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    let init = run_audio(&["audio"], None);
+    assert_eq!(init["audio"], false);
+    assert_eq!(init["muted"], true);
+
+    let on = run_audio(&["audio", "on"], None);
+    assert_eq!(on["audio"], true);
+    assert_eq!(on["muted"], false);
+    assert_eq!(run_audio(&["audio", "status"], None)["audio"], true);
+
+    // `rb audio off` alias works identically.
+    let off = run_audio(&["rb", "audio", "off"], None);
+    assert_eq!(off["audio"], false);
+    assert_eq!(off["muted"], true);
+
+    // Per-process env override beats persisted muted state.
+    let env_on = run_audio(&["audio", "status"], Some("1"));
+    assert_eq!(env_on["audio"], true);
+    assert_eq!(env_on["persisted"], false);
+}

@@ -72,7 +72,13 @@ static GL_SPOOFED: AtomicBool = AtomicBool::new(false);
 static FULL_SCRIPT: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
 
 /// The assembled full stealth script, if one has been registered.
+/// The last full stealth script registered by `apply()`, if any.
+/// Never returned on the real-browser lane (guards against an agent→real
+/// mid-session switch leaking agent OOPIF injections into the real browser).
 pub fn full_script() -> Option<String> {
+    if crate::realbrowser::real_lane() {
+        return None;
+    }
     let guard = FULL_SCRIPT.read().ok()?;
     if guard.is_empty() {
         None
@@ -82,8 +88,11 @@ pub fn full_script() -> Option<String> {
 }
 
 /// True once a full stealth script has been registered (drives whether the
-/// auto-attach handler needs to run at all).
+/// auto-attach handler needs to run at all). Always false on the real lane.
 pub fn has_full_script() -> bool {
+    if crate::realbrowser::real_lane() {
+        return false;
+    }
     FULL_SCRIPT.read().map(|s| !s.is_empty()).unwrap_or(false)
 }
 

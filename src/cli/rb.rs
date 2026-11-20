@@ -55,6 +55,20 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             let paused = rb::input_paused();
             let sel = rb::resolve_selection(&cfg);
             if json_mode {
+                let attach_port = sel.as_ref().ok().and_then(|(_, p)| rb::devtools_port(&p.root));
+                let attach_live = sel
+                    .as_ref()
+                    .ok()
+                    .and_then(|(_, p)| rb::devtools_port_live(&p.root))
+                    .is_some();
+                let template_fresh = sel
+                    .as_ref()
+                    .ok()
+                    .map(|(s, p)| rb::template_is_fresh(&s.id, &p.root, &p.key));
+                let source_in_use = sel
+                    .as_ref()
+                    .ok()
+                    .and_then(|(_, p)| rb::profile_in_use(&p.root));
                 let v = serde_json::json!({
                     "ok": true,
                     "enabled": cfg.enabled,
@@ -63,14 +77,17 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                     "browser": cfg.browser.clone(),
                     "profile": cfg.profile.clone(),
                     "binary": cfg.binary.clone(),
-                    "attach_port": sel.as_ref().ok().and_then(|(_, p)| rb::devtools_port(&p.root)),
+                    "attach_port": attach_port,
+                    "attach_live": attach_live,
                     "visible": cfg.visible,
                     "idle_shutdown": cfg.idle_shutdown,
                     "idle_hum": cfg.idle_hum,
                     "paused": paused,
                     "browsers_found": rb::discover().iter().map(|b| b.id.clone()).collect::<Vec<_>>(),
                     "template": sel.as_ref().ok().map(|(s, _)| rb::has_template(&s.id)),
+                    "template_fresh": template_fresh,
                     "source": sel.as_ref().ok().and_then(|(s, _)| rb::template_source(&s.id)),
+                    "source_in_use": source_in_use,
                 });
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 return Ok(());
@@ -119,20 +136,43 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                             rb::effective_mode(&cfg, &profile.root).as_str()
                         ),
                     ));
-                    if let Some(port) = rb::devtools_port(&profile.root) {
+                    if let Some(port) = rb::devtools_port_live(&profile.root) {
                         rows.push((
                             "attach",
-                            format!("live debug endpoint on 127.0.0.1:{port} — auto would attach"),
+                            format!("live debug endpoint on 127.0.0.1:{port} — auto will attach"),
+                        ));
+                    } else if let Some(port) = rb::devtools_port(&profile.root) {
+                        rows.push((
+                            "attach",
+                            ui::smoke(&format!(
+                                "stale DevToolsActivePort ({port}, not listening) — ignored"
+                            )),
                         ));
                     }
                     match rb::template_stats(&spec.id) {
                         Some((files, bytes)) => {
+                            let freshness = if rb::template_is_fresh(&spec.id, &profile.root, &profile.key) {
+                                ui::green("up to date")
+                            } else {
+                                ui::amber("stale — source profile updated (auto-refreshes on `rb on` or next launch)")
+                            };
                             rows.push((
                                 "clone",
-                                format!("{files} files ({})", rb::human_bytes(bytes)),
+                                format!("{files} files ({}) · {freshness}", rb::human_bytes(bytes)),
                             ));
                             if let Some(src) = rb::template_source(&spec.id) {
                                 rows.push(("source", ui::smoke(&src)));
+                            }
+                            let failed = rb::template_failed_critical(&spec.id);
+                            if !failed.is_empty() {
+                                rows.push((
+                                    "warning",
+                                    ui::amber(&format!(
+                                        "last import could not copy: {} — close {} and run `rb refresh`",
+                                        failed.join(", "),
+                                        spec.name
+                                    )),
+                                ));
                             }
                         }
                         None => rows.push((
@@ -160,16 +200,34 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
 
         "on" => {
             if cfg.enabled {
-                // Already on: still self-heal a missing or stale clone (after
-                // `rb forget`, or `rb profile` into another user-data root) so
-                // the next launch never imports mid-run.
+                // Already on: still self-heal a missing, mismatched, or stale
+                // clone (e.g. after logging into a site in the real browser,
+                // `rb forget`, or `rb profile` into another user-data root).
+                // The fresh import bumps `.blade-import`, which makes any
+                // running MCP/daemon session relaunch onto the new clone on its
+                // next call.
+                let mut refreshed = false;
                 if let Ok((spec, profile)) = rb::resolve_selection(&cfg) {
-                    if rb::effective_mode(&cfg, &profile.root) == rb::Mode::Clone {
-                        rb::ensure_current_import(&spec, &profile)?;
+                    if rb::effective_mode(&cfg, &profile.root) == rb::Mode::Clone
+                        && !rb::template_is_fresh(&spec.id, &profile.root, &profile.key)
+                    {
+                        restart_daemon_for_lane().await;
+                        refreshed = rb::ensure_current_import(&spec, &profile)?.is_some();
                     }
                 }
                 if json_mode {
-                    println!("{}", serde_json::json!({"ok": true, "enabled": true, "note": "already on"}));
+                    println!("{}", serde_json::json!({
+                        "ok": true,
+                        "enabled": true,
+                        "refreshed": refreshed,
+                        "note": if refreshed { "already on (clone refreshed from newer profile)" } else { "already on" }
+                    }));
+                } else if refreshed {
+                    println!(
+                        "{} {} — refreshed clone with newer logins/state (`bladebro rb status` for details)",
+                        ui::bold("Real-browser lane:"),
+                        ui::bold(&ui::green("already ON"))
+                    );
                 } else {
                     println!("{} {}", ui::bold("Real-browser lane:"), ui::bold(&ui::green("already ON")) + " — `bladebro rb status` for details");
                 }
@@ -184,23 +242,29 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                     spec.name
                 )));
             }
+            // Stop any running CLI daemon BEFORE replacing the clone template
+            // so its teardown never races with the import.
+            restart_daemon_for_lane().await;
             // Import now (clone lane) so problems surface HERE, not inside a
             // later agent run.
-            if mode == rb::Mode::Clone {
-                rb::ensure_current_import(&spec, &profile)?;
-            }
+            let imported = if mode == rb::Mode::Clone {
+                rb::ensure_current_import(&spec, &profile)?
+            } else {
+                None
+            };
             cfg.enabled = true;
             rb::save_config(&cfg)?;
-            restart_daemon_for_lane().await;
             if json_mode {
                 let v = serde_json::json!({
                     "ok": true, "enabled": true, "mode": mode.as_str(),
                     "browser": spec.id, "profile": profile.key,
+                    "refreshed": imported.is_some(),
+                    "failed_critical": imported.as_ref().map(|s| &s.failed_critical),
                 });
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 return Ok(());
             }
-            let rows = vec![
+            let mut rows = vec![
                 ("browser", format!("{} ({})", spec.name, spec.brand.as_str())),
                 (
                     "profile",
@@ -228,6 +292,18 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
                     "`rb pause` / `rb resume` hand the browser back to you".into(),
                 ),
             ];
+            if let Some(stats) = &imported {
+                if !stats.failed_critical.is_empty() {
+                    rows.push((
+                        "warning",
+                        ui::amber(&format!(
+                            "locked profile file(s) skipped: {} — close {} and run `rb refresh`",
+                            stats.failed_critical.join(", "),
+                            spec.name
+                        )),
+                    ));
+                }
+            }
             ui::dossier_card(
                 "Real-Browser Lane",
                 ("ON", ui::Tone::Success),
@@ -553,11 +629,33 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             // if it does not stop) and refuse while any other session runs.
             stop_daemon_for_clone_change().await?;
             refuse_under_live_clone_sessions(&spec.id, "refresh")?;
-            rb::ensure_import(&spec, &profile)?;
+            let stats = rb::ensure_import(&spec, &profile)?;
             if json_mode {
-                println!("{}", serde_json::json!({"ok": true, "refreshed_from": profile.path.display().to_string()}));
+                println!("{}", serde_json::json!({
+                    "ok": true,
+                    "refreshed_from": profile.path.display().to_string(),
+                    "files": stats.files,
+                    "bytes": stats.bytes,
+                    "ms": stats.ms,
+                    "copied_cookies": stats.copied_cookies,
+                    "failed_critical": stats.failed_critical,
+                }));
             } else {
-                println!("clone refreshed from {}", ui::dim(&profile.path.display().to_string()));
+                println!(
+                    "clone refreshed from {} ({} files, {} in {}ms)",
+                    ui::dim(&profile.path.display().to_string()),
+                    stats.files,
+                    rb::human_bytes(stats.bytes),
+                    stats.ms
+                );
+                if !stats.failed_critical.is_empty() {
+                    println!(
+                        "{} locked profile file(s) skipped: {} — close {} and run `bladebro rb refresh` again",
+                        ui::amber("warning:"),
+                        stats.failed_critical.join(", "),
+                        spec.name
+                    );
+                }
             }
             Ok(())
         }
@@ -619,8 +717,118 @@ pub(super) async fn run_rb(args: &[String], json_mode: bool) -> Result<()> {
             Ok(())
         }
 
+        "audio" => run_audio(rest, json_mode).await,
+
         other => Err(crate::error::BladeError::Usage(format!(
-            "unknown rb subcommand `{other}` — use on|off|status|mode|use|profile|visible|idle-hum|idle-shutdown|refresh|forget|pause|resume"
+            "unknown rb subcommand `{other}` — use on|off|status|mode|use|profile|visible|idle-hum|idle-shutdown|audio|refresh|forget|pause|resume"
         ))),
+    }
+}
+
+/// `bladebro audio [on|off|status]` — control browser audio output across both
+/// the default agent browser and owned real-browser launches. Muted by default
+/// so media players (YouTube, video ads, audio streams) never play unexpected
+/// sound back to the user unless explicitly opted in.
+pub(super) async fn run_audio(args: &[String], json_mode: bool) -> Result<()> {
+    use crate::ui;
+
+    let raw = args.first().map(|s| s.as_str()).unwrap_or("status");
+    let sub = match raw {
+        "on" | "true" | "1" | "yes" | "enable" | "unmute" => "on",
+        "off" | "false" | "0" | "no" | "disable" | "mute" => "off",
+        "status" => "status",
+        other => {
+            return Err(crate::error::BladeError::Usage(format!(
+                "unknown audio option `{other}` — use `bladebro audio [on|off|status]`"
+            )))
+        }
+    };
+
+    let env_raw = std::env::var("BLADE_AUDIO").ok();
+    match sub {
+        "status" => {
+            let persisted = crate::browser::audio_persisted();
+            let effective = crate::browser::audio_enabled();
+            if json_mode {
+                let v = serde_json::json!({
+                    "ok": true,
+                    "audio": effective,
+                    "muted": !effective,
+                    "persisted": persisted,
+                    "env_override": env_raw,
+                });
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                return Ok(());
+            }
+            let badge = if effective {
+                ("AUDIBLE", ui::Tone::Warn)
+            } else {
+                ("MUTED", ui::Tone::Success)
+            };
+            let mut rows = vec![
+                (
+                    "output",
+                    if effective {
+                        "ON — browser audio plays through your speakers/headphones".into()
+                    } else {
+                        "OFF (default) — browser audio is muted (`--mute-audio`)".into()
+                    },
+                ),
+                (
+                    "scope",
+                    "applies to the agent browser and owned real-browser launches (never an externally attached browser)".into(),
+                ),
+            ];
+            if let Some(ev) = env_raw.as_deref().filter(|s| !s.is_empty()) {
+                rows.push(("env", format!("BLADE_AUDIO={ev} (overrides saved setting)")));
+            }
+            ui::dossier_card(
+                "Browser Audio",
+                badge,
+                &rows,
+                Some("`bladebro audio on` enables sound · `bladebro audio off` mutes again"),
+            );
+            Ok(())
+        }
+        "on" | "off" => {
+            let on = sub == "on";
+            crate::browser::set_audio_enabled(on)?;
+            restart_daemon_for_lane().await;
+            let effective = crate::browser::audio_enabled();
+            if json_mode {
+                let v = serde_json::json!({
+                    "ok": true,
+                    "audio": effective,
+                    "muted": !effective,
+                    "persisted": on,
+                    "env_override": env_raw,
+                });
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                return Ok(());
+            }
+            if on {
+                println!(
+                    "{} {} — browser sound is now audible (running MCP sessions pick this up on the next call; `bladebro audio off` mutes again)",
+                    ui::bold("Browser audio:"),
+                    ui::amber("ON")
+                );
+            } else {
+                println!(
+                    "{} {} — browser sound is muted on both agent and owned real-browser launches",
+                    ui::bold("Browser audio:"),
+                    ui::green("MUTED")
+                );
+            }
+            if let Some(ev) = env_raw.as_deref().filter(|s| !s.is_empty()) {
+                println!(
+                    "  {}",
+                    ui::dim(&format!(
+                        "note: BLADE_AUDIO={ev} is set in this shell and overrides the saved setting"
+                    ))
+                );
+            }
+            Ok(())
+        }
+        _ => unreachable!(),
     }
 }

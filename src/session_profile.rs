@@ -49,7 +49,7 @@ mod copy;
 mod reap;
 
 use self::copy::copy_profile;
-pub(crate) use self::copy::copy_profile_ex;
+pub(crate) use self::copy::copy_profile_ex_report;
 pub use self::reap::reap_orphans;
 pub(crate) use self::reap::{profile_in_use, session_owner_dead, session_roots};
 
@@ -451,11 +451,20 @@ impl SessionProfile {
         self.http_cache.as_deref().map(HttpCacheSlot::dir)
     }
 
-    /// A session dir bladebro created for its own agent-lane browser (not an
-    /// operator's BLADE_PROFILE_DIR, an adopted user profile or a real-lane
-    /// clone): only such a dir proves a process running on it is ours.
-    pub(crate) fn is_owned_agent_session(&self) -> bool {
-        self.owned && self.real_root.is_none()
+    /// Any blade-owned per-process session dir (agent lane OR real-lane clone).
+    /// Never true for borrowed `BLADE_PROFILE_DIR` or adopted live user profiles
+    /// (`rb mode profile`).
+    pub(crate) fn is_owned(&self) -> bool {
+        self.owned
+    }
+
+    /// Discard an owned session dir from a failed launch attempt WITHOUT syncing
+    /// it back over the template (an unstarted/crashed launch must never replace
+    /// a good template). No-op for borrowed/adopted user profiles.
+    pub fn discard_unstarted(&self) {
+        if self.owned {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     /// An owned agent-lane session at `dir`, without the template copy or

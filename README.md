@@ -96,7 +96,7 @@ bladebro stop
 
 Start with the agent browser for a clean workspace. Use real-browser mode when a task depends on your browser setup or authenticated state. Actions in a signed-in profile can affect your account.
 
-`bladebro rb status` shows which browser and profile are selected. `bladebro rb pause` hands input back to you, and `bladebro rb off` switches back to the agent browser. [Profiles, attachment, and ownership](docs/browser-modes.md).
+`bladebro rb status` shows which browser and profile are selected. `bladebro rb pause` hands input back to you, and `bladebro rb off` switches back to the agent browser. Browser audio is muted by default across both lanes; run `bladebro audio on` to opt in to sound output. [Profiles, attachment, and ownership](docs/browser-modes.md).
 
 ## How it works
 
