@@ -131,20 +131,24 @@ Bladebro drives Chromium-family browsers. Cross-origin iframe content, extension
 
 <p align="center"><img src="Assets/readme/monogram.webp" width="144" alt="Bladebro's angular B monogram with a browser toolbar and a katana blade"></p>
 
-Sponsorship funds maintenance and releases for Bladebro.
+Sponsorship funds maintenance, testing, and releases for Bladebro. Top-of-README placement is capped at 5 active slots so every sponsor stays visible.
 
-| Tier | Monthly price | What you get |
+| Option | Price | What's included |
 |---|---:|---|
-| **Silver** | **$25/month** | A text link to your site in this section. |
-| **Gold** | **$79/month** | A large linked banner with priority placement above Silver links. Bladebro may consider a native integration if the product fits and we agree on the scope. |
+| **Sponsor** | **$89/month** | Linked banner and short tagline near the top of the README, plus listing here. Prepay any number of months to lock the current rate. |
+| **Integration Partner** | **$399 upfront, then $89/month** | Everything in Sponsor for your first 3 months, plus a scoped native integration (e.g. setup bridge, provider preset, or site/service adapter) built, tested, and documented with you. |
+
+### How native integrations work
+
+1. **Free scope check first**: email what you want to integrate before paying anything. Integrations must genuinely help Bladebro users and fit its 5-tool design. If it's not a fit, you can still take a standard **$89/month** Sponsor slot.
+2. **Active maintenance**: while your sponsorship is active, the integration is maintained and kept working across Bladebro releases.
+3. **Fair lifecycle**: if sponsorship ends, working integrations stay in Bladebro. If an unsponsored integration later breaks due to upstream changes or becomes a maintenance burden, it may be deprecated or removed after a heads-up.
 
 ### How to sponsor
 
-Email **bhandaribishesh879@gmail.com** with your site or product URL, tier, and preferred term. For Gold, include a banner if you have one and describe any integration you'd like to discuss. I'll confirm placement and share PayPal payment details. [Email about sponsorship](mailto:bhandaribishesh879@gmail.com).
+Email **bhandaribishesh879@gmail.com** with your product URL, banner (if you have one), and whether you want a Sponsor slot or an Integration Partner scope check. I'll confirm availability and share PayPal details. [Email about sponsorship](mailto:bhandaribishesh879@gmail.com).
 
-### Prepay to lock your rate
-
-Prepay any number of months at the current rate. That rate stays fixed for the term you paid for. Six months costs **$150** for Silver or **$474** for Gold. One-time support is welcome through Ko-fi.
+One-time support is also welcome through Ko-fi.
 
 [![Support Bladebro on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
