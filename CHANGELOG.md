@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.8.1] - 2026-11-20
+
 ### Added
 - **Noir Syndicate ("Mafia Don") CLI visual overhaul**: modularized terminal UI (`src/ui/{palette,anim,render}.rs`) with TrueColor → 256-color → 16-color → plain auto-negotiation, responsive box-framed mastheads with gold-shimmer reveal, animated diamond spinners with RAII cursor restoration, 8× sub-block gold-to-crimson gradient download progress bars with smoothed throughput and ETA, grouped dossier layouts, word-wrapped cards, and Windows `ENABLE_VIRTUAL_TERMINAL_PROCESSING` support across `-u`/`update`, `--rollback`, `doctor`, `-v`/`--version`, `audit`, `rb`, `hermes`, and `help` while keeping pipes, `--json`, `NO_COLOR`, and `BLADE_PLAIN=1` byte-clean.
 
@@ -2277,7 +2279,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.0...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.1...HEAD
+[4.8.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.1
 [4.8.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.0
 [4.7.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.7.0
 [4.6.10]: https://github.com/dondai44423/bladebro/releases/tag/v4.6.10
