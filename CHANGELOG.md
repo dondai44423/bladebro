@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Zero-`.json` Reddit adapter for threads and search**: completely removed Reddit `.json` API endpoints (`/comments/...json`, `/api/info.json`, `/search.json`) and the `loid` reload loop that triggered HTTP 403 network-security walls and `CDP error (-32000) Inspected target navigated or closed`. Post and comment extraction now reads `<shreddit-post>`, `<shreddit-comment>`, and `old.reddit.com` trees directly from the live DOM, then sequentially expands `<faceplate-partial src="/svc/shreddit/more-comments/...">` ("View more comments" / "N more replies") and deep `div.fold-more` (`?force-legacy-sct=1`) / `.deepthread` continuation links one request at a time with polite jitter and in-browser `DOMParser` parsing — never firing parallel bursts, never navigating the tab away, and preserving full DFS depth, `op`, and detached single-comment permalink roots. Search pages extract Shreddit SDUI (`search-post-unit`) and `old.reddit.com` results directly from the DOM and follow `/svc/shreddit/search` HTML partials sequentially.
+
+### Fixed
+- **Mid-redirect `CDP error (-32000) Inspected target navigated or closed` recovery**: `CdpSession::eval_isolated_with_timeout` now backs off briefly across up to 3 stale-context retries, and `run_auto_extract` waits for load/route settle and retries once when a short-URL redirect (such as `/r/<sub>/comments/<id>/` → canonical slug) lands mid-evaluation.
+- **HTTP 429 (`Retry-After`) propagation across Reddit expansion, same-URL redirects, and reloads**: Reddit HTML partial sweeps stop immediately on HTTP 429 or security walls without hammering, preserve all collected comments, and report exact `HTTP 429` + `Retry-After` headers and remaining unexpanded reply counts; `navigate` and `act reload` now also surface `http:` 4xx/5xx notices even when the final URL matches the previous page (`delta.navigated == false`).
+- **Reddit DOM & Markdown extraction bugs**: scoped `[slot="comment"]`, `faceplate-timeago`, and `time` lookups to each owning `<shreddit-comment>` so deleted parents never steal child comment text; fixed `u/[deleted]` double-prefixing, `null !== ''` `NaN` score/depth coercion, and promoted-post filtering in `reddit.js`/`auto_extract.js`; and fixed `markdown.js` to match `reddit.com` hostnames strictly, read post author from `shreddit-post` instead of the navbar user link, and skip `shreddit-ad-post` / `shreddit-comments-page-ad` blocks.
+
 ## [4.8.2] - 2026-11-20
 
 ### Added
