@@ -258,7 +258,19 @@ async fn run_auto_extract(
     // wait the transition out before reading anything.
     page.settle_route(crate::page::ROUTE_BUDGET).await;
     let expr = auto_extract_expr(limit, post_marker);
-    let (mut val, mut live_url) = auto_extract_eval(page, &expr).await?;
+    let (mut val, mut live_url) = match auto_extract_eval(page, &expr).await {
+        Ok(res) => res,
+        Err(e) if crate::cdp::CdpSession::is_stale_context_err(&e) => {
+            // A redirect (e.g. reddit short post URL -> canonical slug) or
+            // challenge commit landed mid-eval; let the destination load and
+            // retry this pure read once.
+            let _ =
+                crate::page::wait_for_load(page.cdp_ref(), std::time::Duration::from_secs(3)).await;
+            page.settle_route(crate::page::ROUTE_BUDGET).await;
+            auto_extract_eval(page, &expr).await?
+        }
+        Err(e) => return Err(e),
+    };
     for _ in 0..2 {
         if crate::adapters::is_early_settle(&val) {
             break;

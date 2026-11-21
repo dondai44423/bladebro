@@ -1,30 +1,39 @@
-//! Reddit search results via the page's own listing JSON.
+//! Reddit search results via live DOM + sequential HTML pagination — zero
+//! `.json` API endpoints.
 //!
-//! The search page is fully client-rendered: result units are SDUI components
-//! (`[data-testid=search-post-unit]`, …, verified live) and no `shreddit-post`
-//! ever appears — so the feed fast path cannot see this page, and the
-//! structural fallback used to read it blind. Worse, the page's router moves
-//! the search query in the URL BEFORE the new feed paints: a DOM read that
-//! lands in that window answers the previous query.
-//!
-//! Reading reddit's own `/search.json` listing avoids both: exact scores
-//! (the DOM only shows reddit's fuzzed display values), the query the listing
-//! actually answered echoed back in the payload, and freshness that does not
-//! depend on what the router has painted yet.
+//! Reads rendered Shreddit SDUI units (`[data-testid="search-post-unit"]`,
+//! `[data-testid="sdui-post-unit"]`, `<shreddit-post>`) and `old.reddit.com`
+//! `.search-result` rows directly from the page, then follows Shreddit's own
+//! `<faceplate-partial src="/svc/shreddit/search/...">` (or `old.reddit` next
+//! links) sequentially when `limit` asks for more items than the first page.
 
+use std::collections::HashSet;
+
+use serde_json::Value;
+
+use super::net::{
+    dom_parse_expr, eval_dom, fetch_html_parsed, is_rate_limit, is_security_block, polite_pause,
+    retry_after_from_err,
+};
+use super::tree::{
+    as_int, bare_author, canonical_reddit_url, cut_chars, normalize_date, normalize_text, u_prefix,
+};
 use super::*;
 
-use super::tree::{cut_chars, format_epoch, normalize_text};
-/// URL params that shape a search listing. Everything else on the page's own
-/// url — reddit's `solution`/`js_challenge`/`jsc_*` challenge handshake and
-/// tracking params — is dropped; replaying it into the API path would be
-/// meaningless.
+pub(super) const PARSE_SEARCH_JS: &str = include_str!("js/parse_search.js");
+
+/// URL params that shape a search listing. Challenge handshake and tracking
+/// params (`solution`, `js_challenge`, `jsc_*`, …) are dropped.
 const KEPT_PARAMS: [&str; 6] = ["q", "type", "sort", "t", "restrict_sr", "include_over_18"];
 
-/// Reddit serves at most this many items per listing page.
+/// Maximum search items returned in one extract call.
 pub const MAX_SEARCH_PAGE: usize = 100;
 /// Default result cap when the caller passed no explicit limit.
 pub const DEFAULT_SEARCH_LIMIT: usize = 25;
+/// Hard ceiling on extra pagination HTML requests per search extract.
+const MAX_SEARCH_REQUESTS: u32 = 5;
+/// Wall-clock budget for paginated search reads.
+const SEARCH_BUDGET: Duration = Duration::from_secs(15);
 
 /// One search result.
 #[derive(Debug, Serialize)]
@@ -50,8 +59,7 @@ pub struct SearchItem {
 #[derive(Debug, Serialize)]
 pub struct SearchPayload {
     pub container: &'static str,
-    /// The query this listing answers (echoed so a caller can prove the
-    /// results match what was asked — the DOM cannot say this).
+    /// The query this listing answers.
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
@@ -64,12 +72,8 @@ pub struct SearchPayload {
     pub items: Vec<SearchItem>,
 }
 
-/// `(path, kept query)` for the listing fetch, or `None` when this page is not
-/// a posts-shaped search (communities/users searches keep the DOM path).
-///
-/// `pathname`/`raw_params` come from the page itself (`location`), so the
-/// fetch happens against the url the router already moved to — not against
-/// whatever feed happens to be mounted.
+/// `(path, kept query)` for a posts-shaped Reddit search page, or `None` when
+/// this page is not a posts search (communities/users keep generic DOM read).
 pub fn search_target(pathname: &str, raw_params: &str) -> Option<(String, String)> {
     let path = pathname.trim_end_matches('/');
     if path != "/search" && !path.ends_with("/search") {
@@ -106,10 +110,6 @@ pub fn search_target(pathname: &str, raw_params: &str) -> Option<(String, String
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("&");
-    // New reddit scopes `/r/<sub>/search/?q=…` by the path alone, but the
-    // JSON listing at that path searches ALL of reddit unless restrict_sr
-    // is set — the page's own scope must be stated. An explicit value on
-    // the page's url is the page's choice and is replayed as is.
     let in_subreddit = path
         .strip_prefix("/r/")
         .and_then(|rest| rest.strip_suffix("/search"))
@@ -120,8 +120,9 @@ pub fn search_target(pathname: &str, raw_params: &str) -> Option<(String, String
     Some((path.to_string(), query))
 }
 
-/// Fetch one page of search results. `path` is `/search` or `/r/<sub>/search`,
-/// `query` the kept params (already url-encoded — reddit sees its own bytes).
+/// Extract Reddit search results from the live DOM, following Shreddit HTML
+/// partials (`/svc/shreddit/search/...`) or `old.reddit` next links
+/// sequentially when `limit` needs additional pages. Never calls `.json`.
 pub async fn fetch_search(
     cdp: &CdpSession,
     path: &str,
@@ -131,19 +132,8 @@ pub async fn fetch_search(
     if !query.split('&').any(|p| p.starts_with("q=")) {
         return Err(BladeError::Other("reddit: search without a query".into()));
     }
-    // Same loid gate as the comment sweep: without the token these API paths
-    // answer with the network-security wall instead of JSON.
-    if !ensure_loid(cdp).await {
-        return Err(BladeError::Other(
-            "reddit: no loid session token yet (the page-load challenge has not resolved) — load the page once, then retry".into(),
-        ));
-    }
     let limit = limit.clamp(1, MAX_SEARCH_PAGE);
-    let raw = fetch_json(
-        cdp,
-        &format!("{path}.json?{query}&limit={limit}&raw_json=1"),
-    )
-    .await?;
+    let deadline = Instant::now() + SEARCH_BUDGET;
     let param = |k: &str| {
         query.split('&').find_map(|p| {
             p.split_once('=')
@@ -151,120 +141,249 @@ pub async fn fetch_search(
                 .map(|(_, v)| decode(v))
         })
     };
-    parse_search(
-        &raw,
-        &param("q").unwrap_or_default(),
-        param("sort"),
-        param("t"),
-        limit,
-    )
-}
+    let q_str = param("q").unwrap_or_default();
+    let sort = param("sort");
+    let time = param("t");
 
-/// Reddit serializes some numerics as floats (`"created_utc": 1789604179.0`,
-/// captured live) — accept both shapes rather than dropping the field.
-fn as_int(v: &Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
-}
+    let dom_expr = dom_parse_expr(PARSE_SEARCH_JS, "parseRedditSearch(document)");
+    let mut first = eval_dom(cdp, &dom_expr).await?;
+    let first_empty = first
+        .get("items")
+        .and_then(Value::as_array)
+        .is_none_or(|a| a.is_empty());
+    if first_empty {
+        // SPA search routes can still be painting right after URL change;
+        // pause briefly and re-read the DOM once before falling back to one
+        // same-origin HTML GET of the search page itself (never `.json`).
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        first = eval_dom(cdp, &dom_expr).await?;
+        let still_empty = first
+            .get("items")
+            .and_then(Value::as_array)
+            .is_none_or(|a| a.is_empty());
+        if still_empty {
+            let html_path = format!("{path}/?{query}");
+            if let Ok(fetched) =
+                fetch_html_parsed(cdp, &html_path, PARSE_SEARCH_JS, "parseRedditSearch(doc)").await
+            {
+                first = fetched;
+            }
+        }
+    }
 
-/// Parse one search listing into the payload. Pure: the unit tests run it on
-/// a real captured listing.
-fn parse_search(
-    raw: &Value,
-    query: &str,
-    sort: Option<String>,
-    time: Option<String>,
-    page: usize,
-) -> Result<SearchPayload> {
-    let children = raw["data"]["children"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let mut items = Vec::new();
+    let mut items: Vec<SearchItem> = Vec::new();
+    let mut seen_urls: HashSet<String> = HashSet::new();
     let mut skipped_ads = 0usize;
-    for c in &children {
-        if items.len() >= page {
+    let mut next_url =
+        ingest_search_batch(&first, &mut items, &mut seen_urls, &mut skipped_ads, limit);
+    let mut seen_pages: HashSet<String> = HashSet::new();
+    let mut requests = 0u32;
+    let mut rate_limited = false;
+    let mut retry_after: Option<String> = None;
+    let mut security_blocked = false;
+    let mut budget_hit = false;
+
+    while items.len() < limit {
+        let Some(url) = next_url.take() else {
+            break;
+        };
+        if !seen_pages.insert(url.clone()) {
             break;
         }
-        if c["kind"].as_str() != Some("t3") {
-            continue;
+        if requests >= MAX_SEARCH_REQUESTS || Instant::now() >= deadline {
+            next_url = Some(url);
+            budget_hit = true;
+            break;
         }
-        let d = &c["data"];
-        // Promoted/promoted-UI posts are ads, not results — serving them as
-        // ordinary items without a word is the confident-but-wrong class.
-        if d["is_created_from_ads_ui"].as_bool() == Some(true)
-            || d["promoted"].as_bool() == Some(true)
-        {
-            skipped_ads += 1;
-            continue;
+        polite_pause().await;
+        requests += 1;
+        match fetch_html_parsed(cdp, &url, PARSE_SEARCH_JS, "parseRedditSearch(doc)").await {
+            Ok(batch) => {
+                let before = items.len();
+                next_url = ingest_search_batch(
+                    &batch,
+                    &mut items,
+                    &mut seen_urls,
+                    &mut skipped_ads,
+                    limit,
+                );
+                if items.len() == before {
+                    break;
+                }
+            }
+            Err(e) => {
+                if is_rate_limit(&e) {
+                    rate_limited = true;
+                    retry_after = retry_after_from_err(&e);
+                } else if is_security_block(&e) {
+                    security_blocked = true;
+                }
+                next_url = Some(url);
+                break;
+            }
         }
-        let title = d["title"].as_str().unwrap_or("").trim();
-        if title.is_empty() {
-            continue;
-        }
-        let permalink = d["permalink"].as_str().unwrap_or("");
-        let url = if permalink.is_empty() {
-            d["url"].as_str().unwrap_or("").to_string()
-        } else if permalink.starts_with('/') {
-            format!("https://www.reddit.com{permalink}")
-        } else {
-            format!("https://www.reddit.com/{permalink}")
-        };
-        let subreddit = d["subreddit_name_prefixed"]
-            .as_str()
-            .map(str::to_string)
-            .or_else(|| d["subreddit"].as_str().map(|s| format!("r/{s}")))
-            .unwrap_or_default();
-        let author = match d["author"].as_str().unwrap_or("") {
-            "" | "[deleted]" => "[deleted]".to_string(),
-            a => format!("u/{a}"),
-        };
-        let selftext = d["selftext"].as_str().unwrap_or("").trim();
-        items.push(SearchItem {
-            title: cut_chars(title, 200),
-            url,
-            subreddit,
-            author,
-            score: as_int(&d["score"]),
-            comments: as_int(&d["num_comments"]),
-            date: as_int(&d["created_utc"]).map(format_epoch),
-            domain: d["domain"].as_str().map(str::to_string),
-            text: (!selftext.is_empty()).then(|| normalize_text(selftext, 240)),
-        });
     }
+
+    Ok(assemble_search(
+        q_str,
+        sort,
+        time,
+        items,
+        limit,
+        next_url.is_some(),
+        skipped_ads,
+        budget_hit,
+        rate_limited,
+        retry_after,
+        security_blocked,
+    ))
+}
+
+fn ingest_search_batch(
+    raw: &Value,
+    items: &mut Vec<SearchItem>,
+    seen_urls: &mut HashSet<String>,
+    skipped_ads: &mut usize,
+    limit: usize,
+) -> Option<String> {
+    *skipped_ads += raw.get("skipped_ads").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let mut overflowed = false;
+    if let Some(arr) = raw.get("items").and_then(Value::as_array) {
+        for it in arr {
+            let title = it.get("title").and_then(Value::as_str).unwrap_or("").trim();
+            let raw_url = it.get("url").and_then(Value::as_str).unwrap_or("").trim();
+            if title.is_empty() || raw_url.is_empty() {
+                continue;
+            }
+            let url = canonical_reddit_url(raw_url);
+            let key = url
+                .split('#')
+                .next()
+                .unwrap_or(&url)
+                .trim_end_matches('/')
+                .to_string();
+            if !seen_urls.insert(key) {
+                continue;
+            }
+            if items.len() >= limit {
+                overflowed = true;
+                break;
+            }
+            let subreddit = it
+                .get("subreddit")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let author = u_prefix(&bare_author(
+                it.get("author")
+                    .and_then(Value::as_str)
+                    .unwrap_or("[deleted]"),
+            ));
+            let text = it
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| normalize_text(s, 240));
+            items.push(SearchItem {
+                title: cut_chars(title, 200),
+                url,
+                subreddit,
+                author,
+                score: it.get("score").and_then(as_int),
+                comments: it.get("comments").and_then(as_int),
+                date: it
+                    .get("date")
+                    .and_then(Value::as_str)
+                    .and_then(normalize_date),
+                domain: it
+                    .get("domain")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
+                text,
+            });
+        }
+    }
+    let next = raw
+        .get("next_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if overflowed && next.is_none() {
+        Some("#more-in-batch".to_string())
+    } else {
+        next
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_search(
+    query: String,
+    sort: Option<String>,
+    time: Option<String>,
+    items: Vec<SearchItem>,
+    limit: usize,
+    has_more: bool,
+    skipped_ads: usize,
+    budget_hit: bool,
+    rate_limited: bool,
+    retry_after: Option<String>,
+    security_blocked: bool,
+) -> SearchPayload {
     let count = items.len();
-    let has_more = raw["data"]["after"].as_str().is_some_and(|a| !a.is_empty());
-    let mut note = has_more.then(|| {
-        if page >= MAX_SEARCH_PAGE {
-            format!(
-                "showing the first {count} results — at Reddit's {MAX_SEARCH_PAGE}-item single-page listing ceiling"
-            )
+    let mut notes: Vec<String> = Vec::new();
+    if rate_limited {
+        let ra = retry_after
+            .map(|r| format!(", retry-after: {r}"))
+            .unwrap_or_default();
+        notes.push(format!(
+            "reddit rate limit reached (HTTP 429{ra}): showing {count} results — wait before retrying"
+        ));
+    } else if security_blocked {
+        notes.push(format!(
+            "reddit's network-security wall interrupted pagination: showing {count} results"
+        ));
+    } else if budget_hit {
+        notes.push(format!(
+            "pagination budget reached: showing the first {count} results"
+        ));
+    } else if has_more {
+        if limit >= MAX_SEARCH_PAGE {
+            notes.push(format!(
+                "showing the first {count} results — at the {MAX_SEARCH_PAGE}-item search extract ceiling"
+            ));
         } else {
-            format!(
-                "showing the first {count} results — reddit pages search listings at {MAX_SEARCH_PAGE} per request (raise limit to fetch more)"
-            )
+            notes.push(format!(
+                "showing the first {count} results — more pages exist (raise limit to fetch more)"
+            ));
         }
-    });
-    if skipped_ads > 0 {
-        let ads = format!("{skipped_ads} promoted post(s) skipped");
-        note = Some(match note {
-            Some(n) => format!("{n}; {ads}"),
-            None => ads,
-        });
     }
-    Ok(SearchPayload {
+    if skipped_ads > 0 {
+        notes.push(format!("{skipped_ads} promoted post(s) skipped"));
+    }
+    let complete = !has_more && !rate_limited && !security_blocked && !budget_hit;
+    let note = if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join("; "))
+    };
+    SearchPayload {
         container: "reddit-search",
-        query: query.to_string(),
+        query,
         sort,
         time,
         count,
-        complete: !has_more,
+        complete,
         note,
         items,
-    })
+    }
 }
 
-/// Percent-decode one param value for the query echo (display only — the
-/// request path replays the page's own encoded bytes).
+/// Percent-decode one param value for the query echo.
 fn decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -300,185 +419,170 @@ fn decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixture() -> Value {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/reddit_search.json");
-        let raw = std::fs::read_to_string(&path).expect("fixture readable");
-        serde_json::from_str(&raw).expect("fixture is JSON")
-    }
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
-    fn target_keeps_result_params_and_drops_the_challenge_handshake() {
-        // The live shape: the page-load JS challenge leaves solution/
-        // js_challenge/jsc_* params on the url (captured 2026-10-01).
-        let params = "?q=best+monitor+for+programming&type=posts&solution=0bb183e5\
-                      &js_challenge=1&jsc_token=2824be&jsc_orig_r=&sort=top&t=year";
-        let (path, query) = search_target("/search/", params).expect("posts search accepted");
-        assert_eq!(path, "/search");
+    fn search_target_sanitizes_and_scopes_subreddit_queries() {
         assert_eq!(
-            query,
-            "q=best+monitor+for+programming&type=posts&sort=top&t=year"
+            search_target("/search/", "?q=best+monitor&sort=top&t=year&js_challenge=1"),
+            Some(("/search".into(), "q=best+monitor&sort=top&t=year".into()))
         );
-
-        // Subreddit-scoped search: same endpoint family.
-        let (path, query) =
-            search_target("/r/rust/search/", "?q=lifetimes&restrict_sr=1&type=posts")
-                .expect("scoped search accepted");
-        assert_eq!(path, "/r/rust/search");
-        assert_eq!(query, "q=lifetimes&restrict_sr=1&type=posts");
-    }
-
-    #[test]
-    fn subreddit_search_paths_stay_scoped_to_the_subreddit() {
-        // New reddit scopes `/r/<sub>/search/?q=…` by the path alone; the
-        // JSON listing at that path searches all of reddit unless
-        // restrict_sr is set.
-        let (path, query) =
-            search_target("/r/rust/search/", "?q=lifetimes&type=posts").expect("accepted");
-        assert_eq!(path, "/r/rust/search");
-        assert_eq!(query, "q=lifetimes&type=posts&restrict_sr=1");
-        // An explicit choice on the page's url is replayed as is.
-        let (_, query) =
-            search_target("/r/rust/search/", "?q=lifetimes&restrict_sr=0").expect("accepted");
-        assert_eq!(query, "q=lifetimes&restrict_sr=0");
-        // Site-wide search stays site-wide.
-        let (_, query) = search_target("/search/", "?q=lifetimes").expect("accepted");
-        assert_eq!(query, "q=lifetimes");
-    }
-
-    #[test]
-    fn target_rejects_non_post_searches_and_missing_queries() {
-        // Community/user searches are not listings of posts.
+        assert_eq!(
+            search_target("/r/rust/search/", "?q=async&type=posts"),
+            Some((
+                "/r/rust/search".into(),
+                "q=async&type=posts&restrict_sr=1".into()
+            ))
+        );
+        assert_eq!(
+            search_target("/r/rust/search/", "?q=async&restrict_sr=0"),
+            Some(("/r/rust/search".into(), "q=async&restrict_sr=0".into()))
+        );
         assert!(search_target("/search/", "?q=rust&type=communities").is_none());
-        assert!(search_target("/search/", "?q=rust&type=users").is_none());
-        // The "All" tab is the no-type search (posts listing) — accepted.
-        assert!(search_target("/search/", "?q=rust&type=all").is_some());
-        // No query at all, or a blank one.
+        assert!(search_target("/search/", "?q=rust&type=people").is_none());
         assert!(search_target("/search/", "?type=posts").is_none());
-        assert!(search_target("/search/", "?q=&type=posts").is_none());
-        // Not a search page.
         assert!(search_target("/r/rust/", "?q=rust").is_none());
-        assert!(search_target("/search-ish/", "?q=rust").is_none());
     }
 
     #[test]
-    fn a_real_listing_parses_with_exact_fields_and_the_query_echo() {
-        let p = parse_search(
-            &fixture(),
-            "best monitor for programming",
+    fn search_batch_dedupes_skips_ads_and_tracks_completion() {
+        let raw = json!({
+            "items": [
+                {
+                    "title": "Async Rust in 2026",
+                    "url": "https://www.reddit.com/r/rust/comments/abc1/async_rust/",
+                    "subreddit": "r/rust",
+                    "author": "u/alice",
+                    "score": 142,
+                    "comments": 37,
+                    "date": "2026-11-20T12:30:00Z",
+                    "text": "Overview of async runtimes."
+                },
+                {
+                    "title": "Duplicate",
+                    "url": "https://www.reddit.com/r/rust/comments/abc1/async_rust",
+                    "subreddit": "r/rust",
+                    "author": "alice"
+                }
+            ],
+            "skipped_ads": 1,
+            "next_url": "/svc/shreddit/search/?q=async&cursor=c2"
+        });
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        let mut ads = 0;
+        let next = ingest_search_batch(&raw, &mut items, &mut seen, &mut ads, 25);
+        assert_eq!(items.len(), 1);
+        assert_eq!(ads, 1);
+        assert_eq!(
+            next.as_deref(),
+            Some("/svc/shreddit/search/?q=async&cursor=c2")
+        );
+        let payload = assemble_search(
+            "async".into(),
             Some("relevance".into()),
             None,
-            100,
-        )
-        .expect("parse");
-        assert_eq!(p.container, "reddit-search");
-        assert_eq!(p.query, "best monitor for programming");
-        assert_eq!(p.sort.as_deref(), Some("relevance"));
-        assert_eq!(p.count, 3);
-        assert_eq!(p.items.len(), 3);
-
-        let first = &p.items[0];
-        assert_eq!(
-            first.title,
-            "Which is the best monitor for programming worth buying?"
+            items,
+            25,
+            true,
+            ads,
+            false,
+            false,
+            None,
+            false,
         );
-        assert_eq!(first.subreddit, "r/Monitors");
-        assert_eq!(first.author, "u/Reasonable_You5995");
-        assert_eq!(first.score, Some(3), "exact score, not a fuzzed one");
-        assert_eq!(first.comments, Some(21));
-        assert_eq!(first.date.as_deref(), Some("2026-09-17 00:16 UTC"));
-        assert_eq!(first.url, "https://www.reddit.com/r/Monitors/comments/1wiegex/which_is_the_best_monitor_for_programming_worth/");
-        assert!(
-            first.text.as_deref().is_some_and(|t| !t.is_empty()),
-            "self-post excerpt present"
-        );
-        // Reddit still has pages of results behind this one.
-        assert!(!p.complete, "listing with `after` is partial");
-        assert!(
-            p.note
-                .as_deref()
-                .is_some_and(|n| n.contains("showing the first 3 results")),
-            "paging note: {:?}",
-            p.note
-        );
-        // At MAX_SEARCH_PAGE, the note must not suggest raising limit further.
-        assert!(
-            !p.note
-                .as_deref()
-                .unwrap_or("")
-                .contains("raise limit to fetch more"),
-            "ceiling note must not give impossible advice: {:?}",
-            p.note
-        );
-        let small = parse_search(&fixture(), "q", None, None, 25).expect("parse");
-        assert!(
-            small
-                .note
-                .as_deref()
-                .is_some_and(|n| n.contains("raise limit to fetch more")),
-            "below ceiling should suggest raising limit: {:?}",
-            small.note
-        );
-        // Field order keeps `container` first (payload contract).
-        let s = serde_json::to_string(&p).unwrap();
-        assert!(s.starts_with("{\"container\":\"reddit-search\""), "{s:.80}");
+        assert_eq!(payload.container, "reddit-search");
+        assert!(!payload.complete);
+        let note = payload.note.as_deref().unwrap_or("");
+        assert!(note.contains("1 promoted post(s) skipped"), "{note}");
+        assert!(note.contains("more pages exist"), "{note}");
     }
 
-    #[test]
-    fn non_post_children_are_filtered_and_empty_listings_stay_honest() {
-        let raw = serde_json::json!({"kind":"Listing","data":{"after":null,"children":[
-            {"kind":"t5","data":{"title":"subreddit"}},
-            {"kind":"t3","data":{"title":"","permalink":"/r/x/comments/1/a/"}},
-            {"kind":"t3","data":{"title":"Real result","permalink":"/r/x/comments/2/b/",
-             "subreddit":"x","subreddit_name_prefixed":"r/x","author":"[deleted]",
-             "score":1,"num_comments":0,"created_utc":0,"domain":"self.x","selftext":""}}
-        ]}});
-        let p = parse_search(&raw, "q", None, None, 100).expect("parse");
-        assert_eq!(p.count, 1, "t5 and blank-title children dropped");
-        assert_eq!(p.items[0].author, "[deleted]");
-        assert_eq!(p.items[0].text, None, "empty selftext stays absent");
-        assert!(p.complete, "no `after` = complete listing");
-        assert!(p.note.is_none(), "no `after` = complete listing");
-
-        let empty = serde_json::json!({"kind":"Listing","data":{"after":null,"children":[]}});
-        let p = parse_search(&empty, "q", None, None, 100).expect("parse");
-        assert_eq!(p.count, 0);
-        assert!(p.items.is_empty());
-    }
-
-    #[test]
-    fn promoted_posts_are_skipped_with_a_note() {
-        let raw = serde_json::json!({"kind":"Listing","data":{"after":null,"children":[
-            {"kind":"t3","data":{"title":"Promoted thing","is_created_from_ads_ui":true,
-             "permalink":"/r/x/comments/1/a/","score":1,"num_comments":0}},
-            {"kind":"t3","data":{"title":"Real result","is_created_from_ads_ui":false,
-             "permalink":"/r/x/comments/2/b/","score":1,"num_comments":0}}
-        ]}});
-        let p = parse_search(&raw, "q", None, None, 100).expect("parse");
-        assert_eq!(p.count, 1);
-        assert_eq!(p.items[0].title, "Real result");
-        assert!(
-            p.note
-                .as_deref()
-                .is_some_and(|n| n.contains("1 promoted post(s) skipped")),
-            "ad skip is disclosed: {:?}",
-            p.note
-        );
-    }
-
-    #[test]
-    fn the_page_cap_trims_the_listing() {
-        let raw = fixture();
-        let p = parse_search(&raw, "q", None, None, 2).expect("parse");
-        assert_eq!(p.count, 2, "caller's cap is honored");
+    #[tokio::test]
+    async fn fetch_search_paginates_via_html_partials_with_zero_json_calls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut exprs = Vec::new();
+            for step in 0..2 {
+                let req = socket.next().await.unwrap().unwrap();
+                let req: Value = serde_json::from_str(req.to_text().unwrap()).unwrap();
+                let expr = req["params"]["expression"].as_str().unwrap().to_string();
+                assert!(
+                    !expr.contains(".json"),
+                    "search must never hit .json endpoints: {expr:.200}"
+                );
+                exprs.push(expr);
+                let value = if step == 0 {
+                    json!({
+                        "items": [{
+                            "title": "First post",
+                            "url": "https://www.reddit.com/r/rust/comments/1/first/",
+                            "subreddit": "r/rust",
+                            "author": "alice",
+                            "score": 50,
+                            "comments": 10
+                        }],
+                        "skipped_ads": 0,
+                        "next_url": "/svc/shreddit/search/?q=rust&cursor=p2"
+                    })
+                } else {
+                    json!({
+                        "s": 200,
+                        "ra": "",
+                        "head": "",
+                        "len": 200,
+                        "data": {
+                            "items": [{
+                                "title": "Second post",
+                                "url": "https://www.reddit.com/r/rust/comments/2/second/",
+                                "subreddit": "r/rust",
+                                "author": "bob",
+                                "score": 25,
+                                "comments": 4
+                            }],
+                            "skipped_ads": 1,
+                            "next_url": null
+                        }
+                    })
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id": req["id"], "result": {"result": {"value": value}}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            exprs
+        });
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let cdp = CdpSession::root(client);
+        let p = fetch_search(&cdp, "/r/rust/search", "q=rust&restrict_sr=1", 10)
+            .await
+            .unwrap();
+        let exprs = task.await.unwrap();
+        assert_eq!(exprs.len(), 2);
+        assert!(exprs[1].contains("/svc/shreddit/search/?q=rust&cursor=p2"));
+        assert_eq!(p.count, 2);
+        assert!(p.complete);
+        assert_eq!(p.items[0].title, "First post");
+        assert_eq!(p.items[1].title, "Second post");
+        assert_eq!(p.note.as_deref(), Some("1 promoted post(s) skipped"));
     }
 
     #[test]
     fn query_decoding_handles_plus_and_percent_escapes() {
         assert_eq!(decode("best+monitor"), "best monitor");
         assert_eq!(decode("%E2%82%AC%20100"), "€ 100");
-        assert_eq!(decode("100%"), "100%", "a stray % is kept");
+        assert_eq!(decode("100%"), "100%");
         assert_eq!(decode("a%2"), "a%2");
     }
 }

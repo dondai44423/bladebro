@@ -624,6 +624,15 @@ impl Page {
         } else {
             Vec::new()
         };
+        let is_reload = matches!(action, crate::action::Action::Reload);
+        if matches!(
+            action,
+            crate::action::Action::Reload
+                | crate::action::Action::Back
+                | crate::action::Action::Forward
+        ) {
+            self.clear_doc_response();
+        }
         let result = crate::action::perform_with_network(
             &self.cdp,
             &mut self.lpm,
@@ -668,6 +677,8 @@ impl Page {
         };
         if delta.navigated {
             self.sync_domain_chrome_and_risk();
+        }
+        if delta.navigated || is_reload {
             if let Some(doc) = self.doc_response().filter(|d| d.status >= 400) {
                 if let Ok(mut a) = self.ambient.lock() {
                     a.push(doc.ambient_note(delta.url.starts_with("chrome-error://")));

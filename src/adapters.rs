@@ -87,13 +87,13 @@ pub fn preview_for_handoff(marker: &Value) -> Option<Value> {
             "container": "reddit-comments",
             "fields": ["author", "date", "depth", "id", "op", "score", "text", "url"],
             "sampled": 0,
-            "note": "schema for Reddit full-thread API adapter (post metadata + complete comment tree; no API call made for preview)",
+            "note": "schema for Reddit full-thread DOM/HTML adapter (post metadata + expanded comment tree; no network call made for preview)",
         })),
         "reddit-search-page" => Some(json!({
             "container": "reddit-search",
             "fields": ["author", "comments", "date", "domain", "score", "subreddit", "text", "title", "url"],
             "sampled": 0,
-            "note": "schema for Reddit search listing API adapter (no API call made for preview)",
+            "note": "schema for Reddit search DOM/HTML adapter (no network call made for preview)",
         })),
         "x-page" => {
             let kind = marker
@@ -146,32 +146,48 @@ pub async fn dispatch(
             if permalink.is_empty() {
                 return Ok(AdapterDispatch::PassThrough);
             }
-            let sort = sort_override.map(str::to_string).unwrap_or_else(|| {
-                marker
-                    .get("sort")
-                    .and_then(Value::as_str)
-                    .unwrap_or("confidence")
-                    .to_string()
-            });
+            let page_path = marker
+                .get("pathname")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .unwrap_or(&permalink)
+                .to_string();
+            let page_sort = marker
+                .get("sort")
+                .and_then(Value::as_str)
+                .unwrap_or("confidence");
+            let (sort, sort_explicit) = match sort_override {
+                Some(s) => (s.to_string(), !s.eq_ignore_ascii_case(page_sort)),
+                None => (page_sort.to_string(), false),
+            };
             let cap = if limit_explicit {
                 limit.clamp(1, crate::reddit::MAX_COMMENT_CAP)
             } else {
                 crate::reddit::DEFAULT_COMMENT_CAP
             };
-            match crate::reddit::fetch_comments(page.cdp_ref(), &permalink, &sort, cap).await {
+            match crate::reddit::fetch_comments(
+                page.cdp_ref(),
+                &permalink,
+                &page_path,
+                &sort,
+                sort_explicit,
+                cap,
+            )
+            .await
+            {
                 Ok(payload) => {
                     let _ = page.take_route_unsettled();
                     Ok(AdapterDispatch::Handled(serde_json::to_value(payload)?))
                 }
                 Err(e) => {
                     let hint = if crate::reddit::is_security_block(&e) {
-                        " (Reddit denied the API request; repeated extracts may remain blocked. DOM coverage is partial; verify complete before treating this as the full thread)"
+                        " (Reddit blocked the expansion request; repeated extracts may remain blocked. DOM coverage is partial; verify complete before treating this as the full thread)"
                     } else {
                         ""
                     };
                     Ok(AdapterDispatch::Fallback {
                         reason: format!(
-                            "\nnote: full-thread fetch failed ({e}); items above are a DOM fallback and may miss collapsed replies{hint}"
+                            "\nnote: full-thread extraction failed ({e}); items above are a DOM fallback and may miss collapsed replies{hint}"
                         ),
                     })
                 }
@@ -195,13 +211,13 @@ pub async fn dispatch(
                 }
                 Err(e) => {
                     let hint = if crate::reddit::is_security_block(&e) {
-                        " (Reddit denied the API request; repeated extracts may remain blocked. DOM coverage is partial)"
+                        " (Reddit blocked the request; repeated extracts may remain blocked. DOM coverage is partial)"
                     } else {
                         ""
                     };
                     Ok(AdapterDispatch::Fallback {
                         reason: format!(
-                            "\nnote: reddit search listing fetch failed ({e}); items above are a DOM fallback{hint}"
+                            "\nnote: reddit search extraction failed ({e}); items above are a DOM fallback{hint}"
                         ),
                     })
                 }
@@ -929,5 +945,53 @@ setupDoc('https://www.google.com/search?q=rust', mkEl('body', {{children:[rso]}}
         assert_eq!(vg["items"][0]["url"], "https://rust-lang.org/");
         assert_eq!(vg["items"][0]["display_url"], "https://rust-lang.org");
         assert_eq!(vg["redirects_unwrapped"], 1);
+    }
+
+    #[test]
+    fn reddit_dom_fallback_scopes_comment_bodies_and_handles_old_reddit_and_search() {
+        let mock_shreddit = format!(
+            r#"{DOM_HARNESS}
+const child = mkEl('shreddit-comment', {{
+  attrs: {{ thingid:'t1_c2', author:'bob', score:'7', depth:'1', permalink:'/r/rust/comments/1xqudci/comment/c2/' }},
+  children: [
+    mkEl('faceplate-timeago', {{ attrs: {{ ts:'2026-11-20T15:00:00Z' }} }}),
+    mkEl('div', {{ attrs: {{ slot:'comment' }}, innerText:'Nested reply body' }}),
+  ]
+}});
+const deletedParent = mkEl('shreddit-comment', {{
+  attrs: {{ thingid:'t1_c1', 'is-comment-deleted':'', 'is-author-deleted':'', depth:'0' }},
+  children: [child]
+}});
+setupDoc('https://www.reddit.com/r/rust/comments/1xqudci/everything_is_becoming_rust_now/', mkEl('body', {{children:[deletedParent]}}));
+"#
+        );
+        let v = run_assembled_in_node(&mock_shreddit, 20, false);
+        assert_eq!(v["container"], "reddit-comments", "{v}");
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["items"][0]["author"], "[deleted]");
+        assert_eq!(
+            v["items"][0]["text"], "[deleted]",
+            "deleted parent must not steal child's [slot=comment] text: {v}"
+        );
+        assert_eq!(v["items"][1]["author"], "u/bob");
+        assert_eq!(v["items"][1]["text"], "Nested reply body");
+        assert_eq!(v["items"][1]["date"], "2026-11-20 15:00");
+
+        let mock_search = format!(
+            r#"{DOM_HARNESS}
+const ad = mkEl('div', {{ attrs: {{ 'data-testid':'search-post-unit', 'is-promoted':'' }}, children: [
+  mkEl('a', {{ attrs: {{ 'data-testid':'post-title', href:'/r/ads/comments/a1/ad/' }}, innerText:'Sponsored ad' }}),
+]}});
+const hit = mkEl('div', {{ attrs: {{ 'data-testid':'search-post-unit' }}, children: [
+  mkEl('a', {{ attrs: {{ 'data-testid':'post-title', href:'/r/rust/comments/1xqudci/rust_now/' }}, innerText:'Everything is becoming Rust now' }}),
+  mkEl('a', {{ attrs: {{ href:'/r/rust/' }}, innerText:'r/rust' }}),
+]}});
+setupDoc('https://www.reddit.com/search/?q=rust', mkEl('body', {{children:[ad, hit]}}));
+"#
+        );
+        let vs = run_assembled_in_node(&mock_search, 20, false);
+        assert_eq!(vs["container"], "reddit-search", "{vs}");
+        assert_eq!(vs["count"], 1, "promoted unit skipped: {vs}");
+        assert_eq!(vs["items"][0]["subreddit"], "r/rust");
     }
 }

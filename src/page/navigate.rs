@@ -479,12 +479,15 @@ impl Page {
         // agent trusts results that never had the filter applied. Observation
         // only — it names what is missing, never why.
         if let Ok(delta) = &r {
-            if delta.navigated {
-                if let Some(doc) = self.doc_response().filter(|d| d.status >= 400) {
-                    if let Ok(mut a) = self.ambient.lock() {
-                        a.push(doc.ambient_note(self.lpm.url().starts_with("chrome-error://")));
-                    }
+            // Surface HTTP 4xx/5xx notices for THIS navigation even when
+            // re-navigating to the same URL (`delta.navigated == false`, e.g.
+            // reloading a rate-limited Reddit thread that returned HTTP 429).
+            if let Some(doc) = self.doc_response().filter(|d| d.status >= 400) {
+                if let Ok(mut a) = self.ambient.lock() {
+                    a.push(doc.ambient_note(self.lpm.url().starts_with("chrome-error://")));
                 }
+            }
+            if delta.navigated {
                 if let Some(note) = nav_params_note(url, self.lpm.url()) {
                     if let Ok(mut a) = self.ambient.lock() {
                         a.push(note);

@@ -1,86 +1,42 @@
-//! Reddit's in-page HTTP layer: the loid gate, JSON fetches, and gate
-//! classification (network-security wall vs JS challenge vs generic failure).
+//! Reddit's in-page HTML/DOM transport layer: observational live-DOM reads,
+//! sequential same-origin HTML partial fetches parsed in-browser via
+//! `DOMParser`, and honest gate/rate-limit classification.
+//!
+//! Zero `.json` endpoints: Shreddit renders and expands comment trees and
+//! search feeds via HTML partials (`/svc/shreddit/more-comments/...`,
+//! `/svc/shreddit/search/...`) and comment permalinks (`div.fold-more`).
+//! Fetching those same-origin HTML paths one at a time matches the web app's
+//! own traffic and avoids the `.json` API network-security blocks.
+
+use serde_json::{json, Value};
 
 use super::*;
 
-/// Reddit gates its JSON paths (`.json`, `/api/info`, subtree listings) on
-/// the `loid` client token: without it they answer with the network-security
-/// wall (HTTP 403) rather than the JS challenge that HTML navigations get.
-/// The token is set by the page-load challenge and persists in the profile,
-/// so it is missing only on a cold profile or mid-challenge. Wait briefly
-/// (the challenge auto-submits in ~1s), then re-serve the page once; give up
-/// honestly rather than burn the sweep on guaranteed 403s.
-pub(super) async fn ensure_loid(cdp: &CdpSession) -> bool {
-    async fn has_loid(cdp: &CdpSession) -> bool {
-        cdp.send(
-            "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": "document.cookie.includes('loid=')",
-                "returnByValue": true,
-            })),
-        )
-        .await
-        .ok()
-        .and_then(|r| {
-            r.get("result")
-                .and_then(|x| x.get("value"))
-                .and_then(|v| v.as_bool())
-        })
-        .unwrap_or(false)
-    }
-
-    if has_loid(cdp).await {
-        return true;
-    }
-    for _ in 0..6 {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        if has_loid(cdp).await {
-            return true;
-        }
-    }
-    // Still tokenless — re-serve the page; the challenge resolves in ~1s
-    // and its solved response sets `loid`.
-    let _ = cdp
-        .send(
-            "Page.reload",
-            Some(serde_json::json!({ "ignoreCache": false })),
-        )
-        .await;
-    let _ = crate::page::wait_for_load(cdp, Duration::from_secs(10)).await;
-    for _ in 0..8 {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        if has_loid(cdp).await {
-            return true;
-        }
-    }
-    false
+/// Evaluate a pure, observational DOM-parsing JS expression in the isolated
+/// world (stale-context resilient across mid-flight redirects).
+pub(super) async fn eval_dom(cdp: &CdpSession, expr: &str) -> Result<Value> {
+    let res = cdp
+        .eval_isolated_with_timeout(expr, true, false, Duration::from_secs(15))
+        .await?;
+    extract_eval_value(&res, "dom read failed")
 }
 
-/// Marker classification for HTML bodies served to reddit API paths: the
-/// network-security wall and the unsolved JS challenge both mean "stop the
-/// sweep — this is a gate, not a gap". Anything else keeps the generic
-/// HTTP / parse error.
-pub(super) fn classify_gate_body(path: &str, text: &str) -> Option<BladeError> {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("blocked by network security") || lower.contains("whoa there, pardner") {
-        return Some(BladeError::Other(format!(
-            "reddit: network-security block (API denied; repeated requests may remain blocked) on {path}"
-        )));
-    }
-    if lower.contains("js_challenge") || lower.contains("requestsubmit") {
-        return Some(BladeError::Other(format!(
-            "reddit: JS challenge served to an API path on {path}"
-        )));
-    }
-    None
-}
-
-/// Fetch one same-origin reddit JSON path from inside the page.
-pub(super) async fn fetch_json(cdp: &CdpSession, path: &str) -> Result<Value> {
-    for attempt in 0..3 {
-        match fetch_json_once(cdp, path).await {
-            Err(e) if attempt < 2 && transient_read(&e) => {
-                tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await;
+/// Fetch one same-origin Reddit HTML path (partial or permalink) sequentially
+/// from page context and parse it inside the browser with `DOMParser`,
+/// returning only the compact structured payload.
+///
+/// Retries at most once on transient network/5xx/stale-context errors; never
+/// retries HTTP 403, HTTP 429, or network-security/challenge gates.
+pub(super) async fn fetch_html_parsed(
+    cdp: &CdpSession,
+    path: &str,
+    parser_lib: &str,
+    parse_call: &str,
+) -> Result<Value> {
+    for attempt in 0..2 {
+        match fetch_html_parsed_once(cdp, path, parser_lib, parse_call).await {
+            Err(e) if attempt == 0 && transient_read(&e) => {
+                tokio::time::sleep(Duration::from_millis(350)).await;
             }
             result => return result,
         }
@@ -88,141 +44,201 @@ pub(super) async fn fetch_json(cdp: &CdpSession, path: &str) -> Result<Value> {
     Err(BladeError::Other("reddit: read retries exhausted".into()))
 }
 
-// Only safe GET observations, never challenge denial or rate limiting. An
-// unanswered CDP eval is not replayed: its pending fetch may still be alive.
 fn transient_read(error: &BladeError) -> bool {
+    if CdpSession::is_stale_context_err(error) {
+        return true;
+    }
     matches!(error, BladeError::Other(message) if ["HTTP 0", "HTTP 502", "HTTP 503", "HTTP 504"].iter().any(|suffix| message.ends_with(suffix)))
 }
 
-async fn fetch_json_once(cdp: &CdpSession, path: &str) -> Result<Value> {
-    let url_js = serde_json::to_string(path)?;
+async fn fetch_html_parsed_once(
+    cdp: &CdpSession,
+    path: &str,
+    parser_lib: &str,
+    parse_call: &str,
+) -> Result<Value> {
+    let path_js = serde_json::to_string(path)?;
+    // Parse inside the browser so raw HTML (50–300 KB per partial) never
+    // crosses the CDP bridge. Gate snippets (first 2 KB) are returned only on
+    // non-200 or empty-parse responses for accurate block classification.
     let expr = format!(
-        "(async()=>{{try{{const c=new AbortController();const t=setTimeout(()=>c.abort(),{PAGE_FETCH_TIMEOUT_MS});\
-const r=await fetch({url_js},{{credentials:'include',signal:c.signal}});clearTimeout(t);const x=await r.text();\
-return {{s:r.status,t:x}};}}catch(e){{return {{s:0,t:String(e)}}}}}})()"
+        "(async()=>{{try{{\
+{parser_lib}\
+const c=new AbortController();\
+const tm=setTimeout(()=>c.abort(),{PAGE_FETCH_TIMEOUT_MS});\
+const r=await fetch({path_js},{{credentials:'include',headers:{{'Accept':'text/html,application/xhtml+xml,*/*;q=0.8'}},signal:c.signal}});\
+clearTimeout(tm);\
+const ra=(r.headers&&typeof r.headers.get==='function')?(r.headers.get('retry-after')||''):'';\
+const html=await r.text();\
+if(r.status!==200)return {{s:r.status,ra,head:html.slice(0,2500),len:html.length}};\
+const doc=new DOMParser().parseFromString(html,'text/html');\
+const data={parse_call};\
+return {{s:200,ra,data,head:html.length<25000?html.slice(0,2500):'',len:html.length}};\
+}}catch(e){{return {{s:0,ra:'',head:String(e).slice(0,500),len:0}};}}}})()"
     );
     let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
+        .eval_isolated_with_timeout(
+            &expr,
+            true,
+            true,
+            Duration::from_millis(PAGE_FETCH_TIMEOUT_MS + 5_000),
         )
         .await?;
-    if let Some(exc) = res.get("exceptionDetails") {
-        let msg = exc
-            .get("exception")
-            .and_then(|e| e.get("description"))
-            .and_then(|d| d.as_str())
-            .unwrap_or("fetch failed");
-        return Err(BladeError::Other(format!(
-            "reddit: {}",
-            crate::platform::truncate_utf8(msg, 200)
-        )));
-    }
-    let val = res
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let val = extract_eval_value(&res, "html fetch failed")?;
     let status = val["s"].as_i64().unwrap_or(0);
-    let text = val["t"].as_str().unwrap_or_default();
+    let retry_after = val["ra"].as_str().unwrap_or("").trim();
+    let head = val["head"].as_str().unwrap_or("");
+    let len = val["len"].as_u64().unwrap_or(0);
+
     if status == 429 {
-        return Err(BladeError::Other("reddit: rate limited (HTTP 429)".into()));
+        return Err(rate_limit_error(retry_after));
     }
     if status != 200 {
-        return Err(classify_gate_body(path, text)
+        return Err(classify_gate_body(path, head)
             .unwrap_or_else(|| BladeError::Other(format!("reddit: GET {path} → HTTP {status}"))));
     }
-    if text.trim().is_empty() {
+    if len == 0 {
         return Err(BladeError::Other(
             "reddit: empty response (throttled?)".into(),
         ));
     }
-    serde_json::from_str(text).map_err(|e| {
-        classify_gate_body(path, text).unwrap_or_else(|| {
-            BladeError::Other(format!("reddit: non-JSON response from {path} ({e})"))
-        })
-    })
+    let data = val.get("data").cloned().unwrap_or(Value::Null);
+    let has_items = data
+        .get("comments")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+        || data
+            .get("items")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        || data
+            .get("partials")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        || data
+            .get("folds")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+    // Only inspect a 200 body for WAF/challenge walls when parsing produced no
+    // comments/items/controls — real comment text can mention "blocked by
+    // network security" without the response being a block page.
+    if !has_items && !head.is_empty() {
+        if let Some(gate) = classify_gate_body(path, head) {
+            return Err(gate);
+        }
+    }
+    Ok(data)
 }
 
-/// Fetch several reddit JSON paths concurrently in one CDP round-trip.
-/// Each URL resolves to `Ok(value)` / `Err(reason)` independently.
-pub(super) async fn fetch_json_many(
-    cdp: &CdpSession,
-    urls: &[String],
-) -> Result<Vec<Result<Value>>> {
-    let urls_js = serde_json::to_string(urls)?;
-    let expr = format!(
-        "(async()=>{{const us={urls_js};return await Promise.all(us.map(u=>{{const c=new AbortController();\
-const tm=setTimeout(()=>c.abort(),{PAGE_FETCH_TIMEOUT_MS});\
-return fetch(u,{{credentials:'include',signal:c.signal}}).then(r=>r.text().then(t=>({{s:r.status,t}})))\
-.catch(e=>({{s:0,t:String(e)}})).finally(()=>clearTimeout(tm));}}));}})()"
-    );
-    let res = cdp
-        .send(
-            "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": expr,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-        )
-        .await?;
+fn extract_eval_value(res: &Value, fallback: &str) -> Result<Value> {
     if let Some(exc) = res.get("exceptionDetails") {
         let msg = exc
             .get("exception")
             .and_then(|e| e.get("description"))
             .and_then(|d| d.as_str())
-            .unwrap_or("batch fetch failed");
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or(fallback);
         return Err(BladeError::Other(format!(
             "reddit: {}",
-            crate::platform::truncate_utf8(msg, 200)
+            crate::platform::truncate_utf8(msg.lines().next().unwrap_or(msg), 200)
         )));
     }
-    let value = res
+    Ok(res
         .get("result")
         .and_then(|r| r.get("value"))
         .cloned()
-        .unwrap_or(Value::Null);
-    let arr = value.as_array().cloned().unwrap_or_default();
-    let mut out = Vec::with_capacity(arr.len());
-    for (item, url) in arr.iter().zip(urls) {
-        let status = item["s"].as_i64().unwrap_or(0);
-        let text = item["t"].as_str().unwrap_or_default();
-        if status == 429 {
-            out.push(Err(BladeError::Other("rate limited (HTTP 429)".into())));
-        } else if status != 200 {
-            out.push(Err(classify_gate_body(url, text)
-                .unwrap_or_else(|| BladeError::Other(format!("HTTP {status}")))));
-        } else if text.trim().is_empty() {
-            out.push(Err(BladeError::Other("empty response (throttled?)".into())));
-        } else {
-            out.push(serde_json::from_str(text).map_err(|e| {
-                classify_gate_body(url, text)
-                    .unwrap_or_else(|| BladeError::Other(format!("non-JSON response ({e})")))
-            }));
-        }
-    }
-    Ok(out)
+        .unwrap_or(Value::Null))
 }
 
-/// Rate-limit signal: Reddit throttles with 429s (and empty bodies). Match
-/// the exact endings the fetchers above mint for those, never a bare
-/// "429"/"throttled": other errors carry the request path, and base36 ids
-/// or a subreddit name can spell either (a plain HTTP 500 then read as
-/// "rate limit, retry in a minute").
+/// Format an HTTP 429 error preserving any `Retry-After` header value.
+pub(super) fn rate_limit_error(retry_after: &str) -> BladeError {
+    let ra = retry_after.trim();
+    if ra.is_empty() {
+        BladeError::Other("reddit: rate limited (HTTP 429)".into())
+    } else {
+        let suffix = if ra.chars().all(|c| c.is_ascii_digit()) {
+            format!("{ra}s")
+        } else {
+            crate::platform::truncate_utf8(ra, 64).to_string()
+        };
+        BladeError::Other(format!(
+            "reddit: rate limited (HTTP 429, retry-after: {suffix})"
+        ))
+    }
+}
+
+/// Marker classification for HTML bodies served as Reddit WAF/challenge gates:
+/// both mean "stop the sweep immediately — this is a gate, not a gap".
+pub(super) fn classify_gate_body(path: &str, text: &str) -> Option<BladeError> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("blocked by network security") || lower.contains("whoa there, pardner") {
+        return Some(BladeError::Other(format!(
+            "reddit: network-security block (repeated requests may remain blocked) on {path}"
+        )));
+    }
+    if lower.contains("js_challenge")
+        || lower.contains("requestsubmit")
+        || lower.contains("prove your humanity")
+    {
+        return Some(BladeError::Other(format!(
+            "reddit: challenge gate served on {path}"
+        )));
+    }
+    if lower.contains("too many requests") {
+        return Some(BladeError::Other("reddit: rate limited (HTTP 429)".into()));
+    }
+    None
+}
+
+/// Rate-limit signal: Reddit throttles with HTTP 429 (with optional
+/// `retry-after`) or empty responses. Never match bare "429" anywhere in a
+/// request path (base36 ids / subreddit names can contain "429").
 pub(super) fn is_rate_limit(e: &BladeError) -> bool {
     let s = e.to_string();
-    s.ends_with("rate limited (HTTP 429)") || s.ends_with("empty response (throttled?)")
+    s.contains("reddit: rate limited (HTTP 429")
+        || s.ends_with("rate limited (HTTP 429)")
+        || s.ends_with("empty response (throttled?)")
 }
 
-/// Security-wall signal: the sweep hit reddit's network-security block page
-/// and must stop — it is transient, and hammering extends it.
+/// Extract the `retry-after` suffix (if present) from a rate-limit error.
+pub(super) fn retry_after_from_err(e: &BladeError) -> Option<String> {
+    let s = e.to_string();
+    let idx = s.find("retry-after: ")?;
+    let rest = &s[idx + "retry-after: ".len()..];
+    let end = rest.find(')')?;
+    let val = rest[..end].trim();
+    (!val.is_empty()).then(|| val.to_string())
+}
+
+/// Security-wall or challenge-gate signal: stop the sweep immediately so we
+/// never hammer a blocked session.
 pub fn is_security_block(e: &BladeError) -> bool {
-    e.to_string().contains("network-security block")
+    let s = e.to_string();
+    s.contains("network-security block") || s.contains("challenge gate served")
+}
+
+/// Short polite jitter between sequential partial fetches (120–240ms) so
+/// expansion stays strictly serial and avoids burst rate-scoring.
+pub(super) async fn polite_pause() {
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis() as u64 % 120)
+        .unwrap_or(60);
+    tokio::time::sleep(Duration::from_millis(120 + jitter)).await;
+}
+
+/// Build an isolated DOM-read expression wrapping a parser library and call.
+pub(super) fn dom_parse_expr(parser_lib: &str, call_expr: &str) -> String {
+    format!("(()=>{{{parser_lib}return {call_expr};}})()")
+}
+
+/// Helper to build a JSON-serialized options object for JS parsers.
+pub(super) fn opts_json(is_fragment: bool, fallback_parent: &str) -> String {
+    json!({
+        "isFragment": is_fragment,
+        "fallbackParent": fallback_parent,
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -232,25 +248,32 @@ mod retry_tests {
     use serde_json::json;
     use tokio_tungstenite::tungstenite::Message;
 
-    async fn fixture(statuses: Vec<i64>) -> (CdpSession, tokio::task::JoinHandle<usize>) {
+    async fn fixture(
+        responses: Vec<(i64, &'static str, &'static str)>,
+    ) -> (CdpSession, tokio::task::JoinHandle<usize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let mut count = 0;
-            for status in statuses {
+            for (status, ra, head) in responses {
                 let request = socket.next().await.unwrap().unwrap();
                 let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
                 assert_eq!(request["method"], "Runtime.evaluate");
-                let body = if status == 200 {
-                    "{\"ok\":true}"
-                } else if status == 403 {
-                    "blocked by network security"
+                let val = if status == 200 {
+                    json!({"s": 200, "ra": ra, "data": {"comments": [{"id": "c1"}]}, "head": head, "len": 120})
                 } else {
-                    "temporary server failure"
+                    json!({"s": status, "ra": ra, "head": head, "len": head.len()})
                 };
-                socket.send(Message::Text(json!({"id":request["id"],"result":{"result":{"value":{"s":status,"t":body}}}}).to_string().into())).await.unwrap();
+                socket
+                    .send(Message::Text(
+                        json!({"id": request["id"], "result": {"result": {"value": val}}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
                 count += 1;
             }
             count
@@ -262,25 +285,54 @@ mod retry_tests {
     }
 
     #[tokio::test]
-    async fn transient_get_recovers_but_denials_never_retry() {
-        let (cdp, task) = fixture(vec![503, 502, 200]).await;
-        assert_eq!(fetch_json(&cdp, "/fixture.json").await.unwrap()["ok"], true);
-        assert_eq!(task.await.unwrap(), 3);
-        for status in [403, 429] {
-            let (cdp, task) = fixture(vec![status]).await;
-            assert!(fetch_json(&cdp, "/fixture.json").await.is_err());
-            assert_eq!(task.await.unwrap(), 1);
-        }
+    async fn transient_503_recovers_once_but_403_and_429_never_retry() {
+        let (cdp, task) = fixture(vec![(503, "", "unavailable"), (200, "", "")]).await;
+        let v = fetch_html_parsed(&cdp, "/svc/shreddit/more-comments/r/rust/t3_abc", "", "{}")
+            .await
+            .unwrap();
+        assert_eq!(v["comments"][0]["id"], "c1");
+        assert_eq!(task.await.unwrap(), 2);
+
+        let (cdp, task) = fixture(vec![(403, "", "You've been blocked by network security")]).await;
+        let err = fetch_html_parsed(&cdp, "/svc/shreddit/more-comments/r/rust/t3_abc", "", "{}")
+            .await
+            .unwrap_err();
+        assert!(is_security_block(&err), "{err}");
+        assert_eq!(task.await.unwrap(), 1);
+
+        let (cdp, task) = fixture(vec![(429, "45", "Too Many Requests")]).await;
+        let err = fetch_html_parsed(&cdp, "/svc/shreddit/more-comments/r/rust/t3_abc", "", "{}")
+            .await
+            .unwrap_err();
+        assert!(is_rate_limit(&err), "{err}");
+        assert_eq!(retry_after_from_err(&err).as_deref(), Some("45s"));
+        assert_eq!(task.await.unwrap(), 1);
     }
 
     #[tokio::test]
-    async fn permanent_transient_read_stops_after_three_attempts() {
-        let (cdp, task) = fixture(vec![503, 503, 503]).await;
-        let error = fetch_json(&cdp, "/fixture.json").await.unwrap_err();
-        assert!(error.to_string().contains("HTTP 503"));
-        assert_eq!(task.await.unwrap(), 3);
+    async fn permanent_503_stops_after_single_retry() {
+        let (cdp, task) = fixture(vec![(503, "", "fail"), (503, "", "fail")]).await;
+        let err = fetch_html_parsed(&cdp, "/svc/shreddit/more-comments/r/rust/t3_abc", "", "{}")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 503"), "{err}");
+        assert_eq!(task.await.unwrap(), 2);
         assert!(!transient_read(&BladeError::Timeout(Duration::from_secs(
             5
         ))));
+    }
+
+    #[test]
+    fn rate_limit_never_false_matches_path_substrings() {
+        let ok_500 = BladeError::Other(
+            "reddit: GET /r/throttled/comments/1ab429c/comment/k2xq/ → HTTP 500".into(),
+        );
+        assert!(!is_rate_limit(&ok_500));
+        assert!(is_rate_limit(&rate_limit_error("")));
+        assert!(is_rate_limit(&rate_limit_error("60")));
+        assert_eq!(
+            retry_after_from_err(&rate_limit_error("60")).as_deref(),
+            Some("60s")
+        );
     }
 }

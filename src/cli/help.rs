@@ -231,7 +231,7 @@ fn command_help_json(cmd: &str) -> Option<Value> {
                 "bladebro see --find \"Submit\"",
                 "bladebro see --logs network"
             ],
-            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it attempts the full comment tree; complete/partial disclose API denial and missing replies", "extract=auto envelope: container,count,items + page_total/partial/paged when the page claims more results than the DOM holds, sponsored (paid placements), duplicates_removed, redirects_unwrapped/redirects_unresolved — each explained by a note line"]
+            "notes": ["extract=auto is the first move on list/search/product/profile pages — one call returns structured items; on Reddit post pages it expands the comment tree via HTML partials and deep continuation links (no .json API); complete/partial disclose rate limits, blocks, and unexpanded replies", "extract=auto envelope: container,count,items + page_total/partial/paged when the page claims more results than the DOM holds, sponsored (paid placements), duplicates_removed, redirects_unwrapped/redirects_unresolved — each explained by a note line"]
         }),
         "act" => json!({
             "usage": "bladebro act <action> [target] [value] [--flags]",

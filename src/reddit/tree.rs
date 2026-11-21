@@ -1,253 +1,390 @@
-//! Reddit listing parsing + thread rendering: listing JSON → tree → flat
-//! thread-ordered items, plus the shared value/format helpers.
+//! Reddit DOM/HTML comment-tree builder + lossless DFS thread renderer.
+//!
+//! Ingests structured snapshots produced by `js/parse_thread.js` (initial DOM,
+//! `<faceplate-partial>` HTML fragments, and `div.fold-more` comment permalink
+//! HTML pages) into a parent-linked `Tree`, then renders flat thread-ordered
+//! items with exact nesting depth and zero dropped or duplicated comments.
+
+use std::collections::{HashMap, HashSet};
+
+use serde_json::Value;
 
 use super::*;
 
-/// Parse `[postListing, commentListing]` into post meta + a fresh tree.
-pub(super) fn parse_discussion(raw: &Value) -> Result<(PostMeta, Tree)> {
-    let arr = raw
-        .as_array()
-        .ok_or_else(|| BladeError::Other("reddit: discussion payload is not a listing".into()))?;
-    let post_data = arr
-        .first()
-        .and_then(|l| l.get("data"))
-        .and_then(|d| d.get("children"))
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("data"))
-        .ok_or_else(|| BladeError::Other("reddit: post object missing from payload".into()))?;
+#[derive(Clone, Debug)]
+pub(super) struct PartialTask {
+    pub url: String,
+    pub parent_id: String,
+    pub claimed: Option<i64>,
+}
 
-    let post_id = post_data["id"].as_str().unwrap_or_default().to_string();
+#[derive(Clone, Debug)]
+pub(super) struct FoldTask {
+    pub url: String,
+    pub parent_id: String,
+    pub comment_id: String,
+}
+
+#[derive(Debug)]
+pub(super) struct ParsedBatch {
+    pub post: Option<PostMeta>,
+    pub post_id: String,
+    pub post_permalink: String,
+    pub post_author_bare: String,
+    pub comments: Vec<RawComment>,
+    pub partials: Vec<PartialTask>,
+    pub folds: Vec<FoldTask>,
+    pub clickable_only_partials: usize,
+    pub legacy_more_count: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct RawComment {
+    pub id: String,
+    pub parent_id: String,
+    pub author: String,
+    pub score: Option<i64>,
+    pub depth: Option<usize>,
+    pub date: Option<String>,
+    pub permalink: String,
+    pub body: String,
+}
+
+/// One comment node stored in the thread tree.
+pub(super) struct Node {
+    pub author: String,
+    pub score: Option<i64>,
+    pub date: Option<String>,
+    pub hint_depth: Option<usize>,
+    pub body: String,
+    pub permalink: String,
+}
+
+#[derive(Default)]
+pub(super) struct Tree {
+    pub post_id: String,
+    pub post_author: String,
+    pub post_permalink: String,
+    pub nodes: HashMap<String, Node>,
+    /// Deterministic insertion order of comment IDs.
+    pub order: Vec<String>,
+    /// parent bare id → ordered child bare ids.
+    pub children: HashMap<String, Vec<String>>,
+    /// child bare id → recorded parent bare id.
+    pub parents: HashMap<String, String>,
+}
+
+/// Decode one `parseRedditThread(...)` JSON payload into typed Rust structs.
+pub(super) fn decode_batch(raw: &Value, fallback_post_id: &str) -> ParsedBatch {
+    let mut post_id = raw["post_id"].as_str().unwrap_or("").trim().to_string();
     if post_id.is_empty() {
-        return Err(BladeError::Other(
-            "reddit: post id missing from payload".into(),
-        ));
+        post_id = fallback_post_id.to_string();
     }
-    let post_author = post_data["author"]
-        .as_str()
-        .unwrap_or("[deleted]")
-        .to_string();
-    let permalink = post_data["permalink"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let subreddit = post_data["subreddit"].as_str().unwrap_or_default();
-    let body = post_data["selftext"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| normalize_text(s, POST_BODY_CAP));
 
-    let post = PostMeta {
-        title: post_data["title"].as_str().unwrap_or_default().to_string(),
-        author: u_prefix(&post_author),
-        subreddit: if subreddit.is_empty() {
-            String::new()
-        } else {
-            format!("r/{subreddit}")
-        },
-        score: as_int(&post_data["score"]),
-        comments: as_int(&post_data["num_comments"]),
-        date: as_epoch(&post_data["created_utc"]).map(format_epoch),
-        url: if permalink.starts_with('/') {
-            format!("https://www.reddit.com{permalink}")
-        } else {
-            format!("https://www.reddit.com/{permalink}")
-        },
-        body,
-    };
-
-    let mut tree = Tree {
-        post_id: post_id.clone(),
-        post_author,
-        post_permalink: permalink,
-        ..Default::default()
-    };
-    if let Some(kids) = arr
-        .get(1)
-        .and_then(|l| l.get("data"))
-        .and_then(|d| d.get("children"))
-        .and_then(|c| c.as_array())
-    {
-        walk(&mut tree, &post_id, kids);
-    }
-    Ok((post, tree))
-}
-
-/// Walk a comment listing (recursively through `replies`) into the tree.
-fn walk(tree: &mut Tree, parent: &str, children: &[Value]) {
-    for c in children {
-        match c["kind"].as_str().unwrap_or_default() {
-            "t1" => {
-                let d = &c["data"];
-                let Some(id) = d["id"].as_str() else { continue };
-                let id = id.to_string();
-                tree.nodes.entry(id.clone()).or_insert_with(|| Node {
-                    author: d["author"].as_str().unwrap_or("[deleted]").to_string(),
-                    score: as_int(&d["score"]),
-                    created: as_epoch(&d["created_utc"]),
-                    body: d["body"].as_str().unwrap_or_default().to_string(),
-                    permalink: d["permalink"].as_str().unwrap_or_default().to_string(),
-                });
-                tree.children
-                    .entry(parent.to_string())
-                    .or_default()
-                    .push(id.clone());
-                if let Some(kids) = d
-                    .get("replies")
-                    .and_then(|r| r.get("data"))
-                    .and_then(|dd| dd.get("children"))
-                    .and_then(|k| k.as_array())
-                {
-                    walk(tree, &id, kids);
-                }
-            }
-            "more" => {
-                let d = &c["data"];
-                let parent_full = d["parent_id"].as_str().unwrap_or_default();
-                let ids: Vec<String> = d["children"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                tree.stubs.push(Stub {
-                    parent: strip_prefix(parent_full).to_string(),
-                    top_level: parent_full.starts_with("t3_"),
-                    count: as_int(&d["count"]).unwrap_or(0),
-                    ids,
-                });
-            }
-            _ => {}
+    let mut post_permalink = String::new();
+    let mut post_author_bare = String::new();
+    let post = raw.get("post").and_then(Value::as_object).map(|p| {
+        if let Some(id) = p
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            post_id = id.to_string();
         }
-    }
-}
+        let author_raw = p
+            .get("author")
+            .and_then(Value::as_str)
+            .unwrap_or("[deleted]");
+        post_author_bare = bare_author(author_raw);
+        let permalink = p
+            .get("permalink")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        post_permalink = permalink.clone();
+        let url = p
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| canonical_reddit_url(&permalink));
+        let body = p
+            .get("body")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| normalize_text(s, POST_BODY_CAP));
+        let date = p
+            .get("date")
+            .and_then(Value::as_str)
+            .and_then(normalize_date);
+        PostMeta {
+            title: p
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            author: u_prefix(&post_author_bare),
+            subreddit: p
+                .get("subreddit")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            score: p.get("score").and_then(as_int),
+            comments: p.get("comments").and_then(as_int),
+            date,
+            url,
+            body,
+        }
+    });
 
-/// Parse a comment-permalink payload
-/// (`[postListing, listingOfTheComment]`) into the comment's subtree.
-pub(super) fn parse_subtree(raw: &Value) -> Result<(String, Tree)> {
-    let arr = raw
-        .as_array()
-        .ok_or_else(|| BladeError::Other("reddit: subtree payload is not a listing".into()))?;
-    let first = arr
-        .get(1)
-        .and_then(|l| l.get("data"))
-        .and_then(|d| d.get("children"))
-        .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .ok_or_else(|| BladeError::Other("reddit: comment subtree is empty".into()))?;
-    if first["kind"].as_str() != Some("t1") {
-        return Err(BladeError::Other(
-            "reddit: comment subtree unavailable (deleted or removed)".into(),
-        ));
-    }
-    let root = first["data"]["id"].as_str().unwrap_or_default().to_string();
-    if root.is_empty() {
-        return Err(BladeError::Other(
-            "reddit: comment subtree has no root id".into(),
-        ));
-    }
-    let mut sub = Tree::default();
-    walk(&mut sub, "", std::slice::from_ref(first));
-    sub.children.remove("");
-    Ok((root, sub))
-}
-
-/// Merge a fetched subtree into the tree. The fetched children of the root
-/// are authoritative and complete; anything previously known that the fetch
-/// omitted is kept after them.
-pub(super) fn merge_subtree(tree: &mut Tree, root: &str, sub: Tree) {
-    for (id, node) in sub.nodes {
-        tree.nodes.insert(id, node);
-    }
-    for (pid, kids) in sub.children {
-        if pid == root {
-            let mut merged = kids;
-            if let Some(old) = tree.children.get(&pid) {
-                for k in old {
-                    if !merged.contains(k) {
-                        merged.push(k.clone());
+    let comments = raw
+        .get("comments")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let id = strip_prefix(c.get("id")?.as_str()?).trim().to_string();
+                    if id.is_empty() {
+                        return None;
                     }
-                }
-            }
-            tree.children.insert(pid, merged);
-        } else {
-            tree.children.insert(pid, kids);
-        }
+                    let parent_id = c
+                        .get("parent_id")
+                        .and_then(Value::as_str)
+                        .map(strip_prefix)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let author = bare_author(
+                        c.get("author")
+                            .and_then(Value::as_str)
+                            .unwrap_or("[deleted]"),
+                    );
+                    let score = c.get("score").and_then(as_int);
+                    let depth = c
+                        .get("depth")
+                        .and_then(as_int)
+                        .and_then(|d| usize::try_from(d).ok());
+                    let date = c
+                        .get("date")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_date);
+                    let permalink = c
+                        .get("permalink")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let body = c
+                        .get("body")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    Some(RawComment {
+                        id,
+                        parent_id,
+                        author,
+                        score,
+                        depth,
+                        date,
+                        permalink,
+                        body,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let partials = raw
+        .get("partials")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let url = p.get("url")?.as_str()?.trim().to_string();
+                    if url.is_empty() {
+                        return None;
+                    }
+                    let parent_id = p
+                        .get("parent_id")
+                        .and_then(Value::as_str)
+                        .map(strip_prefix)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let claimed = p.get("claimed").and_then(as_int);
+                    Some(PartialTask {
+                        url,
+                        parent_id,
+                        claimed,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let folds = raw
+        .get("folds")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|f| {
+                    let url = f.get("url")?.as_str()?.trim().to_string();
+                    if url.is_empty() {
+                        return None;
+                    }
+                    let parent_id = f
+                        .get("parent_id")
+                        .and_then(Value::as_str)
+                        .map(strip_prefix)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let comment_id = f
+                        .get("comment_id")
+                        .and_then(Value::as_str)
+                        .map(strip_prefix)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    Some(FoldTask {
+                        url,
+                        parent_id,
+                        comment_id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let clickable_only_partials = raw
+        .get("clickable_only_partials")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let legacy_more_count = raw
+        .get("legacy_more_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+
+    ParsedBatch {
+        post,
+        post_id,
+        post_permalink,
+        post_author_bare,
+        comments,
+        partials,
+        folds,
+        clickable_only_partials,
+        legacy_more_count,
     }
-    tree.children.entry(root.to_string()).or_default();
-    // Stubs discovered inside the subtree resolve after the current ones.
-    tree.stubs.extend(sub.stubs);
 }
 
-/// Attach `/api/info` things under their real parent; returns how many were
-/// t1 comments.
-pub(super) fn attach_info_things(
+/// Merge parsed comments into the tree without duplicating existing nodes or
+/// corrupting established parent links. Returns how many new comments arrived.
+pub(super) fn ingest_comments(
     tree: &mut Tree,
-    things: &[Value],
+    comments: Vec<RawComment>,
     fallback_parent: &str,
 ) -> usize {
-    let mut got = 0usize;
-    for t in things {
-        if t["kind"].as_str() != Some("t1") {
+    let mut added = 0usize;
+    for c in comments {
+        if let Some(existing) = tree.nodes.get_mut(&c.id) {
+            if existing.body.trim().is_empty() && !c.body.trim().is_empty() {
+                existing.body = c.body;
+            }
+            if existing.date.is_none() && c.date.is_some() {
+                existing.date = c.date;
+            }
+            if existing.score.is_none() && c.score.is_some() {
+                existing.score = c.score;
+            }
+            if existing.permalink.is_empty() && !c.permalink.is_empty() {
+                existing.permalink = c.permalink;
+            }
+            if existing.author == "[deleted]" && c.author != "[deleted]" {
+                existing.author = c.author;
+            }
             continue;
         }
-        let d = &t["data"];
-        let Some(id) = d["id"].as_str() else { continue };
-        let id = id.to_string();
+
+        let mut parent = if !c.parent_id.is_empty() && c.parent_id != c.id {
+            c.parent_id
+        } else if !fallback_parent.is_empty() && fallback_parent != c.id {
+            fallback_parent.to_string()
+        } else {
+            tree.post_id.clone()
+        };
+        if parent.is_empty() {
+            parent = tree.post_id.clone();
+        }
+
         tree.nodes.insert(
-            id.clone(),
+            c.id.clone(),
             Node {
-                author: d["author"].as_str().unwrap_or("[deleted]").to_string(),
-                score: as_int(&d["score"]),
-                created: as_epoch(&d["created_utc"]),
-                body: d["body"].as_str().unwrap_or_default().to_string(),
-                permalink: d["permalink"].as_str().unwrap_or_default().to_string(),
+                author: c.author,
+                score: c.score,
+                date: c.date,
+                hint_depth: c.depth,
+                body: c.body,
+                permalink: c.permalink,
             },
         );
-        let parent = d["parent_id"]
-            .as_str()
-            .map(strip_prefix)
-            .unwrap_or(fallback_parent);
-        let list = tree.children.entry(parent.to_string()).or_default();
-        if !list.contains(&id) {
-            list.push(id);
+        tree.order.push(c.id.clone());
+        tree.parents.insert(c.id.clone(), parent.clone());
+        let kids = tree.children.entry(parent).or_default();
+        if !kids.contains(&c.id) {
+            kids.push(c.id);
         }
-        got += 1;
+        added += 1;
     }
-    got
+    added
 }
 
-/// Thread-ordered (DFS) render, trimmed at `cap`; returns whether trimming
-/// happened.
-pub(super) fn render_items(tree: &Tree, cap: usize) -> (Vec<CommentItem>, bool) {
-    let mut items = Vec::new();
-    let mut capped = false;
-    let Some(roots) = tree.children.get(&tree.post_id) else {
-        return (items, false);
-    };
-    let mut stack: Vec<(String, usize)> = roots.iter().rev().map(|id| (id.clone(), 0)).collect();
+fn push_dfs(
+    tree: &Tree,
+    start_id: &str,
+    start_depth: usize,
+    cap: usize,
+    visited: &mut HashSet<String>,
+    items: &mut Vec<CommentItem>,
+    capped: &mut bool,
+) {
+    let mut stack: Vec<(String, usize)> = vec![(start_id.to_string(), start_depth)];
     while let Some((id, depth)) = stack.pop() {
         if items.len() >= cap {
-            capped = true;
-            break;
+            *capped = true;
+            return;
+        }
+        if !visited.insert(id.clone()) {
+            continue;
         }
         let Some(n) = tree.nodes.get(&id) else {
             continue;
         };
         let url = if n.permalink.is_empty() {
-            format!("https://www.reddit.com{}comment/{id}/", tree.post_permalink)
+            if tree.post_permalink.is_empty() {
+                format!(
+                    "https://www.reddit.com/comments/{}/comment/{id}/",
+                    tree.post_id
+                )
+            } else {
+                let base = tree.post_permalink.trim_end_matches('/');
+                format!("https://www.reddit.com{base}/comment/{id}/")
+            }
         } else {
-            format!("https://www.reddit.com{}", n.permalink)
+            canonical_reddit_url(&n.permalink)
         };
         items.push(CommentItem {
             id: id.clone(),
             author: u_prefix(&n.author),
             score: n.score,
-            date: n.created.map(format_epoch),
+            date: n.date.clone(),
             depth,
-            op: if n.author == tree.post_author && !n.author.starts_with('[') {
+            op: if !tree.post_author.is_empty()
+                && n.author == tree.post_author
+                && !n.author.starts_with('[')
+            {
                 Some(true)
             } else {
                 None
@@ -257,64 +394,164 @@ pub(super) fn render_items(tree: &Tree, cap: usize) -> (Vec<CommentItem>, bool) 
         });
         if let Some(kids) = tree.children.get(&id) {
             for k in kids.iter().rev() {
-                stack.push((k.clone(), depth + 1));
+                if !visited.contains(k) {
+                    stack.push((k.clone(), depth + 1));
+                }
             }
         }
     }
+}
+
+/// Lossless DFS thread renderer trimmed at `cap`.
+///
+/// 1. Walks top-level comments under `tree.post_id` (depth 0 → depth + 1).
+/// 2. Walks any detached roots (e.g. a single-comment permalink page or replies
+///    whose deleted parent node was omitted by Reddit) in insertion order so no
+///    fetched comment is ever silently dropped.
+/// 3. Tracks `visited` so cycles or duplicate links can never duplicate output.
+pub(super) fn render_items(tree: &Tree, cap: usize) -> (Vec<CommentItem>, bool) {
+    let mut items = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut capped = false;
+
+    if let Some(roots) = tree.children.get(&tree.post_id) {
+        for root_id in roots {
+            if items.len() >= cap {
+                capped = true;
+                break;
+            }
+            push_dfs(tree, root_id, 0, cap, &mut visited, &mut items, &mut capped);
+        }
+    }
+
+    // Detached roots (single-comment permalink pages or replies to omitted
+    // deleted parents): parents not in `tree.nodes`.
+    if !capped {
+        for id in &tree.order {
+            if items.len() >= cap {
+                capped = true;
+                break;
+            }
+            if visited.contains(id) {
+                continue;
+            }
+            let parent_in_tree = tree
+                .parents
+                .get(id)
+                .is_some_and(|p| tree.nodes.contains_key(p));
+            if !parent_in_tree {
+                let d0 = tree.nodes.get(id).and_then(|n| n.hint_depth).unwrap_or(0);
+                push_dfs(tree, id, d0, cap, &mut visited, &mut items, &mut capped);
+            }
+        }
+    }
+
+    // Final safety pass in case malformed parent references formed a cycle.
+    if !capped {
+        for id in &tree.order {
+            if items.len() >= cap {
+                capped = true;
+                break;
+            }
+            if !visited.contains(id) {
+                let d0 = tree.nodes.get(id).and_then(|n| n.hint_depth).unwrap_or(0);
+                push_dfs(tree, id, d0, cap, &mut visited, &mut items, &mut capped);
+            }
+        }
+    }
+
     (items, capped)
 }
 
-/// Does this stub hide comments worth a dedicated parent-subtree fetch?
-/// Two shapes: an EMPTY stub (count 0, no ids — reddit's collapsed-region
-/// marker; the parent's own permalink listing still serves the subtree) and
-/// a partial region (count exceeds the id list) with a real shortfall.
-pub(super) fn stub_hides_comments(s: &Stub) -> bool {
-    let empty = s.count == 0 && s.ids.is_empty();
-    !s.top_level && (empty || s.count - s.ids.len() as i64 >= RECOVERY_MIN_SHORTFALL)
+pub(super) fn canonical_reddit_url(permalink: &str) -> String {
+    let p = permalink.trim();
+    if p.starts_with("http://") || p.starts_with("https://") {
+        p.to_string()
+    } else if p.starts_with('/') {
+        format!("https://www.reddit.com{p}")
+    } else if p.is_empty() {
+        String::new()
+    } else {
+        format!("https://www.reddit.com/{p}")
+    }
 }
 
-fn strip_prefix(fullname: &str) -> &str {
+pub(super) fn strip_prefix(fullname: &str) -> &str {
     fullname
         .strip_prefix("t1_")
         .or_else(|| fullname.strip_prefix("t3_"))
         .unwrap_or(fullname)
 }
 
-fn u_prefix(author: &str) -> String {
-    if author.starts_with('[') {
+pub(super) fn bare_author(raw: &str) -> String {
+    let a = raw
+        .trim()
+        .trim_start_matches('/')
+        .strip_prefix("u/")
+        .or_else(|| raw.trim().trim_start_matches('/').strip_prefix("U/"))
+        .unwrap_or(raw.trim())
+        .trim();
+    if a.is_empty()
+        || a.eq_ignore_ascii_case("[deleted]")
+        || a.eq_ignore_ascii_case("deleted")
+        || a.eq_ignore_ascii_case("[removed]")
+    {
+        "[deleted]".to_string()
+    } else {
+        a.to_string()
+    }
+}
+
+pub(super) fn u_prefix(author: &str) -> String {
+    if author.is_empty() || author.starts_with('[') {
+        if author.is_empty() {
+            "[deleted]".to_string()
+        } else {
+            author.to_string()
+        }
+    } else if author.starts_with("u/") {
         author.to_string()
     } else {
         format!("u/{author}")
     }
 }
 
-fn as_int(v: &Value) -> Option<i64> {
+pub(super) fn as_int(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_f64().map(|f| f.round() as i64))
 }
 
-fn as_epoch(v: &Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
+/// Normalize ISO-8601 timestamps from Shreddit/old.reddit
+/// (`2026-11-20T14:22:10.123000+0000`, `2026-11-20T14:22:10Z`) to
+/// `YYYY-MM-DD HH:MM UTC`. Non-ISO strings are returned trimmed up to 32 chars.
+pub(super) fn normalize_date(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b.len() >= 16
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && (b[10] == b'T' || b[10] == b' ')
+        && b[13] == b':'
+    {
+        let date_part = &s[..10];
+        let time_part = &s[11..16];
+        let is_utc = s.ends_with('Z')
+            || s.ends_with('z')
+            || s.ends_with("+00:00")
+            || s.ends_with("+0000")
+            || s.ends_with("UTC");
+        return Some(if is_utc {
+            format!("{date_part} {time_part} UTC")
+        } else {
+            format!("{date_part} {time_part}")
+        });
+    }
+    Some(cut_chars(s, 32))
 }
 
-/// Epoch seconds → `YYYY-MM-DD HH:MM UTC` (civil-from-days; no chrono).
-pub(super) fn format_epoch(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (hh, mm) = (rem / 3_600, (rem % 3_600) / 60);
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02} UTC")
-}
-
-/// Normalize a comment body for reading: CRLF → LF, trailing whitespace
+/// Normalize a comment/post body for reading: CRLF → LF, trailing whitespace
 /// stripped per line, 2+ blank lines collapsed to one, then capped.
 pub(super) fn normalize_text(s: &str, cap: usize) -> String {
     let t = s.replace("\r\n", "\n").replace('\r', "\n");

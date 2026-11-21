@@ -1,40 +1,37 @@
-//! Reddit extraction — the `extract auto` fast path: the comment tree on
-//! reddit.com post pages, and the result listing on reddit search pages.
+//! Reddit extraction — the `extract auto` fast path for Reddit post pages and
+//! search pages, built purely on the live DOM and Shreddit's own HTML partials
+//! (zero `.json` API endpoints).
 //!
-//! Comments come from Reddit's own JSON endpoints, fetched from inside the
-//! page (same origin, same cookies, same session — exactly the traffic the
-//! web app itself makes), never from scraping the rendered DOM:
+//! Why zero `.json`: Reddit's network-security layer routinely denies `.json`
+//! requests (HTTP 403) even when the browser session loaded the HTML page
+//! cleanly, and Shreddit itself never calls `.json`. Instead, the web app
+//! renders `<shreddit-post>` and `<shreddit-comment>` nodes directly in HTML
+//! and expands collapsed branches via:
 //!
-//! - `GET <post>.json` → the inline comment tree (structured things) plus
-//!   "more" stubs for whatever the server did not inline (listings cap
-//!   around a few hundred comments per level).
-//! - A nested stub is completed with one
-//!   `GET /comments/<post>/comment/<parent>.json` — that listing returns the
-//!   stub parent's full subtree, still structured.
-//! - A top-level stub is completed with batched `GET /api/info.json?id=…`
-//!   calls, which return full comment things by id.
+//! - `<faceplate-partial src="/svc/shreddit/more-comments/...">` (both
+//!   top-level "View more comments" and nested "N more replies" buttons),
+//! - `div.fold-more a[href*="/comment/"]` (deep-thread continuation links,
+//!   e.g. `?force-legacy-sct=1`), and
+//! - `old.reddit.com` `.thing.comment` trees + `.deepthread a` links.
 //!
-//! The result is a flat, thread-ordered item list with full bodies and an
-//! honest `complete` flag: no evals, no vision, no collapsed replies missed.
+//! This module reads the live DOM observationally, then expands discovered
+//! partials and deep continuation links **strictly sequentially** (one GET at a
+//! time with short polite jitter — never parallel bursts), parses each HTML
+//! fragment in-browser with `DOMParser`, and renders a lossless DFS comment
+//! tree with honest `complete`, `total`, and `note` fields (propagating exact
+//! HTTP 429 + `Retry-After` or security walls immediately without hammering).
 //!
-//! Both API paths are gated on Reddit's `loid` client token (set by the
-//! page-load JS challenge): without it the endpoints answer with the
-//! network-security wall (HTTP 403) instead of JSON — never the challenge.
-//! `ensure_loid` guards the sweep against sending those requests tokenless,
-//! and wall/challenge bodies that do slip through are classified as
-//! stop-signals (partial results + honest note), never hammered.
-//!
-//! Module map: this file is the sweep orchestrator ([`fetch_comments`]) and
-//! the search sweep's entry points ([`fetch_search`] / [`search_target`]);
-//! `net` is the in-page HTTP layer (loid gate, JSON fetches, gate
-//! classification); `tree` is the listing parser + thread renderer; `search`
-//! is the search-listing path (query sanitizing + parse).
+//! Module map: this file is the comment-tree sweep orchestrator
+//! ([`fetch_comments`]) and search entry points ([`fetch_search`] /
+//! [`search_target`]); `net` is the isolated DOM-read + sequential HTML
+//! partial transport; `tree` is the parent-linked tree builder + lossless DFS
+//! renderer; `search` is the zero-`.json` search extractor; `js/` holds the
+//! syntax-checked in-browser HTML/DOM parsers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::cdp::CdpSession;
 use crate::error::{BladeError, Result};
@@ -44,29 +41,26 @@ mod search;
 mod tree;
 
 pub use self::net::is_security_block;
-use self::net::{ensure_loid, fetch_json, fetch_json_many, is_rate_limit};
+use self::net::{
+    dom_parse_expr, eval_dom, fetch_html_parsed, is_rate_limit, opts_json, polite_pause,
+    retry_after_from_err,
+};
 pub use self::search::{
     fetch_search, search_target, SearchItem, SearchPayload, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_PAGE,
 };
 use self::tree::{
-    attach_info_things, cut_chars, merge_subtree, parse_discussion, parse_subtree, render_items,
-    stub_hides_comments,
+    canonical_reddit_url, cut_chars, decode_batch, ingest_comments, render_items, FoldTask,
+    PartialTask, Tree,
 };
 
-/// Budget for the whole comment sweep (initial fetch + stub resolution).
-const TOTAL_BUDGET: Duration = Duration::from_secs(25);
-/// Hard cap on HTTP requests the sweep may make.
-const MAX_REQUESTS: u32 = 40;
+pub(super) const PARSE_THREAD_JS: &str = include_str!("reddit/js/parse_thread.js");
+
+/// Wall-clock budget for the full comment expansion sweep.
+const TOTAL_BUDGET: Duration = Duration::from_secs(30);
+/// Hard cap on sequential HTML expansion requests per sweep.
+const MAX_REQUESTS: u32 = 45;
 /// Per-request in-page fetch timeout.
 const PAGE_FETCH_TIMEOUT_MS: u64 = 12_000;
-/// Ids per /api/info batch.
-const INFO_BATCH: usize = 100;
-/// /api/info batches fired concurrently per CDP round-trip.
-const WAVE_BATCHES: usize = 5;
-/// A more-region worth a dedicated parent-subtree fetch (shortfall ≥ this).
-const RECOVERY_MIN_SHORTFALL: i64 = 3;
-/// Ceiling on dedicated parent-subtree recovery fetches per sweep.
-const MAX_RECOVERY_FETCHES: usize = 12;
 /// Safety cap for a single comment body (kept whole below this).
 const COMMENT_TEXT_CAP: usize = 5_000;
 /// Safety cap for the post selftext.
@@ -86,7 +80,7 @@ pub struct PostMeta {
     /// `r/name`.
     pub subreddit: String,
     pub score: Option<i64>,
-    /// The comment count reddit reports for the post.
+    /// The comment count Reddit reports for the post.
     pub comments: Option<i64>,
     pub date: Option<String>,
     pub url: String,
@@ -102,7 +96,7 @@ pub struct CommentItem {
     pub score: Option<i64>,
     pub date: Option<String>,
     pub depth: usize,
-    /// Present (true) only when the comment author is the post author.
+    /// Present (`true`) only when the comment author is the post author.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub op: Option<bool>,
     pub text: String,
@@ -116,47 +110,13 @@ pub struct CommentsPayload {
     pub post: PostMeta,
     /// Comments returned.
     pub count: usize,
-    /// Comments reddit reports for the post.
+    /// Comments Reddit reports for the post.
     pub total: Option<i64>,
     /// True only when the returned list is the complete discussion.
     pub complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub items: Vec<CommentItem>,
-}
-
-/// One comment as the API reports it.
-struct Node {
-    author: String,
-    score: Option<i64>,
-    created: Option<i64>,
-    body: String,
-    permalink: String,
-}
-
-/// A "more" region: comments the server reported but did not inline.
-#[derive(Clone)]
-struct Stub {
-    /// Bare id of the parent comment, or the post id for a top-level stub.
-    parent: String,
-    /// True when the stub sits directly under the post.
-    top_level: bool,
-    /// How many comments the region claims.
-    count: i64,
-    /// The ids the server exposed (bare). Can be fewer than `count` on very
-    /// large threads.
-    ids: Vec<String>,
-}
-
-#[derive(Default)]
-struct Tree {
-    post_id: String,
-    post_author: String,
-    post_permalink: String,
-    nodes: HashMap<String, Node>,
-    /// parent bare id → ordered child bare ids.
-    children: HashMap<String, Vec<String>>,
-    stubs: Vec<Stub>,
 }
 
 struct Budget {
@@ -172,28 +132,51 @@ impl Budget {
         }
     }
 
-    /// Consume `n` request slots; false when the sweep must stop.
     fn take(&mut self, n: u32) -> bool {
+        if !self.ok() {
+            return false;
+        }
         self.requests += n;
-        self.ok()
+        true
     }
 
-    /// Check the remaining allowance without consuming it.
     fn ok(&self) -> bool {
         self.requests < MAX_REQUESTS && Instant::now() < self.deadline
     }
 }
 
-/// Fetch the complete comment tree for a reddit post page.
+fn post_id_from_base(post_base: &str) -> String {
+    post_base
+        .split("/comments/")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn subreddit_from_base(post_base: &str) -> String {
+    post_base
+        .strip_prefix("/r/")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("r/{s}"))
+        .unwrap_or_default()
+}
+
+/// Extract the comment tree for a Reddit post (or single-comment permalink)
+/// purely from the live DOM plus sequential HTML partial/continuation fetches.
 ///
-/// `post_base` is the page path up to the post id
-/// (`/r/rust/comments/1wn7jni`), `sort` the page's active comment sort. The
-/// sweep stops at `cap` comments (or an internal request/time budget) and
-/// reports exactly what it got via `count`/`total`/`complete`/`note`.
+/// Never calls `.json` endpoints and never fires parallel request bursts.
+/// `post_base` is `/r/<sub>/comments/<id>`; `page_path` is the page's current
+/// `location.pathname`; `sort_explicit` is true only when the caller explicitly
+/// asked for a sort different from the page's currently rendered sort.
 pub async fn fetch_comments(
     cdp: &CdpSession,
     post_base: &str,
+    page_path: &str,
     sort: &str,
+    sort_explicit: bool,
     cap: usize,
 ) -> Result<CommentsPayload> {
     if !post_base.starts_with('/') || !post_base.contains("/comments/") {
@@ -211,364 +194,360 @@ pub async fn fetch_comments(
     };
     let cap = cap.clamp(1, MAX_COMMENT_CAP);
     let mut budget = Budget::new();
+    let fallback_post_id = post_id_from_base(post_base);
 
-    tracing::debug!(post = post_base, sort, cap, "reddit sweep start");
+    tracing::debug!(
+        post = post_base,
+        page_path,
+        sort,
+        sort_explicit,
+        cap,
+        "reddit html/dom sweep start"
+    );
 
-    // Never send API paths without the loid token: without it reddit answers
-    // with the network-security wall (guaranteed 403s) instead of JSON.
-    if !ensure_loid(cdp).await {
+    // Step 1: initial read. When the caller did not ask for a different sort,
+    // read the live DOM observationally (0 HTTP requests). When an explicit
+    // sort override differs from the rendered page, fetch the HTML page with
+    // `?sort=<sort>` (still zero `.json`).
+    let initial_raw = if sort_explicit {
+        let base_path = if !page_path.is_empty() && page_path.starts_with('/') {
+            page_path
+        } else {
+            post_base
+        };
+        let clean_path = base_path.split('?').next().unwrap_or(base_path);
+        let sort_url = format!("{clean_path}?sort={sort}");
+        budget.take(1);
+        let opts = opts_json(false, &fallback_post_id);
+        fetch_html_parsed(
+            cdp,
+            &sort_url,
+            PARSE_THREAD_JS,
+            &format!("parseRedditThread(doc, {opts})"),
+        )
+        .await?
+    } else {
+        let opts = opts_json(false, &fallback_post_id);
+        let expr = dom_parse_expr(
+            PARSE_THREAD_JS,
+            &format!("parseRedditThread(document, {opts})"),
+        );
+        eval_dom(cdp, &expr).await?
+    };
+
+    let initial = decode_batch(&initial_raw, &fallback_post_id);
+    if initial.post.is_none()
+        && initial.comments.is_empty()
+        && initial.partials.is_empty()
+        && initial.folds.is_empty()
+    {
         return Err(BladeError::Other(
-            "reddit: no loid session token yet (the page-load challenge has not resolved) — load the page once, then retry".into(),
+            "reddit: post and comment elements not found in DOM".into(),
         ));
     }
 
-    if !budget.take(1) {
-        return Err(BladeError::Other("reddit: fetch budget exhausted".into()));
-    }
-    let raw = fetch_json(
-        cdp,
-        &format!("{post_base}.json?limit=500&raw_json=1&sort={sort}"),
-    )
-    .await?;
-    let (post, mut tree) = parse_discussion(&raw)?;
-    tracing::debug!(
-        nodes = tree.nodes.len(),
-        stubs = tree.stubs.len(),
-        requests = budget.requests,
-        "reddit sweep initial fetch done"
+    let post_id = if !initial.post_id.is_empty() {
+        initial.post_id
+    } else {
+        fallback_post_id
+    };
+    let post_permalink = if !initial.post_permalink.is_empty() {
+        initial.post_permalink
+    } else if !page_path.is_empty() && page_path.starts_with('/') {
+        page_path.to_string()
+    } else {
+        post_base.to_string()
+    };
+    let post = initial.post.unwrap_or_else(|| PostMeta {
+        title: String::new(),
+        author: "[deleted]".into(),
+        subreddit: subreddit_from_base(post_base),
+        score: None,
+        comments: None,
+        date: None,
+        url: canonical_reddit_url(&post_permalink),
+        body: None,
+    });
+
+    let mut tree = Tree {
+        post_id: post_id.clone(),
+        post_author: initial.post_author_bare,
+        post_permalink,
+        ..Default::default()
+    };
+    ingest_comments(&mut tree, initial.comments, &post_id);
+
+    let mut partial_queue: VecDeque<PartialTask> = VecDeque::new();
+    let mut fold_queue: VecDeque<FoldTask> = VecDeque::new();
+    let mut seen_urls: HashSet<String> = HashSet::new();
+    let mut seen_fold_ids: HashSet<String> = HashSet::new();
+    let mut clickable_only_partials = initial.clickable_only_partials;
+    let mut legacy_more_count = initial.legacy_more_count;
+
+    enqueue_controls(
+        initial.partials,
+        initial.folds,
+        &mut partial_queue,
+        &mut fold_queue,
+        &mut seen_urls,
+        &mut seen_fold_ids,
     );
 
+    tracing::debug!(
+        nodes = tree.nodes.len(),
+        partials = partial_queue.len(),
+        folds = fold_queue.len(),
+        "reddit initial dom parse done"
+    );
+
+    // Step 2: strictly sequential BFS expansion over `<faceplate-partial>`
+    // ("View more comments" / "N more replies") and `div.fold-more` deep
+    // continuation links. One request at a time with polite jitter.
     let mut capped = false;
     let mut budget_hit = false;
     let mut rate_limited = false;
+    let mut retry_after: Option<String> = None;
     let mut security_blocked = false;
     let mut gaps: Vec<String> = Vec::new();
-    let post_key = tree.post_id.clone();
+    let mut failed_regions = 0usize;
 
-    let mut residue_regions = 0usize;
-    let mut residue_comments: i64 = 0;
-    // Regions that hide retrievable comments but were left collapsed once
-    // the per-sweep recovery cap was spent.
-    let mut unexpanded = 0usize;
-    let mut recovered = 0usize;
-    let mut expanded: HashSet<String> = HashSet::new();
-    let mut queued: HashSet<String> = HashSet::new();
-    // Stubs before `resolved` have been handled. A Phase B subtree can carry
-    // stubs of its own (a deeper "continue this thread", a wide "more"
-    // region), so both phases repeat over each new generation of stubs until
-    // none appear or the sweep has to stop — within the same budget.
-    let mut resolved = 0usize;
-    while resolved < tree.stubs.len()
-        && !capped
-        && !budget_hit
-        && !rate_limited
-        && !security_blocked
-    {
-        let generation: Vec<Stub> = tree.stubs[resolved..].to_vec();
-        resolved = tree.stubs.len();
-
-        // Phase A — one batched id sweep across every "more" region. Both
-        // nested and top-level stubs expose comment ids, and /api/info
-        // returns full things for up to 100 ids per call — so ALL ids go
-        // through one queue (deduplicated, listing order) instead of one
-        // request per region. Large threads carry hundreds of tiny nested
-        // regions; per-region requests burn the whole budget before the big
-        // top-level region is ever reached.
-        let mut pending: Vec<String> = Vec::new();
-        for s in &generation {
-            for id in &s.ids {
-                if !tree.nodes.contains_key(id) && queued.insert(id.clone()) {
-                    pending.push(id.clone());
-                }
-            }
-        }
-        let mut cursor = 0usize;
-        while cursor < pending.len() {
-            if rate_limited || security_blocked {
-                break;
-            }
-            let need = cap.saturating_sub(tree.nodes.len());
-            if need == 0 {
-                capped = true;
-                break;
-            }
-            // Round up to whole batches so the cap is never overshot by more
-            // than one batch, and cap the wave at WAVE_BATCHES.
-            let take = need
-                .div_ceil(INFO_BATCH)
-                .saturating_mul(INFO_BATCH)
-                .min(WAVE_BATCHES * INFO_BATCH)
-                .min(pending.len() - cursor);
-            let wave = &pending[cursor..cursor + take];
-            let sub_batches: Vec<&[String]> = wave.chunks(INFO_BATCH).collect();
-            if !budget.take(sub_batches.len() as u32) {
-                budget_hit = true;
-                break;
-            }
-            let urls: Vec<String> = sub_batches
-                .iter()
-                .map(|chunk| {
-                    let ids_param = chunk
-                        .iter()
-                        .map(|i| format!("t1_{i}"))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!("/api/info.json?id={ids_param}&raw_json=1")
-                })
-                .collect();
-            match fetch_json_many(cdp, &urls).await {
-                Ok(results) => {
-                    let mut failed = false;
-                    let mut attached = 0usize;
-                    for (chunk, res) in sub_batches.iter().zip(results) {
-                        match res {
-                            Ok(raw) => {
-                                let things = raw["data"]["children"]
-                                    .as_array()
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let got = attach_info_things(&mut tree, &things, &post_key);
-                                attached += got;
-                                if got < chunk.len() {
-                                    gaps.push(format!(
-                                        "{} comments no longer retrievable",
-                                        chunk.len() - got
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                if is_rate_limit(&e) {
-                                    rate_limited = true;
-                                } else if is_security_block(&e) {
-                                    security_blocked = true;
-                                } else {
-                                    gaps.push(format!("comment batch fetch failed ({e})"));
-                                }
-                                failed = true;
-                            }
-                        }
-                    }
-                    tracing::debug!(
-                        batches = sub_batches.len(),
-                        attached,
-                        nodes = tree.nodes.len(),
-                        requests = budget.requests,
-                        "reddit info wave done"
-                    );
-                    if failed {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    if is_rate_limit(&e) {
-                        rate_limited = true;
-                    } else if is_security_block(&e) {
-                        security_blocked = true;
-                    } else {
-                        gaps.push(format!("comment batch wave failed ({e})"));
-                    }
-                    break;
-                }
-            }
-            cursor += take;
-
-            // Human-ish gap between waves — the burst pattern is the one
-            // thing reddit's rate-scoring can object to, and only multi-wave
-            // sweeps pay it (a few hundred ms), never small threads.
-            if cursor < pending.len() && !rate_limited && !security_blocked {
-                let pause = 180
-                    + std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.subsec_millis() as u64)
-                        .unwrap_or(120)
-                        % 320;
-                tokio::time::sleep(Duration::from_millis(pause)).await;
-            }
-        }
-
-        // Phase B — parent-subtree recovery for regions the listing
-        // collapsed. Two shapes: (a) a region that claims N comments but
-        // exposes fewer ids, and (b) an EMPTY stub (count 0, no ids) — reddit
-        // truncates deep subtrees like that, but the parent's own permalink
-        // listing still serves the whole subtree (verified live: an
-        // 81-comment thread exposed 60 inline + 2 empty stubs whose parents
-        // held 9 more retrievable comments). Both get a dedicated fetch; one
-        // listing returns the parent's entire subtree.
-        if capped || budget_hit || rate_limited || security_blocked {
+    while !partial_queue.is_empty() || !fold_queue.is_empty() {
+        if tree.nodes.len() >= cap {
+            capped = true;
             break;
         }
-        // Parents expanded in THIS generation: a second stub under one of
-        // them was covered by that same subtree fetch.
-        let mut this_generation: HashSet<String> = HashSet::new();
-        for s in &generation {
-            let empty = s.count == 0 && s.ids.is_empty();
-            if !empty && s.count <= s.ids.len() as i64 {
-                continue;
+        if !budget.ok() {
+            budget_hit = true;
+            break;
+        }
+
+        enum Step {
+            Partial(PartialTask),
+            Fold(FoldTask),
+        }
+        let step = if let Some(p) = partial_queue.pop_front() {
+            Step::Partial(p)
+        } else if let Some(f) = fold_queue.pop_front() {
+            Step::Fold(f)
+        } else {
+            break;
+        };
+
+        if budget.requests > 0 {
+            polite_pause().await;
+        }
+        if !budget.take(1) {
+            // Put back so remaining count stays exact.
+            match step {
+                Step::Partial(p) => partial_queue.push_front(p),
+                Step::Fold(f) => fold_queue.push_front(f),
             }
-            let shortfall = (s.count - s.ids.len() as i64).max(0);
-            if stub_hides_comments(s) {
-                if this_generation.contains(&s.parent) {
-                    continue;
-                }
-                if expanded.contains(&s.parent) {
-                    // The parent's own listing, already merged, still
-                    // collapses this region: fetching it again would only
-                    // repeat that.
-                    if empty {
-                        gaps.push(format!(
-                            "a collapsed region under {} stayed collapsed after expanding it",
-                            s.parent
-                        ));
-                    }
-                } else if recovered >= MAX_RECOVERY_FETCHES {
-                    // Retrievable, just past this sweep's recovery cap:
-                    // neither resolved nor "not retrievable".
-                    unexpanded += 1;
-                    continue;
+            budget_hit = true;
+            break;
+        }
+
+        let (url, fallback_parent) = match &step {
+            Step::Partial(p) => (
+                p.url.as_str(),
+                if p.parent_id.is_empty() {
+                    post_id.as_str()
                 } else {
-                    if tree.nodes.len() >= cap {
-                        capped = true;
-                        break;
-                    }
-                    if !budget.take(1) {
-                        budget_hit = true;
-                        break;
-                    }
-                    recovered += 1;
-                    this_generation.insert(s.parent.clone());
-                    let url = format!(
-                        "/comments/{}/comment/{}.json?limit=500&raw_json=1&sort={sort}",
-                        tree.post_id, s.parent
-                    );
-                    match fetch_json(cdp, &url).await {
-                        Ok(raw) => match parse_subtree(&raw) {
-                            Ok((root, sub)) if root == s.parent => {
-                                merge_subtree(&mut tree, &root, sub);
-                                continue;
-                            }
-                            Ok((root, _)) => {
-                                gaps.push(format!(
-                                    "subtree fetch returned {root}, expected {}",
-                                    s.parent
-                                ));
-                            }
-                            Err(e) => {
-                                if empty {
-                                    gaps.push(format!(
-                                        "a collapsed region under {} could not be expanded ({e})",
-                                        s.parent
-                                    ));
-                                } else {
-                                    gaps.push(e.to_string());
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            if is_rate_limit(&e) {
-                                rate_limited = true;
-                                break;
-                            }
-                            if is_security_block(&e) {
-                                security_blocked = true;
-                                break;
-                            }
-                            gaps.push(format!("subtree fetch failed ({e})"));
-                        }
-                    }
+                    p.parent_id.as_str()
+                },
+            ),
+            Step::Fold(f) => (
+                f.url.as_str(),
+                if !f.parent_id.is_empty() {
+                    f.parent_id.as_str()
+                } else if !f.comment_id.is_empty() {
+                    f.comment_id.as_str()
+                } else {
+                    post_id.as_str()
+                },
+            ),
+        };
+
+        let opts = opts_json(true, fallback_parent);
+        match fetch_html_parsed(
+            cdp,
+            url,
+            PARSE_THREAD_JS,
+            &format!("parseRedditThread(doc, {opts})"),
+        )
+        .await
+        {
+            Ok(raw) => {
+                let batch = decode_batch(&raw, &post_id);
+                let added = ingest_comments(&mut tree, batch.comments, fallback_parent);
+                clickable_only_partials += batch.clickable_only_partials;
+                legacy_more_count += batch.legacy_more_count;
+                enqueue_controls(
+                    batch.partials,
+                    batch.folds,
+                    &mut partial_queue,
+                    &mut fold_queue,
+                    &mut seen_urls,
+                    &mut seen_fold_ids,
+                );
+                tracing::debug!(
+                    requests = budget.requests,
+                    added,
+                    nodes = tree.nodes.len(),
+                    partials_left = partial_queue.len(),
+                    folds_left = fold_queue.len(),
+                    "reddit html expansion step done"
+                );
+            }
+            Err(e) => {
+                if is_rate_limit(&e) {
+                    rate_limited = true;
+                    retry_after = retry_after_from_err(&e);
+                    failed_regions += 1;
+                    break;
                 }
+                if is_security_block(&e) {
+                    security_blocked = true;
+                    failed_regions += 1;
+                    break;
+                }
+                failed_regions += 1;
+                gaps.push(format!("reply branch fetch failed ({e})"));
             }
-            // Only counted shortfalls read as "incomplete regions"; a failed
-            // empty-stub expansion already reported itself above.
-            if !empty {
-                residue_regions += 1;
-                residue_comments += shortfall;
-            }
-        }
-        expanded.extend(this_generation);
-    }
-    if !capped && !budget_hit && !rate_limited && !security_blocked {
-        if residue_regions > 0 {
-            gaps.push(format!(
-                "{residue_regions} more-regions incomplete ({residue_comments} comments not retrievable)"
-            ));
-        }
-        if unexpanded > 0 {
-            gaps.push(format!(
-                "{unexpanded} collapsed region(s) not expanded (per-sweep limit of {MAX_RECOVERY_FETCHES} subtree fetches; open a comment's url to read its replies)"
-            ));
         }
     }
+
+    let remaining_regions = partial_queue.len()
+        + fold_queue.len()
+        + clickable_only_partials
+        + legacy_more_count
+        + failed_regions;
+    let remaining_claimed: i64 = partial_queue.iter().filter_map(|p| p.claimed).sum();
 
     let (items, dfs_capped) = render_items(&tree, cap);
     tracing::debug!(
         nodes = tree.nodes.len(),
         items = items.len(),
         requests = budget.requests,
-        capped,
+        capped = capped || dfs_capped,
         budget_hit,
         rate_limited,
         security_blocked,
-        "reddit sweep done"
+        remaining_regions,
+        "reddit html/dom sweep done"
     );
+
     Ok(assemble(
         post,
         items,
         capped || dfs_capped,
         budget_hit,
         rate_limited,
+        retry_after,
         security_blocked,
+        remaining_regions,
+        remaining_claimed,
+        clickable_only_partials,
+        legacy_more_count,
         gaps,
     ))
 }
 
-/// Assemble the payload: honest counts, deduplicated notes, completion flag.
+fn enqueue_controls(
+    partials: Vec<PartialTask>,
+    folds: Vec<FoldTask>,
+    partial_queue: &mut VecDeque<PartialTask>,
+    fold_queue: &mut VecDeque<FoldTask>,
+    seen_urls: &mut HashSet<String>,
+    seen_fold_ids: &mut HashSet<String>,
+) {
+    for p in partials {
+        if seen_urls.insert(p.url.clone()) {
+            partial_queue.push_back(p);
+        }
+    }
+    for f in folds {
+        let id_ok = f.comment_id.is_empty() || seen_fold_ids.insert(f.comment_id.clone());
+        if id_ok && seen_urls.insert(f.url.clone()) {
+            fold_queue.push_back(f);
+        }
+    }
+}
+
+/// Assemble the payload with honest counts, completion flag, and actionable
+/// notes describing any cap, budget, HTTP 429 (`Retry-After`), security wall,
+/// or unexpanded reply branches.
+#[allow(clippy::too_many_arguments)]
 fn assemble(
     post: PostMeta,
     items: Vec<CommentItem>,
     capped: bool,
     budget_hit: bool,
     rate_limited: bool,
+    retry_after: Option<String>,
     security_blocked: bool,
+    remaining_regions: usize,
+    remaining_claimed: i64,
+    clickable_only_partials: usize,
+    legacy_more_count: usize,
     mut gaps: Vec<String>,
 ) -> CommentsPayload {
     let count = items.len();
     let total = post.comments;
-    let mut notes: Vec<String> = Vec::new();
     let total_s = total.map(|t| t.to_string()).unwrap_or_else(|| "?".into());
-    let mut status: Option<String> = None;
+    let mut notes: Vec<String> = Vec::new();
+
+    let remain_tail = if remaining_regions > 0 {
+        if remaining_claimed > 0 {
+            format!(" ({remaining_regions} unexpanded reply region(s), ~{remaining_claimed}+ replies remain)")
+        } else {
+            format!(" ({remaining_regions} unexpanded reply region(s) remain)")
+        }
+    } else {
+        String::new()
+    };
+
     if capped {
-        status = Some(format!(
-            "capped: {count} of {total_s} comments shown (raise limit to fetch more)"
-        ));
-    } else if security_blocked {
-        status = Some(format!(
-            "reddit's network-security wall interrupted the sweep: {count} of {total_s} comments loaded (API denied; repeated requests may remain blocked)"
+        notes.push(format!(
+            "capped: {count} of {total_s} comments shown{remain_tail} (raise limit to fetch more)"
         ));
     } else if rate_limited {
-        status = Some(format!(
-            "reddit rate limit reached: {count} of {total_s} comments loaded (retry in ~a minute for more)"
+        let ra = retry_after
+            .map(|r| format!(", retry-after: {r}"))
+            .unwrap_or_default();
+        notes.push(format!(
+            "reddit rate limit reached (HTTP 429{ra}): {count} of {total_s} comments loaded{remain_tail} — wait before retrying"
+        ));
+    } else if security_blocked {
+        notes.push(format!(
+            "reddit's network-security wall interrupted expansion: {count} of {total_s} comments loaded{remain_tail} (remaining replies were not fetched)"
         ));
     } else if budget_hit {
-        status = Some(format!(
-            "fetch budget exhausted: {count} of {total_s} comments loaded"
+        notes.push(format!(
+            "expansion budget reached ({MAX_REQUESTS} requests / {}s): {count} of {total_s} comments loaded{remain_tail}",
+            TOTAL_BUDGET.as_secs()
         ));
+    } else if remaining_regions > 0 {
+        if clickable_only_partials > 0 {
+            gaps.push(format!(
+                "{clickable_only_partials} collapsed reply control(s) had no partial URL and were not expanded"
+            ));
+        }
+        if legacy_more_count > 0 {
+            gaps.push(format!(
+                "{legacy_more_count} old.reddit 'load more comments' branch(es) remain collapsed"
+            ));
+        }
+        notes.push(format!("loaded {count} of {total_s} comments{remain_tail}"));
     } else if total.is_some_and(|t| (count as i64) < t) {
-        status = Some(if gaps.is_empty() {
-            // Every sweep-side cause is excluded above, and every region the
-            // API exposed was resolved (Phase A + B) — the leftover is
-            // comments reddit counts but does not serve to this account.
-            format!(
-                "loaded {count} of {total_s} comments — every region reddit exposed was resolved; the remainder are deleted/removed comments reddit still counts (not retrievable)"
-            )
+        if gaps.is_empty() {
+            notes.push(format!(
+                "loaded {count} of {total_s} comments — every visible reply branch Reddit exposed was expanded; the remainder are deleted/removed or unserved comments"
+            ));
         } else {
-            // A named gap (a failed fetch, a region left collapsed) is part
-            // of the shortfall; claiming all was resolved would contradict it.
-            format!("loaded {count} of {total_s} comments")
-        });
+            notes.push(format!("loaded {count} of {total_s} comments"));
+        }
     }
-    if let Some(s) = status {
-        notes.push(s);
-    }
+
     notes.append(&mut gaps);
     let mut seen = HashSet::new();
     notes.retain(|n| seen.insert(n.clone()));
@@ -577,6 +556,7 @@ fn assemble(
     } else {
         Some(cut_chars(&notes.join("; "), 600))
     };
+
     CommentsPayload {
         container: "reddit-comments",
         post,
@@ -591,544 +571,764 @@ fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use std::sync::{Arc, Mutex};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{json, Value};
+    use std::io::Write;
+    use tokio_tungstenite::tungstenite::Message;
 
-    use super::net::classify_gate_body;
-    use super::tree::{format_epoch, normalize_text};
+    use super::net::{classify_gate_body, is_rate_limit, rate_limit_error};
+    use super::tree::{normalize_date, normalize_text};
 
-    fn fixture() -> Value {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/reddit_post_comments.json");
-        let raw = std::fs::read_to_string(&path).expect("fixture readable");
-        serde_json::from_str(&raw).expect("fixture is JSON")
-    }
-
-    fn post_listing(id: &str, author: &str) -> Value {
-        json!({"kind":"Listing","data":{"children":[{"kind":"t3","data":{
-            "id":id,"author":author,"subreddit":"test","title":"T",
-            "score":10,"num_comments":4,"created_utc":1_750_000_000,
-            "permalink":format!("/r/test/comments/{id}/p/"),"selftext":""
-        }}]}})
-    }
-
-    fn t1(id: &str, author: &str, parent: &str, body: &str, replies: Value) -> Value {
-        json!({"kind":"t1","data":{
-            "id":id,"author":author,"parent_id":parent,"score":5,
-            "created_utc":1_750_000_000,
-            "permalink":format!("/r/test/comments/abc/comment/{id}/"),
-            "body":body,"replies":replies
-        }})
-    }
-
-    fn more(parent: &str, count: i64, ids: &[&str]) -> Value {
-        json!({"kind":"more","data":{"parent_id":parent,"count":count,"children":ids}})
-    }
-
-    #[test]
-    fn fixture_parses_the_complete_thread() {
-        let (post, tree) = parse_discussion(&fixture()).expect("parse");
-        assert_eq!(post.title, "Fearless SIMD v1.0 is here");
-        assert_eq!(post.author, "u/Shnatsel");
-        assert_eq!(post.subreddit, "r/rust");
-        assert_eq!(post.comments, Some(26));
-        assert_eq!(post.score, Some(486));
-        assert_eq!(tree.nodes.len(), 26);
-        assert!(tree.stubs.is_empty(), "26-comment thread carries no stubs");
-
-        let roots = tree.children.get(&tree.post_id).expect("roots");
-        assert_eq!(roots.len(), 12, "12 top-level comments");
-
-        let (items, capped) = render_items(&tree, DEFAULT_COMMENT_CAP);
-        assert!(!capped);
-        assert_eq!(items.len(), 26);
-
-        // DFS order: first root, then its reply.
-        assert_eq!(items[0].id, "pbcven4");
-        assert_eq!(items[1].id, "pbd2e82");
-        assert_eq!(items[2].id, "pbd57io");
-        assert_eq!(items[2].depth, 1);
-
-        // The previously DOM-collapsed depth-3 reply is present.
-        let deep = items
-            .iter()
-            .find(|i| i.id == "pbehi7l")
-            .expect("depth-3 comment");
-        assert_eq!(deep.depth, 3);
-
-        // Full bodies, no mid-word 500-char cut.
-        let straight = items.iter().find(|i| i.id == "pbd2e82").expect("comment");
-        assert!(straight.text.chars().count() > 500, "long body kept whole");
-        let reply = items.iter().find(|i| i.id == "pbd57io").expect("reply");
-        assert!(
-            reply.text.chars().count() > 500,
-            "1194-char reply kept whole"
-        );
-
-        // Dates formatted from created_utc.
-        assert_eq!(straight.date.as_deref(), Some("2026-09-22 13:30 UTC"));
-
-        // OP flag on Shnatsel's comments, not on others.
-        assert_eq!(reply.op, Some(true));
-        assert_eq!(straight.op, None);
-
-        // Complete: rendered count equals the reported total.
-        let payload = assemble(post, items, false, false, false, false, vec![]);
-        assert!(payload.complete);
-        assert!(payload.note.is_none());
-        assert_eq!(payload.count, 26);
-    }
-
-    #[test]
-    fn epoch_formatting() {
-        assert_eq!(format_epoch(0), "1970-01-01 00:00 UTC");
-        assert_eq!(format_epoch(1_700_000_000), "2023-11-14 22:13 UTC");
-        assert_eq!(format_epoch(1_709_164_800), "2024-02-29 00:00 UTC");
-        assert_eq!(format_epoch(1_790_083_846), "2026-09-22 13:30 UTC");
-    }
-
-    #[test]
-    fn nested_stub_resolves_via_subtree_with_correct_depths() {
-        // Initial listing: root comment `a` with a stub for 2 more replies.
-        let initial = json!([
-            post_listing("abc", "opuser"),
-            {"kind":"Listing","data":{"children":[
-                t1("a","alice","t3_abc","A", json!("")),
-                more("t1_a", 2, &["b","c"])
-            ]}}
-        ]);
-        let (post, mut tree) = parse_discussion(&initial).unwrap();
-        assert_eq!(tree.stubs.len(), 1);
-        assert!(!tree.stubs[0].top_level);
-
-        // Permalink listing for `a`: full subtree — b (with reply d) and c.
-        let subtree = json!([
-            post_listing("abc", "opuser"),
-            {"kind":"Listing","data":{"children":[
-                t1("a","alice","t3_abc","A",
-                    json!({"kind":"Listing","data":{"children":[
-                        t1("b","bob","t1_a","B",
-                            json!({"kind":"Listing","data":{"children":[
-                                t1("d","dan","t1_b","D", json!(""))
-                            ]}})),
-                        t1("c","carol","t1_a","C", json!(""))
-                    ]}}))
-            ]}}
-        ]);
-        let (root, sub) = parse_subtree(&subtree).unwrap();
-        assert_eq!(root, "a");
-        merge_subtree(&mut tree, &root, sub);
-
-        let (items, _) = render_items(&tree, 100);
-        let order: Vec<(String, usize)> = items.iter().map(|i| (i.id.clone(), i.depth)).collect();
-        assert_eq!(
-            order,
-            vec![
-                ("a".into(), 0),
-                ("b".into(), 1),
-                ("d".into(), 2),
-                ("c".into(), 1),
-            ]
-        );
-        let payload = assemble(post, items, false, false, false, false, vec![]);
-        assert!(payload.complete);
-    }
-
-    #[test]
-    fn top_level_stub_resolves_via_info_batches() {
-        let initial = json!([
-            post_listing("abc", "opuser"),
-            {"kind":"Listing","data":{"children":[
-                t1("a","alice","t3_abc","A", json!("")),
-                more("t3_abc", 3, &["b","c","d"])
-            ]}}
-        ]);
-        let (post, mut tree) = parse_discussion(&initial).unwrap();
-        assert!(tree.stubs[0].top_level);
-        assert_eq!(tree.stubs[0].parent, "abc");
-
-        let things = vec![
-            json!({"kind":"t1","data":{"id":"b","author":"bob","parent_id":"t3_abc","score":2,
-                "created_utc":1_750_000_001,"permalink":"/r/test/comments/abc/comment/b/","body":"B"}}),
-            json!({"kind":"t1","data":{"id":"c","author":"carol","parent_id":"t3_abc","score":1,
-                "created_utc":1_750_000_002,"permalink":"/r/test/comments/abc/comment/c/","body":"C"}}),
-            json!({"kind":"t1","data":{"id":"d","author":"dan","parent_id":"t3_abc","score":1,
-                "created_utc":1_750_000_003,"permalink":"/r/test/comments/abc/comment/d/","body":"D"}}),
-        ];
-        let got = attach_info_things(&mut tree, &things, "abc");
-        assert_eq!(got, 3);
-
-        let (items, _) = render_items(&tree, 100);
-        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["a", "b", "c", "d"],
-            "resolved top-level comments appended in order"
-        );
-        let payload = assemble(post, items, false, false, false, false, vec![]);
-        assert!(payload.complete);
-    }
-
-    // ── Whole sweeps against a fake page ──────────────────────────────────
-    // A fake CDP endpoint answers the sweep's in-page fetches from a route
-    // table (path → status, body), so `fetch_comments` runs end to end.
-
-    type Route = Box<dyn Fn(&str) -> (i64, String) + Send>;
-
-    /// Serve the sweep; the loid check passes. Returns every fetched path.
-    async fn fake_page(route: Route) -> (CdpSession, Arc<Mutex<Vec<String>>>) {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let fetched = Arc::new(Mutex::new(Vec::new()));
-        let log = fetched.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            // The first JSON value in `s` (a url string or a url array).
-            fn first<T: serde::de::DeserializeOwned>(s: &str) -> T {
-                serde_json::Deserializer::from_str(s)
-                    .into_iter::<T>()
-                    .next()
-                    .unwrap()
-                    .unwrap()
-            }
-            let answer = move |url: &str| {
-                log.lock().unwrap().push(url.to_string());
-                let (s, t) = route(url);
-                json!({"s": s, "t": t})
-            };
-            while let Some(Ok(msg)) = socket.next().await {
-                let req: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
-                let expr = req["params"]["expression"].as_str().unwrap_or_default();
-                let value = if expr.contains("loid=") {
-                    json!(true)
-                } else if let Some(rest) = expr.split("const us=").nth(1) {
-                    let urls: Vec<String> = first(rest);
-                    Value::Array(urls.iter().map(|u| answer(u)).collect())
-                } else {
-                    let url: String = first(expr.split("fetch(").nth(1).unwrap());
-                    answer(&url)
-                };
-                let reply = json!({"id": req["id"], "result": {"result": {"value": value}}});
-                socket
-                    .send(Message::Text(reply.to_string().into()))
-                    .await
-                    .unwrap();
-            }
-        });
-        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
-            .await
-            .unwrap();
-        (CdpSession::root(client), fetched)
-    }
-
-    fn listing(children: Vec<Value>) -> Value {
-        json!({"kind": "Listing", "data": {"children": children}})
-    }
-
-    /// `[post, comments]` for post `abc` reporting `total` comments.
-    fn discussion(total: i64, comments: Vec<Value>) -> String {
-        let mut post = post_listing("abc", "opuser");
-        post["data"]["children"][0]["data"]["num_comments"] = json!(total);
-        json!([post, listing(comments)]).to_string()
-    }
-
-    fn info(things: Vec<Value>) -> String {
-        json!({"kind": "Listing", "data": {"children": things}}).to_string()
-    }
-
-    #[tokio::test]
-    async fn stubs_found_inside_recovered_subtrees_are_resolved_too() {
-        // `a` is collapsed behind an empty stub. Its subtree brings two NEW
-        // regions: another "continue this thread" under `c` and a "more"
-        // (x, y) under `a`. Both must be followed, not left behind while the
-        // note blames deletions.
-        let route: Route = Box::new(|url: &str| {
-            let body = if url.starts_with("/r/test/comments/abc.json") {
-                discussion(
-                    6,
-                    vec![t1(
-                        "a",
-                        "alice",
-                        "t3_abc",
-                        "A",
-                        listing(vec![more("t1_a", 0, &[])]),
-                    )],
-                )
-            } else if url.starts_with("/comments/abc/comment/a.json") {
-                let c = t1(
-                    "c",
-                    "carol",
-                    "t1_b",
-                    "C",
-                    listing(vec![more("t1_c", 0, &[])]),
-                );
-                let b = t1("b", "bob", "t1_a", "B", listing(vec![c]));
-                let a = t1(
-                    "a",
-                    "alice",
-                    "t3_abc",
-                    "A",
-                    listing(vec![b, more("t1_a", 2, &["x", "y"])]),
-                );
-                discussion(6, vec![a])
-            } else if url.starts_with("/comments/abc/comment/c.json") {
-                let d = t1("d", "dan", "t1_c", "D", json!(""));
-                discussion(6, vec![t1("c", "carol", "t1_b", "C", listing(vec![d]))])
-            } else if url.starts_with("/api/info.json?id=t1_x,t1_y&") {
-                info(vec![
-                    t1("x", "xena", "t1_a", "X", json!("")),
-                    t1("y", "yuri", "t1_a", "Y", json!("")),
-                ])
-            } else {
-                return (404, format!("unexpected fetch {url}"));
-            };
-            (200, body)
-        });
-        let (cdp, fetched) = fake_page(route).await;
-        let p = fetch_comments(&cdp, "/r/test/comments/abc", "confidence", 100)
-            .await
-            .expect("sweep");
-        let ids: Vec<&str> = p.items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["a", "b", "c", "d", "x", "y"],
-            "fetched: {:?}, note: {:?}",
-            fetched.lock().unwrap(),
-            p.note
-        );
-        assert!(p.complete, "{:?}", p.note);
-    }
-
-    #[tokio::test]
-    async fn regions_left_collapsed_are_named_not_blamed_on_deletions() {
-        // 13 top-level comments, each hiding one reply behind an empty stub:
-        // the sweep's recovery cap (12) leaves one region collapsed. That is
-        // a retrievable region the sweep did not open, not a deletion.
-        let route: Route = Box::new(|url: &str| {
-            if url.starts_with("/r/test/comments/abc.json") {
-                let roots = (0..13)
-                    .map(|i| {
-                        let id = format!("r{i}");
-                        let stub = more(&format!("t1_{id}"), 0, &[]);
-                        t1(&id, "u", "t3_abc", "R", listing(vec![stub]))
-                    })
-                    .collect();
-                return (200, discussion(26, roots));
-            }
-            let Some(id) = url
-                .strip_prefix("/comments/abc/comment/")
-                .and_then(|r| r.split(".json").next())
-            else {
-                return (404, format!("unexpected fetch {url}"));
-            };
-            let reply = t1(&format!("{id}k"), "u", &format!("t1_{id}"), "K", json!(""));
-            let root = t1(id, "u", "t3_abc", "R", listing(vec![reply]));
-            (200, discussion(26, vec![root]))
-        });
-        let (cdp, _) = fake_page(route).await;
-        let p = fetch_comments(&cdp, "/r/test/comments/abc", "confidence", 100)
-            .await
-            .expect("sweep");
-        assert_eq!(p.count, 25);
-        assert!(!p.complete);
-        let note = p.note.unwrap_or_default();
-        assert!(
-            !note.contains("every region reddit exposed was resolved"),
-            "{note}"
-        );
-        assert!(note.contains("1 collapsed region"), "{note}");
-    }
-
-    #[test]
-    fn a_gap_note_never_sits_next_to_an_all_resolved_claim() {
-        let (post, tree) = parse_discussion(&fixture()).unwrap();
-        let (items, _) = render_items(&tree, 3);
-        let gap = "subtree fetch failed (reddit: GET /x.json → HTTP 500)".to_string();
-        let p = assemble(post, items, false, false, false, false, vec![gap]);
-        let note = p.note.unwrap_or_default();
-        assert!(note.contains("loaded 3 of 26 comments"), "{note}");
-        assert!(note.contains("subtree fetch failed"), "{note}");
-        assert!(
-            !note.contains("every region reddit exposed was resolved"),
-            "a known gap contradicts the claim: {note}"
-        );
-    }
-
-    #[test]
-    fn empty_stubs_and_partial_regions_are_recovery_targets() {
-        let mk = |parent: &str, top: bool, count: i64, ids: usize| Stub {
-            parent: parent.into(),
-            top_level: top,
-            count,
-            ids: (0..ids).map(|i| format!("id{i}")).collect(),
-        };
-        // Reddit's collapsed-region shape: count 0, no ids — still worth a
-        // parent-subtree fetch (the live 60→69 recovery).
-        assert!(stub_hides_comments(&mk("p1", false, 0, 0)));
-        // A partial region with a real shortfall.
-        assert!(stub_hides_comments(&mk("p2", false, 10, 4)));
-        // Complete regions, tiny shortfalls and top-level stubs are not.
-        assert!(!stub_hides_comments(&mk("p3", false, 4, 4)));
-        assert!(!stub_hides_comments(&mk("p4", false, 5, 4)));
-        assert!(!stub_hides_comments(&mk("p5", true, 0, 0)));
-    }
-
-    #[test]
-    fn cap_and_gaps_produce_honest_notes() {
-        let (post, tree) = parse_discussion(&fixture()).unwrap();
-        let (items, capped) = render_items(&tree, 3);
-        assert!(capped);
-        assert_eq!(items.len(), 3);
-
-        let payload = assemble(post, items, capped, false, false, false, vec![]);
-        assert!(!payload.complete);
-        let note = payload.note.unwrap();
-        assert!(
-            note.contains("capped: 3 of 26"),
-            "note names the cap: {note}"
-        );
-
-        // Clean full render → complete, no note.
-        let (post2, tree2) = parse_discussion(&fixture()).unwrap();
-        let (items2, capped2) = render_items(&tree2, 1_000);
-        let payload2 = assemble(post2, items2, capped2, false, false, false, vec![]);
-        assert!(payload2.complete);
-
-        // Budget shortfall reads as a budget issue, not as deletions.
-        let (post3, tree3) = parse_discussion(&fixture()).unwrap();
-        let (items3, _) = render_items(&tree3, 3);
-        let payload3 = assemble(post3, items3, false, true, false, false, vec![]);
-        assert!(!payload3.complete);
-        let note3 = payload3.note.unwrap();
-        assert!(note3.contains("fetch budget exhausted: 3 of 26"), "{note3}");
-        assert!(
-            !note3.contains("deleted"),
-            "budget shortfall must not read as deletions: {note3}"
-        );
-
-        // Rate limiting reads as its own status, with a retry hint.
-        let (post4, tree4) = parse_discussion(&fixture()).unwrap();
-        let (items4, _) = render_items(&tree4, 3);
-        let payload4 = assemble(post4, items4, false, false, true, false, vec![]);
-        assert!(!payload4.complete);
-        let note4 = payload4.note.unwrap();
-        assert!(note4.contains("rate limit reached: 3 of 26"), "{note4}");
-        assert!(note4.contains("retry in ~a minute"), "{note4}");
-
-        // The network-security wall reads as its own transient status.
-        let (post5, tree5) = parse_discussion(&fixture()).unwrap();
-        let (items5, _) = render_items(&tree5, 3);
-        let payload5 = assemble(post5, items5, false, false, false, true, vec![]);
-        assert!(!payload5.complete);
-        let note5 = payload5.note.unwrap();
-        assert!(
-            note5.contains("network-security wall interrupted"),
-            "{note5}"
-        );
-        assert!(note5.contains("may remain blocked"), "{note5}");
-    }
-
-    #[test]
-    fn gate_bodies_classify_by_markers() {
-        // Real block-page text (captured live from a tokenless `.json` hit).
-        let wall = "<div>You've been blocked by network security.</div>\
-                    <div>If you think you've been blocked by mistake, file a ticket below and we'll look into it.</div>";
-        let e = classify_gate_body("/r/x/comments/y/.json", wall).expect("wall classified");
-        assert!(is_security_block(&e));
-        assert!(!is_rate_limit(&e));
-        assert!(e.to_string().contains("may remain blocked"), "{e}");
-
-        // The classic variant some reddit edges still serve.
-        let whoa =
-            "<h1>Whoa there, pardner!</h1>Your request has been blocked due to a network policy.";
-        assert!(is_security_block(
-            &classify_gate_body("/api/info.json", whoa).expect("whoa variant classified")
-        ));
-
-        // The challenge page (hidden auto-submit form) served to an API path.
-        let challenge = "<form hidden method=\"GET\" action=\"/r/x/\">\
-            <input type=\"hidden\" name=\"solution\" />\
-            <input type=\"hidden\" name=\"js_challenge\" value=\"1\"/>\
-            <input type=\"hidden\" name=\"jsc_token\" value=\"abc\"/></form>\
-            <script>document.forms[0].requestSubmit()</script>";
-        let e = classify_gate_body("/api/info.json", challenge).expect("challenge classified");
-        assert!(!is_security_block(&e));
-        assert!(e.to_string().contains("JS challenge"), "{e}");
-
-        // Ordinary failures keep the generic path — no false classification.
-        assert!(classify_gate_body("/x.json", "{\"kind\":\"Listing\"}").is_none());
-        assert!(
-            classify_gate_body("/x.json", "<html><body>Service Unavailable</body></html>")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn rate_limit_is_the_429_status_not_a_429_in_a_path() {
-        // Sweep errors carry the request path, and base36 post/comment ids
-        // (or a subreddit name) can spell "429" or "throttled".
-        for plain in [
-            "reddit: GET /comments/1ab429c/comment/k2xq.json?limit=500&raw_json=1&sort=confidence → HTTP 500",
-            "reddit: GET /r/throttled/comments/1wn7jni/comment/k2xq.json?limit=500&raw_json=1&sort=new → HTTP 502",
-            "reddit: non-JSON response from /comments/1x429/comment/a.json (expected value at line 1 column 1)",
-        ] {
-            assert!(!is_rate_limit(&BladeError::Other(plain.into())), "{plain}");
+    const NODE_DOM_SHIM: &str = r#"
+function mkEl(tag, opts = {}) {
+  const attrs = Object.assign({}, opts.attrs || {});
+  const cls = new Set((opts.className || '').split(/\s+/).filter(Boolean));
+  const node = {
+    nodeType: 1,
+    tagName: tag.toUpperCase(),
+    className: opts.className || '',
+    classList: { contains(c) { return cls.has(c); } },
+    id: opts.id || attrs.id || '',
+    children: [],
+    childNodes: [],
+    parentElement: null,
+    getAttribute(n) {
+      if (n === 'id' && this.id) return this.id;
+      if (n === 'class' && this.className) return this.className;
+      return attrs[n] !== undefined ? String(attrs[n]) : null;
+    },
+    hasAttribute(n) { return this.getAttribute(n) !== null; },
+    matches(sel) { return matchAny(this, sel); },
+    closest(sel) {
+      let cur = this;
+      while (cur) {
+        if (matchAny(cur, sel)) return cur;
+        cur = cur.parentElement;
+      }
+      return null;
+    },
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; },
+    querySelectorAll(sel) {
+      const out = [];
+      const walk = n => {
+        for (const ch of n.children) {
+          if (matchAny(ch, sel)) out.push(ch);
+          walk(ch);
         }
-        for limited in [
-            "reddit: rate limited (HTTP 429)",
-            "rate limited (HTTP 429)",
-            "reddit: empty response (throttled?)",
-            "empty response (throttled?)",
+      };
+      walk(this);
+      return out;
+    },
+  };
+  if (opts.text !== undefined) {
+    node.childNodes.push({ nodeType: 3, textContent: String(opts.text) });
+  }
+  for (const ch of (opts.children || [])) {
+    if (typeof ch === 'string') {
+      node.childNodes.push({ nodeType: 3, textContent: ch });
+    } else if (ch && ch.nodeType === 1) {
+      ch.parentElement = node;
+      node.children.push(ch);
+      node.childNodes.push(ch);
+    }
+  }
+  return node;
+}
+function matchSimple(el, part) {
+  part = part.trim();
+  if (!part || part === '*') return true;
+  if (part.includes(':not(')) {
+    const m = part.match(/^(.*):not\(([^)]+)\)(.*)$/);
+    if (m) return matchSimple(el, m[1] + m[3]) && !matchSimple(el, m[2]);
+  }
+  const tokens = part.match(/(?:^[a-zA-Z0-9_-]+)|(?:#[a-zA-Z0-9_-]+)|(?:\.[a-zA-Z0-9_-]+)|(?:\[[^\]]+\])/g) || [];
+  if (!tokens.length) return false;
+  for (const tk of tokens) {
+    if (tk.startsWith('#')) { if (el.id !== tk.slice(1)) return false; }
+    else if (tk.startsWith('.')) { if (!el.classList.contains(tk.slice(1))) return false; }
+    else if (tk.startsWith('[')) {
+      const m = tk.match(/^\[([^\]=*^$~|]+)(?:([*^$~]?=)["']?([^"'\]]*)["']?)?\]$/);
+      if (!m) return false;
+      const v = el.getAttribute(m[1]);
+      if (v === null) return false;
+      if (m[2] === '=') { if (v !== m[3]) return false; }
+      else if (m[2] === '*=') { if (!v.includes(m[3])) return false; }
+      else if (m[2] === '^=') { if (!v.startsWith(m[3])) return false; }
+      else if (m[2] === '$=') { if (!v.endsWith(m[3])) return false; }
+      else if (m[2] === '~=') { if (!v.split(/\s+/).includes(m[3])) return false; }
+    } else {
+      if (el.tagName !== tk.toUpperCase()) return false;
+    }
+  }
+  return true;
+}
+function splitOutside(sel, sepRe) {
+  const out = []; let cur = '', d = 0;
+  for (let i = 0; i < sel.length; i++) {
+    const ch = sel[i];
+    if (ch === '[') d++; else if (ch === ']' && d > 0) d--;
+    if (d === 0 && sepRe.test(ch)) { if (cur.trim()) out.push(cur.trim()); cur = ''; }
+    else cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+function matchSel(el, sel) {
+  const desc = splitOutside(sel.trim(), /\s/);
+  if (desc.length > 1) {
+    if (!matchSimple(el, desc[desc.length - 1])) return false;
+    let cur = el.parentElement;
+    for (let i = desc.length - 2; i >= 0; i--) {
+      while (cur && !matchSimple(cur, desc[i])) cur = cur.parentElement;
+      if (!cur) return false;
+      cur = cur.parentElement;
+    }
+    return true;
+  }
+  return matchSimple(el, sel);
+}
+function matchAny(el, sel) {
+  return sel.split(',').some(s => matchSel(el, s));
+}
+"#;
+
+    fn run_node(js: &str) -> Value {
+        let mut child = std::process::Command::new("node")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("node required for reddit parser tests");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(js.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "node error:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("valid JSON from node")
+    }
+
+    #[test]
+    fn reddit_parser_scripts_pass_node_syntax_check() {
+        let has_node = std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !has_node {
+            return;
+        }
+        for (name, src) in [
+            ("parse_thread", PARSE_THREAD_JS),
+            ("parse_search", search::PARSE_SEARCH_JS),
         ] {
+            let path = std::env::temp_dir().join(format!("bladebro-reddit-{name}.js"));
+            std::fs::write(&path, src).unwrap();
+            let out = std::process::Command::new("node")
+                .arg("--check")
+                .arg(&path)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_file(&path);
             assert!(
-                is_rate_limit(&BladeError::Other(limited.into())),
-                "{limited}"
+                out.status.success(),
+                "{name}.js syntax error:\n{}",
+                String::from_utf8_lossy(&out.stderr)
             );
         }
     }
 
     #[test]
-    fn gate_classification_is_case_insensitive() {
-        assert!(
-            classify_gate_body("/x.json", "YOU'VE BEEN BLOCKED BY Network Security.").is_some()
+    fn shreddit_parser_extracts_comments_partials_folds_and_never_steals_child_body() {
+        let js = format!(
+            r#"{NODE_DOM_SHIM}
+{PARSE_THREAD_JS}
+const post = mkEl('shreddit-post', {{
+  attrs: {{
+    id: 't3_1xqudci',
+    'post-title': 'Everything is becoming Rust now',
+    author: 'ferris',
+    'subreddit-prefixed-name': 'r/rust',
+    score: '412',
+    'comment-count': '453',
+    permalink: '/r/rust/comments/1xqudci/everything_is_becoming_rust_now/',
+    'created-timestamp': '2026-11-20T14:22:10.000000+0000',
+  }},
+  children: [
+    mkEl('div', {{ attrs: {{ slot: 'text-body' }}, children: [mkEl('p', {{ text: 'Post body line 1.' }})] }}),
+  ],
+}});
+const nestedChild = mkEl('shreddit-comment', {{
+  attrs: {{ thingid: 't1_c2', parentid: 't1_c1', author: 'bob', score: '19', depth: '1', permalink: '/r/rust/comments/1xqudci/comment/c2/' }},
+  children: [
+    mkEl('faceplate-timeago', {{ attrs: {{ ts: '2026-11-20T15:00:00Z' }} }}),
+    mkEl('div', {{ attrs: {{ slot: 'comment' }}, children: [mkEl('p', {{ text: 'Child reply text must stay on c2 only' }})] }}),
+    mkEl('div', {{ className: 'fold-more', children: [
+      mkEl('a', {{ attrs: {{ href: '/r/rust/comments/1xqudci/comment/c2/?force-legacy-sct=1' }}, text: '1 more reply' }}),
+    ]}}),
+  ],
+}});
+// Deleted parent with NO own [slot=comment] must NOT steal c2's body.
+const deletedParent = mkEl('shreddit-comment', {{
+  attrs: {{ thingid: 't1_c1', parentid: 't3_1xqudci', 'is-comment-deleted': '', 'is-author-deleted': '', depth: '0' }},
+  children: [
+    mkEl('a', {{ className: 'more-comments-link', attrs: {{ href: '/r/rust/comments/1xqudci/comment/c1/' }}, text: 'hidden seo link' }}),
+    mkEl('faceplate-partial', {{
+      attrs: {{ name: 'more-comments_c1', src: '/svc/shreddit/more-comments/r/rust/t3_1xqudci?cursor=abc', loading: 'action' }},
+      children: [mkEl('button', {{ text: '29 more replies' }})],
+    }}),
+    nestedChild,
+  ],
+}});
+const sidebarPartial = mkEl('aside', {{ children: [
+  mkEl('faceplate-partial', {{ attrs: {{ name: 'right-sidebar', src: '/svc/shreddit/pdp-right-rail/r/rust' }} }}),
+]}});
+const postMethodPartial = mkEl('faceplate-partial', {{
+  attrs: {{ method: 'post', src: '/svc/shreddit/more-comments/r/rust/t3_1xqudci?mut=1' }},
+}});
+const tree = mkEl('shreddit-comment-tree', {{ children: [
+  deletedParent,
+  postMethodPartial,
+  mkEl('faceplate-partial', {{
+    attrs: {{ name: 'more-comments_top', src: '/svc/shreddit/more-comments/r/rust/t3_1xqudci?cursor=top2' }},
+    children: [mkEl('button', {{ text: 'View more comments' }})],
+  }}),
+]}});
+const doc = mkEl('body', {{ children: [post, mkEl('main', {{ children: [tree] }}), sidebarPartial] }});
+console.log(JSON.stringify(parseRedditThread(doc, {{
+  isFragment: false,
+  origin: 'https://www.reddit.com',
+  url: 'https://www.reddit.com/r/rust/comments/1xqudci/everything_is_becoming_rust_now/',
+  pathname: '/r/rust/comments/1xqudci/everything_is_becoming_rust_now/',
+}})));
+"#
+        );
+        let v = run_node(&js);
+        assert_eq!(v["post"]["title"], "Everything is becoming Rust now");
+        assert_eq!(v["post"]["comments"], 453);
+        assert_eq!(v["post"]["body"], "Post body line 1.");
+
+        let cmts = v["comments"].as_array().unwrap();
+        assert_eq!(cmts.len(), 2);
+        assert_eq!(cmts[0]["id"], "c1");
+        assert_eq!(cmts[0]["author"], "[deleted]");
+        assert_eq!(
+            cmts[0]["body"], "[deleted]",
+            "deleted parent must never steal child comment text"
+        );
+        assert_eq!(cmts[1]["id"], "c2");
+        assert_eq!(cmts[1]["body"], "Child reply text must stay on c2 only");
+        assert_eq!(cmts[1]["date"], "2026-11-20T15:00:00Z");
+
+        let partials = v["partials"].as_array().unwrap();
+        assert_eq!(
+            partials.len(),
+            2,
+            "sidebar and method=post partials excluded: {partials:?}"
+        );
+        assert_eq!(partials[0]["parent_id"], "c1");
+        assert_eq!(partials[0]["claimed"], 29);
+        assert_eq!(partials[1]["parent_id"], "1xqudci");
+
+        let folds = v["folds"].as_array().unwrap();
+        assert_eq!(
+            folds.len(),
+            1,
+            "only div.fold-more captured, hidden a.more-comments-link ignored: {folds:?}"
+        );
+        assert_eq!(folds[0]["comment_id"], "c2");
+        assert_eq!(
+            folds[0]["url"],
+            "/r/rust/comments/1xqudci/comment/c2/?force-legacy-sct=1"
         );
     }
 
     #[test]
-    fn body_normalization_and_caps() {
-        let n = normalize_text("line one   \r\n\r\n\r\nline two\r\n", 100);
-        assert_eq!(n, "line one\n\nline two");
-        let long = "x".repeat(80);
-        let cut = normalize_text(&long, 10);
-        assert_eq!(cut.chars().count(), 11, "10 chars + ellipsis");
-        assert!(cut.ends_with('…'));
-        let utf = "héllo wörld";
-        assert_eq!(cut_chars(utf, 100), utf);
+    fn search_parser_extracts_shreddit_sdui_and_skips_promoted_ads() {
+        let js = format!(
+            r#"{NODE_DOM_SHIM}
+{}
+const ad = mkEl('div', {{ attrs: {{ 'data-testid': 'search-post-unit', 'is-promoted': '' }}, children: [
+  mkEl('a', {{ attrs: {{ 'data-testid': 'post-title', href: '/r/ads/comments/ad1/buy/' }}, text: 'Buy this' }}),
+]}});
+const unit = mkEl('div', {{ attrs: {{ 'data-testid': 'search-post-unit' }}, children: [
+  mkEl('a', {{ attrs: {{ 'data-testid': 'post-title', href: '/r/rust/comments/1xqudci/everything_is_becoming_rust_now/' }}, text: 'Everything is becoming Rust now' }}),
+  mkEl('a', {{ attrs: {{ href: '/r/rust/' }}, text: 'r/rust' }}),
+  mkEl('a', {{ attrs: {{ href: '/user/ferris/' }}, text: 'u/ferris' }}),
+  mkEl('div', {{ attrs: {{ 'data-testid': 'search-counter-row' }}, text: '1.2K upvotes · 453 comments' }}),
+  mkEl('faceplate-timeago', {{ attrs: {{ ts: '2026-11-20T14:22:10Z' }} }}),
+]}});
+const nextP = mkEl('faceplate-partial', {{ attrs: {{ src: '/svc/shreddit/search/?q=rust&cursor=next2' }} }});
+const doc = mkEl('body', {{ children: [ad, unit, nextP] }});
+console.log(JSON.stringify(parseRedditSearch(doc, {{
+  origin: 'https://www.reddit.com',
+  url: 'https://www.reddit.com/search/?q=rust',
+}})));
+"#,
+            search::PARSE_SEARCH_JS
+        );
+        let v = run_node(&js);
+        assert_eq!(v["skipped_ads"], 1);
+        assert_eq!(v["items"].as_array().unwrap().len(), 1);
+        assert_eq!(v["items"][0]["title"], "Everything is becoming Rust now");
+        assert_eq!(v["items"][0]["subreddit"], "r/rust");
+        assert_eq!(v["items"][0]["author"], "u/ferris");
+        assert_eq!(v["items"][0]["score"], 1200);
+        assert_eq!(v["items"][0]["comments"], 453);
+        assert_eq!(v["next_url"], "/svc/shreddit/search/?q=rust&cursor=next2");
     }
 
-    #[test]
-    fn payload_serialization_keeps_field_order_and_skips_empty() {
-        let (post, tree) = parse_discussion(&fixture()).unwrap();
-        let (items, _) = render_items(&tree, 100);
-        let payload = assemble(post, items, false, false, false, false, vec![]);
-        let s = serde_json::to_string(&payload).unwrap();
-        assert!(
-            s.starts_with("{\"container\":\"reddit-comments\","),
-            "container first: {s:.80}"
-        );
-        assert!(s.contains("\"complete\":true"));
-        assert!(!s.contains("\"note\""), "clean payload carries no note");
-        // Non-op comments do not serialize the op key.
-        let first_item = s.find("\"items\":[").unwrap();
-        let head: String = s
-            .get(first_item..)
-            .unwrap_or("")
-            .chars()
-            .take(400)
+    #[tokio::test]
+    async fn sweep_expands_partials_and_fold_more_sequentially_with_zero_json() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut seen_exprs = Vec::new();
+
+            let responses = vec![
+                // Step 0: live DOM read (1 root comment + 1 nested partial + 1 deep fold-more)
+                json!({
+                    "post_id": "1xqudci",
+                    "post": {
+                        "id": "1xqudci",
+                        "title": "Everything is becoming Rust now",
+                        "author": "ferris",
+                        "subreddit": "r/rust",
+                        "score": 400,
+                        "comments": 4,
+                        "date": "2026-11-20T14:22:00Z",
+                        "permalink": "/r/rust/comments/1xqudci/everything_is_becoming_rust_now/",
+                        "url": "https://www.reddit.com/r/rust/comments/1xqudci/everything_is_becoming_rust_now/"
+                    },
+                    "comments": [{
+                        "id": "c1",
+                        "parent_id": "1xqudci",
+                        "author": "alice",
+                        "score": 50,
+                        "depth": 0,
+                        "date": "2026-11-20T14:30:00Z",
+                        "permalink": "/r/rust/comments/1xqudci/comment/c1/",
+                        "body": "Root comment"
+                    }],
+                    "partials": [{
+                        "url": "/svc/shreddit/more-comments/r/rust/t3_1xqudci?cursor=p1",
+                        "parent_id": "c1",
+                        "claimed": 2
+                    }],
+                    "folds": []
+                }),
+                // Step 1: partial wave 1 adds c2 + nested partial p2 + fold-more f1
+                json!({
+                    "s": 200, "ra": "", "head": "", "len": 400,
+                    "data": {
+                        "post_id": "1xqudci",
+                        "comments": [{
+                            "id": "c2",
+                            "parent_id": "c1",
+                            "author": "ferris",
+                            "score": 20,
+                            "depth": 1,
+                            "permalink": "/r/rust/comments/1xqudci/comment/c2/",
+                            "body": "OP nested reply"
+                        }],
+                        "partials": [{
+                            "url": "/svc/shreddit/more-comments/r/rust/t3_1xqudci?cursor=p2",
+                            "parent_id": "c2",
+                            "claimed": 1
+                        }],
+                        "folds": [{
+                            "url": "/r/rust/comments/1xqudci/comment/c3/?force-legacy-sct=1",
+                            "parent_id": "c3",
+                            "comment_id": "c3"
+                        }]
+                    }
+                }),
+                // Step 2: partial wave 2 adds c3 under c2
+                json!({
+                    "s": 200, "ra": "", "head": "", "len": 300,
+                    "data": {
+                        "post_id": "1xqudci",
+                        "comments": [{
+                            "id": "c3",
+                            "parent_id": "c2",
+                            "author": "carol",
+                            "score": 10,
+                            "depth": 2,
+                            "permalink": "/r/rust/comments/1xqudci/comment/c3/",
+                            "body": "Depth 2 reply"
+                        }],
+                        "partials": [],
+                        "folds": []
+                    }
+                }),
+                // Step 3: div.fold-more permalink returns c3 (already known!) + deep child c4
+                json!({
+                    "s": 200, "ra": "", "head": "", "len": 350,
+                    "data": {
+                        "post_id": "1xqudci",
+                        "comments": [
+                            {
+                                "id": "c3",
+                                "parent_id": "c2",
+                                "author": "carol",
+                                "score": 10,
+                                "depth": 0,
+                                "permalink": "/r/rust/comments/1xqudci/comment/c3/",
+                                "body": "Depth 2 reply"
+                            },
+                            {
+                                "id": "c4",
+                                "parent_id": "c3",
+                                "author": "dave",
+                                "score": 5,
+                                "depth": 1,
+                                "permalink": "/r/rust/comments/1xqudci/comment/c4/",
+                                "body": "Deep fold-more reply"
+                            }
+                        ],
+                        "partials": [],
+                        "folds": []
+                    }
+                }),
+            ];
+
+            for val in responses {
+                let req = socket.next().await.unwrap().unwrap();
+                let req: Value = serde_json::from_str(req.to_text().unwrap()).unwrap();
+                let expr = req["params"]["expression"].as_str().unwrap().to_string();
+                assert!(
+                    !expr.contains(".json"),
+                    "Reddit sweep must NEVER touch .json endpoints: {expr:.200}"
+                );
+                assert!(
+                    !expr.contains("Promise.all"),
+                    "Reddit sweep must stay strictly sequential (no parallel bursts)"
+                );
+                seen_exprs.push(expr);
+                socket
+                    .send(Message::Text(
+                        json!({"id": req["id"], "result": {"result": {"value": val}}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            seen_exprs
+        });
+
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let cdp = CdpSession::root(client);
+        let p = fetch_comments(
+            &cdp,
+            "/r/rust/comments/1xqudci",
+            "/r/rust/comments/1xqudci/everything_is_becoming_rust_now/",
+            "confidence",
+            false,
+            100,
+        )
+        .await
+        .unwrap();
+        let exprs = task.await.unwrap();
+        assert_eq!(exprs.len(), 4);
+        assert!(exprs[1].contains("/svc/shreddit/more-comments/r/rust/t3_1xqudci?cursor=p1"));
+        assert!(exprs[2].contains("/svc/shreddit/more-comments/r/rust/t3_1xqudci?cursor=p2"));
+        assert!(exprs[3].contains("/r/rust/comments/1xqudci/comment/c3/?force-legacy-sct=1"));
+
+        assert_eq!(p.container, "reddit-comments");
+        assert!(p.complete, "all 4 comments resolved cleanly: {:?}", p.note);
+        assert_eq!(p.count, 4);
+        let order: Vec<(&str, usize, Option<bool>)> = p
+            .items
+            .iter()
+            .map(|c| (c.id.as_str(), c.depth, c.op))
             .collect();
-        assert!(!head.contains("\"op\":false"), "op is omitted unless true");
+        assert_eq!(
+            order,
+            vec![
+                ("c1", 0, None),
+                ("c2", 1, Some(true)),
+                ("c3", 2, None),
+                ("c4", 3, None),
+            ],
+            "DFS depth re-rooted cleanly even though fold-more permalink reported depth 0/1"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_stops_immediately_on_429_and_propagates_retry_after() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let responses = vec![
+                json!({
+                    "post_id": "1xqudci",
+                    "post": {
+                        "id": "1xqudci",
+                        "title": "Thread",
+                        "author": "op",
+                        "subreddit": "r/rust",
+                        "comments": 50,
+                        "permalink": "/r/rust/comments/1xqudci/thread/"
+                    },
+                    "comments": [{
+                        "id": "c1", "parent_id": "1xqudci", "author": "alice", "body": "Initial"
+                    }],
+                    "partials": [
+                        {"url": "/svc/shreddit/more-comments/r/rust/t3_1xqudci?cursor=1", "parent_id": "c1", "claimed": 20},
+                        {"url": "/svc/shreddit/more-comments/r/rust/t3_1xqudci?cursor=2", "parent_id": "1xqudci", "claimed": 29}
+                    ],
+                    "folds": []
+                }),
+                json!({
+                    "s": 429, "ra": "60", "head": "Too Many Requests", "len": 17
+                }),
+            ];
+            let mut count = 0;
+            for val in responses {
+                let req = socket.next().await.unwrap().unwrap();
+                let req: Value = serde_json::from_str(req.to_text().unwrap()).unwrap();
+                socket
+                    .send(Message::Text(
+                        json!({"id": req["id"], "result": {"result": {"value": val}}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+                count += 1;
+            }
+            count
+        });
+
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let cdp = CdpSession::root(client);
+        let p = fetch_comments(
+            &cdp,
+            "/r/rust/comments/1xqudci",
+            "/r/rust/comments/1xqudci/thread/",
+            "confidence",
+            false,
+            100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(task.await.unwrap(), 2, "must stop immediately on first 429");
+        assert!(!p.complete);
+        assert_eq!(p.count, 1, "initial DOM comments preserved");
+        let note = p.note.as_deref().unwrap_or("");
+        assert!(note.contains("HTTP 429"), "{note}");
+        assert!(note.contains("retry-after: 60s"), "{note}");
+        assert!(note.contains("2 unexpanded reply region"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn single_comment_permalink_renders_detached_root_losslessly() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let req = socket.next().await.unwrap().unwrap();
+            let req: Value = serde_json::from_str(req.to_text().unwrap()).unwrap();
+            let val = json!({
+                "post_id": "1xqudci",
+                "post": {
+                    "id": "1xqudci",
+                    "title": "Thread",
+                    "author": "op",
+                    "subreddit": "r/rust",
+                    "comments": 2,
+                    "permalink": "/r/rust/comments/1xqudci/thread/"
+                },
+                "comments": [
+                    {"id": "deep1", "parent_id": "unloaded_ancestor", "author": "alice", "depth": 0, "body": "Focused comment"},
+                    {"id": "deep2", "parent_id": "deep1", "author": "bob", "depth": 1, "body": "Its nested reply"}
+                ],
+                "partials": [],
+                "folds": []
+            });
+            socket
+                .send(Message::Text(
+                    json!({"id": req["id"], "result": {"result": {"value": val}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let cdp = CdpSession::root(client);
+        let p = fetch_comments(
+            &cdp,
+            "/r/rust/comments/1xqudci",
+            "/r/rust/comments/1xqudci/comment/deep1/",
+            "confidence",
+            false,
+            100,
+        )
+        .await
+        .unwrap();
+        task.await.unwrap();
+        assert_eq!(p.count, 2);
+        assert_eq!(p.items[0].id, "deep1");
+        assert_eq!(p.items[0].depth, 0);
+        assert_eq!(p.items[1].id, "deep2");
+        assert_eq!(p.items[1].depth, 1);
+    }
+
+    #[tokio::test]
+    async fn sort_override_fetches_html_page_never_json() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let req = socket.next().await.unwrap().unwrap();
+            let req: Value = serde_json::from_str(req.to_text().unwrap()).unwrap();
+            let expr = req["params"]["expression"].as_str().unwrap().to_string();
+            assert!(!expr.contains(".json"), "sort override must not use .json");
+            assert!(
+                expr.contains("/r/rust/comments/1xqudci/everything_is_becoming_rust_now/?sort=new"),
+                "expected HTML sort URL, got: {expr:.240}"
+            );
+            let val = json!({
+                "s": 200, "ra": "", "head": "", "len": 500,
+                "data": {
+                    "post_id": "1xqudci",
+                    "post": {
+                        "id": "1xqudci",
+                        "title": "Everything is becoming Rust now",
+                        "author": "ferris",
+                        "subreddit": "r/rust",
+                        "comments": 1,
+                        "permalink": "/r/rust/comments/1xqudci/everything_is_becoming_rust_now/"
+                    },
+                    "comments": [{
+                        "id": "newest1", "parent_id": "1xqudci", "author": "zoe", "body": "Just posted!"
+                    }],
+                    "partials": [],
+                    "folds": []
+                }
+            });
+            socket
+                .send(Message::Text(
+                    json!({"id": req["id"], "result": {"result": {"value": val}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let client = crate::cdp::CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let cdp = CdpSession::root(client);
+        let p = fetch_comments(
+            &cdp,
+            "/r/rust/comments/1xqudci",
+            "/r/rust/comments/1xqudci/everything_is_becoming_rust_now/",
+            "new",
+            true,
+            100,
+        )
+        .await
+        .unwrap();
+        task.await.unwrap();
+        assert!(p.complete);
+        assert_eq!(p.count, 1);
+        assert_eq!(p.items[0].id, "newest1");
+    }
+
+    #[test]
+    fn old_reddit_parser_extracts_nested_comments_and_deepthread() {
+        let js = format!(
+            r#"{NODE_DOM_SHIM}
+{PARSE_THREAD_JS}
+const post = mkEl('div', {{
+  className: 'thing link',
+  attrs: {{ 'data-fullname':'t3_abc123', 'data-author':'opuser', 'data-subreddit':'rust', 'data-score':'99', 'data-comments-count':'5', 'data-permalink':'/r/rust/comments/abc123/old_post/' }},
+  children: [
+    mkEl('a', {{ className:'title', text:'Old Reddit Post' }}),
+    mkEl('time', {{ attrs: {{ datetime:'2026-11-20T10:00:00Z' }} }}),
+  ]
+}});
+const c2 = mkEl('div', {{
+  className: 'thing comment',
+  attrs: {{ 'data-fullname':'t1_r2', 'data-author':'bob', 'data-permalink':'/r/rust/comments/abc123/old_post/r2/' }},
+  children: [
+    mkEl('div', {{ className:'entry', children: [
+      mkEl('div', {{ className:'usertext-body', children: [mkEl('div', {{ className:'md', children: [mkEl('p', {{ text:'Old nested reply' }})] }})] }}),
+    ]}}),
+    mkEl('span', {{ className:'deepthread', children: [
+      mkEl('a', {{ attrs: {{ href:'/r/rust/comments/abc123/old_post/r2/' }}, text:'Continue this thread' }}),
+    ]}}),
+  ]
+}});
+const c1 = mkEl('div', {{
+  className: 'thing comment',
+  attrs: {{ 'data-fullname':'t1_r1', 'data-author':'alice', 'data-permalink':'/r/rust/comments/abc123/old_post/r1/' }},
+  children: [
+    mkEl('div', {{ className:'entry', children: [
+      mkEl('span', {{ className:'score unvoted', attrs: {{ title:'42' }}, text:'42 points' }}),
+      mkEl('div', {{ className:'usertext-body', children: [mkEl('div', {{ className:'md', children: [mkEl('p', {{ text:'Old root comment' }})] }})] }}),
+    ]}}),
+    mkEl('div', {{ className:'child', children: [c2] }}),
+  ]
+}});
+const doc = mkEl('body', {{ children: [mkEl('div', {{ id:'siteTable', children:[post] }}), c1] }});
+console.log(JSON.stringify(parseRedditThread(doc, {{
+  isFragment: false,
+  origin: 'https://old.reddit.com',
+  url: 'https://old.reddit.com/r/rust/comments/abc123/old_post/',
+  pathname: '/r/rust/comments/abc123/old_post/',
+}})));
+"#
+        );
+        let v = run_node(&js);
+        assert_eq!(v["post"]["title"], "Old Reddit Post");
+        assert_eq!(v["comments"].as_array().unwrap().len(), 2);
+        assert_eq!(v["comments"][0]["id"], "r1");
+        assert_eq!(v["comments"][0]["score"], 42);
+        assert_eq!(v["comments"][1]["id"], "r2");
+        assert_eq!(v["comments"][1]["parent_id"], "r1");
+        assert_eq!(v["folds"].as_array().unwrap().len(), 1);
+        assert_eq!(v["folds"][0]["comment_id"], "r2");
+    }
+
+    #[test]
+    fn date_and_text_normalization_and_gate_classification() {
+        assert_eq!(
+            normalize_date("2026-11-20T14:22:10.123000+0000").as_deref(),
+            Some("2026-11-20 14:22 UTC")
+        );
+        assert_eq!(
+            normalize_date("2026-11-20T14:22:10Z").as_deref(),
+            Some("2026-11-20 14:22 UTC")
+        );
+        assert_eq!(normalize_text("a  \r\n\r\n\r\nb\r\n", 100), "a\n\nb");
+        assert!(classify_gate_body("/p", "You've been blocked by network security").is_some());
+        assert!(classify_gate_body("/p", "Whoa there, pardner!").is_some());
+        assert!(classify_gate_body("/p", "Prove your humanity").is_some());
+        assert!(is_rate_limit(&rate_limit_error("30")));
     }
 }
