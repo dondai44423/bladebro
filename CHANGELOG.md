@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.8.3] - 2026-11-21
+
 ### Changed
 - **Zero-`.json` Reddit adapter for threads and search**: completely removed Reddit `.json` API endpoints (`/comments/...json`, `/api/info.json`, `/search.json`) and the `loid` reload loop that triggered HTTP 403 network-security walls and `CDP error (-32000) Inspected target navigated or closed`. Post and comment extraction now reads `<shreddit-post>`, `<shreddit-comment>`, and `old.reddit.com` trees directly from the live DOM, then sequentially expands `<faceplate-partial src="/svc/shreddit/more-comments/...">` ("View more comments" / "N more replies") and deep `div.fold-more` (`?force-legacy-sct=1`) / `.deepthread` continuation links one request at a time with polite jitter and in-browser `DOMParser` parsing — never firing parallel bursts, never navigating the tab away, and preserving full DFS depth, `op`, and detached single-comment permalink roots. Search pages extract Shreddit SDUI (`search-post-unit`) and `old.reddit.com` results directly from the DOM and follow `/svc/shreddit/search` HTML partials sequentially.
 
@@ -2301,7 +2303,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.2...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.3...HEAD
+[4.8.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.3
 [4.8.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.2
 [4.8.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.1
 [4.8.0]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.0
