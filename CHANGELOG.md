@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Windows antivirus false-positive mitigation (#99)**: switched the published `windows-x64` release artifact in `.github/workflows/release.yml` from Linux MinGW/Zig cross-compilation (`x86_64-pc-windows-gnu`) to a native `windows-latest` MSVC build (`x86_64-pc-windows-msvc` with static CRT), embedded standard Win32 PE `VS_VERSION_INFO` metadata and an `asInvoker` application manifest via `build.rs` (verified in `gate.yml` and `release.yml`), and removed unnecessary `Login Data` / `Login Data For Account` / `Secure Preferences` password-vault references from real-browser clone freshness checks and copy diagnostics.
+- **`BLADE_NO_ACTIVATE=1` and macOS tab-path window raising (#100)**: routed `switch_tab` (`state switch-tab`, `state open-tab`, `state close-tab` auto-switch) and popup-click opener re-activation through `activate_if_needed()` instead of unconditional `Page.bringToFront`; passed `background: true` to `Target.createTarget` when `BLADE_NO_ACTIVATE=1` and disclosed suppressed focus in tab verdicts; added `BLADE_NO_ACTIVATE` to `DAEMON_SCOPED_ENV` so CLI daemons refuse silent setting drift; documented behavior in `docs/configuration.md` and `bladebro help`; and added mock-CDP regression tests.
+- **Launch, action, cookie, and CLI daemon reliability**: `LaunchGuard::drop` now calls `discard_unstarted()` instead of syncing a crashed/failed startup over the seasoned template; `sub_fires` recovers from `RecvError::Lagged` instead of triggering false dialog or navigation waits on `act click`; `Action::Click` and `handle_template_extract` now run the SPA `route.settle` guard before capturing; Reddit collapsed-composer `act type` updates `sig_frame` before post-settle `finalize_edit`; `Page::attach` fetches `Page.getFrameTree` before spawning background tasks and eliminates unchecked `Instant::now() - Duration` panics (also fixed in `ui/anim.rs`) while pruning stale `pending` network entries; `trusted_select_all` sends `Meta+A` + `selectAll` on macOS; `SetCookie` and `DeleteCookies` readback compare cookie domains case-insensitively; and CLI daemon dispatch wraps tool calls in `catch_unwind` so a handler panic never skips Chrome shutdown or login snapshots.
+
+### Performance
+- **Faster cold start, CDP I/O, perception, and session restore**: cached a shared `reqwest::Client` in `cdp::discovery` instead of rebuilding a rustls/Hyper client on every 50 ms launch poll and click; eliminated full-frame `String` copies in WebSocket and pipe CDP readers (with `Acquire`/`Release` closure ordering inside the pending lock); pipelined `Page`/`Network`/`DOM` domain enables concurrently in `Page::attach`; moved Linux `font_audit` (`fc-list`) off the synchronous launch path; fixed `spawn_session_chrome` to stop polling `set_work_area` after WM readiness instead of spinning up to 3 s; stamped launch-time GL checks to skip a redundant first-call WebGL re-probe and break immediately on closed transports; skipped spurious `wait_for_settle` round-trips when `Action::Wait` sets `settle_ms == 0` (including `network-idle`); removed full DOM `Value` cloning in `perception::capture` and O(n²) landmark scans in `LivePageModel`; and batched `localStorage` writes with O(N) cookie readback indexing in `restore_session`.
+
+### Changed
+- Updated `url` (`2.5.8` → `2.5.9`, #98) and `form_urlencoded` (`1.2.2` → `1.2.3`), and removed the unused `anyhow` dependency from `Cargo.toml`.
+
 ## [4.8.3] - 2026-11-21
 
 ### Changed
