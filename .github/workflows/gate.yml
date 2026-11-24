@@ -110,4 +110,14 @@ jobs:
       - name: Unit tests
         run: cargo test --profile gate --lib
       - name: Release link
-        run: cargo build --release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
+            ./target/release/bladebro.exe --version
+            product=$(powershell -NoProfile -Command "(Get-Item 'target/release/bladebro.exe').VersionInfo.ProductName" | tr -d '\r\n')
+            [[ "$product" == "Bladebro" ]] || { echo "ERROR: Windows PE ProductName is '$product', want 'Bladebro'" >&2; exit 1; }
+          else
+            cargo build --release
+          fi

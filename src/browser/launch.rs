@@ -110,6 +110,7 @@ impl Browser {
                         );
                     }
                     set_gpu_state(Some(state));
+                    crate::page::stamp_gl_checked();
                     return Ok(browser);
                 }
                 None => {
@@ -785,35 +786,40 @@ pub(super) fn browser_command(chrome_path: &str, user_data_dir: &std::path::Path
 
 /// S15: warn when no emoji font is installed. Kasada/Akamai render emoji on
 /// hidden canvases and hash the pixels; a missing emoji font produces a hash
-/// no real browser generates. Linux-only (fc-list). Best-effort, never fatal.
+/// no real browser generates. Linux-only (fc-list). Runs once off the launch
+/// critical path; best-effort, never fatal.
 pub(super) fn font_audit() {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let found = std::process::Command::new("fc-list")
-                .args([":lang=und-zsye", "family"])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .output()
-                .map(|o| o.status.success() && !o.stdout.is_empty())
-                .unwrap_or_else(|_| {
-                    [
-                        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
-                        "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
-                        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-                        "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
-                    ]
-                    .iter()
-                    .any(|p| std::path::Path::new(p).exists())
+            let _ = std::thread::Builder::new()
+                .name("blade-font-audit".into())
+                .spawn(|| {
+                    let found = std::process::Command::new("fc-list")
+                        .args([":lang=und-zsye", "family"])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .output()
+                        .map(|o| o.status.success() && !o.stdout.is_empty())
+                        .unwrap_or_else(|_| {
+                            [
+                                "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+                                "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+                                "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+                                "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
+                            ]
+                            .iter()
+                            .any(|p| std::path::Path::new(p).exists())
+                        });
+                    if !found {
+                        eprintln!(
+                            "[bladebro] WARNING: no emoji font found — anti-bot canvas emoji hashes \
+                             will mismatch (Kasada/Akamai). Install: noto-fonts-emoji (Arch) / \
+                             fonts-noto-color-emoji (Debian)"
+                        );
+                    }
                 });
-            if !found {
-                eprintln!(
-                    "[bladebro] WARNING: no emoji font found — anti-bot canvas emoji hashes \
-                     will mismatch (Kasada/Akamai). Install: noto-fonts-emoji (Arch) / \
-                     fonts-noto-color-emoji (Debian)"
-                );
-            }
         });
     }
     // macOS/Windows: system fonts are always present, no audit needed.

@@ -520,10 +520,26 @@ async fn dispatch_or_shutdown(
     args: &Value,
     page: &mut Page,
 ) -> Option<Result<super::ToolResult>> {
+    use futures_util::FutureExt;
     tokio::select! {
         biased;
         _ = signals.recv() => None,
-        result = dispatch(tool, args, page) => Some(result),
+        outcome = std::panic::AssertUnwindSafe(dispatch(tool, args, page)).catch_unwind() => {
+            Some(match outcome {
+                Ok(res) => res,
+                Err(panic_val) => {
+                    let msg = panic_val
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic_val.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("unknown internal panic");
+                    eprintln!("[bladebro] panic caught in daemon tool handler ({tool}): {msg}");
+                    Err(BladeError::Other(format!(
+                        "internal error in {tool} (panic caught; daemon stayed alive): {msg}"
+                    )))
+                }
+            })
+        }
     }
 }
 
@@ -614,6 +630,7 @@ const DAEMON_SCOPED_ENV: &[&str] = &[
     "BLADE_CONSENT",
     "BLADE_PACE",
     "BLADE_NO_COMPRESS",
+    "BLADE_NO_ACTIVATE",
     "BLADE_AUDIO",
 ];
 
@@ -921,6 +938,12 @@ mod tests {
         )
         .unwrap();
         assert!(why.contains("CHROME_PATH"), "{why}");
+        let why = check(
+            json!({"lane": "agent", "env": {"BLADE_NO_ACTIVATE": "1"}}),
+            false,
+        )
+        .unwrap();
+        assert!(why.contains("BLADE_NO_ACTIVATE"), "{why}");
         // Unlisted names are not the daemon's business.
         assert_eq!(
             check(

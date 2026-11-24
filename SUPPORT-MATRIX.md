@@ -1,6 +1,6 @@
 # Support Matrix
 
-Current verification coverage by platform, browser engine, and runnable instrument. Current release: `4.8.2` (verified locally on Arch Linux x86_64 with Chromium `158.0.8127.36` and pinned `rustc 1.100.0`).
+Current verification coverage by platform, browser engine, and runnable instrument. Current release: `4.8.4` (verified locally on Arch Linux x86_64 with Chromium `158.0.8127.36` and pinned `rustc 1.100.0`).
 
 ## Platforms
 
@@ -10,7 +10,7 @@ Current verification coverage by platform, browser engine, and runnable instrume
 | Linux ARM64 | Cross `cargo check --all-targets` (`zig cc`) | glibc `2.28` `zigbuild` + ABI check in `release.yml`; physical ARM64/Raspberry Pi browser runtime not run |
 | macOS Apple Silicon (`darwin-arm64`) | Native `cargo check --all-targets`, unit tests (`--lib`), `cargo build --release` on `macos-26` | Native `macos-26` release binary in `release.yml` |
 | macOS Intel (`darwin-x64`) | Cross `cargo check --all-targets` | Built on `macos-26` (`--target x86_64-apple-darwin`) in `release.yml`; not executed natively (`macos-26-intel` wedges headful Chrome in `ISIconManager` XPC) |
-| Windows x86_64 | Cross `cargo check --all-targets` + native check, unit tests (`--lib`), and `cargo build --release` on `windows-latest` | `zigbuild` PE binary in `release.yml` |
+| Windows x86_64 | Cross `cargo check --all-targets` + native check, unit tests (`--lib`), and `cargo build --release` (`+crt-static` + PE `VERSIONINFO`) on `windows-latest` | Native `windows-latest` MSVC release binary (`+crt-static`, PE `VERSIONINFO` + `asInvoker` manifest) + binary smoke in `release.yml` |
 | Android (`aarch64-linux-android`) | Source compile check (`ci.yml` NDK job) | Source-level `cfg` guard only; no binary published and no runtime claim |
 
 ## Browser Engines

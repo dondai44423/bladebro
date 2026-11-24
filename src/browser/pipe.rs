@@ -87,6 +87,7 @@ impl Browser {
                         );
                     }
                     set_gpu_state(Some(state));
+                    crate::page::stamp_gl_checked();
                     return Ok((browser, client));
                 }
                 None => {

@@ -234,9 +234,10 @@ pub(super) async fn clear_editable(
     })
 }
 
-/// Rung helper: trusted Ctrl+A (optionally carrying the selectAll editing
-/// command) + trusted Backspace. `Some(readback)` when a selection was
-/// made and deleted; `None` when the shortcut did not select anything.
+/// Rung helper: trusted Ctrl+A (Cmd+A on macOS, optionally carrying the
+/// selectAll editing command) + trusted Backspace. `Some(readback)` when a
+/// selection was made and deleted; `None` when the shortcut did not select
+/// anything.
 pub(super) async fn trusted_select_all(
     cdp: &CdpSession,
     sig: &str,
@@ -244,13 +245,13 @@ pub(super) async fn trusted_select_all(
     with_cmd: bool,
 ) -> Result<Option<String>> {
     let combo = KeyCombo {
-        ctrl: true,
+        ctrl: !cfg!(target_os = "macos"),
         alt: false,
         shift: false,
-        meta: false,
+        meta: cfg!(target_os = "macos"),
         key: "a".to_string(),
     };
-    let cmds = if with_cmd {
+    let cmds = if with_cmd || cfg!(target_os = "macos") {
         Some(vec!["selectAll".to_string()])
     } else {
         None

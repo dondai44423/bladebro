@@ -393,27 +393,29 @@ impl LivePageModel {
         };
 
         // Build the new element list + ref index from the stabilized live map.
-        // `stab.live` maps sig -> ref id; cap.elements carries the matching sigs.
+        // `stab.live` maps sig -> ref id; consume `cap.elements` directly
+        // instead of cloning every RawElement.
         let mut elements = Vec::with_capacity(cap.elements.len());
-        let mut by_ref = HashMap::new();
-        let mut prev_state = HashMap::new();
-        for el in cap.elements.iter() {
+        let mut by_ref = HashMap::with_capacity(cap.elements.len());
+        let mut prev_state = HashMap::with_capacity(cap.elements.len());
+        for el in cap.elements {
             if let Some(ref_id) = stab.live.get(&el.sig) {
-                elements.push(PageElement {
-                    ref_id: ref_id.clone(),
-                    raw: el.clone(),
-                });
-                by_ref.insert(ref_id.clone(), elements.len() - 1);
+                let idx = elements.len();
+                by_ref.insert(ref_id.clone(), idx);
                 prev_state.insert(
                     ref_id.clone(),
                     PrevState {
                         sig: el.sig.clone(),
                         role: el.role.clone(),
                         name: el.name.clone(),
-                        probe: Some(StateProbe::from(el)),
+                        probe: Some(StateProbe::from(&el)),
                         fingerprint: el.fingerprint,
                     },
                 );
+                elements.push(PageElement {
+                    ref_id: ref_id.clone(),
+                    raw: el,
+                });
             }
             // Any element not in `live` is a bug (stabilize inserts all), but
             // defensively skip it.
@@ -422,12 +424,7 @@ impl LivePageModel {
         let added: Vec<PageElement> = stab
             .added
             .iter()
-            .filter_map(|(i, ref_id)| {
-                cap.elements.get(*i).map(|el| PageElement {
-                    ref_id: ref_id.clone(),
-                    raw: el.clone(),
-                })
-            })
+            .filter_map(|(_, ref_id)| by_ref.get(ref_id).map(|&i| elements[i].clone()))
             .collect();
 
         let removed: Vec<String> = if page_changed {
@@ -494,6 +491,34 @@ impl LivePageModel {
 
     // ---- compression / rendering ----
 
+    /// Single-pass O(n) count of the four foldable chrome landmarks plus
+    /// whether the page carries any content landmark (`main`/`dialog`/`search`).
+    fn landmark_summary(&self) -> (bool, [usize; 4]) {
+        let mut has_content = false;
+        let mut counts = [0usize; 4];
+        for e in &self.elements {
+            match e.raw.landmark.as_deref() {
+                Some("main") | Some("dialog") | Some("search") => has_content = true,
+                Some("nav") => counts[0] += 1,
+                Some("banner") => counts[1] += 1,
+                Some("footer") => counts[2] += 1,
+                Some("aside") => counts[3] += 1,
+                _ => {}
+            }
+        }
+        (has_content, counts)
+    }
+
+    fn fold_landmark_idx(lm: &str) -> Option<usize> {
+        match lm {
+            "nav" => Some(0),
+            "banner" => Some(1),
+            "footer" => Some(2),
+            "aside" => Some(3),
+            _ => None,
+        }
+    }
+
     /// How many live links on the current page will be folded as learned
     /// repeated site chrome (excluding elements already covered by ARIA
     /// landmark folding). Returns 0 unless >=4 chrome links and >=2 unique
@@ -502,33 +527,27 @@ impl LivePageModel {
         if self.chrome_hashes.is_empty() {
             return 0;
         }
-        const FOLD_LANDMARKS: [&str; 4] = ["nav", "banner", "footer", "aside"];
-        let has_content_landmark = self.elements.iter().any(|e| {
-            matches!(
-                e.raw.landmark.as_deref(),
-                Some("main") | Some("dialog") | Some("search")
-            )
-        });
-        let is_landmark_folded = |el: &PageElement| -> bool {
-            if !has_content_landmark {
-                return false;
-            }
-            let Some(lm) = el.raw.landmark.as_deref() else {
-                return false;
-            };
-            FOLD_LANDMARKS.contains(&lm)
-                && self
-                    .elements
-                    .iter()
-                    .filter(|e| e.raw.landmark.as_deref() == Some(lm))
-                    .count()
-                    >= 3
-        };
+        let (has_content_landmark, lm_counts) = self.landmark_summary();
+        self.learned_chrome_fold_count_with(has_content_landmark, lm_counts)
+    }
+
+    fn learned_chrome_fold_count_with(
+        &self,
+        has_content_landmark: bool,
+        lm_counts: [usize; 4],
+    ) -> usize {
+        if self.chrome_hashes.is_empty() {
+            return 0;
+        }
         let mut chrome_count = 0usize;
         let mut non_chrome_count = 0usize;
         for el in &self.elements {
-            if is_landmark_folded(el) {
-                continue;
+            if has_content_landmark {
+                if let Some(idx) = el.raw.landmark.as_deref().and_then(Self::fold_landmark_idx) {
+                    if lm_counts[idx] >= 3 {
+                        continue;
+                    }
+                }
             }
             if self.is_learned_chrome(el) {
                 chrome_count += 1;
@@ -554,14 +573,9 @@ impl LivePageModel {
     /// same domain (live-verified: any changed label/href unfolds immediately,
     /// and `compress_filtered` always renders every element).
     pub fn compress(&self, budget: usize, in_flight: usize) -> String {
-        const FOLD_LANDMARKS: [&str; 4] = ["nav", "banner", "footer", "aside"];
-        let has_content_landmark = self.elements.iter().any(|e| {
-            matches!(
-                e.raw.landmark.as_deref(),
-                Some("main") | Some("dialog") | Some("search")
-            )
-        });
-        let learned_chrome_count = self.learned_chrome_fold_count();
+        let (has_content_landmark, lm_counts) = self.landmark_summary();
+        let learned_chrome_count =
+            self.learned_chrome_fold_count_with(has_content_landmark, lm_counts);
         let fold_learned_chrome = learned_chrome_count > 0;
 
         let mut out = String::new();
@@ -583,20 +597,16 @@ impl LivePageModel {
             out.push_str(UNANSWERED_NOTE);
         }
 
-        let mut folded_done: HashSet<&str> = HashSet::new();
+        let mut folded_done = [false; 4];
         let mut chrome_folded_emitted = false;
         for (idx, el) in self.elements.iter().enumerate() {
             if has_content_landmark {
                 if let Some(lm) = el.raw.landmark.as_deref() {
-                    if FOLD_LANDMARKS.contains(&lm) {
-                        if folded_done.contains(lm) {
+                    if let Some(lm_idx) = Self::fold_landmark_idx(lm) {
+                        if folded_done[lm_idx] {
                             continue; // already folded into a one-liner
                         }
-                        let count = self
-                            .elements
-                            .iter()
-                            .filter(|e| e.raw.landmark.as_deref() == Some(lm))
-                            .count();
+                        let count = lm_counts[lm_idx];
                         if count >= 3 {
                             let fold_line = format!(
                                 "{lm} \u{25b8} {count} items folded (filter={lm} to expand)\n"
@@ -605,7 +615,7 @@ impl LivePageModel {
                                 break;
                             }
                             out.push_str(&fold_line);
-                            folded_done.insert(lm);
+                            folded_done[lm_idx] = true;
                             continue;
                         }
                         // <3 items in this landmark: render inline.

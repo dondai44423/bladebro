@@ -69,8 +69,8 @@ fn shallow_dir_max_mtime_ns(dir: &Path) -> u128 {
 }
 
 /// Compute a fast freshness stamp for one profile directory: max nanosecond
-/// mtime across cookies, prefs, login DBs, and local/session storage, plus
-/// cookie database size (detects in-place writes even on coarse filesystems).
+/// mtime across cookies, prefs, and local/session storage, plus cookie
+/// database size (detects in-place writes even on coarse filesystems).
 pub fn profile_state_stamp(profile_dir: &Path) -> ProfileStamp {
     let direct_files = [
         profile_dir.join("Cookies"),
@@ -80,9 +80,6 @@ pub fn profile_state_stamp(profile_dir: &Path) -> ProfileStamp {
         profile_dir.join("Network").join("Cookies-wal"),
         profile_dir.join("Network").join("Cookies-journal"),
         profile_dir.join("Preferences"),
-        profile_dir.join("Secure Preferences"),
-        profile_dir.join("Login Data"),
-        profile_dir.join("Login Data For Account"),
     ];
     let mut max_mtime_ns = 0u128;
     for path in &direct_files {

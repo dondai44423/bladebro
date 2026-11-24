@@ -101,12 +101,11 @@ pub(super) async fn prepare_incognito(client: &CdpClient) -> Result<()> {
     let id = context["browserContextId"].as_str().ok_or_else(|| {
         BladeError::Other("incognito compatibility: Chrome returned no browserContextId".into())
     })?;
-    client
-        .send(
-            "Target.createTarget",
-            Some(json!({"url":"about:blank","browserContextId":id})),
-        )
-        .await?;
+    let mut params = json!({"url":"about:blank","browserContextId":id});
+    if crate::page::no_activate_enabled() {
+        params["background"] = json!(true);
+    }
+    client.send("Target.createTarget", Some(params)).await?;
     if let Some(targets) = old["targetInfos"].as_array() {
         for target in targets.iter().filter(|t| t["type"] == "page") {
             if let Some(id) = target["targetId"].as_str() {

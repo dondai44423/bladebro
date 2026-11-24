@@ -55,18 +55,26 @@ impl TargetInfo {
     }
 }
 
-/// HTTP client for the DevTools endpoint. Never proxied: the endpoint is
-/// reached directly, exactly like the CDP WebSocket that follows discovery
-/// (which never uses a proxy). reqwest's environment proxy matcher has no
-/// implicit loopback bypass, so an ambient `HTTP_PROXY`/`ALL_PROXY` with an
-/// empty `NO_PROXY` routed `127.0.0.1:<port>/json/version` through the proxy
-/// and every launch failed with "debug endpoint not responding" while Chrome
-/// was up and listening.
-fn devtools_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .no_proxy()
-        .build()?)
+/// Shared HTTP client for the DevTools endpoint. Reused across startup polls
+/// and tab discovery calls so each request skips rebuilding a rustls/Hyper
+/// client pool. Never proxied: the endpoint is reached directly, exactly like
+/// the CDP WebSocket that follows discovery (which never uses a proxy).
+/// reqwest's environment proxy matcher has no implicit loopback bypass, so an
+/// ambient `HTTP_PROXY`/`ALL_PROXY` with an empty `NO_PROXY` routed
+/// `127.0.0.1:<port>/json/version` through the proxy and every launch failed
+/// with "debug endpoint not responding" while Chrome was up and listening.
+fn devtools_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<std::result::Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    let res = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .map_err(|e| e.to_string())
+    });
+    res.as_ref()
+        .map_err(|e| BladeError::Other(format!("failed to build devtools HTTP client: {e}")))
 }
 
 /// Fetch `/json/version` from a browser debug endpoint.

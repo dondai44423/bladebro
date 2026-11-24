@@ -24,6 +24,14 @@ use std::time::{Duration, Instant};
 static GL_RECHECK: Mutex<Option<Instant>> = Mutex::new(None);
 const GL_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Record that GL was just probed during launch so the very first tool call
+/// does not immediately repeat the WebGL probe.
+pub(crate) fn stamp_gl_checked() {
+    if let Ok(mut last) = GL_RECHECK.lock() {
+        *last = Some(Instant::now());
+    }
+}
+
 impl Page {
     /// Cheap periodic GL liveness check (agent lane, at most once per
     /// minute), also driven by the serve loop's idle tick so recovery is
@@ -43,7 +51,7 @@ impl Page {
             gpu_state, probe_gl_live, reconcile_gl, set_gpu_state, GlLive, GlReconcile, GpuState,
             WorkerEvidence,
         };
-        if crate::realbrowser::real_lane() {
+        if crate::realbrowser::real_lane() || self.cdp.is_closed() {
             return;
         }
         let before = gpu_state();

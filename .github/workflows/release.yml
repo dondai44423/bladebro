@@ -75,13 +75,11 @@ jobs:
             legacy: linux-aarch64
             bin: target/aarch64-unknown-linux-gnu/release/bladebro
             zig: true
-          - os: ubuntu-latest
-            target: x86_64-pc-windows-gnu
-            zig_target: x86_64-pc-windows-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
             asset: windows-x64
             legacy: windows-x86_64
-            bin: target/x86_64-pc-windows-gnu/release/bladebro.exe
-            zig: true
+            bin: target/x86_64-pc-windows-msvc/release/bladebro.exe
           - os: macos-26
             target: aarch64-apple-darwin
             asset: darwin-arm64
@@ -108,10 +106,16 @@ jobs:
       - uses: taiki-e/install-action@cargo-zigbuild
         if: matrix.zig
       - name: Build
+        shell: bash
         run: |
           set -euo pipefail
           if [[ "${{ matrix.zig }}" == "true" ]]; then
             cargo zigbuild --release --target ${{ matrix.zig_target }}
+          elif [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
+            RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target ${{ matrix.target }}
+            "./${{ matrix.bin }}" --version
+            product=$(powershell -NoProfile -Command "(Get-Item '${{ matrix.bin }}').VersionInfo.ProductName" | tr -d '\r\n')
+            [[ "$product" == "Bladebro" ]] || { echo "ERROR: Windows PE ProductName is '$product', want 'Bladebro'" >&2; exit 1; }
           else
             cargo build --release --target ${{ matrix.target }}
           fi
@@ -126,8 +130,8 @@ jobs:
           mkdir -p dist
           cp "$src" "dist/bladebro-${{ matrix.asset }}$ext"
           cp "$src" "dist/bladebro-${{ matrix.legacy }}$ext"
-          ( cd dist && sha256sum "bladebro-${{ matrix.asset }}$ext" > "bladebro-${{ matrix.asset }}$ext.sha256" )
-          ( cd dist && sha256sum "bladebro-${{ matrix.legacy }}$ext" > "bladebro-${{ matrix.legacy }}$ext.sha256" )
+          ( cd dist && sha256sum "bladebro-${{ matrix.asset }}$ext" | tr -d '\r' | sed 's/ \*/  /' > "bladebro-${{ matrix.asset }}$ext.sha256" )
+          ( cd dist && sha256sum "bladebro-${{ matrix.legacy }}$ext" | tr -d '\r' | sed 's/ \*/  /' > "bladebro-${{ matrix.legacy }}$ext.sha256" )
       - uses: actions/upload-artifact@v7
         with:
           name: assets-${{ matrix.asset }}

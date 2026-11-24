@@ -4,9 +4,9 @@
 use std::path::{Path, PathBuf};
 
 /// Files/dirs Chrome locks while running or regenerates on demand — never copy
-/// these between a live profile and the template. User state (Cookies, Network,
-/// Local Storage, Session Storage, IndexedDB, WebStorage, Extensions,
-/// Preferences, History, Login Data, WidevineCdm) is always kept.
+/// these between a live profile and the template. User session state (Cookies,
+/// Network, Local Storage, Session Storage, IndexedDB, WebStorage, Extensions,
+/// Preferences, History, WidevineCdm) is always kept.
 const SKIP_ON_COPY: &[&str] = &[
     "SingletonLock",
     "SingletonSocket",
@@ -60,7 +60,6 @@ const CRITICAL_AUTH_FILES: &[&str] = &[
     "Cookies-wal",
     "Cookies-journal",
     "Local State",
-    "Login Data",
     "Preferences",
 ];
 

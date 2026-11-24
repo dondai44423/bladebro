@@ -91,6 +91,7 @@ ENVIRONMENT
   BLADE_CMD_TIMEOUT    client wait for a daemon response, seconds (default 300)
   BLADE_IDLE_TIMEOUT   daemon idle before Chrome shuts down, seconds (default 600)
   BLADE_NO_COMPRESS=1  disable response compression
+  BLADE_NO_ACTIVATE=1  never raise the browser window on input, navigation, or tab ops
   BLADE_LANE           real|agent — force the real-browser lane for this process
   BLADE_RB_DEBUG=1     real lane: surface the browser's own stderr on launch failures
   BLADE_PLAIN          plain output — no ANSI even on a terminal
@@ -515,6 +516,7 @@ pub fn help_json(cmd: Option<&str>) -> Result<String> {
             "BLADE_CMD_TIMEOUT": "client wait for a daemon response, seconds (default 300)",
             "BLADE_IDLE_TIMEOUT": "daemon idle before Chrome shuts down, seconds (default 600)",
             "BLADE_NO_COMPRESS": "set 1 to disable response compression",
+            "BLADE_NO_ACTIVATE": "set 1 to keep Bladebro from raising the browser window on input, navigation, or tab ops (open-tab opens in the background)",
             "BLADE_LANE": "real|agent — force the real-browser lane for this process",
             "BLADE_RB_DEBUG": "real lane: set 1 to surface the browser's own stderr on launch failures",
             "BLADE_PLAIN": "plain CLI output — no ANSI even on a TTY (NO_COLOR also honored; CLICOLOR_FORCE=1 forces color off-TTY)",

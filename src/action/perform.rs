@@ -77,7 +77,7 @@ async fn sub_fires(sub: &mut crate::cdp::SessionSubscription, method: &str) -> b
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 std::future::pending::<()>().await
             }
-            Err(_) => return false,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
         }
     }
 }
@@ -111,7 +111,7 @@ pub async fn perform_with_network(
     };
 
     // Resolve ref → (sig, frame) for ref-targeted actions.
-    let sig_frame = match action.ref_id() {
+    let mut sig_frame = match action.ref_id() {
         Some(ref_id) => Some(resolve_ref(lpm, ref_id)?),
         None => None,
     };
@@ -281,7 +281,14 @@ pub async fn perform_with_network(
                     }
                     _ => {}
                 }
-                wait_for_settle_with_network(cdp, Duration::from_millis(1500), in_flight).await?;
+                let route_state = match route {
+                    Some(r) => r.settle(cdp, in_flight, crate::page::ROUTE_BUDGET).await,
+                    None => RouteSettle::Unchanged,
+                };
+                if route_state == RouteSettle::Unchanged {
+                    wait_for_settle_with_network(cdp, Duration::from_millis(1500), in_flight)
+                        .await?;
+                }
                 let cap = capture(cdp).await?;
                 delta = lpm.ingest(cap);
 
@@ -422,14 +429,15 @@ pub async fn perform_with_network(
                     }
                 }
             }
-            // Resolve the rest of the flow against the hook's live-editor sig
-            // when the expansion ran; otherwise the captured sig stands.
-            let (sig, frame): (&str, &[usize]) = match hook_sig.as_deref() {
-                Some(s) => (s, &[]),
-                None => {
-                    let (a, b) = sig_frame.as_ref().unwrap();
-                    (a.as_str(), b.as_slice())
-                }
+            // Resolve the rest of the flow (including post-settle finalize_edit)
+            // against the hook's live-editor sig when the expansion ran;
+            // otherwise the captured sig stands.
+            if let Some(s) = hook_sig {
+                sig_frame = Some((s, Vec::new()));
+            }
+            let (sig, frame): (&str, &[usize]) = {
+                let (a, b) = sig_frame.as_ref().unwrap();
+                (a.as_str(), b.as_slice())
             };
             // Focus the target. Framework composers (facade textarea + a
             // late-mounted contenteditable) mount their real editor here and
@@ -1011,7 +1019,7 @@ pub async fn perform_with_network(
         Action::Type { .. } | Action::Clear { .. } | Action::Scroll { .. } => (120, 900),
         Action::Press { .. } | Action::Select { .. } | Action::Hover { .. } => (150, 900),
         Action::Wait { condition, .. }
-            if condition.as_str() == "settle" || condition.as_str() == "network" =>
+            if matches!(condition.as_str(), "settle" | "network" | "network-idle") =>
         {
             (0, 0)
         }
@@ -1020,13 +1028,15 @@ pub async fn perform_with_network(
     };
 
     // Check if navigation was triggered (with a short timeout).
-    let nav_result = tokio::time::timeout(
-        Duration::from_millis(nav_check_ms),
-        sub_fires(&mut nav_sub, "Page.frameNavigated"),
-    )
-    .await;
-    if let Ok(true) = nav_result {
-        crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
+    if nav_check_ms > 0 {
+        let nav_result = tokio::time::timeout(
+            Duration::from_millis(nav_check_ms),
+            sub_fires(&mut nav_sub, "Page.frameNavigated"),
+        )
+        .await;
+        if let Ok(true) = nav_result {
+            crate::page::wait_for_load(cdp, Duration::from_secs(10)).await?;
+        }
     }
     // A client-side route change (SPA router) can be mid-swap right here:
     // the previous route's DOM is still mounted and DOM-quiet reads
@@ -1037,7 +1047,7 @@ pub async fn perform_with_network(
         Some(r) => r.settle(cdp, in_flight, crate::page::ROUTE_BUDGET).await,
         None => RouteSettle::Unchanged,
     };
-    if route_state == RouteSettle::Unchanged {
+    if route_state == RouteSettle::Unchanged && settle_ms > 0 {
         wait_for_settle_with_network(cdp, Duration::from_millis(settle_ms), in_flight).await?;
     }
 

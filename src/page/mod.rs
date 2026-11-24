@@ -24,9 +24,11 @@ pub mod tabs;
 mod gl;
 mod route;
 
+pub(crate) use self::gl::stamp_gl_checked;
 pub use self::logs::{http_status_reason, DocResponse, NetEntry, XhrEntry};
 pub(crate) use self::navigate::{validate_nav_url, with_scheme};
 pub use self::route::{RouteEpoch, RouteSettle, ROUTE_BUDGET};
+pub use self::tabs::no_activate_enabled;
 
 use std::time::Duration;
 
@@ -709,7 +711,13 @@ impl Page {
                 verdict = new_verdict;
                 // Keep the opener usable and report the popup once. Finish
                 // normal busy/timing cleanup below, even when a tab opened.
-                if let Err(e) = self.activate().await {
+                // Honor BLADE_NO_ACTIVATE=1 so a popup click never raises the
+                // browser window on macOS (#100).
+                if no_activate_enabled() {
+                    verdict.push_str(
+                        "; opener activation suppressed by BLADE_NO_ACTIVATE; use state switch-tab",
+                    );
+                } else if let Err(e) = self.activate_if_needed().await {
                     verdict.push_str(&format!(
                         "; opener activation failed: {e}; use state switch-tab"
                     ));

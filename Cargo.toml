@@ -31,7 +31,6 @@ serde_json = "1"
 # HTTP discovery of CDP targets (rustls — no system OpenSSL, portable binary)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Errors + logging
-anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 libc = "0.2"

@@ -227,24 +227,18 @@ fn spawn_session_chrome(display_num: u16, xauth: &std::path::Path) -> Option<Chi
     // — see the fn docs), so this is a best-effort declaration, never a
     // contract the JS layer hides.
     if wm.is_some() {
-        // Wait for the WM to own the root instead of a blind 400ms sleep,
-        // then set the taskbar property and verify the read-back. xfwm4
-        // publishes the full screen at startup and stops touching
-        // _NET_WORKAREA once it is up — readiness is observable
-        // (_NET_SUPPORTING_WM_CHECK), so poll it tightly (50ms) up to 3s.
-        let mut done = false;
+        // Wait for the WM to own the root (`_NET_SUPPORTING_WM_CHECK`, polled
+        // tightly up to 3s), then declare `_NET_WORKAREA` once. Previously the
+        // loop re-ran `set_work_area` on every tick whenever the WM reset the
+        // atom on a panel-less display, burning 3s and ~180 `xprop` forks on
+        // every cold start.
         for _ in 0..60 {
-            if wm_ready(display_num, xauth) && set_work_area(display_num, xauth) {
-                done = true;
+            if wm_ready(display_num, xauth) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        if !done {
-            // A WM that never publishes the atom: try once blindly — the
-            // read-back inside set_work_area is still the instrument.
-            let _ = set_work_area(display_num, xauth);
-        }
+        let _ = set_work_area(display_num, xauth);
     }
     wm
 }

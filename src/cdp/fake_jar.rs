@@ -81,7 +81,7 @@ fn set_one(jar: &mut Vec<Value>, p: &Value) -> bool {
     }
     let domain = p["domain"]
         .as_str()
-        .map(str::to_owned)
+        .map(|s| s.to_ascii_lowercase())
         .unwrap_or_else(|| host_of(p["url"].as_str().unwrap_or_default()));
     let path = p["path"].as_str().unwrap_or("/").to_string();
     let name = p["name"].as_str().unwrap_or_default().to_string();

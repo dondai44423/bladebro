@@ -41,15 +41,15 @@ impl Page {
         }
         #[allow(unused_assignments)]
         let mut worker_task: Option<tokio::task::JoinHandle<()>> = None;
-        cdp.enable("Page").await?;
+        // Pipeline the three core domain enables concurrently (saves two CDP
+        // round-trips on every attach and tab switch).
         // DO NOT enable Runtime — DataDome's detection leverages the fact that
         // `Runtime.enable` changes console buffering behavior, making
         // `console.log(new Error())` trigger serialization (and thus getter
         // calls on Error.stack) only when CDP is connected. We can still use
         // `Runtime.evaluate` without enabling the domain — evaluate is a
         // standalone command, enable only turns on event notifications.
-        cdp.enable("Network").await?;
-        cdp.enable("DOM").await?;
+        tokio::try_join!(cdp.enable("Page"), cdp.enable("Network"), cdp.enable("DOM"),)?;
         // UA override: only needed in headless mode where the UA contains
         // "HeadlessChrome". In headful mode (Xvfb or native), the real UA
         // is already correct. Read the real UA + platform, and if headless,
@@ -199,6 +199,18 @@ impl Page {
             super::navigate::Emulation::session()
         };
         wait_for_load(&cdp, Duration::from_secs(10)).await?;
+        // Resolve the main frame id BEFORE spawning background tasks so a
+        // fallible `Page.getFrameTree` cannot leak worker/dialog/download
+        // tasks and their CdpClient clones on early error return.
+        let main_frame = cdp
+            .send("Page.getFrameTree", None)
+            .await?
+            .pointer("/frameTree/frame/id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        cdp.set_main_frame(main_frame.clone());
+        let intercept_main_frame = main_frame.clone();
 
         // D22: Worker GL spoof — inject the GL spoof into Worker contexts too.
         // The main page GL spoof (via Page.addScriptToEvaluateOnNewDocument)
@@ -491,15 +503,6 @@ impl Page {
         let doc_response_t = doc_response.clone();
         let xhr_log_t = xhr_log.clone();
         let route_t = route.clone();
-        let main_frame = cdp
-            .send("Page.getFrameTree", None)
-            .await?
-            .pointer("/frameTree/frame/id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        cdp.set_main_frame(main_frame.clone());
-        let intercept_main_frame = main_frame.clone();
         let network_task = tokio::spawn(async move {
             use std::collections::HashMap;
             let mut rx = cdp_for_net.subscribe();
@@ -821,8 +824,8 @@ impl Page {
                 // a legit resource still loading after that is a download, not
                 // a page-load blocker.
                 if last_sweep.elapsed().as_secs() >= 1 {
-                    let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(8);
-                    open.retain(|_, ts| *ts > cutoff);
+                    open.retain(|_, ts| ts.elapsed() < std::time::Duration::from_secs(8));
+                    pending.retain(|id, _| open.contains_key(id));
                     last_sweep = std::time::Instant::now();
                 }
                 net_counter.store(open.len(), std::sync::atomic::Ordering::Relaxed);

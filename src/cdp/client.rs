@@ -141,11 +141,12 @@ impl CdpClient {
             tokio::spawn(async move {
                 let mut stream = stream;
                 while let Some(frame) = stream.next().await {
-                    let text = match frame {
-                        Ok(Message::Text(t)) => String::from_utf8_lossy(t.as_bytes()).into_owned(),
+                    let keep_going = match frame {
+                        Ok(Message::Text(t)) => route_cdp_text(t.as_str(), &pending, &events_tx),
                         Ok(Message::Binary(b)) => {
                             // CDP is text; tolerate binary as UTF-8.
-                            String::from_utf8_lossy(&b).into_owned()
+                            let text = String::from_utf8_lossy(&b);
+                            route_cdp_text(&text, &pending, &events_tx)
                         }
                         Ok(Message::Ping(_)) => {
                             // tungstenite auto-pongs at the protocol layer.
@@ -157,12 +158,12 @@ impl CdpClient {
                         Ok(_) => continue,
                     };
 
-                    if !route_cdp_text(&text, &pending, &events_tx) {
+                    if !keep_going {
                         break;
                     }
                 }
 
-                closed_reader.store(true, Ordering::Relaxed);
+                closed_reader.store(true, Ordering::Release);
                 drain_pending(&pending);
                 // The only strong sender: dropping it closes the bus.
                 drop(events_tx);
@@ -246,7 +247,7 @@ impl CdpClient {
                             if buf.is_empty() {
                                 continue;
                             }
-                            let text = String::from_utf8_lossy(&buf).into_owned();
+                            let text = String::from_utf8_lossy(&buf);
                             if !route_cdp_text(&text, &pending, &events_tx) {
                                 break;
                             }
@@ -254,7 +255,7 @@ impl CdpClient {
                         Err(_) => break,
                     }
                 }
-                closed_reader.store(true, Ordering::Relaxed);
+                closed_reader.store(true, Ordering::Release);
                 drain_pending(&pending);
                 // The only strong sender: dropping it closes the bus.
                 drop(events_tx);
@@ -301,31 +302,30 @@ impl CdpClient {
         // Fast-fail after browser death: the reader already drained pending
         // slots once at exit, so anything sent now would wait the full
         // timeout for a reply that can never arrive.
-        if self.closed.load(Ordering::Relaxed) {
+        if self.closed.load(Ordering::Acquire) {
             return Err(BladeError::Closed);
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel::<CdpOutcome>();
 
         // Register the pending slot BEFORE sending so a lightning-fast reply
-        // can't miss it. The guard removes the slot on early drop (cancellation),
-        // preventing leaks in the long-lived daemon.
+        // can't miss it. Re-check `closed` INSIDE the mutex so reader exit
+        // (store Release -> drain_pending lock) and send (lock -> load Acquire
+        // -> insert) form a strict total order on weak-memory CPUs (ARM64).
         {
             let mut p = self
                 .pending
                 .lock()
                 .map_err(|e| BladeError::Other(e.to_string()))?;
+            if self.closed.load(Ordering::Acquire) {
+                return Err(BladeError::Closed);
+            }
             p.insert(id, tx);
         }
         let _guard = PendingGuard {
             pending: self.pending.clone(),
             id,
         };
-        // Recheck AFTER insert: if the reader died between our first check
-        // and the insert, its drain missed us — fail now instead of hanging.
-        if self.closed.load(Ordering::Relaxed) {
-            return Err(BladeError::Closed);
-        }
 
         let mut req = CdpRequest::new(id, method, params);
         req.session_id = session_id.map(|s| s.to_string());
@@ -361,7 +361,7 @@ impl CdpClient {
     /// Has the transport been closed (Chrome died or pipe broke)?
     /// Used by the MCP server to decide whether to self-heal.
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        self.closed.load(Ordering::Acquire)
     }
 
     /// Wait for the next event whose method equals `method`, up to `deadline`.

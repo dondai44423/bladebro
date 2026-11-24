@@ -153,8 +153,8 @@ fn extract_reply(v: &serde_json::Value) -> OnceReply {
 pub async fn probe_gl_live(session: &crate::cdp::CdpSession) -> GlLive {
     let mut saw_no_context = false;
     let mut worker = WorkerEvidence::Unavailable;
-    for _ in 0..3 {
-        if let Ok(v) = session
+    for attempt in 0..3 {
+        match session
             .send_with_timeout(
                 "Runtime.evaluate",
                 Some(json!({ "expression": GL_PROBE_ONCE_EXPR, "returnByValue": true, "awaitPromise": true })),
@@ -162,7 +162,7 @@ pub async fn probe_gl_live(session: &crate::cdp::CdpSession) -> GlLive {
             )
             .await
         {
-            match extract_reply(&v) {
+            Ok(v) => match extract_reply(&v) {
                 OnceReply::Live(r) => return GlLive::Live(r),
                 OnceReply::NoContext(w) => {
                     saw_no_context = true;
@@ -171,9 +171,13 @@ pub async fn probe_gl_live(session: &crate::cdp::CdpSession) -> GlLive {
                     }
                 }
                 OnceReply::Skip | OnceReply::Malformed => {}
-            }
+            },
+            Err(crate::error::BladeError::Closed) => break,
+            Err(_) => {}
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
     }
     if saw_no_context {
         GlLive::NoContext { worker }

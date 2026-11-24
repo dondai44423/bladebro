@@ -213,7 +213,9 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
                             && c["value"].as_str() == Some(value)
                             && expected_domain.as_deref().is_some_and(|d| {
                                 c["domain"].as_str().is_some_and(|actual| {
-                                    actual.trim_start_matches('.') == d.trim_start_matches('.')
+                                    actual
+                                        .trim_start_matches('.')
+                                        .eq_ignore_ascii_case(d.trim_start_matches('.'))
                                 })
                             })
                             && path
@@ -319,9 +321,11 @@ pub async fn perform(cdp: &CdpSession, op: &StateOp) -> Result<String> {
             // URL ("localhost:3000") leaves a stuck tab (Chrome reads
             // "localhost:" as the scheme).
             let url = crate::page::with_scheme(url);
-            let res = cdp
-                .send("Target.createTarget", Some(json!({ "url": url.as_str() })))
-                .await?;
+            let mut params = json!({ "url": url.as_str() });
+            if crate::page::no_activate_enabled() {
+                params["background"] = json!(true);
+            }
+            let res = cdp.send("Target.createTarget", Some(params)).await?;
             let target_id = res
                 .get("targetId")
                 .and_then(|v| v.as_str())
@@ -432,13 +436,16 @@ async fn cookie_domains_sent_to(cdp: &CdpSession, name: &str, host: &str) -> Res
         .get("cookies")
         .and_then(Value::as_array)
         .ok_or_else(|| BladeError::Other("cookie readback missing cookie store".into()))?;
+    let host_lc = host.to_ascii_lowercase();
     let mut domains: Vec<String> = all
         .iter()
         .filter(|c| c["name"].as_str() == Some(name) && !cookie_partitioned(c))
         .filter_map(|c| c["domain"].as_str())
         .filter(|d| {
-            !host.is_empty()
-                && (d.trim_start_matches('.') == host || (d.starts_with('.') && host.ends_with(d)))
+            let dl = d.to_ascii_lowercase();
+            !host_lc.is_empty()
+                && (dl.trim_start_matches('.') == host_lc
+                    || (dl.starts_with('.') && host_lc.ends_with(&dl)))
         })
         .map(str::to_owned)
         .collect();
@@ -574,23 +581,37 @@ async fn restore_session(cdp: &CdpSession, name: &str, session: &SavedSession) -
         .get("cookies")
         .and_then(Value::as_array)
         .ok_or_else(|| BladeError::Other("cookie readback missing after session restore".into()))?;
+    // Index restored cookies once for O(N) readback verification instead of
+    // nested scans.
+    let restored_index: std::collections::HashSet<(&str, &str, &str, &str)> = all
+        .iter()
+        .filter_map(|c| {
+            Some((
+                c["name"].as_str()?,
+                c["value"].as_str()?,
+                c["domain"].as_str()?,
+                c["path"].as_str()?,
+            ))
+        })
+        .collect();
     // Re-read the clock: a cookie may expire between set and readback.
     let now = unix_now()?;
     for saved in live.iter().filter(|c| !cookie_expired(c, now)) {
-        if !all.iter().any(|c| {
-            c["name"] == saved["name"]
-                && c["value"] == saved["value"]
-                && c["domain"] == saved["domain"]
-                && c["path"] == saved["path"]
-        }) {
+        let key = (
+            saved["name"].as_str().unwrap_or(""),
+            saved["value"].as_str().unwrap_or(""),
+            saved["domain"].as_str().unwrap_or(""),
+            saved["path"].as_str().unwrap_or(""),
+        );
+        if !restored_index.contains(&key) {
             return Err(BladeError::Other(format!(
                 "saved cookie {} did not match readback; session only partially restored",
                 saved["name"]
             )));
         }
     }
-    for entry in &session.storage {
-        set_storage(cdp, "localStorage", &entry.key, &entry.value).await?;
+    if !session.storage.is_empty() {
+        set_storage_batch(cdp, "localStorage", &session.storage).await?;
     }
     let skipped: Vec<String> = [(expired, "expired"), (partitioned, "partitioned")]
         .into_iter()
@@ -681,6 +702,37 @@ async fn set_storage(cdp: &CdpSession, storage: &str, key: &str, value: &str) ->
         )));
     }
     Ok(format!("✓ {storage} set: {key}={}", truncate(value, 40)))
+}
+
+/// Write a batch of storage entries in a single CDP round-trip, verifying
+/// live readback for every key before returning Ok.
+async fn set_storage_batch(
+    cdp: &CdpSession,
+    storage: &str,
+    entries: &[StorageEntry],
+) -> Result<()> {
+    let pairs: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|e| (e.key.as_str(), e.value.as_str()))
+        .collect();
+    let payload = serde_json::to_string(&pairs)?;
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": format!(
+                    "(()=>{{const e={payload};for(const [k,v] of e){{{storage}.setItem(k,v);if({storage}.getItem(k)!==v)return false;}}return true;}})()"
+                ),
+                "returnByValue": true,
+            })),
+        )
+        .await?;
+    if extract_eval_value(&result)? != json!(true) {
+        return Err(BladeError::Other(format!(
+            "{storage} mutation did not match readback"
+        )));
+    }
+    Ok(())
 }
 
 async fn remove_storage(cdp: &CdpSession, storage: &str, key: &str) -> Result<String> {
@@ -936,6 +988,37 @@ mod cookie_jar_tests {
             .unwrap();
         assert!(!out.starts_with('✓'), "nothing left to delete: {out}");
         assert!(out.contains("nothing deleted"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn set_and_delete_cookie_match_domains_case_insensitively() {
+        let (cdp, jar) = fake_jar::start(ORIGIN, vec![]).await;
+        let out = perform(
+            &cdp,
+            &StateOp::SetCookie {
+                name: "tok".into(),
+                value: "v1".into(),
+                url: None,
+                domain: Some("Example.COM".into()),
+                path: Some("/".into()),
+                secure: Some(false),
+                http_only: Some(false),
+                same_site: None,
+            },
+        )
+        .await
+        .expect("uppercase domain must pass Chrome lowercase readback");
+        assert!(out.starts_with('✓'), "{out}");
+        assert_eq!(jar.names(), ["tok"]);
+
+        // Deleting with mixed-case domain against a stored `.example.com`
+        // cookie must still see it in readback and report the mismatch.
+        let (cdp2, _jar2) =
+            fake_jar::start(ORIGIN, vec![cookie("sid", ".example.com", -1.0)]).await;
+        let err = perform(&cdp2, &delete("sid", Some("Example.COM"), None))
+            .await
+            .expect_err("mixed-case mismatch must surface the remaining cookie");
+        assert!(err.to_string().contains(".example.com"), "{err}");
     }
 
     fn get_cookies(domain: Option<&str>) -> StateOp {

@@ -119,6 +119,7 @@ pub async fn handle_template_extract(
     json_mode: bool,
 ) -> Result<String> {
     let expr = template_extract_expr(template, limit)?;
+    page.settle_route(crate::page::ROUTE_BUDGET).await;
 
     let res = page
         .cdp_ref()

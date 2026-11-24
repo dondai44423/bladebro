@@ -289,7 +289,11 @@ impl ProgressBar {
             total: AtomicU64::new(total),
             current: AtomicU64::new(0),
             started: Instant::now(),
-            last_draw: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            last_draw: Mutex::new(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap_or_else(Instant::now),
+            ),
             last_bytes: AtomicU64::new(0),
             ewma_bps: Mutex::new(0.0),
             tick: AtomicU64::new(0),

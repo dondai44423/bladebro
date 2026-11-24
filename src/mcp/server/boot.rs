@@ -46,9 +46,11 @@ async fn attach_pipe(client: &CdpClient) -> Result<CdpSession> {
     let target_id = match page_target {
         Some(id) => id,
         None => {
-            let res = client
-                .send("Target.createTarget", Some(json!({ "url": "about:blank" })))
-                .await?;
+            let mut params = json!({ "url": "about:blank" });
+            if crate::page::no_activate_enabled() {
+                params["background"] = json!(true);
+            }
+            let res = client.send("Target.createTarget", Some(params)).await?;
             res.get("targetId")
                 .and_then(|v| v.as_str())
                 .ok_or(BladeError::NoTarget)?
