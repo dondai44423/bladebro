@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.8.4] - 2026-11-24
+
 ### Fixed
 - **Windows antivirus false-positive mitigation (#99)**: switched the published `windows-x64` release artifact in `.github/workflows/release.yml` from Linux MinGW/Zig cross-compilation (`x86_64-pc-windows-gnu`) to a native `windows-latest` MSVC build (`x86_64-pc-windows-msvc` with static CRT), embedded standard Win32 PE `VS_VERSION_INFO` metadata and an `asInvoker` application manifest via `build.rs` (verified in `gate.yml` and `release.yml`), and removed unnecessary `Login Data` / `Login Data For Account` / `Secure Preferences` password-vault references from real-browser clone freshness checks and copy diagnostics.
 - **`BLADE_NO_ACTIVATE=1` and macOS tab-path window raising (#100)**: routed `switch_tab` (`state switch-tab`, `state open-tab`, `state close-tab` auto-switch) and popup-click opener re-activation through `activate_if_needed()` instead of unconditional `Page.bringToFront`; passed `background: true` to `Target.createTarget` when `BLADE_NO_ACTIVATE=1` and disclosed suppressed focus in tab verdicts; added `BLADE_NO_ACTIVATE` to `DAEMON_SCOPED_ENV` so CLI daemons refuse silent setting drift; documented behavior in `docs/configuration.md` and `bladebro help`; and added mock-CDP regression tests.
@@ -2314,7 +2316,8 @@ Pre-release. Hardening pass complete, CLI update pending.
 - Fill only handled text fields (auto-detect type)
 - Multi-tab hang (5s timeout on Input events, 3s on Target.getTargets)
 
-[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.3...HEAD
+[Unreleased]: https://github.com/dondai44423/bladebro/compare/v4.8.4...HEAD
+[4.8.4]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.4
 [4.8.3]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.3
 [4.8.2]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.2
 [4.8.1]: https://github.com/dondai44423/bladebro/releases/tag/v4.8.1
